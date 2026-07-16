@@ -86,8 +86,20 @@ def _check_admin(key_header: str | None, key_query: str | None) -> None:
 
 
 @router.post("/v1/utility-requests")
-def submit_requests(body: RequestsIn):
-    """Batch-submit utility-add requests (the picker's 'send all' button)."""
+def create_requests(body: RequestsIn, authorization: str | None = Header(default=None)):
+    """Batch-create utility requests. Public (no auth) so the picker can queue fast."""
+    # Optional: extract tenant_id/email from session if provided, else anonymous.
+    tenant_id = None
+    email = None
+    if authorization:
+        try:
+            from .account import tenant_from_session
+            t = tenant_from_session(authorization)
+            tenant_id = t.id
+            email = t.email
+        except Exception:
+            pass  # anonymous is fine
+
     with SessionLocal() as db:
         for req in body.requests:
             db.add(UtilityRequest(
@@ -95,6 +107,8 @@ def submit_requests(body: RequestsIn):
                 state=req.state.strip().upper() if req.state else None,
                 url=req.url.strip() if req.url else None,
                 note=req.note.strip() if req.note else None,
+                tenant_id=tenant_id,
+                email=email,
             ))
         db.commit()
     return {"queued": len(body.requests)}
@@ -103,53 +117,54 @@ def submit_requests(body: RequestsIn):
 @router.get("/v1/utility-requests")
 def list_requests(
     status: str | None = Query(default=None),
-    limit: int = Query(default=100, le=500),
-    x_admin_key: str | None = Header(default=None),
-    admin_key: str | None = Query(default=None),
+    api_key: str | None = Header(default=None, alias="X-API-Key"),
+    key: str | None = Query(default=None),
 ):
-    """List utility-add requests (admin/agent endpoint)."""
-    _check_admin(x_admin_key, admin_key)
+    """List utility requests (admin only). Filter by status if provided."""
+    _check_admin(api_key, key)
     with SessionLocal() as db:
         q = db.query(UtilityRequest)
         if status:
             if status not in VALID_STATUSES:
-                raise HTTPException(400, f"Invalid status (must be one of {VALID_STATUSES})")
+                raise HTTPException(400, f"Invalid status. Must be one of {VALID_STATUSES}")
             q = q.filter(UtilityRequest.status == status)
-        rows = q.order_by(UtilityRequest.created_at.desc()).limit(limit).all()
+        rows = q.order_by(UtilityRequest.created_at.desc()).all()
         return {
             "requests": [
                 {
                     "id": r.id,
-                    "created_at": r.created_at.isoformat() + "Z",
+                    "created_at": r.created_at.isoformat(),
                     "name": r.name,
                     "state": r.state,
                     "url": r.url,
                     "note": r.note,
                     "status": r.status,
                     "result": r.result,
-                    "reviewed_at": r.reviewed_at.isoformat() + "Z" if r.reviewed_at else None,
+                    "reviewed_at": r.reviewed_at.isoformat() if r.reviewed_at else None,
+                    "tenant_id": r.tenant_id,
+                    "email": r.email,
                 }
                 for r in rows
             ]
         }
 
 
-@router.patch("/v1/utility-requests/{request_id}/result")
+@router.patch("/v1/utility-requests/{req_id}/result")
 def update_result(
-    request_id: int,
+    req_id: int,
     body: ResultIn,
-    x_admin_key: str | None = Header(default=None),
-    admin_key: str | None = Query(default=None),
+    api_key: str | None = Header(default=None, alias="X-API-Key"),
+    key: str | None = Query(default=None),
 ):
-    """Agent writeback: record research outcome + status."""
-    _check_admin(x_admin_key, admin_key)
+    """Agent writeback: record research result + optionally change status."""
+    _check_admin(api_key, key)
     if body.status and body.status not in VALID_STATUSES:
-        raise HTTPException(400, f"Invalid status (must be one of {VALID_STATUSES})")
+        raise HTTPException(400, f"Invalid status. Must be one of {VALID_STATUSES}")
     with SessionLocal() as db:
-        row = db.query(UtilityRequest).filter(UtilityRequest.id == request_id).first()
+        row = db.query(UtilityRequest).filter(UtilityRequest.id == req_id).first()
         if not row:
             raise HTTPException(404, "Request not found")
-        row.result = body.result.strip()
+        row.result = body.result
         if body.status:
             row.status = body.status
         row.reviewed_at = _now()
@@ -157,23 +172,39 @@ def update_result(
         return {"id": row.id, "status": row.status, "result": row.result}
 
 
-@router.patch("/v1/utility-requests/{request_id}/status")
+@router.patch("/v1/utility-requests/{req_id}/status")
 def update_status(
-    request_id: int,
+    req_id: int,
     body: StatusIn,
-    x_admin_key: str | None = Header(default=None),
-    admin_key: str | None = Query(default=None),
+    api_key: str | None = Header(default=None, alias="X-API-Key"),
+    key: str | None = Query(default=None),
 ):
-    """Agent status-only update (e.g., 'researching' → 'added')."""
-    _check_admin(x_admin_key, admin_key)
+    """Change status only (e.g., researching → added after manual verification)."""
+    _check_admin(api_key, key)
     if body.status not in VALID_STATUSES:
-        raise HTTPException(400, f"Invalid status (must be one of {VALID_STATUSES})")
+        raise HTTPException(400, f"Invalid status. Must be one of {VALID_STATUSES}")
     with SessionLocal() as db:
-        row = db.query(UtilityRequest).filter(UtilityRequest.id == request_id).first()
+        row = db.query(UtilityRequest).filter(UtilityRequest.id == req_id).first()
         if not row:
             raise HTTPException(404, "Request not found")
         row.status = body.status
-        if body.status in ("added", "declined", "reviewed"):
-            row.reviewed_at = _now()
+        row.reviewed_at = _now()
         db.commit()
         return {"id": row.id, "status": row.status}
+
+
+@router.delete("/v1/utility-requests/{req_id}")
+def delete_request(
+    req_id: int,
+    api_key: str | None = Header(default=None, alias="X-API-Key"),
+    key: str | None = Query(default=None),
+):
+    """Delete a request (admin only). Use sparingly; prefer status transitions."""
+    _check_admin(api_key, key)
+    with SessionLocal() as db:
+        row = db.query(UtilityRequest).filter(UtilityRequest.id == req_id).first()
+        if not row:
+            raise HTTPException(404, "Request not found")
+        db.delete(row)
+        db.commit()
+        return {"deleted": req_id}
