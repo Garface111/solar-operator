@@ -501,19 +501,32 @@ def _tenant_for_owner_email(db, from_email: str | None) -> Tenant | None:
 
 
 def _owner_turns_today(db, tenant_id: str) -> int:
-    from .energy_agent import EaMessage
+    from .energy_agent_mind import EaEvent
     from .models import now as _model_now
     cutoff = _model_now() - timedelta(hours=24)
     n = db.execute(
-        select(func.count(EaMessage.id)).where(
-            EaMessage.tenant_id == tenant_id,
-            EaMessage.created_at >= cutoff,
-            EaMessage.role == "user",
-            EaMessage.meta_json.isnot(None),
-            EaMessage.meta_json.like('%"channel": "email"%'),
+        select(func.count(EaEvent.id)).where(
+            EaEvent.tenant_id == tenant_id,
+            EaEvent.kind == "owner_email_turn",
+            EaEvent.created_at >= cutoff,
         )
     ).scalar() or 0
     return int(n)
+
+
+def _record_owner_turn(db, tenant_id: str, session_id: str | None, subject: str | None) -> None:
+    try:
+        from .energy_agent_mind import EaEvent
+        db.add(EaEvent(
+            tenant_id=tenant_id,
+            session_id=session_id,
+            kind="owner_email_turn",
+            summary=(subject or "owner email")[:200],
+            consumed=1,  # bookkeeping only — never an interrupt candidate
+        ))
+        db.flush()
+    except Exception:
+        log.warning("owner turn event write failed", exc_info=True)
 
 
 def ingest_owner_email(
@@ -551,22 +564,26 @@ def ingest_owner_email(
     if not text:
         return {"ok": False, "reason": "empty"}
 
+    _record_owner_turn(db, tenant.id, None, subject)
+
     session = _find_resumable_session(db, tenant.id)
     if session is None:
         session = EaSession(id=uuid.uuid4().hex[:32], tenant_id=tenant.id, status="open")
         db.add(session)
         db.flush()
 
-    db.add(EaMessage(
-        session_id=session.id, tenant_id=tenant.id, role="user",
-        content=text[:4000],
-        meta_json=json.dumps({"channel": "email", "subject": subject or ""})[:2000],
-    ))
-    db.flush()
-
     # Pending confirm resolved by a plain yes/no reply — same shortcut as chat.
+    # (_agent_turn persists the user turn itself; only these shortcut branches
+    # add rows of their own.)
     reply_text = None
     pending = json.loads(session.pending_json) if session.pending_json else None
+    if pending and (_YES_RE.match(text) or _NO_RE.match(text)):
+        db.add(EaMessage(
+            session_id=session.id, tenant_id=tenant.id, role="user",
+            content=text[:4000],
+            meta_json=json.dumps({"channel": "email", "subject": subject or ""})[:2000],
+        ))
+        db.flush()
     if pending and _YES_RE.match(text):
         session.pending_json = None
         if pending.get("tool") and isinstance(pending.get("args"), dict):
@@ -605,8 +622,9 @@ def ingest_owner_email(
                 "note": (
                     "This turn arrived BY EMAIL (reply to your check-in). You cannot "
                     "drive the UI — never emit ui_navigate/highlight/tour/fill/click; "
-                    "describe where to click instead. Writes still need a confirm: ask, "
-                    "and their reply 'yes' applies it."
+                    "describe where to click instead. Write PLAIN TEXT (no markdown "
+                    "asterisks/headers — this renders in an email client). Writes still "
+                    "need a confirm: ask, and their reply 'yes' applies it."
                 ),
             },
             source="email",
@@ -638,16 +656,8 @@ def ingest_owner_email(
         log.warning("owner email reply send failed: %s", e)
         sent = False
 
-    try:
-        from .repair_ops import _mirror_email_to_chat
-        _mirror_email_to_chat(
-            db, tenant.id,
-            f"(by email) You: “{text[:160]}” — me: “{reply_text[:220]}”",
-            kind="owner_email",
-        )
-    except Exception:
-        pass
-
+    # No extra chat mirror needed: the turn itself is persisted in the session
+    # (user + assistant rows), so the app already shows it on next open.
     return {"ok": True, "tenant_id": tenant.id, "replied": bool(sent)}
 
 
