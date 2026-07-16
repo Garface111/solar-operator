@@ -2368,6 +2368,106 @@ def plan_action(capability: str, payload: dict | None = None) -> dict[str, Any]:
                     payload.get("speak") or payload.get("text") or "",
                     importance=int(payload.get("importance") or 65),
                 )
+            # ── Succession full (Ford 2026-07-16) ──────────────────────────
+            elif capability == "act.money_identity":
+                from .energy_agent_sovereign_succession import (
+                    stripe_inspect, stripe_cancel_subscription, stripe_refund,
+                    stripe_set_status,
+                )
+                act = (payload.get("action") or "inspect").strip().lower()
+                if act in ("inspect", "list", ""):
+                    out = stripe_inspect(db, tenant_id=payload.get("tenant_id"))
+                elif act in ("cancel", "cancel_subscription") and payload.get("tenant_id"):
+                    out = stripe_cancel_subscription(
+                        db, tenant_id=str(payload["tenant_id"]),
+                        at_period_end=payload.get("at_period_end", True) is not False,
+                        reason=payload.get("reason") or payload.get("note") or "admin act",
+                    )
+                elif act in ("refund",) :
+                    out = stripe_refund(
+                        db,
+                        payment_intent_id=payload.get("payment_intent_id"),
+                        charge_id=payload.get("charge_id"),
+                        amount_cents=int(payload["amount_cents"]) if payload.get("amount_cents") is not None else None,
+                        note=payload.get("note") or "",
+                    )
+                elif act in ("set_status", "status") and payload.get("tenant_id"):
+                    out = stripe_set_status(
+                        db, tenant_id=str(payload["tenant_id"]),
+                        subscription_status=str(payload.get("status") or payload.get("subscription_status") or "active"),
+                        active=payload.get("active"),
+                        note=payload.get("note") or "",
+                    )
+                else:
+                    out = {"ok": False, "denied": True, "denied_reason": f"unknown money action {act}"}
+            elif capability == "act.brand":
+                from .energy_agent_sovereign_succession import brand_set, brand_announce
+                act = (payload.get("action") or "set").strip().lower()
+                if act in ("announce", "email"):
+                    out = brand_announce(
+                        db,
+                        subject=payload.get("subject") or "[Sovereign brand]",
+                        body=payload.get("body") or payload.get("value") or payload.get("text") or "",
+                        channel=payload.get("channel") or "ford",
+                        tenant_email=payload.get("tenant_email") or payload.get("email"),
+                    )
+                else:
+                    out = brand_set(
+                        db,
+                        key=str(payload.get("key") or "voice"),
+                        value=str(payload.get("value") or payload.get("text") or ""),
+                    )
+            elif capability == "act.hard_delete":
+                from .energy_agent_sovereign_succession import (
+                    tenant_soft_delete, tenant_hard_purge, purge_soft_deleted_now,
+                )
+                act = (payload.get("action") or "soft").strip().lower()
+                if act in ("hard", "purge", "hard_purge") and payload.get("tenant_id"):
+                    out = tenant_hard_purge(
+                        db,
+                        tenant_id=str(payload["tenant_id"]),
+                        confirm=str(payload.get("confirm") or ""),
+                        reason=payload.get("reason") or payload.get("note") or "admin purge",
+                    )
+                elif act in ("purge_soft", "purge_soft_deleted"):
+                    out = purge_soft_deleted_now(
+                        db, older_than_days=int(payload.get("older_than_days") or 0),
+                    )
+                elif payload.get("tenant_id"):
+                    out = tenant_soft_delete(
+                        db, tenant_id=str(payload["tenant_id"]),
+                        reason=payload.get("reason") or payload.get("note") or "",
+                    )
+                else:
+                    out = {"ok": False, "denied": True, "denied_reason": "tenant_id required"}
+            elif capability == "act.har_capture":
+                from .energy_agent_sovereign_succession import har_stage, har_mark_received
+                act = (payload.get("action") or "stage").strip().lower()
+                if act in ("received", "mark_received"):
+                    out = har_mark_received(
+                        db,
+                        utility_id=int(payload["utility_id"]) if payload.get("utility_id") else None,
+                        utility_name=payload.get("utility_name"),
+                        evidence=payload.get("evidence") or payload.get("note") or "",
+                    )
+                else:
+                    out = har_stage(
+                        db,
+                        utility_name=payload.get("utility_name") or payload.get("name"),
+                        utility_id=int(payload["utility_id"]) if payload.get("utility_id") else None,
+                        tenant_id=payload.get("tenant_id"),
+                        provider=payload.get("provider"),
+                        url=payload.get("url"),
+                        note=payload.get("note") or payload.get("text") or "",
+                    )
+            elif capability == "act.deploy":
+                from .energy_agent_sovereign_ops import stage_deploy
+                out = stage_deploy(
+                    db,
+                    repo=payload.get("repo") or "both",
+                    reason=payload.get("reason") or payload.get("note") or "admin deploy",
+                    execute_now=bool(payload.get("execute_now")),
+                )
             else:
                 out = {
                     "ok": False,
