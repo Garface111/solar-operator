@@ -1304,40 +1304,53 @@ _OPERATING_AGREEMENT = {
 
 
 def ensure_operating_memory(db) -> None:
-    """Seed/refresh Ford's operating agreement into durable Sovereign memory."""
+    """Seed Ford's operating agreement once (skip keys that already match).
+
+    Must not lock-fight every tick — only write missing/changed keys, and
+    always recover the session on failure so desk/tick can continue.
+    """
     try:
+        existing = {m["key"]: m.get("value") for m in memory_get_all(db, limit=100)}
+        wrote = 0
         for key, value in _OPERATING_AGREEMENT.items():
+            if existing.get(key) == value:
+                continue
             memory_set(db, key, value, source="ford_grant")
-        # Compact single key the brain sees often
-        memory_set(
-            db,
-            "ford_operating_agreement",
-            (
-                "1) " + _OPERATING_AGREEMENT["authority_ship"] + "\n"
-                "2) " + _OPERATING_AGREEMENT["checkin_cadence"] + "\n"
-                "3) " + _OPERATING_AGREEMENT["job_budget"] + "\n"
-                "4) " + _OPERATING_AGREEMENT["weekly_digest"] + "\n"
-                "5) " + _OPERATING_AGREEMENT["demo_vs_real"] + "\n"
-                "6) " + _OPERATING_AGREEMENT["people_testers"]
-            ),
-            source="ford_grant",
+            wrote += 1
+        compact = (
+            "1) " + _OPERATING_AGREEMENT["authority_ship"] + "\n"
+            "2) " + _OPERATING_AGREEMENT["checkin_cadence"] + "\n"
+            "3) " + _OPERATING_AGREEMENT["job_budget"] + "\n"
+            "4) " + _OPERATING_AGREEMENT["weekly_digest"] + "\n"
+            "5) " + _OPERATING_AGREEMENT["demo_vs_real"] + "\n"
+            "6) " + _OPERATING_AGREEMENT["people_testers"]
         )
-        write_note(
-            db,
-            kind="memory",
-            title="Ford operating agreement + people map (seeded)",
-            body=(
-                _OPERATING_AGREEMENT["authority_ship"]
-                + "\n\n"
-                + _OPERATING_AGREEMENT["demo_vs_real"]
-                + "\n\n"
-                + _OPERATING_AGREEMENT["people_testers"]
-            ),
-            provider="system",
-            meta={"source": "ford_grant"},
-        )
+        if existing.get("ford_operating_agreement") != compact:
+            memory_set(db, "ford_operating_agreement", compact, source="ford_grant")
+            wrote += 1
+        if wrote and not existing.get("ford_operating_agreement"):
+            write_note(
+                db,
+                kind="memory",
+                title="Ford operating agreement + people map (seeded)",
+                body=(
+                    _OPERATING_AGREEMENT["authority_ship"]
+                    + "\n\n"
+                    + _OPERATING_AGREEMENT["demo_vs_real"]
+                    + "\n\n"
+                    + _OPERATING_AGREEMENT["people_testers"]
+                ),
+                provider="system",
+                meta={"source": "ford_grant"},
+            )
+        if wrote:
+            db.flush()
     except Exception as e:  # noqa: BLE001
         log.warning("ensure_operating_memory failed: %s", e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
 
 def ensure_default_goals(db) -> None:
@@ -1366,6 +1379,10 @@ def ensure_default_goals(db) -> None:
         existing_ids = set(db.execute(select(EaSovereignGoal.id)).scalars().all())
     except Exception as e:  # noqa: BLE001
         log.warning("ensure_default_goals read failed: %s", e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
         return
     added = 0
     for gid, title, pri in defaults:
@@ -2043,13 +2060,27 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
             except Exception:
                 pass
 
-            ensure_default_goals(db)
+            try:
+                ensure_default_goals(db)
+            except Exception as e:  # noqa: BLE001
+                log.warning("ensure_default_goals tick skip: %s", e)
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
             digests = observe_product(db) if sovereign_sense_enabled() else {}
             state = world_get(db)
 
-            goals_rows = db.execute(
-                select(EaSovereignGoal).where(EaSovereignGoal.status == "open")
-            ).scalars().all()
+            try:
+                goals_rows = db.execute(
+                    select(EaSovereignGoal).where(EaSovereignGoal.status == "open")
+                ).scalars().all()
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                goals_rows = []
             goals_payload = [
                 {"id": g.id, "title": g.title, "priority": g.priority, "status": g.status}
                 for g in goals_rows
