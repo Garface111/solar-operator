@@ -131,39 +131,75 @@ def _refresh_access_token(cfg: dict[str, str]) -> str:
 
 
 def get_xai_bearer(*, force_refresh: bool = False) -> str:
-    """Return a Bearer token that can call api.x.ai (API key or Build OIDC)."""
+    """Return a Bearer token that can call api.x.ai (API key or Build OIDC).
+
+    When XAI_PREFER_GROK_BUILD_OIDC=1 (default), never fall back to a classic
+    xai- API key that might bill a different, credit-capped team.
+    """
     prefer_oidc = _flag("XAI_PREFER_GROK_BUILD_OIDC", "1")
     api_key = _env_api_key()
     cfg = _oidc_config()
 
-    # Fast path: classic API key when not forcing OIDC / no OIDC available
+    # Fast path: classic API key only when OIDC is not preferred
     if api_key.startswith("xai-") and not prefer_oidc and not force_refresh:
         return api_key
 
-    # OIDC path (Grok Build subscription credits)
-    if cfg and cfg.get("refresh_token") and cfg.get("client_id"):
+    # OIDC path (Grok Build subscription / prepaid team)
+    if cfg and (cfg.get("access_token") or (cfg.get("refresh_token") and cfg.get("client_id"))):
         with _lock:
             tok = _cache.get("access_token")
             exp = float(_cache.get("expires_at") or 0)
         if not force_refresh and tok and time.time() < exp:
             return str(tok)
-        # Prefer fresh access token from auth.json if still valid-looking
-        if not force_refresh and cfg.get("access_token") and len(cfg["access_token"]) > 40:
-            # use once; refresh in background-ish next call if expired
+
+        access = (cfg.get("access_token") or "").strip()
+        # 1) Use provided access token first (Railway XAI_ACCESS_TOKEN / auth.json)
+        if not force_refresh and len(access) > 40:
+            with _lock:
+                _cache["access_token"] = access
+                # JWT exp unknown — cache briefly; refresh path extends it
+                _cache["expires_at"] = time.time() + int(
+                    os.getenv("XAI_ACCESS_TOKEN_TTL", "1800") or 1800
+                )
+                _cache["source"] = "access_token_env"
+            # Proactive refresh if we have refresh_token (best-effort)
+            if cfg.get("refresh_token") and cfg.get("client_id"):
+                try:
+                    return _refresh_access_token(cfg)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("oidc refresh failed; using access token: %s", e)
+                    return access
+            return access
+
+        # 2) Refresh only
+        if cfg.get("refresh_token") and cfg.get("client_id"):
             try:
                 return _refresh_access_token(cfg)
             except Exception as e:  # noqa: BLE001
-                log.warning("oidc refresh failed, trying cached access_token: %s", e)
-                if cfg.get("access_token"):
-                    return cfg["access_token"]
-                raise
-        return _refresh_access_token(cfg)
+                if access:
+                    log.warning("oidc refresh failed; stale access token: %s", e)
+                    return access
+                if not prefer_oidc and api_key:
+                    log.warning("oidc failed; falling back to XAI_API_KEY: %s", e)
+                    return api_key
+                raise RuntimeError(
+                    f"Grok Build OIDC failed ({e}). Re-run `grok login` and update "
+                    "XAI_OIDC_REFRESH_TOKEN / XAI_ACCESS_TOKEN on Railway."
+                ) from e
 
-    if api_key:
+    if api_key and not prefer_oidc:
         return api_key
+    if api_key and prefer_oidc:
+        # Last resort only if OIDC not configured at all
+        if not cfg:
+            return api_key
+        raise RuntimeError(
+            "XAI_PREFER_GROK_BUILD_OIDC=1 but OIDC token missing/expired; "
+            "refusing capped API key. Update XAI_ACCESS_TOKEN or re-login Grok Build."
+        )
     raise RuntimeError(
-        "no xAI credentials: set XAI_API_KEY (console.x.ai key on the team with credits) "
-        "or XAI_OIDC_REFRESH_TOKEN + XAI_OIDC_CLIENT_ID (Grok Build), "
+        "no xAI credentials: set XAI_API_KEY (console key on the team with credits) "
+        "or XAI_OIDC_REFRESH_TOKEN + XAI_ACCESS_TOKEN (Grok Build), "
         "or sign in with `grok login` on this host"
     )
 
