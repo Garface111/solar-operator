@@ -218,6 +218,7 @@ def report_has_data(client_id: int, *, quarters: int = 6,
             select(Array).where(
                 Array.client_id == client.id,
                 Array.excluded.is_(False),
+                Array.deleted_at.is_(None),
             )
         ).scalars().all()
         array_ids = [a.id for a in arrays]
@@ -307,11 +308,15 @@ def build_workbook(tenant_id: Optional[str] = None,
                         / f"{last_y}-Q{last_q}-GMCS-report.xlsx")
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Arrays scoped to THIS client only; skip excluded (below-REC-threshold) arrays.
+        # Arrays scoped to THIS client only; skip excluded (below-REC-threshold)
+        # AND soft-deleted arrays. Without the deleted_at filter, arrays the
+        # operator removed still got a sheet in the report (Ford 2026-07-16 —
+        # Bruce deleted arrays that kept showing up in the GMCS workbook).
         arrays = db.execute(
             select(Array).where(
                 Array.client_id == client.id,
                 Array.excluded.is_(False),
+                Array.deleted_at.is_(None),
             )
         ).scalars().all()
         arrays_by_id = {a.id: a for a in arrays}

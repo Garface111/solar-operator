@@ -232,7 +232,12 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
         )
         if subject_prefix:
             subject = f"{subject_prefix}{subject}"
-        filename = f"{safe_client}-report.xlsx"
+        # Put the headline quarter in the attachment name so a client who saves
+        # several reports can tell them apart (Ford 2026-07-16). Same quarter the
+        # workbook + email body use (email_ref), e.g. GMCS_Only-Q1-2026-report.xlsx.
+        from .writers.gmcs_writer import _rolling_quarters
+        _ly, _lq = _rolling_quarters(email_ref)[-1]
+        filename = f"{safe_client}-Q{_lq}-{_ly}-report.xlsx"
         # Send to primary; cc the extras. from_header carries the tenant's
         # "send as me" address (send_workbook_email falls back to the platform
         # default if Resend rejects an unverified domain).
