@@ -19,6 +19,7 @@ import stripe as stripe
 logger = logging.getLogger(__name__)
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import select, or_, func, text
 from .db import SessionLocal, engine
 from .models import Tenant, Client, Array, Job, UtilitySession, now
@@ -1621,6 +1622,15 @@ def start():
         CronTrigger(hour=12, minute=0),
         id="morning_fleet_digest", replace_existing=True,
     )
+    # Every 15 min: inbound-email safety net. Re-lists Resend receiving and
+    # ingests anything the live webhook missed (deduped on the Resend id) —
+    # covers BOTH the repair-tech loop and the owner agent mailbox, so one
+    # dropped webhook never silently strands a reply.
+    scheduler.add_job(
+        _run_inbound_email_sync,
+        IntervalTrigger(minutes=15),
+        id="inbound_email_sync", replace_existing=True,
+    )
     # Mondays 13:00 UTC (~9am ET): the AGENTIC weekly check-in — Energy Agent
     # writes each owner a first-person note (what I handled / what I noticed /
     # reply and I act) composed from live fleet+repairs+invoice data. Opt-out
@@ -2454,6 +2464,25 @@ def _run_gmp_daily_backfill() -> None:
             "GMP daily backfill: unhandled exception",
             f"The scheduled GMP daily-generation backfill raised an error:\n{exc}",
         )
+
+
+def _run_inbound_email_sync() -> None:
+    """Safety-net poll of Resend receiving (webhook-miss recovery). Deduped —
+    safe to run repeatedly; one short session per run."""
+    try:
+        from .db import SessionLocal
+        from .repair_ops import sync_inbound_from_resend
+        with SessionLocal() as db:
+            out = sync_inbound_from_resend(db, limit=25)
+            db.commit()
+        if out.get("matched_new") or any(
+            r.get("owner_agent") and not r.get("deduped") for r in out.get("results", [])
+        ):
+            logger.info("inbound_email_sync recovered mail: %s", {
+                k: out.get(k) for k in ("scanned", "processed", "matched_new", "deduped")
+            })
+    except Exception as exc:
+        logger.warning("inbound_email_sync failed: %s", exc)
 
 
 def _run_ea_weekly_checkin() -> None:

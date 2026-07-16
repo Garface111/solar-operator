@@ -245,6 +245,7 @@ async def resend_webhook(
                     from_email=from_email,
                     subject=subject,
                     body=body,
+                    resend_email_id=str(email_id) if email_id else None,
                 )
                 logger.info(
                     "resend inbound owner-agent queued: email_id=%s from=%s",

@@ -514,13 +514,17 @@ def _owner_turns_today(db, tenant_id: str) -> int:
     return int(n)
 
 
-def _record_owner_turn(db, tenant_id: str, session_id: str | None, subject: str | None) -> None:
+def _record_owner_turn(
+    db, tenant_id: str, session_id: str | None, subject: str | None,
+    resend_email_id: str | None = None,
+) -> None:
     try:
         from .energy_agent_mind import EaEvent
         db.add(EaEvent(
             tenant_id=tenant_id,
             session_id=session_id,
             kind="owner_email_turn",
+            ref_id=(resend_email_id or None),
             summary=(subject or "owner email")[:200],
             consumed=1,  # bookkeeping only — never an interrupt candidate
         ))
@@ -529,12 +533,31 @@ def _record_owner_turn(db, tenant_id: str, session_id: str | None, subject: str 
         log.warning("owner turn event write failed", exc_info=True)
 
 
+def _already_processed(db, resend_email_id: str | None) -> bool:
+    """Webhook + safety-net poller can both see the same message — dedupe on
+    the Resend email id so an owner never gets two replies to one email."""
+    if not resend_email_id:
+        return False
+    try:
+        from .energy_agent_mind import EaEvent
+        hit = db.execute(
+            select(EaEvent.id).where(
+                EaEvent.kind == "owner_email_turn",
+                EaEvent.ref_id == str(resend_email_id),
+            ).limit(1)
+        ).scalar_one_or_none()
+        return hit is not None
+    except Exception:
+        return False
+
+
 def ingest_owner_email(
     db,
     *,
     from_email: str | None,
     subject: str | None,
     body: str | None,
+    resend_email_id: str | None = None,
 ) -> dict:
     from .energy_agent import (
         EaMessage,
@@ -549,6 +572,8 @@ def ingest_owner_email(
     frm = (from_email or "").strip().lower()
     if not frm or frm in _SELF_ADDRESSES:
         return {"ok": False, "reason": "self_or_empty"}
+    if _already_processed(db, resend_email_id):
+        return {"ok": True, "deduped": True}
     hay = f"{subject or ''}\n{(body or '')[:400]}"
     if _AUTOREPLY_RE.search(hay):
         return {"ok": False, "reason": "auto_reply"}
@@ -564,7 +589,7 @@ def ingest_owner_email(
     if not text:
         return {"ok": False, "reason": "empty"}
 
-    _record_owner_turn(db, tenant.id, None, subject)
+    _record_owner_turn(db, tenant.id, None, subject, resend_email_id=resend_email_id)
 
     session = _find_resumable_session(db, tenant.id)
     if session is None:

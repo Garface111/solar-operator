@@ -2272,10 +2272,31 @@ def sync_inbound_from_resend(db, *, limit: int = 25, tenant_id: str | None = Non
             except Exception:
                 pass
 
+        to_list = to_emails if isinstance(to_emails, list) else [to_emails]
+
+        # Owner ⇄ agent mailbox mail (no ticket token) belongs to the Energy
+        # Agent email channel, not the repair-ticket matcher. Deduped on the
+        # Resend id, so webhook-handled mail is skipped here.
+        try:
+            from .energy_agent_email import is_owner_agent_address
+            if is_owner_agent_address(to_list) and not extract_ticket_id_from_text(subject, text):
+                from .energy_agent_email import ingest_owner_email
+                res = ingest_owner_email(
+                    db,
+                    from_email=str(from_email or ""),
+                    subject=subject,
+                    body=text,
+                    resend_email_id=str(eid),
+                )
+                results.append({"email_id": eid, "owner_agent": True, **res})
+                continue
+        except Exception:
+            log.exception("owner-agent sync route failed id=%s", eid)
+
         result = ingest_inbound_email(
             db,
             from_email=from_email,
-            to_emails=to_emails if isinstance(to_emails, list) else [to_emails],
+            to_emails=to_list,
             subject=subject,
             body=text,
             tenant_id=tenant_id,
