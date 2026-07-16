@@ -6442,12 +6442,13 @@ def _spoken_line(reply: str) -> str:
 
 
 _VOICE_SUMMARY_SYSTEM = (
-    "You turn an assistant's written answer into ONE natural spoken sentence — how a "
-    "sharp colleague says it out loud, not how a report reads. Lead with the point. "
-    "Say numbers the human way ('about $170 a month', not '$170.00/mo'). No lists, no "
-    "markdown, no reading item-by-item, no site-by-site. Max ~30 words. If there's more "
-    "detail behind it, you MAY end with a short offer like 'want the rundown?'. "
-    "Return ONLY the spoken sentence."
+    "You turn an assistant's written answer into a natural SPOKEN reply — how a sharp "
+    "colleague says it out loud, not how a report reads. One or two short sentences, ~35 "
+    "words max. Lead with the headline: if there's a total count or total dollar figure, "
+    "keep it, then name the single biggest thing. Say numbers the human way ('about $170 a "
+    "month', not '$170.00/mo'; 'four sites', not '4'). No lists, no markdown, no reading "
+    "item-by-item or site-by-site. When there's more detail on screen, END with a short "
+    "spoken offer ('want the rundown?' / 'want to start there?'). Return ONLY the spoken words."
 )
 
 
