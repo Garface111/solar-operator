@@ -705,10 +705,32 @@ def desk_turn(
     }
 
     messages = _desk_chat_prompt(msg, hist, context)
+    # Capture ids before pre-brain commit (session may expire instances)
+    ford_id = ford_row.id
+    tenant_id = t.id
+    if not ford_row.created_at:
+        ford_row.created_at = _now()
+    ford_created = ford_row.created_at
+
+    # CRITICAL: release DB locks before the long LLM wait. Holding this
+    # transaction open through call_brain caused LockNotAvailable on
+    # ea_sovereign_memory (desk vs subconscious/cortex) and Netlify 504s.
+    try:
+        db.commit()
+    except Exception as e:  # noqa: BLE001
+        log.exception("desk pre-brain commit failed")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        raise HTTPException(500, f"Could not save your message: {str(e)[:160]}") from e
+
     provider = None
     model = None
+    # Stay under Netlify proxy ~60s wall clock (brain + side effects + margin)
+    desk_timeout = int(os.getenv("SOVEREIGN_DESK_TIMEOUT", "48") or 48)
     try:
-        raw = call_brain(messages)
+        raw = call_brain(messages, timeout=desk_timeout)
         provider = raw.get("provider")
         model = raw.get("model")
         reply, meta = _split_reply(raw.get("content") or "")
@@ -744,7 +766,7 @@ def desk_turn(
         id=_id("sdm"),
         role="sovereign",
         content=reply[:12000],
-        tenant_id=t.id,
+        tenant_id=tenant_id,
         provider=provider,
         meta_json=json.dumps({
             "channel": "desk",
@@ -755,74 +777,89 @@ def desk_turn(
         }, default=str)[:4000],
     )
     db.add(sov_row)
-
-    # Internal notes / memory / optional side actions (no EA inject)
-    write_note(
-        db,
-        kind="thought",
-        title="desk monologue",
-        body=str(meta.get("monologue") or reply)[:8000],
-        provider=provider,
-        meta={"source": "desk"},
-    )
-    if meta.get("ford_ask"):
-        memory_set(db, "ford_ask", str(meta["ford_ask"])[:2000], source="desk")
-    if meta.get("succession_gap"):
-        memory_set(db, "succession_gap", str(meta["succession_gap"])[:2000], source="desk")
-    if meta.get("mood"):
-        memory_set(db, "mood", str(meta["mood"])[:80], source="desk")
-    for mw in meta.get("memory_writes") or []:
-        if isinstance(mw, dict) and mw.get("key"):
-            memory_set(db, str(mw["key"]), str(mw.get("value") or ""), source="desk")
-    if meta.get("agenda"):
-        apply_agenda(db, meta["agenda"])
-
-    # Execute non-speak actions from desk JSON (triage, code_hire, local_tool, etc.)
-    actions = [
-        a for a in (meta.get("actions") or [])
-        if isinstance(a, dict) and (a.get("type") or "").lower() not in (
-            "speak", "speak_product", "session_inject", "broadcast",
-        )
-    ]
-    side = []
-    # Local computer bridge tools first
-    for a in actions:
-        at = (a.get("type") or "").lower()
-        if at in ("local_tool", "computer", "host_tool", "bridge"):
-            try:
-                task = queue_bridge_task(
-                    db,
-                    tool=str(a.get("tool") or a.get("name") or "shell"),
-                    args=a.get("args") or a.get("input") or {},
-                    desk_message_id=sov_row.id,
-                    tenant_id=t.id,
-                )
-                side.append({
-                    "type": "local_tool",
-                    "ok": True,
-                    "task_id": task.id,
-                    "tool": task.tool,
-                    "why": a.get("why"),
-                })
-            except Exception as e:  # noqa: BLE001
-                side.append({"type": "local_tool", "ok": False, "error": str(e)[:200]})
-    remote_actions = [
-        a for a in actions
-        if (a.get("type") or "").lower() not in (
-            "local_tool", "computer", "host_tool", "bridge",
-        )
-    ]
-    if remote_actions:
-        side.extend(
-            execute_brain_actions(db, remote_actions[:3], tick_id="desk_" + sov_row.id[:10])
-        )
-
-    db.flush()
-    # Stamp created_at for client merge (flush may not refresh server defaults on all DBs)
-    if not ford_row.created_at:
-        ford_row.created_at = _now()
     if not sov_row.created_at:
         sov_row.created_at = _now()
+    side: list[Any] = []
+
+    # Side effects MUST NOT fail the chat turn — lock contention here used to
+    # rollback the whole reply and surface as HTTP 500/504 to Ford.
+    try:
+        write_note(
+            db,
+            kind="thought",
+            title="desk monologue",
+            body=str(meta.get("monologue") or reply)[:8000],
+            provider=provider,
+            meta={"source": "desk"},
+        )
+        if meta.get("ford_ask"):
+            memory_set(db, "ford_ask", str(meta["ford_ask"])[:2000], source="desk")
+        if meta.get("succession_gap"):
+            memory_set(db, "succession_gap", str(meta["succession_gap"])[:2000], source="desk")
+        if meta.get("mood"):
+            memory_set(db, "mood", str(meta["mood"])[:80], source="desk")
+        for mw in meta.get("memory_writes") or []:
+            if isinstance(mw, dict) and mw.get("key"):
+                memory_set(db, str(mw["key"]), str(mw.get("value") or ""), source="desk")
+        if meta.get("agenda"):
+            try:
+                apply_agenda(db, meta["agenda"])
+            except Exception as e:  # noqa: BLE001
+                log.warning("desk apply_agenda skipped: %s", e)
+
+        actions = [
+            a for a in (meta.get("actions") or [])
+            if isinstance(a, dict) and (a.get("type") or "").lower() not in (
+                "speak", "speak_product", "session_inject", "broadcast",
+            )
+        ]
+        for a in actions:
+            at = (a.get("type") or "").lower()
+            if at in ("local_tool", "computer", "host_tool", "bridge"):
+                try:
+                    task = queue_bridge_task(
+                        db,
+                        tool=str(a.get("tool") or a.get("name") or "shell"),
+                        args=a.get("args") or a.get("input") or {},
+                        desk_message_id=sov_row.id,
+                        tenant_id=tenant_id,
+                    )
+                    side.append({
+                        "type": "local_tool",
+                        "ok": True,
+                        "task_id": task.id,
+                        "tool": task.tool,
+                        "why": a.get("why"),
+                    })
+                except Exception as e:  # noqa: BLE001
+                    side.append({"type": "local_tool", "ok": False, "error": str(e)[:200]})
+        remote_actions = [
+            a for a in actions
+            if (a.get("type") or "").lower() not in (
+                "local_tool", "computer", "host_tool", "bridge",
+            )
+        ]
+        if remote_actions:
+            try:
+                side.extend(
+                    execute_brain_actions(
+                        db, remote_actions[:3], tick_id="desk_" + sov_row.id[:10]
+                    )
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("desk execute_brain_actions skipped: %s", e)
+                side.append({"type": "actions", "ok": False, "error": str(e)[:200]})
+        db.flush()
+    except Exception as e:  # noqa: BLE001
+        log.warning("desk side effects skipped (reply still saved): %s", e)
+        try:
+            db.rollback()
+            # Re-add the reply after rollback so commit still persists the chat
+            db.add(sov_row)
+            db.flush()
+        except Exception as e2:  # noqa: BLE001
+            log.exception("desk reply re-add after side-effect failure: %s", e2)
+
     return {
         "ok": True,
         "reply": reply,
@@ -843,15 +880,15 @@ def desk_turn(
             "provider": provider,
         },
         "ford_message": {
-            "id": ford_row.id,
+            "id": ford_id,
             "role": "ford",
             "content": msg,
             "created_at": (
-                ford_row.created_at.isoformat() + "Z"
-                if ford_row.created_at else _now().isoformat() + "Z"
+                ford_created.isoformat() + "Z"
+                if ford_created else _now().isoformat() + "Z"
             ),
         },
-        "ford_message_id": ford_row.id,
+        "ford_message_id": ford_id,
     }
 
 
@@ -1205,13 +1242,54 @@ def desk_chat(body: ChatIn, authorization: str | None = Header(default=None)):
                 db, t, body.message or "",
                 attachment_ids=list(body.attachment_ids or [])[:12],
             )
-            db.commit()
+            try:
+                db.commit()
+            except Exception as ce:  # noqa: BLE001
+                # Reply may already be in session; one more try without side junk
+                log.exception("desk_chat commit failed, retrying reply-only: %s", ce)
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                # If pre-brain commit already saved Ford msg and we have reply text,
+                # re-persist sovereign bubble alone so the chat is not lost.
+                try:
+                    reply = (out or {}).get("reply") or ""
+                    mid = ((out or {}).get("message") or {}).get("id")
+                    if reply and mid:
+                        row = EaSovereignDeskMessage(
+                            id=mid,
+                            role="sovereign",
+                            content=str(reply)[:12000],
+                            tenant_id=t.id,
+                            provider=(out or {}).get("provider"),
+                            meta_json=json.dumps({
+                                "channel": "desk",
+                                "recover": True,
+                            })[:4000],
+                        )
+                        db.merge(row)
+                        db.commit()
+                        return out
+                except Exception as ce2:  # noqa: BLE001
+                    log.exception("desk_chat reply-only recover failed: %s", ce2)
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                raise HTTPException(500, f"Desk save failed: {str(ce)[:180]}") from ce
             return out
         except HTTPException:
-            db.rollback()
+            try:
+                db.rollback()
+            except Exception:
+                pass
             raise
         except Exception as e:  # noqa: BLE001
-            db.rollback()
+            try:
+                db.rollback()
+            except Exception:
+                pass
             log.exception("desk_chat failed")
             raise HTTPException(500, f"Desk turn failed: {str(e)[:200]}") from e
 

@@ -158,7 +158,12 @@ def _http_json(url: str, headers: dict, body: dict, timeout: int = 90) -> dict:
         raise RuntimeError(f"HTTP {e.code}: {err}") from e
 
 
-def call_grok(messages: list[dict], *, temperature: float = 0.45) -> dict:
+def call_grok(
+    messages: list[dict],
+    *,
+    temperature: float = 0.45,
+    timeout: int | None = None,
+) -> dict:
     try:
         from .xai_auth import get_xai_bearer
         bearer = get_xai_bearer()
@@ -166,7 +171,8 @@ def call_grok(messages: list[dict], *, temperature: float = 0.45) -> dict:
         if not XAI_API_KEY:
             raise RuntimeError(f"no_xai: {e}") from e
         bearer = XAI_API_KEY
-    timeout = int(os.getenv("SOVEREIGN_GROK_TIMEOUT", "90") or 90)
+    if timeout is None:
+        timeout = int(os.getenv("SOVEREIGN_GROK_TIMEOUT", "90") or 90)
     body = {
         "model": GROK_MODEL,
         "messages": messages,
@@ -179,7 +185,7 @@ def call_grok(messages: list[dict], *, temperature: float = 0.45) -> dict:
             "Content-Type": "application/json",
         },
         body,
-        timeout=timeout,
+        timeout=int(timeout),
     )
     choice = (out.get("choices") or [{}])[0]
     msg = choice.get("message") or {}
@@ -192,9 +198,16 @@ def call_grok(messages: list[dict], *, temperature: float = 0.45) -> dict:
     }
 
 
-def call_claude(messages: list[dict], *, temperature: float = 0.45) -> dict:
+def call_claude(
+    messages: list[dict],
+    *,
+    temperature: float = 0.45,
+    timeout: int | None = None,
+) -> dict:
     if not ANTHROPIC_API_KEY:
         raise RuntimeError("no_anthropic")
+    if timeout is None:
+        timeout = int(os.getenv("SOVEREIGN_CLAUDE_TIMEOUT", "90") or 90)
     sys = ""
     a_msgs = []
     for m in messages:
@@ -217,7 +230,7 @@ def call_claude(messages: list[dict], *, temperature: float = 0.45) -> dict:
             "Content-Type": "application/json",
         },
         body,
-        timeout=120,
+        timeout=int(timeout),
     )
     text_parts = []
     for block in out.get("content") or []:
@@ -235,8 +248,12 @@ def call_claude(messages: list[dict], *, temperature: float = 0.45) -> dict:
     }
 
 
-def call_brain(messages: list[dict]) -> dict:
-    """Call primary brain with self-repair fallback to the other provider."""
+def call_brain(messages: list[dict], *, timeout: int | None = None) -> dict:
+    """Call primary brain with self-repair fallback to the other provider.
+
+    timeout: optional per-call HTTP timeout (desk uses a shorter one so the
+    Netlify proxy does not 504 before we can return a reply).
+    """
     order = [primary_provider(), fallback_provider()]
     # Dedup while preserving order
     seen = set()
@@ -251,12 +268,17 @@ def call_brain(messages: list[dict]) -> dict:
             providers.append(p)
 
     errors: list[str] = []
-    for p in providers:
+    for i, p in enumerate(providers):
         try:
+            # Desk passes a tight timeout — do not stack full timeouts on fallback
+            # (would exceed Netlify ~60s proxy and 504 the chat).
+            t = timeout
+            if timeout is not None and i > 0:
+                t = min(int(timeout), 22)
             if p == "grok":
-                return call_grok(messages)
+                return call_grok(messages, timeout=t)
             if p == "claude":
-                return call_claude(messages)
+                return call_claude(messages, timeout=t)
         except Exception as e:  # noqa: BLE001
             msg = f"{p}: {e}"
             errors.append(msg)

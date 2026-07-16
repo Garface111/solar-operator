@@ -1585,18 +1585,55 @@ def memory_get_all(db, *, limit: int = 80) -> list[dict]:
     ]
 
 
-def memory_set(db, key: str, value: str, *, source: str = "brain") -> None:
+def _is_lock_or_timeout_err(exc: Exception) -> bool:
+    """Postgres lock/statement timeout or SQLAlchemy OperationalError wrapping it."""
+    name = type(exc).__name__
+    text = str(exc).lower()
+    if "locknotavailable" in name.lower() or "lock not available" in text:
+        return True
+    if "lock timeout" in text or "canceling statement due to lock" in text:
+        return True
+    if "statement timeout" in text or "deadlock detected" in text:
+        return True
+    # unwrap SQLAlchemy cause chain
+    cause = getattr(exc, "orig", None) or getattr(exc, "__cause__", None)
+    if cause is not None and cause is not exc:
+        return _is_lock_or_timeout_err(cause)
+    return False
+
+
+def memory_set(db, key: str, value: str, *, source: str = "brain") -> bool:
+    """Upsert durable memory. Never raises on lock contention — returns False.
+
+    Desk chat + subconscious ticks fight over the same rows; a hard failure here
+    used to 500/504 the whole chat after the LLM already replied.
+    """
     key = (key or "").strip()[:120]
     if not key:
-        return
-    row = db.get(EaSovereignMemory, key)
-    if not row:
-        row = EaSovereignMemory(key=key, value="", source=source[:40])
-        db.add(row)
-    row.value = (value or "")[:8000]
-    row.updated_at = _now()
-    row.source = (source or "brain")[:40]
-    db.flush()
+        return False
+    try:
+        # Short lock wait so chat never stalls behind a long cortex/subconscious tick.
+        try:
+            from sqlalchemy import text as _sql_text
+            db.execute(_sql_text("SET LOCAL lock_timeout = '800ms'"))
+        except Exception:
+            pass
+        with db.begin_nested():  # savepoint — failed write doesn't poison the txn
+            row = db.get(EaSovereignMemory, key)
+            if not row:
+                row = EaSovereignMemory(key=key, value="", source=source[:40])
+                db.add(row)
+            row.value = (value or "")[:8000]
+            row.updated_at = _now()
+            row.source = (source or "brain")[:40]
+            db.flush()
+        return True
+    except Exception as e:  # noqa: BLE001
+        if _is_lock_or_timeout_err(e):
+            log.warning("memory_set skipped (lock) key=%s: %s", key, e)
+        else:
+            log.warning("memory_set failed key=%s: %s", key, e)
+        return False
 
 
 def recent_notes(db, *, limit: int = 20) -> list[dict]:
