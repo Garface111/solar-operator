@@ -29,6 +29,7 @@ import {
   deleteClient,
   sendClientReportToMe,
   downloadClientReport,
+  downloadGeneration,
   listArrays,
   recentReportQuarters,
 } from "../lib/api";
@@ -149,6 +150,7 @@ export function ClientCard({
   const [sendingToMe, setSendingToMe] = useState(false);
   const [reportQuarter, setReportQuarter] = useState(REPORT_QUARTERS[0]?.value ?? "");
   const [downloading, setDownloading] = useState(false);
+  const [downloadingGen, setDownloadingGen] = useState(false);
   const [assigningNepool, setAssigningNepool] = useState(false);
   // Per-client array-import modal — the spreadsheet's operator_name column
   // is ignored; every row lands under THIS client. Complements the global
@@ -257,6 +259,18 @@ export function ClientCard({
       }
     } finally {
       setDownloading(false);
+    }
+  }
+
+  async function handleDownloadGen() {
+    if (downloadingGen) return;
+    setDownloadingGen(true);
+    try {
+      await downloadGeneration(client.id, client.name, reportQuarter || undefined);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't download generation");
+    } finally {
+      setDownloadingGen(false);
     }
   }
 
@@ -524,6 +538,22 @@ export function ClientCard({
                       </>
                     ) : (
                       "Download .xlsx"
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDownloadGen}
+                    disabled={downloadingGen}
+                    title="Raw utility generation for the selected quarter — monthly per project across all utilities (GMP + co-ops), plus daily meter detail where available."
+                    className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-cream-border bg-white px-5 py-2.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+                  >
+                    {downloadingGen ? (
+                      <>
+                        <Spinner />
+                        Downloading…
+                      </>
+                    ) : (
+                      "Download generation .xlsx"
                     )}
                   </button>
                   <Link
