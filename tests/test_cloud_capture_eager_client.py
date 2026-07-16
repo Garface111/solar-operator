@@ -108,6 +108,30 @@ def test_duplicate_login_creates_no_duplicate_client(client):
     assert len(_clients(tid)) == 1
 
 
+def test_first_login_adopts_the_onboarding_placeholder(client):
+    """Onboarding seeds a blank 'Your first client' placeholder at activation.
+    The first cloud login should ADOPT it (not leave a stray) — so two logins
+    yield exactly two client cards, the first reusing the placeholder."""
+    tid, _key, auth = _make_tenant()
+    with SessionLocal() as db:
+        db.add(Client(tenant_id=tid, name="Your first client", active=True,
+                      is_placeholder=True, gmp_autopopulate=True, vec_autopopulate=True))
+        db.commit()
+
+    assert _save_login(client, auth, "gmp", "first@example.com").status_code == 200
+    rows = _clients(tid)
+    assert len(rows) == 1  # adopted, not added
+    c = rows[0]
+    assert c.is_placeholder is False
+    assert c.capture_pending is True
+    assert c.gmp_email == "first@example.com"
+    assert c.name == "First"  # renamed off the placeholder label
+
+    assert _save_login(client, auth, "vec", "second",
+                       login_host="vermontelectric.smarthub.coop").status_code == 200
+    assert len(_clients(tid)) == 2  # second login makes a new card
+
+
 def test_array_operator_tenant_creates_no_client(client):
     """AO uses offtakers, not the Client (sub-client) table — never mirror."""
     tid, _key, auth = _make_tenant(product="array_operator")

@@ -115,6 +115,18 @@ def ensure_client_for_login(db, tenant, provider: str, username: str) -> None:
 
     login_lc = login.lower()
     is_email = "@" in login
+
+    def _bind(c) -> None:
+        """Stamp the login onto the Client using the columns the /v1/sync matcher
+        keys on, arm autopop, and mark it awaiting its first bill."""
+        setattr(c, cfg["username_attr"], login)
+        setattr(c, cfg["autopop_attr"], True)
+        if is_email:
+            setattr(c, cfg["email_attr"], login_lc)
+            if not c.contact_email:
+                c.contact_email = login_lc
+        c.capture_pending = True
+
     match_terms = [func.lower(cfg["username_col"]) == login_lc]
     if is_email:
         match_terms.append(func.lower(cfg["email_col"]) == login_lc)
@@ -133,29 +145,48 @@ def ensure_client_for_login(db, tenant, provider: str, username: str) -> None:
             setattr(existing, cfg["autopop_attr"], True)
         return
 
-    # New pending client. Suffix on the (tenant_id, name) unique constraint —
-    # two logins can derive the same display name, and it doesn't exclude
-    # soft-deleted rows, so retry inside a SAVEPOINT (begin_nested) with a bumped
-    # suffix. The savepoint keeps a collision from rolling back the credential
-    # save that happens in this same outer transaction.
     base_name = _name_from_login(login)
+
+    # Adopt the blank "Your first client" placeholder that onboarding seeds at
+    # activation (api/onboarding.ensure_placeholder_client) — exactly as the
+    # /v1/sync capture path does — so N cloud logins yield N client cards (the
+    # first reusing the placeholder) instead of N + a stray empty placeholder.
+    # Only a placeholder with NO login bound to either provider family is
+    # adoptable, so a second login never stomps the first login's card.
+    target = db.execute(
+        select(Client).where(
+            Client.tenant_id == tenant.id,
+            Client.deleted_at.is_(None),
+            Client.is_placeholder.is_(True),
+            Client.gmp_email.is_(None), Client.gmp_username.is_(None),
+            Client.vec_email.is_(None), Client.vec_username.is_(None),
+        ).order_by(Client.id).limit(1)
+    ).scalar_one_or_none()
+
+    # Suffix on the (tenant_id, name) unique constraint — two logins can derive
+    # the same display name, and the constraint doesn't exclude soft-deleted
+    # rows. Retry inside a SAVEPOINT so a collision never rolls back the
+    # credential save that shares this outer transaction.
     for attempt in range(20):
         name = base_name if attempt == 0 else f"{base_name} {attempt + 1}"
         try:
             with db.begin_nested():
-                c = Client(tenant_id=tenant.id, name=name, active=True,
-                           capture_pending=True)
-                setattr(c, cfg["username_attr"], login)
-                setattr(c, cfg["autopop_attr"], True)
-                if is_email:
-                    setattr(c, cfg["email_attr"], login_lc)
-                    c.contact_email = login_lc
-                db.add(c)
+                if target is not None:
+                    target.is_placeholder = False
+                    _bind(target)
+                    if target.name_edited_at is None:
+                        target.name = name
+                else:
+                    c = Client(tenant_id=tenant.id, name=name, active=True)
+                    _bind(c)
+                    db.add(c)
                 db.flush()
             return
         except IntegrityError:
+            if target is not None and target.name_edited_at is not None:
+                return  # curated name we won't rename — nothing left to retry
             continue
-    log.warning("ensure_client_for_login: couldn't create client for %s/%s after 20 tries",
+    log.warning("ensure_client_for_login: couldn't bind client for %s/%s after 20 tries",
                 tenant.id, provider)
 
 
