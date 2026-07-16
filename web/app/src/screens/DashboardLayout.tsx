@@ -59,18 +59,31 @@ export default function DashboardLayout({ onSignOut }: Props) {
     setLoadKey((k) => k + 1);
   }, []);
 
-  // This SPA is NEPOOL Operator only (nepooloperator.com/accounts). Never let a
-  // mis-tagged array_operator tenant flip chrome/billing into offtaker mode.
-  const asNepoolAccount = useCallback((a: Account): Account => {
-    if (a.product === "nepool" || a.product == null) return a;
-    return { ...a, product: "nepool" };
-  }, []);
-
+  // This SPA is NEPOOL Operator only (nepooloperator.com/accounts + the same
+  // bundle at arrayoperator.com/accounts). An Array Operator session must NOT
+  // render here — previously we *masked* product to "nepool", which made AO
+  // arrays (renames, vendor captures) look like NEPOOL fleet data and scared
+  // operators about REC-report corruption. Reject and bounce to AO instead.
   useEffect(() => {
     let cancelled = false;
     getAccount()
       .then((a) => {
-        if (!cancelled) setAccount(asNepoolAccount(a));
+        if (cancelled) return;
+        if (a.product === "array_operator") {
+          // Wrong product session (often from arrayoperator.com/accounts which
+          // proxies this same SPA). Clear and send them to the real AO site.
+          try {
+            localStorage.removeItem("so_session");
+          } catch {
+            /* ignore */
+          }
+          toast.error(
+            "That sign-in is for Array Operator — opening the owner site.",
+          );
+          window.location.replace("https://arrayoperator.com/");
+          return;
+        }
+        setAccount(a);
       })
       .catch((err) => {
         // 401s are handled globally (UNAUTHORIZED_EVENT bounces to login).
@@ -98,7 +111,10 @@ export default function DashboardLayout({ onSignOut }: Props) {
       debounce = setTimeout(() => {
         getAccount()
           .then((a) => {
-            if (!cancelled) setAccount(asNepoolAccount(a));
+            if (cancelled) return;
+            // Same product gate as initial load — never paint AO as NEPOOL.
+            if (a.product === "array_operator") return;
+            setAccount(a);
           })
           .catch(() => {
             /* leave existing account snapshot; non-fatal */
@@ -209,9 +225,8 @@ export default function DashboardLayout({ onSignOut }: Props) {
           48 * 60 * 60 * 1000
       : false;
 
-  // This SPA is NEPOOL Operator (nepooloperator.com). Force NEPOOL chrome even
-  // if a tenant was mis-tagged array_operator (that leak showed offtaker
-  // billing + renamed "Automatic Reports" to "Billing").
+  // This SPA is NEPOOL Operator only. Wrong-product sessions are rejected on
+  // load (see getAccount effect above); chrome is always NEPOOL branding.
   const brand = brandFor("nepool");
   const tabs: Tab[] = [
     { ...BASE_TABS[0], label: brand.accountTabLabel },

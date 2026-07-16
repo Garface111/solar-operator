@@ -168,7 +168,6 @@ export default function ClientsTab() {
           <SandboxCanvas
             isFullscreen={isFullscreen}
             onToggleFullscreen={toggleFullscreen}
-            active={isSandbox || isFullscreen}
           />
         </ReactFlowProvider>
       </section>
