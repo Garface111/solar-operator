@@ -163,7 +163,11 @@ def test_fanout_off_leaves_sibling_untouched(client, monkeypatch):
     assert len(_arrays(nep)) == 0         # sibling untouched (flag OFF)
 
 
-def test_fanout_on_writes_to_both_and_is_idempotent(client, monkeypatch):
+def test_fanout_inverter_capture_stays_out_of_nepool_sibling(client, monkeypatch):
+    """Inverter capture on the AO tenant writes to AO, and the fan-out to a linked
+    NEPOOL sibling is REFUSED by the product guard — NEPOOL builds arrays from
+    UTILITY data only (Ford 2026-07-16). So the inverter data must never cross
+    into the nepool sibling, even with fan-out ON."""
     monkeypatch.setenv("FAN_OUT_TO_SIBLING", "true")
     email = f"{secrets.token_hex(6)}@on.test"
     ao, ao_key = _mk_tenant(email=email, product="array_operator")
@@ -175,30 +179,28 @@ def test_fanout_on_writes_to_both_and_is_idempotent(client, monkeypatch):
                     headers={"Authorization": f"Bearer {ao_key}"})
     assert r.status_code == 200, r.text
 
-    # BOTH tenants got the array + a daily row.
+    # AO (the inverter product) got the array + daily row...
     assert len(_arrays(ao)) == 1
-    assert len(_arrays(nep)) == 1
     assert len(_daily_rows(ao)) == 1
-    assert len(_daily_rows(nep)) == 1
-    assert _daily_rows(nep)[0].kwh == pytest.approx(42.0)
+    # ...but the NEPOOL sibling got NOTHING — inverter->array write refused there.
+    assert len(_arrays(nep)) == 0
+    assert len(_daily_rows(nep)) == 0
 
-    # Re-capture the SAME day → idempotent: no duplicate arrays/daily in either.
+    # Re-capture the SAME day → idempotent on AO; nepool still empty.
     r2 = client.post("/v1/array-owners/inverter-capture", json=payload,
                      headers={"Authorization": f"Bearer {ao_key}"})
     assert r2.status_code == 200, r2.text
     assert len(_arrays(ao)) == 1
-    assert len(_arrays(nep)) == 1
     assert len(_daily_rows(ao)) == 1
-    assert len(_daily_rows(nep)) == 1
+    assert len(_arrays(nep)) == 0
 
-    # Inverter rows mirrored into the sibling too.
+    # No inverter rows leaked into the nepool sibling either.
     with SessionLocal() as db:
         sib_invs = db.execute(
             select(Inverter).where(Inverter.tenant_id == nep,
                                    Inverter.deleted_at.is_(None))
         ).scalars().all()
-        assert len(sib_invs) == 1
-        assert sib_invs[0].serial == "INV-001"
+        assert len(sib_invs) == 0
 
 
 def test_fanout_sibling_failure_does_not_break_primary(client, monkeypatch):

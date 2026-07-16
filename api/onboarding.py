@@ -376,6 +376,22 @@ def _create_trial_tenant(
         ensure_placeholder_client(db, tenant_id)
         db.commit()
 
+    # Cross-product siblings (Ford 2026-07-16): a person can own a NEPOOL account
+    # AND an Array Operator account on the same email — they should work together
+    # (one login, shared capture fan-out). If this signup means the email now owns
+    # BOTH products, auto-link the two tenants bidirectionally. link_by_email is
+    # idempotent + reversible and a no-op ("missing-one-product") when the email
+    # owns only this product, so it's safe to call on every signup. Best-effort —
+    # a link hiccup must never fail signup.
+    try:
+        from .tenant_link import link_by_email
+        _lk = link_by_email(email, apply=True)
+        if _lk.get("linked"):
+            logger.info("auto-linked cross-product siblings for %s (%s)",
+                        email, _lk.get("reason"))
+    except Exception:
+        logger.exception("auto-link siblings failed for %s", email)
+
     # Ford asked to be pinged at his gmail when SOMEONE ELSE signs up — i.e.
     # not his own / Bruce's / family test accounts (all @…genereaux…), nor the
     # placeholder fixtures. Best-effort: a Resend hiccup must never fail signup.
