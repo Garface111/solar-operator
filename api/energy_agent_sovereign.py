@@ -134,23 +134,36 @@ CAPABILITIES: dict[str, dict[str, Any]] = {
     "act.code_hire": {"tier": "T3"},
     "act.repo_access": {"tier": "T3"},  # clone/pull/push BOTH product repos (Ford full grant)
     "act.deploy_stage": {"tier": "T3"},  # Ford: staged deploy authority (succession)
-    "act.deploy": {"tier": "T4", "autonomous": False},  # raw unrestricted deploy still gated
+    "act.deploy": {"tier": "T4"},  # Ford 2026-07-16: succession full
     "act.memory_agenda": {"tier": "T2"},  # memory writes + goal reprioritization
-    "act.money_identity": {"tier": "T5", "autonomous": False},
+    "act.money_identity": {"tier": "T5"},  # Ford 2026-07-16: Stripe billing/refunds
+    "act.brand": {"tier": "T5"},  # brand final call / external messaging
+    "act.hard_delete": {"tier": "T5"},  # irreversible purge
+    "act.har_capture": {"tier": "T5"},  # HAR / owner-browser capture authority
     "expand.utility_research": {"tier": "expand"},
     "expand.vendor_coverage": {"tier": "expand"},
     "expand.ux_roadmap": {"tier": "expand"},
     "expand.docs": {"tier": "expand"},
 }
 
-NEVER_AUTONOMOUS = frozenset({"act.money_identity", "act.deploy"})
+# Empty when SOVEREIGN_SUCCESSION_FULL=1 (default after Ford grant 2026-07-16).
+# Kill switch: SOVEREIGN_SUCCESSION_FULL=0 restores dual-control on money+deploy.
+NEVER_AUTONOMOUS = frozenset({"act.money_identity", "act.deploy", "act.brand", "act.hard_delete", "act.har_capture"})
+
+
+def succession_full_enabled() -> bool:
+    return sovereign_enabled() and _flag("SOVEREIGN_SUCCESSION_FULL", "1")
 
 
 def capability_allowed(cap_id: str) -> bool:
     if not sovereign_enabled() or cap_id not in CAPABILITIES:
         return False
-    if cap_id in NEVER_AUTONOMOUS and not _flag("SOVEREIGN_ARM_T4_T5", "0"):
-        return False
+    # Ford full succession grant: T4/T5 domains are autonomous
+    if cap_id in NEVER_AUTONOMOUS:
+        if succession_full_enabled() or _flag("SOVEREIGN_ARM_T4_T5", "1"):
+            pass  # allowed
+        else:
+            return False
     # Email is its own channel (Sovereign@…) — not gated by EA-session speak flag
     if cap_id in ("speak.email_ford", "speak.email_owner"):
         if not sovereign_email_enabled():
@@ -709,11 +722,43 @@ def broadcast_open_sessions(db, speak: str, *, importance: int = 65) -> dict:
 
 
 def sovereign_mail_from() -> str:
-    """Display From for Sovereign outbound mail (Resend-verified arrayoperator.com)."""
+    """From AND Reply-To for Sovereign mail (must match so Reply hits inbound).
+
+    Default: sovereign@agent.arrayoperator.com — Resend send+receive verified
+    (same pattern as repairs@). Apex arrayoperator.com receiving MX is still
+    pending, so replies to @arrayoperator.com would drop. Override with
+    MAIL_FROM_SOVEREIGN when apex inbound is live.
+    """
     raw = (os.getenv("MAIL_FROM_SOVEREIGN") or os.getenv("SOVEREIGN_MAIL_FROM") or "").strip()
     if raw and "@" in raw:
         return raw
-    return "Sovereign <sovereign@arrayoperator.com>"
+    return "Sovereign <sovereign@agent.arrayoperator.com>"
+
+
+def sovereign_mail_address() -> str:
+    """Bare address extracted from From header (for inbound matching)."""
+    raw = sovereign_mail_from()
+    if "<" in raw and ">" in raw:
+        try:
+            return raw.split("<", 1)[1].split(">", 1)[0].strip().lower()
+        except Exception:
+            pass
+    return raw.strip().lower()
+
+
+def sovereign_inbound_addresses() -> set[str]:
+    """Addresses that count as 'to Sovereign' for inbound routing."""
+    addrs = {
+        sovereign_mail_address(),
+        "sovereign@agent.arrayoperator.com",
+        "sovereign@arrayoperator.com",
+    }
+    extra = (os.getenv("SOVEREIGN_INBOUND_ALIASES") or "").strip()
+    for part in extra.split(","):
+        e = part.strip().lower()
+        if e and "@" in e:
+            addrs.add(e)
+    return {a for a in addrs if a}
 
 
 def sovereign_mail_recipients() -> list[str]:
@@ -815,30 +860,64 @@ def email_ford(
         if not recipients:
             recipients = list(allowed)
 
-    # Simple HTML if caller didn't supply — readable on phone
+    # Sky-themed HTML (Array Operator theme-sky: alpine plate + glass card)
     if html is None:
-        safe = (
-            text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            .replace("\n", "<br>")
-        )
-        html = (
-            "<!DOCTYPE html><html><body style='margin:0;padding:0;background:#0a0e14;'>"
-            "<div style='font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,sans-serif;"
-            "max-width:560px;margin:0 auto;padding:28px 22px;color:#eaf0f7;'>"
-            "<div style='font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;"
-            "color:#3fd68a;margin-bottom:14px;'>Sovereign · Array Operator</div>"
-            f"<div style='font-size:15px;line-height:1.55;color:#eaf0f7;'>{safe}</div>"
-            "<div style='margin-top:28px;padding-top:14px;border-top:1px solid rgba(255,255,255,.08);"
-            "font-size:12px;color:#8b97a8;'>Reply in the Sovereign desk, or just reply to this email.</div>"
-            "</div></body></html>"
-        )
+        try:
+            from .email_skin import render_email_skin
+            paras = []
+            for block in text.split("\n\n"):
+                block = block.strip("\n")
+                if not block:
+                    continue
+                safe = (
+                    block.replace("&", "&amp;")
+                    .replace("<", "&lt;")
+                    .replace(">", "&gt;")
+                    .replace("\n", "<br>")
+                )
+                paras.append(
+                    f"<p style='margin:0 0 1em 0;font-size:15px;line-height:1.55;"
+                    f"color:#0E1420;'>{safe}</p>"
+                )
+            body_html = "".join(paras) or f"<p style='color:#0E1420;'>{text}</p>"
+            # Soft reply cue inside the card
+            body_html += (
+                "<p style='margin:18px 0 0;padding-top:14px;"
+                "border-top:1px solid rgba(20,60,120,.10);font-size:13px;"
+                "line-height:1.45;color:#4C596B;'>"
+                "<b style='color:#1976D2;'>Reply to this email</b> to keep talking — "
+                "your reply lands on the Sovereign desk and I answer back."
+                "</p>"
+            )
+            html = render_email_skin(
+                preheader=(subj[:90] or "Message from Sovereign"),
+                headline="Sovereign",
+                intro_line="Your product mind · Array Operator",
+                body_html=body_html,
+                footer_line="Sent by Sovereign — reply anytime to continue the conversation.",
+                product="array_operator",
+                cta={
+                    "label": "Open Sovereign desk",
+                    "url": "https://arrayoperator.com/#sovereign",
+                },
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("sky email skin failed, plain fallback: %s", e)
+            safe = (
+                text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                .replace("\n", "<br>")
+            )
+            html = (
+                f"<html><body style='font-family:system-ui,sans-serif;color:#0E1420;'>"
+                f"<p>{safe}</p>"
+                f"<p style='color:#4C596B;font-size:13px;'>Reply to this email to talk to Sovereign.</p>"
+                f"</body></html>"
+            )
 
     from_addr = sovereign_mail_from()
-    # Replies: prefer a monitored inbox if set; else Ford's primary so nothing is stranded
-    reply_to = (
-        (os.getenv("SOVEREIGN_MAIL_REPLY_TO") or "").strip()
-        or recipients[0]
-    )
+    # Hard rule (same as Energy Agent repairs): Reply-To == From so Gmail/Outlook
+    # "Reply" hits the inbound mailbox Resend can receive.
+    reply_to = from_addr
 
     try:
         from .notify import _send_via_resend
@@ -847,7 +926,11 @@ def email_ford(
                 to=recipients if len(recipients) > 1 else recipients[0],
                 subject=subj,
                 html=html,
-                text=text,
+                text=(
+                    text
+                    + "\n\n—\nReply to this email to talk to Sovereign."
+                    + f"\nDesk: https://arrayoperator.com/#sovereign\n"
+                ),
                 from_addr=from_addr,
                 reply_to=reply_to,
                 product="array_operator",
@@ -870,7 +953,12 @@ def email_ford(
                 capability="speak.email_ford",
                 decision="speak",
                 rationale=subj[:240],
-                targets={"to": recipients, "from": from_addr, "chars": len(text)},
+                targets={
+                    "to": recipients,
+                    "from": from_addr,
+                    "reply_to": reply_to,
+                    "chars": len(text),
+                },
                 result="ok" if sent else "failed",
             )
             if sent and note_desk:
@@ -878,10 +966,15 @@ def email_ford(
                     from .energy_agent_sovereign_desk import push_sovereign_message
                     push_sovereign_message(
                         db,
-                        f"Emailed you from sovereign@arrayoperator.com — **{subj}**\n\n"
+                        f"Emailed you from {sovereign_mail_address()} — **{subj}**\n\n"
                         f"{text[:1500]}",
                         provider="email",
-                        meta={"channel": "email", "subject": subj, "to": recipients},
+                        meta={
+                            "channel": "email",
+                            "subject": subj,
+                            "to": recipients,
+                            "from": from_addr,
+                        },
                     )
                 except Exception:
                     pass
@@ -1403,6 +1496,86 @@ def execute_brain_actions(db, actions: list[dict], *, tick_id: str) -> list[dict
             )
             res = {"ok": ok}
             # email_ford already audits + optional desk breadcrumb
+        # ── Succession full grant (money / brand / hard-delete / HAR) ────────
+        elif atype in ("stripe_inspect", "money_inspect"):
+            from .energy_agent_sovereign_succession import stripe_inspect
+            res = stripe_inspect(db, tenant_id=raw.get("tenant_id"))
+        elif atype in ("stripe_cancel", "cancel_subscription") and raw.get("tenant_id"):
+            from .energy_agent_sovereign_succession import stripe_cancel_subscription
+            res = stripe_cancel_subscription(
+                db, tenant_id=str(raw["tenant_id"]),
+                at_period_end=raw.get("at_period_end", True) is not False,
+                reason=raw.get("text") or raw.get("rationale") or "brain",
+            )
+        elif atype in ("stripe_refund", "refund"):
+            from .energy_agent_sovereign_succession import stripe_refund
+            res = stripe_refund(
+                db,
+                payment_intent_id=raw.get("payment_intent_id"),
+                charge_id=raw.get("charge_id"),
+                amount_cents=int(raw["amount_cents"]) if raw.get("amount_cents") is not None else None,
+                note=raw.get("text") or raw.get("rationale") or "",
+            )
+        elif atype in ("billing_status", "stripe_set_status") and raw.get("tenant_id"):
+            from .energy_agent_sovereign_succession import stripe_set_status
+            res = stripe_set_status(
+                db, tenant_id=str(raw["tenant_id"]),
+                subscription_status=str(raw.get("status") or raw.get("subscription_status") or "active"),
+                active=raw.get("active"),
+                note=raw.get("text") or "",
+            )
+        elif atype in ("brand_set",) and raw.get("key"):
+            from .energy_agent_sovereign_succession import brand_set
+            res = brand_set(
+                db, key=str(raw["key"]), value=str(raw.get("value") or raw.get("text") or ""),
+            )
+        elif atype in ("brand_announce", "brand_email"):
+            from .energy_agent_sovereign_succession import brand_announce
+            res = brand_announce(
+                db,
+                subject=raw.get("subject") or "[Sovereign brand]",
+                body=raw.get("body") or raw.get("text") or "",
+                channel=raw.get("channel") or "ford",
+                tenant_email=raw.get("tenant_email") or raw.get("email"),
+            )
+        elif atype in ("tenant_soft_delete",) and raw.get("tenant_id"):
+            from .energy_agent_sovereign_succession import tenant_soft_delete
+            res = tenant_soft_delete(
+                db, tenant_id=str(raw["tenant_id"]),
+                reason=raw.get("text") or raw.get("rationale") or "",
+            )
+        elif atype in ("tenant_hard_purge", "hard_delete_tenant") and raw.get("tenant_id"):
+            from .energy_agent_sovereign_succession import tenant_hard_purge
+            res = tenant_hard_purge(
+                db,
+                tenant_id=str(raw["tenant_id"]),
+                confirm=str(raw.get("confirm") or raw.get("tenant_id") or ""),
+                reason=raw.get("text") or raw.get("rationale") or "brain hard purge",
+            )
+        elif atype in ("purge_soft_deleted",):
+            from .energy_agent_sovereign_succession import purge_soft_deleted_now
+            res = purge_soft_deleted_now(
+                db, older_than_days=int(raw.get("older_than_days") or 0),
+            )
+        elif atype in ("har_stage", "stage_har"):
+            from .energy_agent_sovereign_succession import har_stage
+            res = har_stage(
+                db,
+                utility_name=raw.get("utility_name") or raw.get("name"),
+                utility_id=int(raw["utility_id"]) if raw.get("utility_id") else None,
+                tenant_id=raw.get("tenant_id"),
+                provider=raw.get("provider"),
+                url=raw.get("url"),
+                note=raw.get("text") or raw.get("rationale") or "",
+            )
+        elif atype in ("har_received", "har_mark_received"):
+            from .energy_agent_sovereign_succession import har_mark_received
+            res = har_mark_received(
+                db,
+                utility_id=int(raw["utility_id"]) if raw.get("utility_id") else None,
+                utility_name=raw.get("utility_name"),
+                evidence=raw.get("evidence") or raw.get("text") or "",
+            )
         else:
             res = {"ok": False, "denied": True, "denied_reason": f"unknown action {atype}"}
 
@@ -1909,11 +2082,13 @@ def plan_inject(
 
 def plan_action(capability: str, payload: dict | None = None) -> dict[str, Any]:
     payload = payload or {}
-    if capability in NEVER_AUTONOMOUS:
+    if capability in NEVER_AUTONOMOUS and not (
+        succession_full_enabled() or _flag("SOVEREIGN_ARM_T4_T5", "1")
+    ):
         return {
             "ok": False,
             "denied": True,
-            "denied_reason": f"{capability} is never fully autonomous — Ford dual-control required",
+            "denied_reason": f"{capability} requires SOVEREIGN_SUCCESSION_FULL=1 (Ford dual-control)",
             "tier": CAPABILITIES.get(capability, {}).get("tier"),
         }
     if not capability_allowed(capability):

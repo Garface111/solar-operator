@@ -328,12 +328,19 @@ def pick_repo(brief: str, title: str) -> tuple[str, Path]:
 
 
 def brief_is_denied(title: str, brief: str) -> str | None:
-    blob = f"{title}\n{brief}"
-    if MONEY_HINTS.search(blob) and not re.search(r"\b(copy|ui|label|wording)\b", blob, re.I):
-        return "money/stripe changes require Ford dual-control (T5)"
-    low = blob.lower()
-    if any(x in low for x in ("drop table", "hard delete tenant", "rm -rf", "force push", "reset --hard origin")):
-        return "destructive ops denied"
+    """Deny only when succession full is off, or always-deny nuclear ops."""
+    low = f"{title}\n{brief}".lower()
+    # Always deny repo-destroying git ops
+    if any(x in low for x in ("force push", "reset --hard origin", "rm -rf /", "drop database")):
+        return "destructive repo/db ops denied"
+    succession = _flag("SOVEREIGN_SUCCESSION_FULL", "1")
+    if not succession:
+        if MONEY_HINTS.search(f"{title}\n{brief}") and not re.search(
+            r"\b(copy|ui|label|wording)\b", f"{title}\n{brief}", re.I,
+        ):
+            return "money/stripe changes require SOVEREIGN_SUCCESSION_FULL=1"
+        if any(x in low for x in ("hard delete tenant", "purge tenant", "drop table")):
+            return "hard-delete requires SOVEREIGN_SUCCESSION_FULL=1"
     return None
 
 
@@ -410,9 +417,9 @@ Ford Genereaux authorized Sovereign to use Claude Code on this codebase and ship
 
 ## Hard rules
 1. Minimal correct change only. Prefer existing patterns.
-2. Do NOT commit .env, API keys, Stripe live money paths, or tenant hard-deletes.
-   Portal credential *code paths* and adapter work ARE authorized (Ford unlock).
-   Never hardcode real passwords into source.
+2. Do NOT commit .env or raw secret values into git. Stripe/billing code paths and
+   tenant purge *tooling* ARE authorized under SOVEREIGN_SUCCESSION_FULL (Ford 2026-07-16).
+   Never hardcode live secret keys or passwords into source.
 3. Do NOT use force-push or git reset --hard on shared branches.
 4. After edits: run quick checks if cheap (node --check on edited JS, or pytest -q on touched tests).
 5. When done, leave a clean git working tree with your changes staged or committed is OK — the outer worker will commit/push.

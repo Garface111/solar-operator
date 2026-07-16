@@ -9,7 +9,8 @@ Authority (2026-07-15 Ford):
   6. Job queue: stage + execute without manual intervention
   7. Portal sign-off: unpause roster, enable cloud capture, rearm harvest, mark portal ready
 
-Money/identity/hard-delete still blocked at capability layer.
+Succession full (Ford 2026-07-16): money/Stripe, brand, hard-delete, HAR capture
+via energy_agent_sovereign_succession.py when SOVEREIGN_SUCCESSION_FULL=1.
 Passwords: JIT use for harvest/adapters only — never in desk/chat/audit bodies.
 """
 from __future__ import annotations
@@ -1028,8 +1029,14 @@ def autonomous_ops_sweep(db) -> dict:
     )
     memory_set(
         db, "succession_gap",
-        "money/Stripe identity, brand final call, irreversible hard-deletes, "
-        "HARs we cannot capture without owner browser — everything else owned",
+        "NONE under SOVEREIGN_SUCCESSION_FULL: money/Stripe, brand, hard-delete, "
+        "HAR capture all authorized (Ford 2026-07-16). Kill: SOVEREIGN_SUCCESSION_FULL=0",
+        source="ops",
+    )
+    memory_set(
+        db, "succession_full_grant",
+        "Ford 2026-07-16 authorized: act.money_identity, act.brand, act.hard_delete, "
+        "act.har_capture, act.deploy — Sovereign owns product end-to-end.",
         source="ops",
     )
     write_note(

@@ -539,6 +539,9 @@ def desk_ops_summary(authorization: str | None = Header(default=None)):
             ],
             "memory": memory_get_all(db, limit=40),
             "notes_recent": recent_notes(db, limit=8),
+            "succession": __import__(
+                "api.energy_agent_sovereign_succession", fromlist=["succession_status"]
+            ).succession_status(),
         }
 
 
@@ -684,6 +687,82 @@ def desk_ops_action(body: OpsActionIn, authorization: str | None = Header(defaul
                 blocked.append(eid)
             memory_set(db, "escalation_blocklist", json.dumps(blocked), source="ford")
             out = {"ok": True, "blocked": blocked}
+        # ── Succession full (money / brand / hard-delete / HAR) ──────────────
+        elif action in ("succession", "succession_status"):
+            from .energy_agent_sovereign_succession import succession_status
+            out = succession_status()
+        elif action in ("stripe_inspect", "money_inspect"):
+            from .energy_agent_sovereign_succession import stripe_inspect
+            out = stripe_inspect(db, tenant_id=p.get("tenant_id"))
+        elif action in ("stripe_cancel",):
+            from .energy_agent_sovereign_succession import stripe_cancel_subscription
+            out = stripe_cancel_subscription(
+                db, tenant_id=str(p["tenant_id"]),
+                at_period_end=p.get("at_period_end", True) is not False,
+                reason=p.get("note") or p.get("reason") or "desk",
+            )
+        elif action in ("stripe_refund", "refund"):
+            from .energy_agent_sovereign_succession import stripe_refund
+            out = stripe_refund(
+                db,
+                payment_intent_id=p.get("payment_intent_id"),
+                charge_id=p.get("charge_id"),
+                amount_cents=int(p["amount_cents"]) if p.get("amount_cents") is not None else None,
+                note=p.get("note") or "",
+            )
+        elif action in ("billing_status", "stripe_set_status"):
+            from .energy_agent_sovereign_succession import stripe_set_status
+            out = stripe_set_status(
+                db, tenant_id=str(p["tenant_id"]),
+                subscription_status=str(p.get("status") or p.get("subscription_status") or "active"),
+                active=p.get("active"),
+                note=p.get("note") or "",
+            )
+        elif action in ("brand_set",):
+            from .energy_agent_sovereign_succession import brand_set
+            out = brand_set(db, key=str(p.get("key") or "voice"), value=str(p.get("value") or p.get("note") or ""))
+        elif action in ("brand_announce",):
+            from .energy_agent_sovereign_succession import brand_announce
+            out = brand_announce(
+                db,
+                subject=p.get("subject") or "[Sovereign brand]",
+                body=p.get("body") or p.get("note") or "",
+                channel=p.get("channel") or "ford",
+                tenant_email=p.get("tenant_email") or p.get("email"),
+            )
+        elif action in ("tenant_soft_delete",):
+            from .energy_agent_sovereign_succession import tenant_soft_delete
+            out = tenant_soft_delete(db, tenant_id=str(p["tenant_id"]), reason=p.get("note") or "")
+        elif action in ("tenant_hard_purge", "hard_delete_tenant"):
+            from .energy_agent_sovereign_succession import tenant_hard_purge
+            out = tenant_hard_purge(
+                db,
+                tenant_id=str(p["tenant_id"]),
+                confirm=str(p.get("confirm") or ""),
+                reason=p.get("note") or "desk hard purge",
+            )
+        elif action in ("purge_soft_deleted",):
+            from .energy_agent_sovereign_succession import purge_soft_deleted_now
+            out = purge_soft_deleted_now(db, older_than_days=int(p.get("older_than_days") or 0))
+        elif action in ("har_stage", "stage_har"):
+            from .energy_agent_sovereign_succession import har_stage
+            out = har_stage(
+                db,
+                utility_name=p.get("utility_name") or p.get("name"),
+                utility_id=int(p["utility_id"]) if p.get("utility_id") else None,
+                tenant_id=p.get("tenant_id"),
+                provider=p.get("provider"),
+                url=p.get("url"),
+                note=p.get("note") or "",
+            )
+        elif action in ("har_received",):
+            from .energy_agent_sovereign_succession import har_mark_received
+            out = har_mark_received(
+                db,
+                utility_id=int(p["utility_id"]) if p.get("utility_id") else None,
+                utility_name=p.get("utility_name"),
+                evidence=p.get("evidence") or p.get("note") or "",
+            )
         else:
             raise HTTPException(400, f"Unknown ops action: {action}")
 
