@@ -107,6 +107,58 @@ def test_history_chat_only_survives_worker_flood(monkeypatch):
         assert not any("Sovereign shipped job" in (h["content"] or "") for h in hist)
 
 
+def test_lookup_turn_by_client_request_id_idempotent(monkeypatch):
+    """Retries with the same client_request_id find the prior turn."""
+    monkeypatch.setenv("SOVEREIGN_ENABLED", "1")
+    from api.models import Base
+    import api.energy_agent_sovereign_desk as desk
+    import api.energy_agent_sovereign as sov  # noqa: F401
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+
+    with Session() as db:
+        crid = "cr_test_idem_1"
+        ford = desk.EaSovereignDeskMessage(
+            id="sdm_ford_cr",
+            role="ford",
+            content="ping",
+            meta_json=json.dumps({"client_request_id": crid, "channel": "desk"}),
+        )
+        db.add(ford)
+        db.flush()
+        hit = desk.lookup_turn_by_client_request_id(db, crid)
+        assert hit and not hit["complete"]
+        assert hit["ford"].id == "sdm_ford_cr"
+
+        sov_row = desk.EaSovereignDeskMessage(
+            id="sdm_sov_cr",
+            role="sovereign",
+            content="pong",
+            provider="grok",
+            meta_json=json.dumps({
+                "client_request_id": crid,
+                "reply_to_ford": "sdm_ford_cr",
+                "channel": "desk",
+            }),
+        )
+        db.add(sov_row)
+        db.commit()
+        hit2 = desk.lookup_turn_by_client_request_id(db, crid)
+        assert hit2 and hit2["complete"]
+        assert hit2["sov"].content == "pong"
+        out = desk._format_turn_response(
+            ford=hit2["ford"], sov=hit2["sov"], pending=False, client_request_id=crid
+        )
+        assert out["ok"] and not out["pending"]
+        assert out["reply"] == "pong"
+
+
 def test_split_reply_strips_fenced_and_pure_json():
     """Desk must never store raw side-meta JSON as the chat bubble (screenshot bug)."""
     from api.energy_agent_sovereign_desk import _split_reply

@@ -17,12 +17,14 @@ import json
 import logging
 import os
 import re
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, File, Form, Header, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, Header, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import DateTime, Integer, String, Text, select
 from sqlalchemy.orm import Mapped, mapped_column
@@ -33,6 +35,11 @@ from .models import Base
 
 log = logging.getLogger("energy_agent.sovereign.desk")
 router = APIRouter()
+
+# Long brain turns run off the request thread so gateways never 504 the chat.
+_desk_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="sov-desk")
+_inflight_lock = threading.Lock()
+_inflight_crids: set[str] = set()
 
 _DESK_EMAILS = frozenset({
     "ford.genereaux@gmail.com",
@@ -570,12 +577,177 @@ def _split_reply(raw: str) -> tuple[str, dict]:
     return text, meta
 
 
+def _safe_json_meta(raw: str | None) -> dict:
+    try:
+        m = json.loads(raw or "{}")
+        return m if isinstance(m, dict) else {}
+    except Exception:
+        return {}
+
+
+def lookup_turn_by_client_request_id(db, client_request_id: str) -> dict | None:
+    """Find a prior desk turn by client_request_id (idempotent retries)."""
+    crid = (client_request_id or "").strip()[:80]
+    if not crid:
+        return None
+    rows = db.execute(
+        select(EaSovereignDeskMessage)
+        .where(EaSovereignDeskMessage.role == "ford")
+        .order_by(EaSovereignDeskMessage.created_at.desc())
+        .limit(50)
+    ).scalars().all()
+    ford = None
+    for r in rows:
+        meta = _safe_json_meta(r.meta_json)
+        if meta.get("client_request_id") == crid:
+            ford = r
+            break
+    if not ford:
+        return None
+    sov = None
+    cand = db.execute(
+        select(EaSovereignDeskMessage)
+        .where(
+            EaSovereignDeskMessage.role == "sovereign",
+            EaSovereignDeskMessage.created_at >= ford.created_at,
+        )
+        .order_by(EaSovereignDeskMessage.created_at.asc())
+        .limit(12)
+    ).scalars().all()
+    dump = {"worker", "rules", "admin", "error"}
+    for s in cand:
+        if (s.provider or "") in dump:
+            continue
+        meta = _safe_json_meta(s.meta_json)
+        # Prefer the reply that claims this client_request_id; else first chat reply
+        if meta.get("client_request_id") == crid or meta.get("reply_to_ford") == ford.id:
+            sov = s
+            break
+        if sov is None and (s.content or "").strip():
+            sov = s
+    return {
+        "ford": ford,
+        "sov": sov,
+        "complete": bool(sov and (sov.content or "").strip()),
+        "client_request_id": crid,
+    }
+
+
+def _format_turn_response(
+    *,
+    ford: EaSovereignDeskMessage,
+    sov: EaSovereignDeskMessage | None,
+    pending: bool = False,
+    client_request_id: str | None = None,
+    extra: dict | None = None,
+) -> dict:
+    out: dict[str, Any] = {
+        "ok": True,
+        "pending": pending,
+        "poll": pending,
+        "client_request_id": client_request_id,
+        "ford_message_id": ford.id,
+        "ford_message": {
+            "id": ford.id,
+            "role": "ford",
+            "content": ford.content,
+            "created_at": (
+                ford.created_at.isoformat() + "Z" if ford.created_at else _now().isoformat() + "Z"
+            ),
+        },
+        "reply": None,
+        "message": None,
+    }
+    if sov and (sov.content or "").strip() and not pending:
+        out["reply"] = sov.content
+        out["provider"] = sov.provider
+        out["message"] = {
+            "id": sov.id,
+            "role": "sovereign",
+            "content": sov.content,
+            "created_at": (
+                sov.created_at.isoformat() + "Z" if sov.created_at else _now().isoformat() + "Z"
+            ),
+            "provider": sov.provider,
+        }
+        out["pending"] = False
+        out["poll"] = False
+    if pending:
+        out["hint"] = (
+            "Sovereign is still thinking. Your message is saved — "
+            "the reply will land in chat when ready."
+        )
+    if extra:
+        out.update(extra)
+    return out
+
+
+def _run_desk_turn_isolated(
+    *,
+    tenant_id: str,
+    message: str,
+    attachment_ids: list[str],
+    client_request_id: str | None,
+) -> dict:
+    """Full desk turn on its own DB session (safe for thread pool)."""
+    from .models import Tenant
+
+    with SessionLocal() as db:
+        t = db.get(Tenant, tenant_id)
+        if not t:
+            raise RuntimeError(f"tenant_missing:{tenant_id}")
+        out = desk_turn(
+            db, t, message,
+            attachment_ids=attachment_ids,
+            client_request_id=client_request_id,
+        )
+        try:
+            db.commit()
+        except Exception as ce:  # noqa: BLE001
+            log.exception("isolated desk commit failed: %s", ce)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            # Last-ditch: reply-only if we have it
+            reply = (out or {}).get("reply") or ""
+            mid = ((out or {}).get("message") or {}).get("id")
+            if reply and mid:
+                try:
+                    row = EaSovereignDeskMessage(
+                        id=mid,
+                        role="sovereign",
+                        content=str(reply)[:12000],
+                        tenant_id=tenant_id,
+                        provider=(out or {}).get("provider"),
+                        meta_json=json.dumps({
+                            "channel": "desk",
+                            "recover": True,
+                            "client_request_id": client_request_id,
+                            "reply_to_ford": (out or {}).get("ford_message_id"),
+                        })[:4000],
+                    )
+                    db.merge(row)
+                    db.commit()
+                except Exception:
+                    log.exception("isolated desk reply-only recover failed")
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                    raise
+            else:
+                raise
+        return out
+
+
 def desk_turn(
     db,
     t,
     ford_message: str,
     *,
     attachment_ids: list[str] | None = None,
+    client_request_id: str | None = None,
 ) -> dict:
     from .energy_agent_sovereign import (
         apply_agenda,
@@ -627,6 +799,7 @@ def desk_turn(
         mind_event = None
 
     # Save Ford message first
+    crid = (client_request_id or "").strip()[:80] or None
     ford_row = EaSovereignDeskMessage(
         id=_id("sdm"),
         role="ford",
@@ -634,6 +807,7 @@ def desk_turn(
         tenant_id=t.id,
         meta_json=json.dumps({
             "channel": "desk",
+            "client_request_id": crid,
             "attachment_ids": [a.id for a in assets],
             "attachments": [
                 {"id": a.id, "filename": a.filename, "mime": a.mime, "size": a.size}
@@ -642,6 +816,8 @@ def desk_turn(
         }, default=str)[:4000],
     )
     db.add(ford_row)
+    if not ford_row.created_at:
+        ford_row.created_at = _now()
     db.flush()
 
     # Event bus: desk is the highest-heat human touch (cortex is this turn)
@@ -656,33 +832,81 @@ def desk_turn(
     except Exception:
         pass
 
-    hist = history(db, limit=30)
-    digests = observe_product(db)
-    goals = [
-        {"id": g.id, "title": g.title, "priority": g.priority, "status": g.status}
-        for g in db.execute(
-            select(EaSovereignGoal).where(EaSovereignGoal.status == "open")
+    # Commit Ford's bubble IMMEDIATELY so a slow context/brain path can never
+    # lose the human message (idempotent poll finds it by client_request_id).
+    ford_id_early = ford_row.id
+    ford_created_early = ford_row.created_at or _now()
+    try:
+        db.commit()
+    except Exception as e:  # noqa: BLE001
+        log.exception("desk early ford commit failed")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        raise HTTPException(500, f"Could not save your message: {str(e)[:160]}") from e
+
+    # Context gathers are best-effort — never block chat on a stuck digest/lock
+    def _ctx_recover() -> None:
+        """After a context-read failure, reset the session (Ford already committed)."""
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    hist: list[dict] = []
+    try:
+        hist = history(db, limit=30)
+    except Exception as e:  # noqa: BLE001
+        log.warning("desk history context skipped: %s", e)
+        _ctx_recover()
+    digests: dict = {}
+    try:
+        digests = observe_product(db) or {}
+    except Exception as e:  # noqa: BLE001
+        log.warning("desk observe_product skipped: %s", e)
+        digests = {"error": str(e)[:120]}
+        _ctx_recover()
+    goals: list[dict] = []
+    try:
+        goals = [
+            {"id": g.id, "title": g.title, "priority": g.priority, "status": g.status}
+            for g in db.execute(
+                select(EaSovereignGoal).where(EaSovereignGoal.status == "open")
+            ).scalars().all()
+        ]
+    except Exception as e:  # noqa: BLE001
+        log.warning("desk goals context skipped: %s", e)
+        _ctx_recover()
+    jobs: list[dict] = []
+    try:
+        jobs = [
+            {"id": j.id, "title": j.title, "status": j.status}
+            for j in db.execute(
+                select(EaSovereignJob).where(EaSovereignJob.status == "queued").limit(8)
+            ).scalars().all()
+        ]
+    except Exception as e:  # noqa: BLE001
+        log.warning("desk jobs context skipped: %s", e)
+        _ctx_recover()
+    bridge_done = []
+    bridge_pending = []
+    try:
+        bridge_done = db.execute(
+            select(EaSovereignBridgeTask)
+            .where(EaSovereignBridgeTask.status.in_(("done", "failed")))
+            .order_by(EaSovereignBridgeTask.updated_at.desc())
+            .limit(6)
         ).scalars().all()
-    ]
-    jobs = [
-        {"id": j.id, "title": j.title, "status": j.status}
-        for j in db.execute(
-            select(EaSovereignJob).where(EaSovereignJob.status == "queued").limit(8)
+        bridge_pending = db.execute(
+            select(EaSovereignBridgeTask)
+            .where(EaSovereignBridgeTask.status.in_(("queued", "running")))
+            .order_by(EaSovereignBridgeTask.created_at.desc())
+            .limit(8)
         ).scalars().all()
-    ]
-    # Pending local-bridge results (so Sovereign can continue after a tool round)
-    bridge_done = db.execute(
-        select(EaSovereignBridgeTask)
-        .where(EaSovereignBridgeTask.status.in_(("done", "failed")))
-        .order_by(EaSovereignBridgeTask.updated_at.desc())
-        .limit(6)
-    ).scalars().all()
-    bridge_pending = db.execute(
-        select(EaSovereignBridgeTask)
-        .where(EaSovereignBridgeTask.status.in_(("queued", "running")))
-        .order_by(EaSovereignBridgeTask.created_at.desc())
-        .limit(8)
-    ).scalars().all()
+    except Exception as e:  # noqa: BLE001
+        log.warning("desk bridge context skipped: %s", e)
+        _ctx_recover()
 
     succession_ctx: dict[str, Any] = {}
     try:
@@ -691,19 +915,30 @@ def desk_turn(
     except Exception as e:  # noqa: BLE001
         succession_ctx = {"error": str(e)[:120]}
 
-    mind_status = {}
+    mind_status: dict = {}
     try:
-        mind_status = mind_self_modify_status(db)
+        mind_status = mind_self_modify_status(db) or {}
     except Exception:
         mind_status = {}
     if mind_event:
         mind_status["just_processed"] = mind_event
 
+    mem: list = []
+    notes: list = []
+    try:
+        mem = memory_get_all(db, limit=30)
+    except Exception as e:  # noqa: BLE001
+        log.warning("desk memory context skipped: %s", e)
+    try:
+        notes = recent_notes(db, limit=8)
+    except Exception as e:  # noqa: BLE001
+        log.warning("desk notes context skipped: %s", e)
+
     context = {
         "digests": digests,
         "goals": goals,
-        "memory": memory_get_all(db, limit=30),
-        "recent_notes": recent_notes(db, limit=8),
+        "memory": mem,
+        "recent_notes": notes,
         "open_jobs": jobs,
         "tenant_id": t.id,
         "succession": succession_ctx,
@@ -739,30 +974,24 @@ def desk_turn(
     }
 
     messages = _desk_chat_prompt(msg, hist, context)
-    # Capture ids before pre-brain commit (session may expire instances)
-    ford_id = ford_row.id
+    # Ford already committed early — use captured ids (session may be expired)
+    ford_id = ford_id_early
+    ford_created = ford_created_early
     tenant_id = t.id
-    if not ford_row.created_at:
-        ford_row.created_at = _now()
-    ford_created = ford_row.created_at
 
-    # CRITICAL: release DB locks before the long LLM wait. Holding this
-    # transaction open through call_brain caused LockNotAvailable on
-    # ea_sovereign_memory (desk vs subconscious/cortex) and Netlify 504s.
+    # Release any locks held while building context before the LLM wait
     try:
         db.commit()
-    except Exception as e:  # noqa: BLE001
-        log.exception("desk pre-brain commit failed")
+    except Exception:
         try:
             db.rollback()
         except Exception:
             pass
-        raise HTTPException(500, f"Could not save your message: {str(e)[:160]}") from e
 
     provider = None
     model = None
-    # Stay under Netlify proxy ~60s wall clock (brain + side effects + margin)
-    desk_timeout = int(os.getenv("SOVEREIGN_DESK_TIMEOUT", "48") or 48)
+    # Stay under SOVEREIGN_DESK_WAIT so the outer chat waiter can return pending
+    desk_timeout = int(os.getenv("SOVEREIGN_DESK_TIMEOUT", "90") or 90)
     try:
         raw = call_brain(messages, timeout=desk_timeout)
         provider = raw.get("provider")
@@ -820,6 +1049,8 @@ def desk_turn(
             "mood": meta.get("mood"),
             "ford_ask": meta.get("ford_ask"),
             "succession_gap": meta.get("succession_gap"),
+            "client_request_id": crid,
+            "reply_to_ford": ford_id,
         }, default=str)[:4000],
     )
     db.add(sov_row)
@@ -950,6 +1181,9 @@ def desk_turn(
             ),
         },
         "ford_message_id": ford_id,
+        "pending": False,
+        "poll": False,
+        "client_request_id": crid,
     }
 
 
@@ -1152,6 +1386,10 @@ def ingest_sovereign_inbound_async(**kwargs) -> None:
 class ChatIn(BaseModel):
     message: str = Field(default="", max_length=12000)
     attachment_ids: list[str] = Field(default_factory=list)
+    # Idempotent retries + poll-after-pending (frontend generates per send)
+    client_request_id: str | None = Field(default=None, max_length=80)
+    # Status-only: do not start a new turn; return existing/pending for this id
+    poll_only: bool = False
 
 
 class BridgeResultIn(BaseModel):
@@ -1291,68 +1529,234 @@ def desk_assets_list(
         return {"ok": True, "assets": [serialize_asset(r) for r in rows]}
 
 
+@router.get("/v1/sovereign/desk/turn")
+def desk_turn_status(
+    authorization: str | None = Header(default=None),
+    client_request_id: str | None = Query(default=None),
+    ford_message_id: str | None = Query(default=None),
+):
+    """Poll a desk turn until Sovereign's reply is ready (never 504)."""
+    t, _email = _auth_ford(authorization)
+    del t
+    ensure_tables()
+    crid = (client_request_id or "").strip()[:80] or None
+    fid = (ford_message_id or "").strip()[:40] or None
+    if not crid and not fid:
+        raise HTTPException(400, "client_request_id or ford_message_id required")
+    with SessionLocal() as db:
+        if crid:
+            hit = lookup_turn_by_client_request_id(db, crid)
+            if not hit:
+                with _inflight_lock:
+                    inflight = crid in _inflight_crids
+                return {
+                    "ok": True,
+                    "pending": True,
+                    "poll": True,
+                    "found": False,
+                    "inflight": inflight,
+                    "client_request_id": crid,
+                    "hint": "Turn not found yet — still accepting or not started.",
+                }
+            return _format_turn_response(
+                ford=hit["ford"],
+                sov=hit.get("sov"),
+                pending=not hit["complete"],
+                client_request_id=crid,
+                extra={"found": True},
+            )
+        ford = db.get(EaSovereignDeskMessage, fid)
+        if not ford or ford.role != "ford":
+            raise HTTPException(404, "ford message not found")
+        # Reuse lookup by synthesizing from ford id
+        hit = lookup_turn_by_client_request_id(
+            db, _safe_json_meta(ford.meta_json).get("client_request_id") or ""
+        )
+        if hit and hit["ford"].id == ford.id:
+            return _format_turn_response(
+                ford=hit["ford"],
+                sov=hit.get("sov"),
+                pending=not hit["complete"],
+                client_request_id=_safe_json_meta(ford.meta_json).get("client_request_id"),
+                extra={"found": True},
+            )
+        # No crid — find next sovereign after this ford row
+        cand = db.execute(
+            select(EaSovereignDeskMessage)
+            .where(
+                EaSovereignDeskMessage.role == "sovereign",
+                EaSovereignDeskMessage.created_at >= ford.created_at,
+            )
+            .order_by(EaSovereignDeskMessage.created_at.asc())
+            .limit(8)
+        ).scalars().all()
+        dump = {"worker", "rules", "admin", "error"}
+        sov = next(
+            (s for s in cand if (s.provider or "") not in dump and (s.content or "").strip()),
+            None,
+        )
+        return _format_turn_response(
+            ford=ford,
+            sov=sov,
+            pending=sov is None,
+            extra={"found": True},
+        )
+
+
 @router.post("/v1/sovereign/desk/chat")
 def desk_chat(body: ChatIn, authorization: str | None = Header(default=None)):
+    """Durable desk chat.
+
+    Architecture (invincible path):
+      1. Idempotent by client_request_id — retries never double-send the brain.
+      2. Brain runs in a thread pool; request waits up to SOVEREIGN_DESK_WAIT.
+      3. If still thinking → 200 + pending:true (never gateway 504).
+      4. Background finishes the reply; client polls /desk/turn or re-posts poll_only.
+    """
     t, email = _auth_ford(authorization)
     del email
     if not _flag("SOVEREIGN_ENABLED", "1"):
         raise HTTPException(503, "Sovereign is offline (SOVEREIGN_ENABLED=0)")
-    with SessionLocal() as db:
-        try:
-            out = desk_turn(
-                db, t, body.message or "",
-                attachment_ids=list(body.attachment_ids or [])[:12],
-            )
-            try:
-                db.commit()
-            except Exception as ce:  # noqa: BLE001
-                # Reply may already be in session; one more try without side junk
-                log.exception("desk_chat commit failed, retrying reply-only: %s", ce)
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
-                # If pre-brain commit already saved Ford msg and we have reply text,
-                # re-persist sovereign bubble alone so the chat is not lost.
-                try:
-                    reply = (out or {}).get("reply") or ""
-                    mid = ((out or {}).get("message") or {}).get("id")
-                    if reply and mid:
-                        row = EaSovereignDeskMessage(
-                            id=mid,
-                            role="sovereign",
-                            content=str(reply)[:12000],
-                            tenant_id=t.id,
-                            provider=(out or {}).get("provider"),
-                            meta_json=json.dumps({
-                                "channel": "desk",
-                                "recover": True,
-                            })[:4000],
+    ensure_tables()
+
+    crid = (body.client_request_id or "").strip()[:80] or None
+    attach_ids = list(body.attachment_ids or [])[:12]
+    msg = body.message or ""
+
+    # ── Idempotent / poll path ────────────────────────────────────────────
+    if crid:
+        with SessionLocal() as db:
+            hit = lookup_turn_by_client_request_id(db, crid)
+            if hit and hit["complete"]:
+                return _format_turn_response(
+                    ford=hit["ford"],
+                    sov=hit["sov"],
+                    pending=False,
+                    client_request_id=crid,
+                    extra={"idempotent": True},
+                )
+            if hit and not hit["complete"]:
+                with _inflight_lock:
+                    inflight = crid in _inflight_crids
+                # Already accepted — never start a second brain for same crid
+                return _format_turn_response(
+                    ford=hit["ford"],
+                    sov=None,
+                    pending=True,
+                    client_request_id=crid,
+                    extra={"idempotent": True, "inflight": inflight},
+                )
+        if body.poll_only:
+            with _inflight_lock:
+                inflight = crid in _inflight_crids
+            return {
+                "ok": True,
+                "pending": True,
+                "poll": True,
+                "found": False,
+                "inflight": inflight,
+                "client_request_id": crid,
+                "hint": "No turn yet for this client_request_id.",
+            }
+
+    if body.poll_only:
+        raise HTTPException(400, "poll_only requires client_request_id")
+
+    if not (msg or "").strip() and not attach_ids:
+        raise HTTPException(400, "Empty message")
+
+    # ── Start isolated turn (survives request timeout) ────────────────────
+    if crid:
+        with _inflight_lock:
+            if crid in _inflight_crids:
+                # Race: another request just started this crid
+                with SessionLocal() as db:
+                    hit = lookup_turn_by_client_request_id(db, crid)
+                    if hit:
+                        return _format_turn_response(
+                            ford=hit["ford"],
+                            sov=hit.get("sov"),
+                            pending=not hit["complete"],
+                            client_request_id=crid,
+                            extra={"inflight": True},
                         )
-                        db.merge(row)
-                        db.commit()
-                        return out
-                except Exception as ce2:  # noqa: BLE001
-                    log.exception("desk_chat reply-only recover failed: %s", ce2)
-                    try:
-                        db.rollback()
-                    except Exception:
-                        pass
-                raise HTTPException(500, f"Desk save failed: {str(ce)[:180]}") from ce
-            return out
-        except HTTPException:
-            try:
-                db.rollback()
-            except Exception:
-                pass
-            raise
-        except Exception as e:  # noqa: BLE001
-            try:
-                db.rollback()
-            except Exception:
-                pass
-            log.exception("desk_chat failed")
-            raise HTTPException(500, f"Desk turn failed: {str(e)[:200]}") from e
+            _inflight_crids.add(crid)
+
+    wait_s = float(os.getenv("SOVEREIGN_DESK_WAIT", "40") or 40)
+    wait_s = max(5.0, min(wait_s, 55.0))
+
+    def _job() -> dict:
+        try:
+            return _run_desk_turn_isolated(
+                tenant_id=t.id,
+                message=msg,
+                attachment_ids=attach_ids,
+                client_request_id=crid,
+            )
+        finally:
+            if crid:
+                with _inflight_lock:
+                    _inflight_crids.discard(crid)
+
+    fut = _desk_pool.submit(_job)
+    try:
+        out = fut.result(timeout=wait_s)
+        if isinstance(out, dict):
+            out.setdefault("pending", False)
+            out.setdefault("poll", False)
+            out.setdefault("client_request_id", crid)
+        return out
+    except FuturesTimeout:
+        log.info(
+            "desk_chat wait timeout (%.0fs) — returning pending; brain continues crid=%s",
+            wait_s, crid,
+        )
+        # Ford message may already be committed inside desk_turn pre-brain
+        with SessionLocal() as db:
+            hit = lookup_turn_by_client_request_id(db, crid) if crid else None
+            if hit:
+                return _format_turn_response(
+                    ford=hit["ford"],
+                    sov=hit.get("sov"),
+                    pending=not hit["complete"],
+                    client_request_id=crid,
+                    extra={"wait_timeout": True},
+                )
+        # Brain still in prep — return soft pending without ford id
+        return {
+            "ok": True,
+            "pending": True,
+            "poll": True,
+            "client_request_id": crid,
+            "wait_timeout": True,
+            "hint": (
+                "Sovereign is still thinking. Your message is being saved — "
+                "refresh or wait; the reply will appear."
+            ),
+            "reply": None,
+            "message": None,
+        }
+    except Exception as e:  # noqa: BLE001
+        log.exception("desk_chat failed")
+        # Soft recovery: if ford landed, never 500 as a dead end
+        if crid:
+            with SessionLocal() as db:
+                hit = lookup_turn_by_client_request_id(db, crid)
+                if hit:
+                    return _format_turn_response(
+                        ford=hit["ford"],
+                        sov=hit.get("sov"),
+                        pending=not hit["complete"],
+                        client_request_id=crid,
+                        extra={
+                            "error": str(e)[:200],
+                            "hint": (
+                                "Partial failure — message saved. "
+                                "Reply may still arrive; poll or refresh."
+                            ),
+                        },
+                    )
+        raise HTTPException(500, f"Desk turn failed: {str(e)[:200]}") from e
 
 
 # ── Local computer bridge (machine-side agent) ─────────────────────────────
