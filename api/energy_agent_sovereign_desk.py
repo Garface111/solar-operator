@@ -137,13 +137,38 @@ def _is_chat_worthy(role: str, provider: str | None, content: str, meta: dict) -
 
 
 def history(db, *, limit: int = 80, chat_only: bool = True) -> list[dict]:
-    # Pull extra rows when filtering worker dumps so the transcript stays full
-    fetch_n = min(max(limit * 3, limit), 300) if chat_only else limit
-    rows = db.execute(
-        select(EaSovereignDeskMessage)
-        .order_by(EaSovereignDeskMessage.created_at.desc())
-        .limit(fetch_n)
-    ).scalars().all()
+    """Return recent desk messages.
+
+    Chat-only mode must NOT just take the last N rows then filter — worker/ops
+    dumps used to fill the window and make real Ford↔Sovereign turns vanish
+    from the UI (looked like the send was deleted). Filter providers in SQL,
+    then soft-filter content, then cap.
+    """
+    limit = max(1, min(int(limit or 80), 200))
+    q = select(EaSovereignDeskMessage).order_by(EaSovereignDeskMessage.created_at.desc())
+    if chat_only:
+        # Real conversation turns: ford always; sovereign except dump providers
+        from sqlalchemy import or_, and_
+        dump_providers = ("worker", "rules", "admin")
+        q = q.where(
+            EaSovereignDeskMessage.role.in_(("ford", "sovereign")),
+            or_(
+                EaSovereignDeskMessage.role == "ford",
+                and_(
+                    EaSovereignDeskMessage.role == "sovereign",
+                    or_(
+                        EaSovereignDeskMessage.provider.is_(None),
+                        EaSovereignDeskMessage.provider == "",
+                        ~EaSovereignDeskMessage.provider.in_(dump_providers),
+                    ),
+                ),
+            ),
+        )
+        # Over-fetch a bit for content-level dump filters, not 3× whole table noise
+        fetch_n = min(max(limit * 2, limit), 400)
+    else:
+        fetch_n = limit
+    rows = db.execute(q.limit(fetch_n)).scalars().all()
     rows = list(reversed(rows))
     out: list[dict] = []
     for r in rows:
@@ -161,7 +186,7 @@ def history(db, *, limit: int = 80, chat_only: bool = True) -> list[dict]:
             "provider": r.provider,
             "meta": meta,
         })
-    if chat_only and len(out) > limit:
+    if len(out) > limit:
         out = out[-limit:]
     return out
 
@@ -381,6 +406,11 @@ def desk_turn(db, t, ford_message: str) -> dict:
         side = execute_brain_actions(db, actions[:3], tick_id="desk_" + sov_row.id[:10])
 
     db.flush()
+    # Stamp created_at for client merge (flush may not refresh server defaults on all DBs)
+    if not ford_row.created_at:
+        ford_row.created_at = _now()
+    if not sov_row.created_at:
+        sov_row.created_at = _now()
     return {
         "ok": True,
         "reply": reply,
@@ -394,8 +424,20 @@ def desk_turn(db, t, ford_message: str) -> dict:
             "id": sov_row.id,
             "role": "sovereign",
             "content": reply,
-            "created_at": _now().isoformat() + "Z",
+            "created_at": (
+                sov_row.created_at.isoformat() + "Z"
+                if sov_row.created_at else _now().isoformat() + "Z"
+            ),
             "provider": provider,
+        },
+        "ford_message": {
+            "id": ford_row.id,
+            "role": "ford",
+            "content": msg,
+            "created_at": (
+                ford_row.created_at.isoformat() + "Z"
+                if ford_row.created_at else _now().isoformat() + "Z"
+            ),
         },
         "ford_message_id": ford_row.id,
     }
