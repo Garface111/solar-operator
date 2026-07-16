@@ -7,6 +7,7 @@ import {
   Panel,
   ReactFlow,
   useNodesState,
+  useNodesInitialized,
   useReactFlow,
   type Node,
   type NodeTypes,
@@ -418,6 +419,59 @@ export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen
 
   const { getIntersectingNodes, fitView, setCenter } = useReactFlow();
 
+  // True once EVERY node has a real measured width/height (ReactFlow's
+  // ResizeObserver has run). Client cards land expanded and tall, so their
+  // measured height isn't known for a frame or two after they mount — and it's
+  // never known while the canvas is display:none (the Table sub-tab). Framing
+  // before this is true is the root of "the sandbox doesn't center on my
+  // cards": fitView computes bounds from unmeasured/zero geometry.
+  const nodesInitialized = useNodesInitialized();
+  const nodesInitializedRef = useRef(false);
+  nodesInitializedRef.current = nodesInitialized;
+
+  // The canvas root (h-full/w-full). Its clientWidth is 0 while the section is
+  // hidden (display:none on the Table sub-tab), which we use as the "am I
+  // actually visible?" gate before framing.
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+
+  // A center-on-cards request is pending. We hold it until BOTH the cards are
+  // measured and the pane has real size, then frame exactly once.
+  const pendingFitRef = useRef(false);
+
+  /** Frame the graph iff a fit is pending AND the cards are measured AND the
+   *  pane is actually visible. Idempotent — clears the request when it fires,
+   *  so it's safe to call from every trigger (measure, resize, re-show). */
+  const attemptFit = useCallback(() => {
+    if (!pendingFitRef.current) return;
+    if (!nodesInitializedRef.current) return; // cards not measured yet — wait
+    const el = wrapperRef.current;
+    if (!el || el.clientWidth < 2 || el.clientHeight < 2) return; // hidden — wait
+    pendingFitRef.current = false;
+    fitView({ padding: 0.35, duration: 300, maxZoom: 0.85 });
+  }, [fitView]);
+
+  /** Request a center-on-cards. Fires as soon as attemptFit's conditions hold
+   *  (immediately if already measured+visible, otherwise via the effects below). */
+  const requestFit = useCallback(() => {
+    pendingFitRef.current = true;
+    // Two frames: let React commit the new nodes and ReactFlow measure them
+    // before we try to frame. If they're still not ready, the nodesInitialized
+    // and resize effects retry.
+    requestAnimationFrame(() => requestAnimationFrame(() => attemptFit()));
+  }, [attemptFit]);
+
+  // Retry the pending fit the instant the cards become measured.
+  useEffect(() => { attemptFit(); }, [nodesInitialized, attemptFit]);
+
+  // The canvas is display:none while the Table sub-tab is active; ClientsTab
+  // dispatches a window resize when it returns to Sandbox. Retry any deferred
+  // fit once we actually have size again (also covers window resizes).
+  useEffect(() => {
+    const onResize = () => attemptFit();
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, [attemptFit]);
+
   // Always-fresh refs used in callbacks to avoid stale closures
   const densityRef = useRef<Density>(density);
   densityRef.current = density;
@@ -478,9 +532,8 @@ export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen
       fsMounted.current = true;
       return;
     }
-    const t = setTimeout(() => fitView({ padding: 0.35, duration: 300, maxZoom: 0.85 }), 80);
-    return () => clearTimeout(t);
-  }, [isFullscreen, fitView]);
+    requestFit();
+  }, [isFullscreen, requestFit]);
 
   // ── Data loading ──────────────────────────────────────────────────────────
 
@@ -551,14 +604,19 @@ export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen
       // current viewport — we only re-center on the first paint of this
       // canvas instance.
       if (built.length > 0 && !opts.silent) {
-        setTimeout(() => fitView({ padding: 0.35, duration: 300, maxZoom: 0.85 }), 80);
+        // Frame once the cards are actually measured and the pane is visible —
+        // never on a fixed timer (the cards land expanded/tall and may still be
+        // unmeasured, or the pane may be display:none if we mounted under the
+        // Table sub-tab). requestFit + the nodesInitialized/resize effects
+        // guarantee a correct center-on-cards whenever those conditions hold.
+        requestFit();
       }
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : 'Failed to load canvas');
     } finally {
       if (!opts.silent) setLoading(false);
     }
-  }, [setNodes, fitView]);
+  }, [setNodes, requestFit]);
 
   useEffect(() => { void loadCanvas(); }, [loadCanvas]);
 
@@ -2218,7 +2276,7 @@ export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen
 
   return (
     <CanvasActionsContext.Provider value={actions}>
-      <div className="relative h-full w-full overflow-hidden bg-gradient-to-br from-[#fbf9f3] via-[#f6fbf2] to-[#f0f9ec]">
+      <div ref={wrapperRef} className="relative h-full w-full overflow-hidden bg-gradient-to-br from-[#fbf9f3] via-[#f6fbf2] to-[#f0f9ec]">
         {/* Soft sun-glow ambient flare — top-right warmth */}
         <div
           aria-hidden
