@@ -1,0 +1,124 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   THE FOLD - Phase 3: Sky MATERIAL layer for the Generation-reports embed.
+
+   Imported by embed.tsx AFTER index.css, so every rule here lands later in
+   the bundle and wins order ties. The postcss prefixer in
+   vite.embed.config.ts scopes EVERY selector under #so-genrep (bare
+   html/body/:root collapse to #so-genrep itself) -- nothing in this file can
+   leak into the host page, and none of it exists in the standalone SPA build.
+
+   The palette (emerald->Sky blue, cream->azure, wood->slate) lives in
+   tailwind.embed.config.js; THIS file carries the frosted-glass material:
+
+   - the embed ground goes TRANSPARENT -- it sits inside AO's .rb2 safe-zone
+     sheet (rgba(255,255,255,.66)) and lets it show through, exactly like the
+     Offtakers view's own content.
+   - card surfaces = near-solid rgba(255,255,255,.86) -- the Analysis-model
+     "inner card on a sheet" tier. NO backdrop-filter anywhere in the embed:
+     per AO's material budget (theme-sky-reports.css) blur belongs to the
+     host's top-level bands only; these are inner cards.
+   - soft blue-tinted shadows (the rgba(20,60,120,x) family) replace the
+     neutral-black Tailwind defaults.
+   - the section nav matches AO's .vs-seg glass-pill idiom.
+   - the React Flow sandbox reads Sky: cool white/blue wash + blue dot grid.
+
+   PRESERVED: status semantics (emerald=live/delivered, amber=warn/pending,
+   red=failed/bounced), every id/behavior, all copy. Re-skin, not redesign.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── 1 · GROUND: transparent — the .rb2 Sky sheet shows through ─────────────
+   index.css compiles body{background:var(--so-cream)} to
+   #so-genrep{background-color:#faf8f5}; this block is the same selector
+   (html/body/:root all collapse to #so-genrep), later in the bundle -> wins.
+   The --so-* tokens are re-pointed for any var() consumer. */
+body {
+  background-color: transparent;
+
+  --so-cream: transparent;
+  --so-cream-border: rgba(20, 60, 120, 0.13);
+  --so-wood-border: rgba(20, 60, 120, 0.16);
+  --so-shadow-soft: 0 2px 10px -2px rgba(20, 60, 120, 0.08);
+  --so-shadow-card: 0 8px 30px rgba(20, 60, 120, 0.08);
+}
+
+/* ── 2 · CARD MATERIAL: near-solid frosted white, no blur ───────────────────
+   bg-white cards become the .86 inner-card tier (they already sit on the
+   host's blurred .66 sheet -- translucency alone reads as glass, and per-card
+   blur would blow the GPU budget on the 48-array canvas). */
+.bg-white {
+  background-color: rgba(255, 255, 255, 0.86);
+}
+
+/* Floating layers stay SOLID for legibility (AO keeps --card:#fff for the
+   same reason): modals, toasts, dropdown menus, and the full-screen
+   template-studio panels hover over busy content. */
+.fixed .bg-white,
+.absolute.bg-white,
+.bg-white.shadow-xl,
+.bg-white.shadow-lg {
+  background-color: #ffffff;
+}
+
+/* Cream strips (section headers, timeline chrome) = the glassier tint tier
+   below cards -- distinct hierarchy, still cool. */
+.bg-cream {
+  background-color: rgba(244, 249, 255, 0.6);
+}
+
+/* The email-template studio's fixed full-screen ground was hard-coded warm
+   cream (bg-[#faf8f5] x3 in EmailTemplateStudio.tsx) -- cool it to the Sky
+   azure-white. Arbitrary-value class, so the tailwind remap can't reach it. */
+.bg-\[\#faf8f5\] {
+  background-color: #f2f7fd;
+}
+
+/* ── 3 · SHADOWS: blue-tinted (the Sky rgba(20,60,120,x) family) ────────────
+   Only --tw-shadow is overridden so Tailwind's ring/offset composition (and
+   focus rings) keep working. */
+.shadow-sm {
+  --tw-shadow: 0 2px 10px -2px rgba(20, 60, 120, 0.1);
+}
+.shadow {
+  --tw-shadow: 0 4px 16px -4px rgba(20, 60, 120, 0.12);
+}
+.shadow-md {
+  --tw-shadow: 0 8px 30px rgba(20, 60, 120, 0.1);
+}
+.shadow-lg {
+  --tw-shadow: 0 12px 40px -8px rgba(20, 60, 120, 0.16);
+}
+.shadow-xl {
+  --tw-shadow: 0 24px 60px -18px rgba(20, 60, 120, 0.22);
+}
+
+/* ── 4 · SECTION NAV = AO's .vs-seg glass pill idiom ────────────────────────
+   The embed's Reports | Clients tablist mirrors the host's Invoices sub-nav:
+   translucent white track, active pill = the solid Sky action blue with the
+   same blue glow AO uses (.vs-seg-btn.on). NavLink stamps aria-current. */
+nav[role="tablist"] {
+  background: rgba(255, 255, 255, 0.62);
+  border-color: rgba(20, 60, 120, 0.13);
+  box-shadow: 0 4px 18px -4px rgba(20, 60, 120, 0.14);
+  padding: 4px;
+}
+nav[role="tablist"] [role="tab"][aria-current="page"] {
+  background: #2196f3;
+  box-shadow: 0 1px 4px -1px rgba(33, 150, 243, 0.5);
+}
+nav[role="tablist"] [role="tab"]:not([aria-current="page"]):hover {
+  background: rgba(33, 150, 243, 0.08);
+}
+
+/* ── 5 · SANDBOX CANVAS: the world reads Sky ────────────────────────────────
+   The wrapper's warm cream->sage gradient (from-[#fbf9f3] via-[#f6fbf2]
+   to-[#f0f9ec] on the div wrapping .react-flow) becomes a cool white/blue
+   wash; the background shorthand resets the Tailwind gradient image. */
+:has(> .react-flow) {
+  background: linear-gradient(135deg, #f7fbff, #ecf4fd 55%, #e3f0fc);
+}
+
+/* Dot grid: sage #9caf88 -> soft Sky blue. The color prop only feeds a CSS
+   variable in @xyflow v12; this ID-scoped fill wins. */
+.react-flow__background-pattern.dots {
+  fill: #a9c8e8;
+}

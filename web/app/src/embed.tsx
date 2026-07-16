@@ -37,6 +37,7 @@ import {
   getSession,
 } from "./lib/api";
 import "./index.css";
+import "./embed-sky.css"; // Sky material layer (THE FOLD Phase 3) - AFTER index.css so it wins order ties
 
 const VerifyAccuracy = lazyWithRetry(() => import("./screens/VerifyAccuracy"));
 

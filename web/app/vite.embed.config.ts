@@ -48,7 +48,7 @@ export default defineConfig({
     postcss: {
       // Order matters: Tailwind expands its directives first, then everything
       // (preflight included) is scoped under the embed root.
-      plugins: [tailwindcss(), autoprefixer(), prefixSelectors()],
+      plugins: [tailwindcss({ config: "./tailwind.embed.config.js" }), autoprefixer(), prefixSelectors()],
     },
   },
   build: {
