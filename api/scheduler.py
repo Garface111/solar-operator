@@ -1681,6 +1681,16 @@ def start():
         max_instances=1, coalesce=True,
         next_run_time=datetime.utcnow() + timedelta(seconds=95),
     )
+    # Sovereign skill evolution (Hermes closed learning loop).
+    # Harvest job/ops traces → create/patch SKILL.md playbooks → curator.
+    # Kill: SOVEREIGN_SKILLS=0  /  SOVEREIGN_SKILL_EVOLVE=0
+    scheduler.add_job(
+        _run_energy_agent_sovereign_skills,
+        "interval", minutes=20, id="energy_agent_sovereign_skills",
+        replace_existing=True,
+        max_instances=1, coalesce=True,
+        next_run_time=datetime.utcnow() + timedelta(minutes=5),
+    )
     # Weekly async check-in digest to Ford (high-level, no job spam).
     # Monday 14:00 UTC ≈ morning US East — review when convenient.
     scheduler.add_job(
@@ -1839,6 +1849,27 @@ def _run_energy_agent_sovereign_watchdog() -> None:
             pass
     except Exception as exc:
         logger.exception("energy_agent_sovereign_watchdog crashed: %s", exc)
+
+
+def _run_energy_agent_sovereign_skills() -> None:
+    """Hermes-style skill evolution: harvest traces → create/patch → curator."""
+    try:
+        from .energy_agent_sovereign_skills import evolution_cycle, skills_enabled
+        if not skills_enabled():
+            return
+        res = evolution_cycle()
+        if res.get("created") or res.get("patched"):
+            logger.info(
+                "sovereign_skills: created=%s patched=%s deprecated=%s traces=%s",
+                res.get("created"),
+                res.get("patched"),
+                (res.get("curator") or {}).get("deprecated"),
+                res.get("n_traces"),
+            )
+        elif not res.get("ok"):
+            logger.warning("sovereign_skills cycle failed: %s", res.get("error"))
+    except Exception as exc:
+        logger.exception("energy_agent_sovereign_skills crashed: %s", exc)
 
 
 def _run_energy_agent_sovereign_subconscious() -> None:

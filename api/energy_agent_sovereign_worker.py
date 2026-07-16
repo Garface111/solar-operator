@@ -1047,6 +1047,47 @@ def process_job(db, job) -> dict[str, Any]:
         provider=str(agent_result.get("provider") or "worker"),
         meta={"job_id": job.id},
     )
+    # Skill evolution hook: codify win/fail playbooks (Hermes closed loop)
+    try:
+        from .energy_agent_sovereign_skills import skills_enabled, upsert_skill
+        if skills_enabled():
+            if job.status == "done":
+                upsert_skill(
+                    db,
+                    name=f"job-win-{title}"[:80],
+                    title=f"Repeat: {title[:80]}",
+                    description=f"Successful job pattern: {title[:140]}",
+                    body=(
+                        f"# {title[:120]}\n\n## When\nSimilar to job `{job.id}` that shipped.\n\n"
+                        f"## Steps\n1. Brief like: {title}\n"
+                        f"2. Ship via code worker; verify push/deploy.\n"
+                        f"3. Link feature/utility ids in the title when present.\n"
+                    ),
+                    category="worker",
+                    tags=["job", "success"],
+                    source="job",
+                    source_ref=job.id,
+                )
+            elif job.status == "failed" and job.error:
+                upsert_skill(
+                    db,
+                    name=f"job-fail-{(job.error or '')[:40]}"[:80],
+                    title=f"Recover: {(job.error or '')[:80]}",
+                    description=f"Recover when jobs fail: {(job.error or '')[:140]}",
+                    body=(
+                        f"# Recover from job failure\n\n## Error\n{(job.error or '')[:500]}\n\n"
+                        f"## Steps\n1. Classify transient vs permanent.\n"
+                        f"2. Transient → jobs_requeue + jobs_drain.\n"
+                        f"3. Same error twice → evolve this skill with new detail.\n"
+                        f"## Job\n- id: {job.id}\n- title: {title}\n"
+                    ),
+                    category="worker",
+                    tags=["job", "failure"],
+                    source="job",
+                    source_ref=job.id,
+                )
+    except Exception as e:  # noqa: BLE001
+        log.debug("skill hook after job: %s", e)
     audit(
         db, capability="act.code_hire", decision="act",
         rationale=f"ship {job.status}: {title}",

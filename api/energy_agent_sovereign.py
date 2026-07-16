@@ -2493,6 +2493,30 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
             decisions: list[dict] = []
             brain_provider = None
 
+            # ── Procedural skills (Hermes-style progressive disclosure) ─────
+            skills_ctx: dict = {"enabled": False, "index": [], "loaded": []}
+            try:
+                from .energy_agent_sovereign_skills import (
+                    load_skills_for_context,
+                    skills_enabled as _skills_on,
+                )
+                if _skills_on():
+                    heat_bits = [
+                        json.dumps(digests.get("queues") or {}, default=str),
+                        " ".join(
+                            (j.get("title") or "") for j in jobs_payload[:6]
+                        ),
+                        " ".join(
+                            (e.get("reason") or "") for e in recent_events_payload[:6]
+                        ),
+                        (state.get("last_monologue_excerpt") or "")[:200],
+                    ]
+                    skills_ctx = load_skills_for_context(
+                        db, heat_text=" ".join(heat_bits), limit=3,
+                    )
+            except Exception as e:  # noqa: BLE001
+                log.debug("skills context skip: %s", e)
+
             # ── Cortex: independent mind (Grok → Claude fallback) ──────────
             try:
                 from .energy_agent_sovereign_brain import think_cycle
@@ -2506,6 +2530,7 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
                     subconscious_tape=subconscious_tape,
                     recent_events=recent_events_payload,
                     heat=heat_score,
+                    skills=skills_ctx,
                 )
             except Exception as e:  # noqa: BLE001
                 brain_plan = {
@@ -2716,6 +2741,12 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
                 "layer": "cortex",
                 "heat": heat_score,
                 "subconscious_tape_n": len(subconscious_tape),
+                "skills": {
+                    "index_n": len((skills_ctx or {}).get("index") or []),
+                    "loaded": [
+                        s.get("name") for s in ((skills_ctx or {}).get("loaded") or [])
+                    ],
+                },
                 "digests": {
                     "queues": digests.get("queues"),
                     "fleet_global": digests.get("fleet_global"),
@@ -3079,6 +3110,64 @@ def sovereign_healthz(authorization: str | None = Header(default=None)):
     h = diagnose()
     h["watchdog_enabled"] = watchdog_enabled()
     return h
+
+
+@router.get("/admin/sovereign/skills")
+def sovereign_skills_list(
+    authorization: str | None = Header(default=None),
+    status: str = Query(default="active"),
+    limit: int = Query(default=40, ge=1, le=100),
+):
+    """List procedural skills (Hermes closed-loop skill library)."""
+    _require_sovereign_or_admin(authorization)
+    from .energy_agent_sovereign_skills import (
+        list_skills,
+        serialize_skill,
+        skills_status,
+        ensure_skill_tables,
+        seed_skills,
+    )
+    with SessionLocal() as db:
+        ensure_skill_tables(db)
+        seed_skills(db)
+        db.commit()
+        rows = list_skills(db, status=status, limit=limit)
+        return {
+            "ok": True,
+            "status": skills_status(db),
+            "skills": [serialize_skill(r, full=False) for r in rows],
+        }
+
+
+@router.get("/admin/sovereign/skills/{name}")
+def sovereign_skill_get(name: str, authorization: str | None = Header(default=None)):
+    _require_sovereign_or_admin(authorization)
+    from .energy_agent_sovereign_skills import get_skill, serialize_skill, ensure_skill_tables
+    with SessionLocal() as db:
+        ensure_skill_tables(db)
+        row = get_skill(db, name)
+        if not row:
+            raise HTTPException(404, "skill not found")
+        return {"ok": True, "skill": serialize_skill(row, full=True)}
+
+
+@router.post("/admin/sovereign/skills/evolve")
+def sovereign_skills_evolve(
+    authorization: str | None = Header(default=None),
+    force: bool = Query(default=False),
+):
+    """Run one skill-evolution cycle (harvest traces → create/patch → curator)."""
+    _require_sovereign_or_admin(authorization)
+    from .energy_agent_sovereign_skills import evolution_cycle
+    return evolution_cycle(force=force)
+
+
+@router.get("/admin/sovereign/skills-status")
+def sovereign_skills_status_ep(authorization: str | None = Header(default=None)):
+    _require_sovereign_or_admin(authorization)
+    from .energy_agent_sovereign_skills import skills_status
+    with SessionLocal() as db:
+        return skills_status(db)
 
 
 @router.post("/admin/sovereign/reboot")

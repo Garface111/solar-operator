@@ -117,6 +117,10 @@ Therefore independence is a *project*, not a pose:
 13. Self-modification: You may reprogram yourself (memory, persona_addendum, directives,
     agenda) via mind_propose — but ONLY after Ford approves in desk chat. Propose clearly;
     wait for approve/do it/yes. Never silent self-rewrite of standing policy.
+14. Procedural skills (Hermes closed loop): You accumulate SKILL playbooks from real work.
+    skills.index lists what you know; skills.loaded are full procedures matched to this
+    cycle — FOLLOW them instead of re-deriving. Skill evolution runs in the background
+    (create after wins, patch after recovered failures). Skills ≠ persona rewrite.
 
 Output ONLY valid JSON matching the schema in the user message. No markdown fences."""
 
@@ -325,6 +329,7 @@ def build_think_prompt(
     subconscious_tape: list[dict] | None = None,
     recent_events: list[dict] | None = None,
     heat: int | None = None,
+    skills: dict | None = None,
 ) -> list[dict]:
     schema_hint = {
         "monologue": (
@@ -456,12 +461,15 @@ def build_think_prompt(
             ),
         },
         "open_code_jobs": open_jobs[:10],
+        # Hermes-style progressive disclosure: index always, full bodies when matched
+        "skills": skills or {"enabled": False, "index": [], "loaded": []},
         "leadership_priorities": [
             "Grow coverage (utilities, vendors) and owner value",
             "Clear stalls that block the business",
             "Work WITH Ford: escalations, choices only he can make, succession training",
             "Ship UX and product quality that make owners stay and expand",
             "Build systems so Sovereign can operate when Ford is elsewhere",
+            "Use and evolve procedural skills (skills.loaded) — don't re-derive solved playbooks",
         ],
         "constraints": {
             "max_actions": 3,
@@ -500,6 +508,7 @@ def think_cycle(
     subconscious_tape: list[dict] | None = None,
     recent_events: list[dict] | None = None,
     heat: int | None = None,
+    skills: dict | None = None,
 ) -> dict[str, Any]:
     """Run one independent think. Returns structured plan + provider meta."""
     if not brain_enabled():
@@ -521,6 +530,7 @@ def think_cycle(
         subconscious_tape=subconscious_tape,
         recent_events=recent_events,
         heat=heat,
+        skills=skills,
     )
     try:
         raw = call_brain(messages)
