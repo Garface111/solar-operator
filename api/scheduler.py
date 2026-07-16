@@ -1666,6 +1666,16 @@ def start():
         max_instances=1, coalesce=True,
         next_run_time=datetime.utcnow() + timedelta(minutes=3),
     )
+    # Sovereign desk brain drain (web offloads turns → worker finishes them).
+    # Independent of SOVEREIGN_ENABLED so Ford's desk works with mind heavy work
+    # paused. Kill: SOVEREIGN_DESK_ENABLED=0 or SOVEREIGN_DESK_DRAIN=0.
+    scheduler.add_job(
+        _run_energy_agent_sovereign_desk_drain,
+        "interval", seconds=12, id="energy_agent_sovereign_desk_drain",
+        replace_existing=True,
+        max_instances=1, coalesce=True,
+        next_run_time=datetime.utcnow() + timedelta(seconds=8),
+    )
     # Sovereign Mind (product executive) — three layers:
     #   subconscious (cheap, ~45s) → cortex (expensive, 5m backstop + event wakes)
     #   event bus: wake_sovereign from product touchpoints
@@ -1904,6 +1914,41 @@ def _sov_pool_too_hot() -> bool:
         return pool_too_hot()
     except Exception:
         return False
+
+
+def _run_energy_agent_sovereign_desk_drain() -> None:
+    """Finish Ford desk turns enqueued by the web process (no LLM on web).
+
+    Always-on while desk is enabled — does not require SOVEREIGN_ENABLED so
+    the mind can stay paused without bricking Sovereign Desk chat.
+    Skips when the worker DB pool is hot to protect shared Postgres / AO API.
+    """
+    try:
+        from .energy_agent_sovereign_desk import (
+            _flag as _desk_flag,
+            drain_pending_desk_turns,
+        )
+        if not _desk_flag("SOVEREIGN_DESK_ENABLED", "1"):
+            return
+        if not _desk_flag("SOVEREIGN_DESK_DRAIN", "1"):
+            return
+        # Soft pool gate only — don't take the heavy single-flight lock so
+        # cortex/jobs can still progress independently of desk chat.
+        try:
+            from .sovereign_guard import pool_too_hot
+            if pool_too_hot():
+                logger.warning("sovereign_desk_drain skipped: pool_hot")
+                return
+        except Exception:
+            pass
+        res = drain_pending_desk_turns()
+        if res.get("recovered"):
+            logger.info(
+                "sovereign_desk_drain recovered=%s scanned=%s",
+                res.get("recovered"), res.get("scanned"),
+            )
+    except Exception as exc:
+        logger.exception("energy_agent_sovereign_desk_drain crashed: %s", exc)
 
 
 def _run_energy_agent_sovereign_watchdog() -> None:

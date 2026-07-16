@@ -94,11 +94,21 @@ async def health():
     except Exception:
         dialect, pool_max, ps = "unknown", None, {}
     from api.scheduler import scheduler as aps
+    # Surface desk drain ownership so ops can confirm web never runs the brain.
+    desk_drain = False
+    try:
+        desk_drain = bool(
+            getattr(aps, "running", False)
+            and aps.get_job("energy_agent_sovereign_desk_drain") is not None
+        )
+    except Exception:
+        desk_drain = False
     return {
         "ok": True,
         "role": "worker",
         "service": "solar-operator-worker",
         "scheduler_running": bool(getattr(aps, "running", False)),
+        "desk_drain_job": desk_drain,
         "db": dialect,
         "db_pool_max": pool_max,
         "db_pool_checked_out": ps.get("checked_out"),

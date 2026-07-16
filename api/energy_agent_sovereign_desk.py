@@ -134,6 +134,38 @@ def desk_emails() -> set[str]:
     return out
 
 
+def desk_offload_enabled() -> bool:
+    """When true, web never runs the desk brain — only enqueues Ford's message.
+
+    The worker process drains `turn_status=thinking` rows and runs call_brain.
+    This keeps Array Operator HTTP free of LLM/threadpool thrash that hung /health.
+
+    Defaults:
+      • PROCESS_ROLE/SO_PROCESS=web → on
+      • RUN_SCHEDULER falsy (HTTP-only process) → on
+      • otherwise → off (single-process local still thinks inline)
+    Override anytime with SOVEREIGN_DESK_OFFLOAD=0|1.
+    """
+    raw = os.getenv("SOVEREIGN_DESK_OFFLOAD")
+    if raw is not None and str(raw).strip() != "":
+        return str(raw).strip().lower() in ("1", "true", "yes", "on")
+    role = (
+        os.getenv("PROCESS_ROLE")
+        or os.getenv("SO_PROCESS")
+        or ""
+    ).strip().lower()
+    if role == "web":
+        return True
+    if role == "worker":
+        return False
+    # Infer from scheduler flag when role unset (legacy single-process defaults off)
+    try:
+        from .scheduler import scheduler_enabled
+        return not scheduler_enabled()
+    except Exception:
+        return False
+
+
 def _auth_ford(authorization: str | None):
     # require_not_demo returns None (raises on demo) — do NOT assign its return value
     t = tenant_from_session(authorization)
@@ -785,14 +817,25 @@ def find_orphan_desk_turns(
     return orphans
 
 
-def recover_orphan_desk_turns(*, limit: int = 3) -> dict[str, Any]:
-    """Resume desk turns killed by deploy/restart. Safe to call from watchdog/boot."""
+def recover_orphan_desk_turns(
+    *,
+    limit: int = 3,
+    min_age_sec: float | None = None,
+    max_age_sec: float | None = None,
+    reason: str = "orphan_recover",
+) -> dict[str, Any]:
+    """Resume desk turns killed by deploy/restart. Safe to call from watchdog/boot.
+
+    Worker also uses this with min_age_sec≈2 to drain web-offloaded turns promptly.
+    """
     from .models import Tenant
 
     ensure_tables()
     results: list[dict] = []
     with SessionLocal() as db:
-        orphans = find_orphan_desk_turns(db, limit=limit)
+        orphans = find_orphan_desk_turns(
+            db, limit=limit, min_age_sec=min_age_sec, max_age_sec=max_age_sec,
+        )
         for ford in orphans:
             meta = _safe_json_meta(ford.meta_json)
             crid = (meta.get("client_request_id") or "").strip()[:80] or None
@@ -805,7 +848,7 @@ def recover_orphan_desk_turns(*, limit: int = 3) -> dict[str, Any]:
                     turn_status="running",
                     claimed_at=_now().isoformat() + "Z",
                     claimer=claimer,
-                    resume_reason="orphan_recover",
+                    resume_reason=reason,
                 )
                 db.commit()
             except Exception as e:  # noqa: BLE001
@@ -887,7 +930,143 @@ def recover_orphan_desk_turns(*, limit: int = 3) -> dict[str, Any]:
         "scanned": len(results),
         "recovered": sum(1 for r in results if r.get("ok")),
         "results": results,
+        "reason": reason,
     }
+
+
+def drain_pending_desk_turns(*, limit: int | None = None) -> dict[str, Any]:
+    """Worker path: finish desk turns enqueued by the web process (no local brain).
+
+    min_age is short so Ford gets a reply within a few seconds of send, without
+    racing the web request's commit. Does not require SOVEREIGN_ENABLED — desk
+    is gated by SOVEREIGN_DESK_ENABLED / process role instead.
+    """
+    lim = limit
+    if lim is None:
+        try:
+            lim = int(os.getenv("SOVEREIGN_DESK_DRAIN_LIMIT", "2") or 2)
+        except (TypeError, ValueError):
+            lim = 2
+    lim = max(1, min(int(lim), 5))
+    try:
+        min_age = float(os.getenv("SOVEREIGN_DESK_DRAIN_MIN_AGE_SEC", "2") or 2)
+    except (TypeError, ValueError):
+        min_age = 2.0
+    return recover_orphan_desk_turns(
+        limit=lim,
+        min_age_sec=min_age,
+        reason="worker_desk_drain",
+    )
+
+
+def enqueue_desk_message(
+    *,
+    tenant_id: str,
+    message: str,
+    attachment_ids: list[str] | None = None,
+    client_request_id: str | None = None,
+) -> dict[str, Any]:
+    """Persist Ford's bubble only — brain runs later on the worker drain.
+
+    Never calls the LLM. Safe for the public web process under load.
+    """
+    from .models import Tenant
+
+    ensure_tables()
+    crid = (client_request_id or "").strip()[:80] or None
+    attach_ids = list(attachment_ids or [])[:12]
+    msg = (message or "").strip()
+
+    with SessionLocal() as db:
+        t = db.get(Tenant, tenant_id)
+        if not t:
+            raise HTTPException(500, "tenant missing for desk enqueue")
+
+        # Idempotent: already have this crid
+        if crid:
+            hit = lookup_turn_by_client_request_id(db, crid)
+            if hit:
+                return _format_turn_response(
+                    ford=hit["ford"],
+                    sov=hit.get("sov"),
+                    pending=not hit["complete"],
+                    client_request_id=crid,
+                    extra={"idempotent": True, "offloaded": True},
+                )
+
+        assets = load_assets(db, attach_ids)
+        if not msg and not assets:
+            raise HTTPException(400, "Empty message")
+        if not msg and assets:
+            names = ", ".join(a.filename for a in assets[:6])
+            msg = f"[Attached: {names}] Please review these files/data."
+
+        ford_row = EaSovereignDeskMessage(
+            id=_id("sdm"),
+            role="ford",
+            content=msg[:12000],
+            tenant_id=t.id,
+            meta_json=json.dumps({
+                "channel": "desk",
+                "client_request_id": crid,
+                "turn_status": "thinking",
+                "turn_started_at": _now().isoformat() + "Z",
+                "offloaded": True,
+                "offload_target": "worker",
+                "attachment_ids": [a.id for a in assets],
+                "attachments": [
+                    {"id": a.id, "filename": a.filename, "mime": a.mime, "size": a.size}
+                    for a in assets
+                ],
+            }, default=str)[:4000],
+        )
+        db.add(ford_row)
+        if not ford_row.created_at:
+            ford_row.created_at = _now()
+        try:
+            from .energy_agent_sovereign_subconscious import append_event
+            append_event(
+                db, "desk_message",
+                {"tenant_id": t.id, "message_id": ford_row.id, "excerpt": msg[:160],
+                 "offloaded": True},
+                source="desk",
+                heat=95,
+            )
+        except Exception as e:  # noqa: BLE001
+            # Event bus is best-effort — never block Ford's bubble on missing tables
+            log.debug("desk enqueue event skipped: %s", e)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            # Re-stage ford after rollback (identity map may still hold it)
+            try:
+                db.add(ford_row)
+            except Exception:
+                pass
+        try:
+            db.commit()
+        except Exception as e:  # noqa: BLE001
+            log.exception("desk enqueue commit failed")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            raise HTTPException(500, f"Could not save your message: {str(e)[:160]}") from e
+
+        return _format_turn_response(
+            ford=ford_row,
+            sov=None,
+            pending=True,
+            client_request_id=crid,
+            extra={
+                "offloaded": True,
+                "hint": (
+                    "Message saved. Sovereign is thinking on the background worker — "
+                    "reply will appear shortly."
+                ),
+            },
+        )
 
 
 def note_sovereign_boot() -> None:
@@ -2243,11 +2422,13 @@ def desk_turn_status(
 def desk_chat(body: ChatIn, authorization: str | None = Header(default=None)):
     """Durable desk chat.
 
-    Architecture (invincible path):
+    Architecture (process-split, invincible path):
       1. Idempotent by client_request_id — retries never double-send the brain.
-      2. Brain runs in a thread pool; request waits up to SOVEREIGN_DESK_WAIT.
-      3. If still thinking → 200 + pending:true (never gateway 504).
-      4. Background finishes the reply; client polls /desk/turn or re-posts poll_only.
+      2. On **web** (desk_offload_enabled): only enqueue Ford's message → pending.
+         Brain runs on the **worker** via drain_pending_desk_turns (never on web).
+      3. On single-process / worker-inline: brain runs in a thread pool; request
+         waits up to SOVEREIGN_DESK_WAIT then returns pending if still thinking.
+      4. Client polls /desk/turn or re-posts poll_only until complete.
     """
     t, email = _auth_ford(authorization)
     del email
@@ -2263,6 +2444,7 @@ def desk_chat(body: ChatIn, authorization: str | None = Header(default=None)):
     crid = (body.client_request_id or "").strip()[:80] or None
     attach_ids = list(body.attachment_ids or [])[:12]
     msg = body.message or ""
+    offload = desk_offload_enabled()
 
     # ── Idempotent / poll path ────────────────────────────────────────────
     if crid:
@@ -2278,18 +2460,24 @@ def desk_chat(body: ChatIn, authorization: str | None = Header(default=None)):
                 )
             if hit and not hit["complete"]:
                 with _inflight_lock:
-                    inflight = crid in _inflight_crids
+                    inflight = (not offload) and (crid in _inflight_crids)
                 # Already accepted — never start a second brain for same crid
                 return _format_turn_response(
                     ford=hit["ford"],
                     sov=None,
                     pending=True,
                     client_request_id=crid,
-                    extra={"idempotent": True, "inflight": inflight},
+                    extra={
+                        "idempotent": True,
+                        "inflight": inflight,
+                        "offloaded": offload or bool(
+                            _safe_json_meta(hit["ford"].meta_json).get("offloaded")
+                        ),
+                    },
                 )
         if body.poll_only:
             with _inflight_lock:
-                inflight = crid in _inflight_crids
+                inflight = (not offload) and (crid in _inflight_crids)
             return {
                 "ok": True,
                 "pending": True,
@@ -2306,7 +2494,16 @@ def desk_chat(body: ChatIn, authorization: str | None = Header(default=None)):
     if not (msg or "").strip() and not attach_ids:
         raise HTTPException(400, "Empty message")
 
-    # ── Start isolated turn (survives request timeout) ────────────────────
+    # ── Web offload: never run LLM/brain on the public API process ─────────
+    if offload:
+        return enqueue_desk_message(
+            tenant_id=t.id,
+            message=msg,
+            attachment_ids=attach_ids,
+            client_request_id=crid,
+        )
+
+    # ── Single-process / inline path (survives request timeout via pool) ──
     if crid:
         with _inflight_lock:
             if crid in _inflight_crids:

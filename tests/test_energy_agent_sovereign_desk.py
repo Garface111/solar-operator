@@ -313,3 +313,114 @@ def test_speak_defaults_off():
     import api.energy_agent_sovereign as sov
     # re-read flag function — default should be off
     assert sov._flag("SOVEREIGN_SPEAK_ENABLED", "0") is False
+
+
+def test_desk_offload_defaults_by_process_role(monkeypatch):
+    """Web role must offload desk brain; worker must not."""
+    import api.energy_agent_sovereign_desk as desk
+
+    monkeypatch.delenv("SOVEREIGN_DESK_OFFLOAD", raising=False)
+    monkeypatch.setenv("PROCESS_ROLE", "web")
+    monkeypatch.delenv("SO_PROCESS", raising=False)
+    assert desk.desk_offload_enabled() is True
+
+    monkeypatch.setenv("PROCESS_ROLE", "worker")
+    assert desk.desk_offload_enabled() is False
+
+    monkeypatch.setenv("SOVEREIGN_DESK_OFFLOAD", "0")
+    monkeypatch.setenv("PROCESS_ROLE", "web")
+    assert desk.desk_offload_enabled() is False
+
+    monkeypatch.setenv("SOVEREIGN_DESK_OFFLOAD", "1")
+    monkeypatch.setenv("PROCESS_ROLE", "worker")
+    assert desk.desk_offload_enabled() is True
+
+
+def test_enqueue_desk_message_never_calls_brain(monkeypatch):
+    """Web enqueue saves Ford bubble only — no call_brain."""
+    monkeypatch.setenv("PROCESS_ROLE", "web")
+    monkeypatch.setenv("SOVEREIGN_DESK_OFFLOAD", "1")
+    from api.models import Base, Tenant
+    import api.energy_agent_sovereign_desk as desk
+    import api.energy_agent_sovereign as sov  # noqa: F401
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    monkeypatch.setattr(desk, "SessionLocal", Session)
+
+    brain_calls = {"n": 0}
+
+    def _no_brain(*a, **k):
+        brain_calls["n"] += 1
+        raise AssertionError("call_brain must not run on web enqueue")
+
+    monkeypatch.setattr(
+        "api.energy_agent_sovereign_brain.call_brain", _no_brain, raising=False
+    )
+
+    with Session() as db:
+        db.add(Tenant(
+            id="ten_ford",
+            tenant_key="sol_live_ford",
+            name="Ford",
+            product="array_operator",
+            contact_email="ford.genereaux@gmail.com",
+            active=True,
+        ))
+        db.commit()
+
+    out = desk.enqueue_desk_message(
+        tenant_id="ten_ford",
+        message="Detach the mind so AO never hangs.",
+        client_request_id="cr_offload_1",
+    )
+    assert out["ok"] is True
+    assert out["pending"] is True
+    assert out.get("offloaded") is True
+    assert out.get("ford_message_id")
+    assert brain_calls["n"] == 0
+
+    with Session() as db:
+        ford = db.get(desk.EaSovereignDeskMessage, out["ford_message_id"])
+        assert ford is not None
+        meta = json.loads(ford.meta_json or "{}")
+        assert meta.get("turn_status") == "thinking"
+        assert meta.get("offloaded") is True
+        assert meta.get("client_request_id") == "cr_offload_1"
+        ford_id = ford.id
+
+    drained = {"n": 0}
+
+    def _fake_desk_turn(db, t, msg, **kw):
+        drained["n"] += 1
+        sov_row = desk.EaSovereignDeskMessage(
+            id="sdm_sov_drain",
+            role="sovereign",
+            content="Detached and working.",
+            tenant_id=t.id,
+            provider="test",
+            meta_json=json.dumps({
+                "client_request_id": "cr_offload_1",
+                "reply_to_ford": ford_id,
+            }),
+        )
+        db.add(sov_row)
+        desk._patch_ford_meta(db, ford_id, turn_status="done")
+        return {
+            "ok": True,
+            "reply": "Detached and working.",
+            "message": {"id": sov_row.id},
+            "provider": "test",
+        }
+
+    monkeypatch.setattr(desk, "desk_turn", _fake_desk_turn)
+    res = desk.recover_orphan_desk_turns(
+        limit=3, min_age_sec=0, max_age_sec=3600, reason="test_drain",
+    )
+    assert res["recovered"] >= 1
+    assert drained["n"] >= 1
