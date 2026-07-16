@@ -1387,6 +1387,15 @@ def main():
         ):
             print(f"  {'✓' if inspect(conn).has_table(tbl) else '✗ MISSING'} table {tbl}")
 
+        # 2026-07-16 Repairs trusted mode — per-contact trust stamp: after the
+        # first owner-approved send, follow-ups to that contact go autonomous.
+        if not column_exists(conn, "service_contacts", "trusted_at"):
+            conn.execute(text(
+                "ALTER TABLE service_contacts ADD COLUMN trusted_at TIMESTAMP NULL"
+            ))
+            added.append("service_contacts.trusted_at")
+            print("  + service_contacts.trusted_at")
+
     print("=== Migration complete ===")
 
 

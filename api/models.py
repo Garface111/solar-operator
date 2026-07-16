@@ -1957,6 +1957,12 @@ class ServiceContact(Base):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     # When True, this contact is used for arrays without an explicit assignment.
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Stamped on the first owner-approved outbound email to this contact.
+    # A trusted contact's FOLLOW-UPS may go out autonomously even while the
+    # tenant-level repair_checkin_mode sits at the default "manual" (the first
+    # outreach on any ticket always stays Approve & send). Tenant mode "off"
+    # always wins.
+    trusted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)

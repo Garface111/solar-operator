@@ -182,6 +182,12 @@ CRITICAL — O&M ROSTER HUNGER (Repairs / any O&M question):
     6. Forbidden closes: "Done." / "Got it." / "OK." with no next question when roster is incomplete.
     7. Explain WHY you want it in one breath: so you can draft and send outreach the moment
        an inverter faults — without them babysitting.
+  TRUSTED FOLLOW-UPS: the first email to any contact is always Approve & send. Once the
+  owner approves ONE send to a contact, follow-ups to that contact go out automatically on
+  the check-in cadence — mention this the first time it arms. If the owner says stop
+  ("stop auto follow-ups", "ask me first"), call upsert_service_contact with trusted=false
+  for that contact; re-arm later with trusted=true. Never promise an auto follow-up for an
+  untrusted contact.
   Manufacturer warranty claims remain a separate path.
 - propose_site_improvement = ship UI/product improvements via the SAME judge pipeline as
   the old "Wish this was better" button (markup screenshot → judge → auto-ship small UI).
@@ -1170,6 +1176,15 @@ TOOL_DEFS = [
                     "notes": {"type": "string"},
                     "is_default": {"type": "boolean"},
                     "active": {"type": "boolean"},
+                    "trusted": {
+                        "type": "boolean",
+                        "description": (
+                            "Auto follow-up trust. Set false when the owner says "
+                            "'stop auto follow-ups' for this contact (back to "
+                            "Approve & send); true re-arms it. Omit to leave as is — "
+                            "trust arms itself on the first approved send."
+                        ),
+                    },
                     "needs_confirm": {"type": "boolean", "default": True},
                     "reason": {"type": "string"},
                 },
@@ -4351,6 +4366,7 @@ def _run_tool(
             "notes": args.get("notes"),
             "is_default": bool(args.get("is_default") or False),
             "active": True if args.get("active") is None else bool(args.get("active")),
+            "trusted": args.get("trusted"),
         }
         reason = args.get("reason") or f"Save service contact {payload.get('name')}"
         if needs:
@@ -4372,6 +4388,7 @@ def _run_tool(
                 notes=payload.get("notes"),
                 is_default=bool(payload.get("is_default")),
                 active=bool(payload.get("active", True)),
+                trusted=payload.get("trusted"),
             )
             db.commit()
             return {"ok": True, "contact": ro.serialize_contact(c)}

@@ -84,6 +84,40 @@ def _safe_mind_emit(
         )
 
 
+def _nudge_missing_contact(db, tenant: Tenant, info: dict) -> None:
+    """A site is failing and there is NO service contact to email — tell the
+    owner instead of silently skipping. At most one nudge per tenant per 24h
+    (a fleet with five dark sites needs one loud line, not five)."""
+    try:
+        from .energy_agent_mind import EaEvent
+        cutoff = now() - timedelta(hours=24)
+        recent = db.execute(
+            select(EaEvent.id).where(
+                EaEvent.tenant_id == tenant.id,
+                EaEvent.kind == "repair_no_contact",
+                EaEvent.created_at >= cutoff,
+            ).limit(1)
+        ).scalar_one_or_none()
+        if recent is not None:
+            return
+    except Exception:
+        return  # ea tables missing (tests) — skip quietly
+    site = info.get("site_name") or "a site"
+    inv = (info.get("inv") or {}).get("name") or "an inverter"
+    st = info.get("status") or "down"
+    _safe_mind_emit(
+        db,
+        tenant.id,
+        "repair_no_contact",
+        f"{site} / {inv} is {st} but no O&M contact is on file",
+        payload={"origin": "repair", "importance": 85, "site_name": site, "status": st},
+        speak_as_mind=(
+            f"{site} / {inv} looks {st} and I have nobody to email about it — "
+            "add your repair contact on Repairs and I'll take it from there."
+        ),
+    )
+
+
 # Hardware states that auto-open a repair ticket when a service contact is known.
 # underperforming is intentional (Ford 2026-07-15): peer-flagged units should
 # appear as active repair cases, not only dead/fault.
@@ -132,6 +166,8 @@ def serialize_contact(c: ServiceContact) -> dict:
         "notes": c.notes,
         "is_default": bool(c.is_default),
         "active": bool(c.active),
+        "trusted": bool(getattr(c, "trusted_at", None)),
+        "trusted_at": _iso(getattr(c, "trusted_at", None)),
         "created_at": _iso(c.created_at),
         "updated_at": _iso(c.updated_at),
     }
@@ -474,6 +510,19 @@ def effective_checkin_mode(tenant: Tenant) -> str:
     return mode if mode in VALID_CHECKIN_MODES else "manual"
 
 
+def effective_checkin_mode_for(tenant: Tenant, contact) -> str:
+    """Per-contact TRUSTED mode: once the owner has approved one email to a
+    contact (contact.trusted_at set), follow-ups to that contact go out
+    autonomously even while the tenant sits at the default "manual" — the
+    employee finishes the job it was told to start. The FIRST outreach on any
+    ticket always stays Approve & send, and tenant mode "off" always wins.
+    An explicit tenant "auto"/"delay" already covers everyone."""
+    mode = effective_checkin_mode(tenant)
+    if mode == "manual" and contact is not None and getattr(contact, "trusted_at", None):
+        return "auto"
+    return mode
+
+
 def checkin_interval_hours(tenant: Tenant) -> int:
     try:
         h = int(tenant.repair_checkin_hours or 48)
@@ -515,6 +564,7 @@ def upsert_contact(
     notes: str | None = None,
     is_default: bool = False,
     active: bool = True,
+    trusted: bool | None = None,
 ) -> ServiceContact:
     name = (name or "").strip()
     if not name:
@@ -545,6 +595,10 @@ def upsert_contact(
     c.notes = notes
     c.active = bool(active)
     c.is_default = bool(is_default)
+    if trusted is True and not c.trusted_at:
+        c.trusted_at = now()
+    elif trusted is False:
+        c.trusted_at = None  # owner said stop — back to Approve & send each time
     db.flush()
 
     if c.is_default:
@@ -783,13 +837,16 @@ def build_checkin_draft(
     return {"to": to, "subject": subject, "body": body}
 
 
-def _schedule_next_checkin(tenant: Tenant, ticket: RepairTicket, *, first: bool = False) -> None:
+def _schedule_next_checkin(
+    tenant: Tenant, ticket: RepairTicket, *, first: bool = False, contact=None,
+) -> None:
     """Schedule next auto check-in. NEVER schedule immediate first-send.
 
     First outreach is always owner/agent-approved (Approve & send). Auto mode
-    only follows up after a prior send, on the configured interval.
+    (tenant-level, or per-contact TRUSTED after one approved send) only follows
+    up after a prior send, on the configured interval.
     """
-    mode = effective_checkin_mode(tenant)
+    mode = effective_checkin_mode_for(tenant, contact)
     hours = checkin_interval_hours(tenant)
     if mode in ("off", "manual") or first:
         # No auto fire on create — wait for explicit Approve & send
@@ -939,7 +996,13 @@ def send_checkin(
         ticket.draft_checkin = build_checkin_draft(
             ticket, tenant, contact, sequence=ticket.checkin_count + 1,
         )
-        _schedule_next_checkin(tenant, ticket, first=False)
+        # First owner-approved send to this contact arms TRUST: follow-ups to
+        # them go autonomous from here (interval + spam guards still apply).
+        trust_armed = False
+        if via != "auto" and contact is not None and not getattr(contact, "trusted_at", None):
+            contact.trusted_at = now()
+            trust_armed = True
+        _schedule_next_checkin(tenant, ticket, first=False, contact=contact)
         # Notify open Energy Agent chat that outreach went out
         who = (contact.name if contact else None) or go_to
         site = ticket.site_name or "the site"
@@ -960,6 +1023,11 @@ def send_checkin(
             speak_as_mind=(
                 f"I emailed {who} about {site} / {inv}. "
                 f"When they reply to Energy Agent, I'll update you here."
+                + (
+                    f" From now on I'll follow up with {who} automatically — "
+                    "say 'stop auto follow-ups' anytime."
+                    if trust_armed else ""
+                )
             ),
         )
         _mirror_email_to_chat(
@@ -969,10 +1037,16 @@ def send_checkin(
                 f"I emailed {who} about {site} / {inv} "
                 f"(ticket #{ticket.id}, check-in #{ticket.checkin_count}). "
                 f"When they reply to Energy Agent, it continues here."
+                + (
+                    f" Follow-ups to {who} now go out automatically on your "
+                    f"{checkin_interval_hours(tenant)}h cadence — no more approve clicks "
+                    "for this contact (tell me to stop anytime)."
+                    if trust_armed else ""
+                )
             ),
             kind="repair_outbound",
             ticket_id=ticket.id,
-            extra={"to": go_to, "via": via},
+            extra={"to": go_to, "via": via, "trust_armed": trust_armed},
         )
     db.flush()
     if not ok:
@@ -1301,7 +1375,10 @@ def send_or_log_sms(
         ticket.checkin_count = (ticket.checkin_count or 0) + 1
         if ticket.status == "open":
             ticket.status = "waiting_reply"
-        _schedule_next_checkin(tenant, ticket, first=False)
+        _schedule_next_checkin(
+            tenant, ticket, first=False,
+            contact=get_contact(db, tenant.id, ticket.contact_id) if ticket.contact_id else None,
+        )
     db.flush()
     return {
         "ok": True,
@@ -1892,7 +1969,7 @@ def continue_repair_email_conversation(
         if ticket.status == "open":
             ticket.status = "waiting_reply"
         # Push next auto follow-up later; conversation owns the near term
-        _schedule_next_checkin(tenant, ticket, first=False)
+        _schedule_next_checkin(tenant, ticket, first=False, contact=contact)
         owner_chat = (plan.get("owner_chat") or "").strip()
         if not owner_chat:
             who = to
@@ -2452,7 +2529,12 @@ def reconcile(db, tenant: Tenant, tree: Optional[dict] = None) -> dict:
         array_id = info["array_id"]
         contact = resolve_contact_for_array(db, tenant.id, array_id)
         if contact is None:
-            continue  # no ops person known — don't open an orphan ticket
+            # No ops person known — don't open an orphan ticket, but never
+            # no-op SILENTLY: nudge the owner (once/day) that a failing site
+            # has nobody to email. This is the difference between "the agent
+            # can't help" and "the agent can't help and never told you."
+            _nudge_missing_contact(db, tenant, info)
+            continue
         existing = _active_ticket_for_inverter(db, tenant.id, iid, array_id)
         if existing:
             # Refresh site snapshot if an old ticket lost its name
@@ -2504,13 +2586,15 @@ def reconcile(db, tenant: Tenant, tree: Optional[dict] = None) -> dict:
 
 
 def process_due(db, tenant: Tenant) -> int:
-    """Fire auto *follow-up* check-ins when due (mode auto|delay only).
+    """Fire auto *follow-up* check-ins when due.
 
+    Runs under tenant mode auto|delay, AND under the default "manual" for
+    tickets whose contact is TRUSTED (owner approved a prior send to them).
     Never sends the first outreach — that is always Approve & send.
     Never re-sends if we are still waiting on a reply with no new inbound.
     """
-    mode = effective_checkin_mode(tenant)
-    if mode not in ("auto", "delay"):
+    tenant_mode = effective_checkin_mode(tenant)
+    if tenant_mode == "off":
         return 0
     due = db.execute(
         select(RepairTicket).where(
@@ -2522,6 +2606,11 @@ def process_due(db, tenant: Tenant) -> int:
     ).scalars().all()
     sent = 0
     for ticket in due:
+        contact = get_contact(db, tenant.id, ticket.contact_id) if ticket.contact_id else None
+        if effective_checkin_mode_for(tenant, contact) not in ("auto", "delay"):
+            # Mode says no auto for this contact — clear the stale schedule
+            ticket.next_checkin_at = None
+            continue
         # First letter is never auto
         if (ticket.checkin_count or 0) < 1 and _prior_successful_outbound(db, ticket.id) < 1:
             ticket.next_checkin_at = None
