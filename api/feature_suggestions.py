@@ -93,9 +93,14 @@ def _customer_facing_outcome(status: str, review: str | None) -> dict:
             "detail": "Live on the site — refresh to see it.",
         }
     if status == "building":
-        detail = "Sovereign is building this now."
-        if review and "Sovereign claimed" in (review or ""):
-            detail = "Sovereign claimed this and is building it now."
+        detail = "Energy Agent is building this now."
+        if review and (
+            "claimed live" in (review or "").lower()
+            or "claimed this" in (review or "").lower()
+            or "Sovereign claimed" in (review or "")
+            or "Energy Agent claimed" in (review or "")
+        ):
+            detail = "Energy Agent claimed this and is building it now."
         return {
             "status": "building",
             "detail": detail,
@@ -103,7 +108,7 @@ def _customer_facing_outcome(status: str, review: str | None) -> dict:
     if status == "new":
         return {
             "status": "new",
-            "detail": "Received — Sovereign is taking this into mind now.",
+            "detail": "Received — Energy Agent is taking this into mind now.",
         }
     # reviewed / held
     reason = ""

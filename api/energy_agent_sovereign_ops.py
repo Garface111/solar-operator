@@ -274,11 +274,11 @@ def claim_improvement_for_sovereign(
             prev = fs.status
             if fs.status not in ("building", "shipped"):
                 note = (
-                    "Sovereign claimed live: owner Improve proposal ingested into mind + "
+                    "Energy Agent claimed live: owner Improve proposal ingested into mind + "
                     "code job queued (not waiting on external judge alone)."
                 )
                 fs.status = "building"
-                fs.review = ((fs.review or "") + f"\n[sovereign {_now().isoformat()}Z] {note}").strip()[:20000]
+                fs.review = ((fs.review or "") + f"\n[energy_agent {_now().isoformat()}Z] {note}").strip()[:20000]
                 if not fs.reviewed_at:
                     fs.reviewed_at = _now()
                 db.flush()
