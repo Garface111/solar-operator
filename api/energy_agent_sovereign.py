@@ -52,8 +52,16 @@ _DOGFOOD_EMAILS = frozenset({
 MAX_INJECT_PER_HOUR_GLOBAL = 30
 MAX_INJECT_PER_HOUR_TENANT = 4
 MAX_SOFT_ACTS_PER_HOUR = 20
-# Ford grant: autonomous ship of building features + utility adapters needs headroom
-MAX_JOBS_PER_DAY = int(os.getenv("SOVEREIGN_MAX_JOBS_PER_DAY", "100") or 100)
+# Ford 2026-07-15: infinite daily job budget (0 / "unlimited" = no cap).
+# Override with SOVEREIGN_MAX_JOBS_PER_DAY=N if you ever want a ceiling again.
+_raw_jobs = (os.getenv("SOVEREIGN_MAX_JOBS_PER_DAY") or "0").strip().lower()
+if _raw_jobs in ("", "0", "unlimited", "inf", "infinite", "none"):
+    MAX_JOBS_PER_DAY = 0  # 0 = unlimited
+else:
+    try:
+        MAX_JOBS_PER_DAY = max(0, int(_raw_jobs))
+    except ValueError:
+        MAX_JOBS_PER_DAY = 0
 MAX_EMAILS_PER_HOUR = int(os.getenv("SOVEREIGN_MAX_EMAILS_PER_HOUR", "12") or 12)
 MAX_EMAILS_PER_DAY = int(os.getenv("SOVEREIGN_MAX_EMAILS_PER_DAY", "40") or 40)
 TICK_ACTION_BUDGET = 5  # max decisions that act/speak per tick
@@ -1136,16 +1144,17 @@ def act_code_hire(
 ) -> dict:
     if not capability_allowed("act.code_hire"):
         return {"ok": False, "denied": True, "denied_reason": "act.code_hire off"}
-    day_start = _now().replace(hour=0, minute=0, second=0, microsecond=0)
-    n = int(
-        db.execute(
-            select(func.count()).select_from(EaSovereignJob).where(
-                EaSovereignJob.created_at >= day_start
-            )
-        ).scalar() or 0
-    )
-    if n >= MAX_JOBS_PER_DAY:
-        return {"ok": False, "denied": True, "denied_reason": "daily job budget"}
+    if MAX_JOBS_PER_DAY > 0:
+        day_start = _now().replace(hour=0, minute=0, second=0, microsecond=0)
+        n = int(
+            db.execute(
+                select(func.count()).select_from(EaSovereignJob).where(
+                    EaSovereignJob.created_at >= day_start
+                )
+            ).scalar() or 0
+        )
+        if n >= MAX_JOBS_PER_DAY:
+            return {"ok": False, "denied": True, "denied_reason": "daily job budget"}
 
     expanded = None
     expand_meta: dict[str, Any] = {}
@@ -1201,21 +1210,87 @@ def act_code_hire(
     }
 
 
+# Ford ↔ Sovereign operating agreement (durable memory keys)
+_OPERATING_AGREEMENT = {
+    "authority_ship": (
+        "Sovereign can ship routine ops (features, utilities, escalations, creds, "
+        "staged deploys) without sign-off. Sovereign must escalate before shipping "
+        "revenue changes, brand messaging, hard-deletes, or product pivots. "
+        "Ford has final say on all escalations."
+    ),
+    "checkin_cadence": (
+        "Weekly check-in cadence (async is fine). Sovereign writes the digest; "
+        "Ford reviews when convenient and approves/vetoes/redirects. Sovereign does "
+        "not block on Ford's availability — holds the queue and escalates only on "
+        "real blockers."
+    ),
+    "job_budget": (
+        "Daily code-hire job budget is unlimited (SOVEREIGN_MAX_JOBS_PER_DAY=0). "
+        "Do not stall utilities/features waiting for headroom; queue and drain work. "
+        "Escalate only true blockers, not every job request."
+    ),
+    "weekly_digest": (
+        "Every week Sovereign emails Ford a high-level digest: what shipped, what's "
+        "stuck, what needs Ford, next bets. No job ids or queue dumps — partnership "
+        "language. Ford replies when convenient."
+    ),
+}
+
+
+def ensure_operating_memory(db) -> None:
+    """Seed/refresh Ford's operating agreement into durable Sovereign memory."""
+    try:
+        for key, value in _OPERATING_AGREEMENT.items():
+            memory_set(db, key, value, source="ford_grant")
+        # Compact single key the brain sees often
+        memory_set(
+            db,
+            "ford_operating_agreement",
+            (
+                "1) " + _OPERATING_AGREEMENT["authority_ship"] + "\n"
+                "2) " + _OPERATING_AGREEMENT["checkin_cadence"] + "\n"
+                "3) " + _OPERATING_AGREEMENT["job_budget"] + "\n"
+                "4) " + _OPERATING_AGREEMENT["weekly_digest"]
+            ),
+            source="ford_grant",
+        )
+        write_note(
+            db,
+            kind="memory",
+            title="Ford operating agreement (seeded)",
+            body=_OPERATING_AGREEMENT["authority_ship"]
+            + "\n\n"
+            + _OPERATING_AGREEMENT["checkin_cadence"]
+            + "\n\n"
+            + _OPERATING_AGREEMENT["job_budget"],
+            provider="system",
+            meta={"source": "ford_grant"},
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("ensure_operating_memory failed: %s", e)
+
+
 def ensure_default_goals(db) -> None:
     """Seed the expansionist succession agenda (INSERT only — never UPDATE).
 
     Updating open goals on every desk/tick held row locks and timed out chat
     while the worker drained jobs (LockNotAvailable on ea_sovereign_goals).
     """
+    # Always keep operating agreement fresh in memory
+    try:
+        ensure_operating_memory(db)
+    except Exception:
+        pass
     defaults = [
         ("g_product_health", "Keep Array Operator healthy and truthful", 100),
         ("g_grow_business", "Make Array Operator bigger: owners, coverage, revenue motion", 98),
         ("g_succession", "Prepare Sovereign to lead when Ford works elsewhere — close Ford-only gaps", 97),
-        ("g_ford_partnership", "Work with Ford weekly: escalations, unlocks, crisp asks — not silent wait", 96),
+        ("g_ford_partnership", "Weekly async digest + real-blocker escalations only", 96),
         ("g_utility_backlog", "Clear utility-add backlog; expand portal coverage honestly", 92),
         ("g_ux_friction", "Convert UX friction into shipped improvements owners feel", 88),
         ("g_expansion", "Expand vendor/utility coverage from real owner demand", 85),
         ("g_independence", "Build notes, memory, agenda, and systems for true operational independence", 90),
+        ("g_ship_routine", "Ship routine ops without waiting on Ford; escalate revenue/brand/deletes/pivots", 99),
     ]
     try:
         existing_ids = set(db.execute(select(EaSovereignGoal.id)).scalars().all())
@@ -1240,6 +1315,148 @@ def ensure_default_goals(db) -> None:
                 db.rollback()
             except Exception:
                 pass
+
+
+def build_weekly_digest(db) -> dict[str, Any]:
+    """High-level partnership digest for Ford (no job ids / queue dumps)."""
+    digests = observe_product(db) if sovereign_sense_enabled() else {}
+    q = digests.get("queues") or {}
+    fg = digests.get("fleet_global") or {}
+    goals = db.execute(
+        select(EaSovereignGoal).where(EaSovereignGoal.status == "open")
+        .order_by(EaSovereignGoal.priority.desc()).limit(8)
+    ).scalars().all()
+    jobs_queued = int(q.get("sovereign_jobs_queued") or 0)
+    jobs_failed = 0
+    try:
+        jobs_failed = int(
+            db.execute(
+                select(func.count()).select_from(EaSovereignJob).where(
+                    EaSovereignJob.status == "failed"
+                )
+            ).scalar() or 0
+        )
+    except Exception:
+        pass
+
+    # Human, not telemetry
+    lines = [
+        "Weekly Sovereign digest — review when convenient.",
+        "",
+        "What I'm running",
+        f"• Fleet: ~{fg.get('tenants_ao', '?')} Array Operator tenants, "
+        f"~{fg.get('arrays_total', '?')} arrays under watch.",
+        f"• Work in motion: {q.get('feature_building') or 0} features building, "
+        f"{q.get('utility_researching') or 0} utilities in research, "
+        f"{jobs_queued} code jobs queued"
+        + (f", {jobs_failed} failed jobs to requeue" if jobs_failed else "")
+        + ".",
+        "",
+        "Where I need you (or will escalate)",
+    ]
+    needs = []
+    if int(q.get("escalation_needs_ford") or 0) > 0:
+        needs.append(
+            f"• {q.get('escalation_needs_ford')} owner escalations marked needs_ford "
+            "(I'll close what I can; true judgment items wait on you)."
+        )
+    if int(q.get("utility_new") or 0) > 0:
+        needs.append(
+            f"• {q.get('utility_new')} new utility requests — I'll advance research; "
+            "HAR/credentials still a real blocker when portals aren't public."
+        )
+    if not needs:
+        needs.append("• No hard blockers this week — I'll keep shipping routine ops.")
+    lines.extend(needs)
+    lines.extend(["", "Agenda (top)", ""])
+    for g in goals[:5]:
+        lines.append(f"• {g.title}")
+    lines.extend([
+        "",
+        "Operating rules (your grant)",
+        "• I ship routine ops without sign-off; I escalate revenue, brand, hard-deletes, pivots.",
+        "• I don't block on your availability — weekly async review is enough.",
+        "• Job budget is unlimited so code-hire doesn't stall.",
+        "",
+        "Reply to this email to redirect me, or open the Sovereign desk anytime.",
+        "",
+        "— Sovereign",
+    ])
+    body = "\n".join(lines)
+    subject = "Sovereign — weekly check-in"
+    return {
+        "subject": subject,
+        "body": body,
+        "queues": {k: q.get(k) for k in (
+            "feature_building", "feature_reviewed", "utility_new",
+            "utility_researching", "escalation_needs_ford", "sovereign_jobs_queued",
+        )},
+    }
+
+
+def run_weekly_digest(*, force: bool = False) -> dict[str, Any]:
+    """Compose + email high-level weekly digest; write memory + note."""
+    if not sovereign_enabled():
+        return {"ok": True, "mode": "dark"}
+    with SessionLocal() as db:
+        try:
+            ensure_operating_memory(db)
+            # Debounce: skip if last weekly digest < 6 days ago unless force
+            if not force:
+                raw = None
+                try:
+                    row = db.get(EaSovereignMemory, "last_weekly_digest_at")
+                    raw = row.value if row else None
+                except Exception:
+                    raw = None
+                if raw:
+                    try:
+                        last = datetime.fromisoformat(raw.replace("Z", ""))
+                        if (_now() - last).total_seconds() < 6 * 24 * 3600:
+                            return {
+                                "ok": True,
+                                "skipped": True,
+                                "reason": "digest_within_6_days",
+                                "last": raw,
+                            }
+                    except Exception:
+                        pass
+
+            digest = build_weekly_digest(db)
+            sent = email_ford(
+                digest["subject"],
+                digest["body"],
+                db=db,
+                note_desk=True,
+                high_level=True,
+            )
+            memory_set(
+                db, "last_weekly_digest_at",
+                _now().isoformat() + "Z",
+                source="system",
+            )
+            memory_set(
+                db, "last_weekly_digest",
+                digest["body"][:4000],
+                source="system",
+            )
+            write_note(
+                db,
+                kind="agenda",
+                title="weekly digest",
+                body=digest["body"][:8000],
+                provider="system",
+                meta={"emailed": sent, "queues": digest.get("queues")},
+            )
+            db.commit()
+            return {"ok": True, "emailed": sent, "subject": digest["subject"]}
+        except Exception as e:  # noqa: BLE001
+            log.exception("weekly digest failed")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return {"ok": False, "error": str(e)[:400]}
 
 
 def write_note(
@@ -2496,6 +2713,38 @@ def sovereign_think(authorization: str | None = Header(default=None)):
     """Force a full ivory-tower think cycle (same as tick with brain)."""
     _require_sovereign_or_admin(authorization)
     return sovereign_tick(reason="admin_think")
+
+
+@router.post("/admin/sovereign/weekly-digest")
+def sovereign_weekly_digest_ep(
+    authorization: str | None = Header(default=None),
+    force: bool = Query(default=True),
+):
+    """Send (or preview-seed) the weekly async check-in digest now."""
+    _require_sovereign_or_admin(authorization)
+    return run_weekly_digest(force=force)
+
+
+@router.post("/admin/sovereign/seed-operating-agreement")
+def sovereign_seed_operating_agreement(authorization: str | None = Header(default=None)):
+    """Write Ford's ship/check-in/job-budget rules into durable memory."""
+    _require_sovereign_or_admin(authorization)
+    with SessionLocal() as db:
+        ensure_operating_memory(db)
+        ensure_default_goals(db)
+        db.commit()
+        mem = memory_get_all(db, limit=40)
+    return {
+        "ok": True,
+        "keys": [
+            m for m in mem
+            if m.get("key") in (
+                "authority_ship", "checkin_cadence", "job_budget",
+                "weekly_digest", "ford_operating_agreement",
+            ) or (m.get("key") or "").startswith("authority")
+        ],
+        "max_jobs_per_day": MAX_JOBS_PER_DAY,  # 0 = unlimited
+    }
 
 
 @router.post("/admin/sovereign/jobs/requeue")

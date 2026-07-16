@@ -1671,6 +1671,16 @@ def start():
         max_instances=1, coalesce=True,
         next_run_time=datetime.utcnow() + timedelta(minutes=4),
     )
+    # Weekly async check-in digest to Ford (high-level, no job spam).
+    # Monday 14:00 UTC ≈ morning US East — review when convenient.
+    scheduler.add_job(
+        _run_energy_agent_sovereign_weekly_digest,
+        CronTrigger(day_of_week="mon", hour=14, minute=0),
+        id="energy_agent_sovereign_weekly_digest",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
     # Ford Operator: standing Grok triage for Energy Agent escalations inbox.
     # Every 2 min process a small batch of open items → needs_ford + notify.
     scheduler.add_job(
@@ -1865,7 +1875,8 @@ def _run_energy_agent_sovereign_jobs() -> None:
         if not code_live_enabled():
             return
         with SessionLocal() as db:
-            res = drain_jobs(db, limit=1)
+            # Unlimited daily budget — drain a few per tick for velocity
+            res = drain_jobs(db, limit=3)
             if res.get("processed"):
                 logger.info("sovereign_jobs: %s", res)
     except Exception as exc:  # noqa: BLE001
@@ -1877,6 +1888,23 @@ def _run_energy_agent_sovereign_jobs() -> None:
             )
         except Exception:
             pass
+
+
+def _run_energy_agent_sovereign_weekly_digest() -> None:
+    """Async weekly check-in: high-level digest email to Ford."""
+    try:
+        from .energy_agent_sovereign import sovereign_enabled, run_weekly_digest
+        if not sovereign_enabled():
+            return
+        res = run_weekly_digest(force=False)
+        if res.get("emailed"):
+            logger.info("sovereign_weekly_digest: emailed ok")
+        elif res.get("skipped"):
+            logger.debug("sovereign_weekly_digest: skipped %s", res.get("reason"))
+        else:
+            logger.info("sovereign_weekly_digest: %s", res)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("sovereign_weekly_digest crashed: %s", exc)
 
 
 def _run_bill_to_daily() -> None:
