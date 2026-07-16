@@ -2084,6 +2084,9 @@ class RepairTicket(Base):
     tech_note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     opened_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    # Stamped when we escalate a week-long-down fault to the OWNER by email
+    # (asking for action + a repair contact). Prevents re-escalating the same case.
+    owner_escalated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     cleared_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

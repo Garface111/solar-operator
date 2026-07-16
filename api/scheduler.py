@@ -101,7 +101,7 @@ def reconcile_repair_ops() -> dict:
     """O&M healing: open repair tickets for dead/fault units with a known
     service contact, clear recovered tickets, fire due auto check-ins."""
     from . import repair_ops
-    opened = closed = sent = touched = 0
+    opened = closed = sent = touched = escalated = 0
     errors = 0
     with SessionLocal() as db:
         tenants = db.execute(
@@ -113,6 +113,9 @@ def reconcile_repair_ops() -> dict:
                 tenant = db.get(Tenant, t.id)
                 tally = repair_ops.reconcile(db, tenant)
                 sent += repair_ops.process_due(db, tenant)
+                # Week-long-down → email the owner for action + a repair contact
+                # (idempotent via owner_escalated_at).
+                escalated += repair_ops.escalate_stale_repairs(db, tenant)
                 opened += tally.get("opened", 0) or 0
                 closed += tally.get("closed", 0) or 0
                 touched += 1
@@ -120,8 +123,8 @@ def reconcile_repair_ops() -> dict:
             errors += 1
             logger.warning("repair ops reconcile failed for %s: %s", t.id, exc)
     result = {"tenants": touched, "opened": opened, "closed": closed,
-              "auto_checkins": sent, "errors": errors}
-    if opened or sent:
+              "auto_checkins": sent, "owner_escalations": escalated, "errors": errors}
+    if opened or sent or escalated:
         logger.info("repair ops: %s", result)
     return result
 

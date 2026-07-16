@@ -158,7 +158,11 @@ def test_open_ticket_drafts_checkin():
         assert sn in (draft.get("body") or "") or "Inv" in (draft.get("body") or "")
 
 
-def test_reconcile_opens_only_with_contact():
+def test_reconcile_opens_contactless_then_adopts_contact():
+    # New contract (2026-07-16): reconcile opens a CONTACT-LESS ticket for a down
+    # unit with no repair contact (so it's visible + its duration is tracked for
+    # the week-long owner escalation); it must NOT start crew outreach without a
+    # contact. Once a contact resolves, the existing ticket adopts it.
     tid, _ = _tenant()
     aid = _array(tid, "No Contact Site")
     iid, sn = _inv(tid, aid)
@@ -166,21 +170,25 @@ def test_reconcile_opens_only_with_contact():
     with SessionLocal() as db:
         t = db.get(Tenant, tid)
         out = ro.reconcile(db, t, tree=tree)
-        assert out["opened"] == 0  # no contact
-
-        ro.upsert_contact(db, tid, name="Eve", email="eve@om.test", is_default=True)
-        db.commit()
-        t = db.get(Tenant, tid)
-        out2 = ro.reconcile(db, t, tree=tree)
-        assert out2["opened"] == 1
+        assert out["opened"] == 1  # contact-less ticket now opens for tracking
         tickets = ro.list_tickets(db, tid, active_only=True)
         assert len(tickets) == 1
+        assert tickets[0].contact_id is None  # no crew outreach without a contact
         assert tickets[0].fail_type == "dead"
         assert tickets[0].serial == sn
 
-        # idempotent
-        out3 = ro.reconcile(db, t, tree=tree)
-        assert out3["opened"] == 0
+        # idempotent — does not re-open a second ticket for the same unit
+        out2 = ro.reconcile(db, t, tree=tree)
+        assert out2["opened"] == 0
+
+        # Owner adds a contact → the existing ticket adopts it (crew flow can start)
+        ro.upsert_contact(db, tid, name="Eve", email="eve@om.test", is_default=True)
+        db.commit()
+        t = db.get(Tenant, tid)
+        ro.reconcile(db, t, tree=tree)
+        tickets = ro.list_tickets(db, tid, active_only=True)
+        assert len(tickets) == 1
+        assert tickets[0].contact_id is not None
 
 
 def test_reconcile_clears_recovered_before_contact():

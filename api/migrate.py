@@ -1426,6 +1426,14 @@ def main():
             added.append("service_contacts.trusted_at")
             print("  + service_contacts.trusted_at")
 
+        # 2026-07-16 Autonomous escalation — week-long-down owner escalation stamp.
+        if not column_exists(conn, "repair_tickets", "owner_escalated_at"):
+            conn.execute(text(
+                "ALTER TABLE repair_tickets ADD COLUMN owner_escalated_at TIMESTAMP NULL"
+            ))
+            added.append("repair_tickets.owner_escalated_at")
+            print("  + repair_tickets.owner_escalated_at")
+
     print("=== Migration complete ===")
 
 

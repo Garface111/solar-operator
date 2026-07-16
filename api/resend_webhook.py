@@ -228,19 +228,17 @@ async def resend_webhook(
         except Exception:
             logger.exception("resend webhook: sovereign inbound route failed")
 
-        # Owner ⇄ Energy Agent mailbox (weekly check-in replies, "hey can you…"
-        # emails). Repair mail carries an [AO-TICKET-N] token — anything to the
-        # agent mailbox WITHOUT one is an owner turn, answered by the same
-        # per-tenant agent (async: the turn can run multiple tool rounds).
+        # Owner ⇄ Energy Agent mailbox (weekly check-in replies, escalation
+        # replies, "hey can you…" emails). Crew mail goes to repairs@ (its own
+        # Reply-To), so ANYTHING to the owner agent mailbox is an owner turn —
+        # including escalation replies that carry an [AO-TICKET-N] token (the
+        # owner ingest routes those to the repair handler internally).
         try:
             from .energy_agent_email import (
                 ingest_owner_email_async,
                 is_owner_agent_address,
             )
-            from .repair_ops import extract_ticket_id_from_text
-            if is_owner_agent_address(to_list) and not extract_ticket_id_from_text(
-                f"{subject}\n{(body or '')[:2000]}"
-            ):
+            if is_owner_agent_address(to_list):
                 ingest_owner_email_async(
                     from_email=from_email,
                     subject=subject,

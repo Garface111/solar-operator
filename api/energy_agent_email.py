@@ -457,6 +457,74 @@ def send_gap_alert_email(tenant: Tenant, setup_status: dict, top_gap: dict) -> b
     )
 
 
+def send_repair_escalation_email(
+    tenant: Tenant,
+    *,
+    ticket_id: int,
+    site: str,
+    inverter: str,
+    fail_type: str,
+    diagnosis: str | None,
+    days_down: int,
+    loss_usd_month: float | None = None,
+    contact_name: str | None = None,
+) -> bool:
+    """Week-long-down escalation TO THE OWNER, from the owner-agent mailbox so
+    the reply routes back to Energy Agent. Carries [AO-TICKET-N] so the reply
+    ties to this exact case. Asks for action + a repair contact (or, if a tech is
+    already engaged, whether to push harder)."""
+    from .email_skin import render_email_skin
+    from .notify import _send_via_resend
+
+    to = (getattr(tenant, "contact_email", None) or "").strip()
+    if not to or "@" not in to:
+        return False
+    unit = f"{site} — {inverter}".strip(" —")
+    what = (diagnosis or "").strip() or f"the inverter is {fail_type}"
+    money = f" (about ${loss_usd_month:,.0f}/mo in lost production)" if loss_usd_month and loss_usd_month >= 1 else ""
+    ref = f"[AO-TICKET-{ticket_id}]"
+    if contact_name:
+        ask = (
+            f"I've been in touch with {contact_name}, but it's still down after {days_down} days. "
+            "Want me to push harder, or bring in someone else? Just reply and let me know — "
+            "if it's a new person, include their name and email and I'll take it from there."
+        )
+    else:
+        ask = (
+            f"I don't have a repair contact on file for this site. If you'd like me to get it "
+            f"fixed, reply with your repair person's name and email (phone too if you have it) — "
+            "I'll reach out to them, start the conversation, and coordinate the fix, keeping you "
+            "posted here and in the app the whole way."
+        )
+    body = (
+        f"{unit} has been down for {days_down} days now{money}.\n\n"
+        f"What I'm seeing: {what}.\n\n"
+        f"{ask}\n\n"
+        f"Reference: {ref}"
+    )
+    off_url = _optout_url(tenant.id, on=True)
+    esc = body.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
+    footer = "Reply and I'll act on it."
+    if off_url:
+        footer += f' · <a href="{off_url}">Fewer emails</a>'
+    html = render_email_skin(
+        preheader=f"{unit} — down {days_down} days, want me to get it fixed?",
+        headline="A site's been down a while",
+        intro_line="From Energy Agent, your fleet's operator",
+        body_html=f"<p style='white-space:pre-line'>{esc}</p>",
+        footer_line=footer,
+        product="array_operator",
+    )
+    text = body + ("\n\nFewer emails: " + off_url if off_url else "")
+    subject = f"{site} has been down {days_down} days — want me to get it fixed?"
+    return bool(
+        _send_via_resend(
+            to=to, subject=subject, html=html, text=text,
+            from_addr=OWNER_AGENT_FROM, reply_to=OWNER_AGENT_FROM, product="array_operator",
+        )
+    )
+
+
 def run_weekly_checkins(*, only_tenant_id: str | None = None, force: bool = False) -> dict:
     """Send the Monday check-in to every eligible owner. One short DB session
     per tenant (LLM + Resend HTTP inside — never one session across the loop)."""
@@ -701,6 +769,49 @@ def ingest_owner_email(
         session = EaSession(id=uuid.uuid4().hex[:32], tenant_id=tenant.id, status="open")
         db.add(session)
         db.flush()
+
+    # Escalation reply: the owner answered a week-long-down email ([AO-TICKET-N]).
+    # Route it to the repair handler — it may onboard a repair contact and kick
+    # off the crew dialogue, or close the case. Falls through to the general
+    # agent turn if the reply isn't a clear answer.
+    try:
+        from .repair_ops import extract_ticket_id_from_text, handle_owner_escalation_reply
+        tkt = extract_ticket_id_from_text(subject, text)
+        if tkt:
+            esc = handle_owner_escalation_reply(db, tenant, text, tkt)
+            if esc and esc.get("handled"):
+                db.add(EaMessage(
+                    session_id=session.id, tenant_id=tenant.id, role="user",
+                    content=text[:4000],
+                    meta_json=json.dumps({"channel": "email", "subject": subject or "",
+                                          "escalation_reply": tkt})[:2000],
+                ))
+                reply_text = _email_plain(esc.get("reply") or "Got it.")
+                db.add(EaMessage(
+                    session_id=session.id, tenant_id=tenant.id, role="assistant",
+                    content=reply_text, meta_json=json.dumps({"channel": "email"})[:200],
+                ))
+                subj = (subject or "Your Energy Agent").strip()
+                if not subj.lower().startswith("re:"):
+                    subj = f"Re: {subj}"
+                sent = False
+                try:
+                    from .notify import _send_via_resend
+                    sent = _send_via_resend(
+                        to=frm, subject=subj[:200],
+                        html=("<div style='font-family:system-ui,sans-serif;line-height:1.55;"
+                              "color:#0f172a'>"
+                              + reply_text.replace("&", "&amp;").replace("<", "&lt;")
+                              .replace(">", "&gt;").replace("\n", "<br>") + "</div>"),
+                        text=reply_text, from_addr=OWNER_AGENT_FROM, reply_to=OWNER_AGENT_FROM,
+                        product="array_operator",
+                    )
+                except Exception as e:
+                    log.warning("escalation reply email send failed: %s", e)
+                db.flush()
+                return {"ok": True, "tenant_id": tenant.id, "escalation": tkt, "replied": bool(sent)}
+    except Exception as e:
+        log.warning("escalation reply routing failed: %s", e)
 
     # Pending confirm resolved by a plain yes/no reply — same shortcut as chat.
     # (_agent_turn persists the user turn itself; only these shortcut branches

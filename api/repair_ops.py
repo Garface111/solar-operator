@@ -2274,12 +2274,13 @@ def sync_inbound_from_resend(db, *, limit: int = 25, tenant_id: str | None = Non
 
         to_list = to_emails if isinstance(to_emails, list) else [to_emails]
 
-        # Owner ⇄ agent mailbox mail (no ticket token) belongs to the Energy
-        # Agent email channel, not the repair-ticket matcher. Deduped on the
-        # Resend id, so webhook-handled mail is skipped here.
+        # Owner ⇄ agent mailbox mail belongs to the Energy Agent email channel,
+        # not the repair-ticket matcher (crew mail arrives at repairs@). Escalation
+        # replies carry an [AO-TICKET-N] token but still route to the owner ingest,
+        # which hands them to the repair handler internally. Deduped on Resend id.
         try:
             from .energy_agent_email import is_owner_agent_address
-            if is_owner_agent_address(to_list) and not extract_ticket_id_from_text(subject, text):
+            if is_owner_agent_address(to_list):
                 from .energy_agent_email import ingest_owner_email
                 res = ingest_owner_email(
                     db,
@@ -2550,11 +2551,33 @@ def reconcile(db, tenant: Tenant, tree: Optional[dict] = None) -> dict:
         array_id = info["array_id"]
         contact = resolve_contact_for_array(db, tenant.id, array_id)
         if contact is None:
-            # No ops person known — don't open an orphan ticket, but never
-            # no-op SILENTLY: nudge the owner (once/day) that a failing site
-            # has nobody to email. This is the difference between "the agent
-            # can't help" and "the agent can't help and never told you."
+            # No ops person known. Still OPEN a (contact-less) ticket so the down
+            # site is VISIBLE in Repairs and its duration is tracked — the
+            # week-long escalation (escalate_stale_repairs) then emails the owner
+            # to ask for action + a repair contact. Plus the immediate in-app nudge.
             _nudge_missing_contact(db, tenant, info)
+            existing = _active_ticket_for_inverter(db, tenant.id, iid, array_id)
+            if existing is None:
+                open_ticket(
+                    db, tenant,
+                    array_id=array_id, inverter_id=iid, contact_id=None,
+                    fail_type=st,
+                    severity="critical" if st in ("dead", "fault") else "warning",
+                    source="auto",
+                    evidence={
+                        "status": st,
+                        "diagnosis": inv.get("diagnosis") or inv.get("why"),
+                        "peer_index": inv.get("peer_index"),
+                        "window_kwh": inv.get("window_kwh"),
+                        "nameplate_kw": inv.get("nameplate_kw"),
+                        "no_contact": True,
+                    },
+                    site_name=info.get("site_name"),
+                    inv_name=inv.get("name"),
+                    serial=inv.get("sn") or inv.get("serial"),
+                    vendor=inv.get("vendor"),
+                )
+                opened += 1
             continue
         existing = _active_ticket_for_inverter(db, tenant.id, iid, array_id)
         if existing:
@@ -2563,6 +2586,10 @@ def reconcile(db, tenant: Tenant, tree: Optional[dict] = None) -> dict:
                 existing.site_name = info.get("site_name")
             if not existing.inv_name and inv.get("name"):
                 existing.inv_name = inv.get("name")
+            # A previously contact-less ticket now has a resolvable contact
+            # (owner added one) → adopt it so the crew flow can start.
+            if not existing.contact_id and contact is not None:
+                existing.contact_id = contact.id
             continue
         evidence = {
             "status": st,
@@ -2604,6 +2631,195 @@ def reconcile(db, tenant: Tenant, tree: Optional[dict] = None) -> dict:
 
     db.commit()
     return {"opened": opened, "closed": closed, "tree": tree}
+
+
+# ── autonomous escalation: week-long-down → email the owner for action ────────
+ESCALATE_DAYS = float(os.getenv("EA_ESCALATE_DAYS", "7") or 7)
+
+
+def _ticket_loss_usd_month(ticket: RepairTicket) -> float | None:
+    """Best-effort $/mo from the ticket's captured evidence (window_kwh over the
+    14-day peer window × a default rate). None when we can't size it honestly."""
+    ev = ticket.evidence or {}
+    try:
+        lost_kwh = ev.get("lost_kwh_14d")
+        if lost_kwh is None:
+            # Fall back to a rough fair-share gap if present; else give up.
+            return None
+        rate = 0.21
+        return round(float(lost_kwh) * rate / 14.0 * 30.0, 2)
+    except Exception:
+        return None
+
+
+def escalate_stale_repairs(db, tenant: Tenant) -> int:
+    """Email the OWNER about any fault that's been down consistently for a week
+    and hasn't been escalated yet — asking if they want action and (when we have
+    no one to call) for a repair contact. Idempotent via owner_escalated_at.
+
+    This is the heavy tier of the escalation ladder: the immediate in-app nudge
+    fires on day one; THIS pulls the owner in by email once it's clearly stuck.
+    """
+    if bool(getattr(tenant, "is_demo", False)):
+        return 0
+    cutoff = now() - timedelta(days=ESCALATE_DAYS)
+    stale = db.execute(
+        select(RepairTicket).where(
+            RepairTicket.tenant_id == tenant.id,
+            RepairTicket.status.in_(ACTIVE_TICKET_STATUSES),
+            RepairTicket.fail_type.in_(AUTO_OPEN_FAILS),
+            RepairTicket.owner_escalated_at.is_(None),
+            RepairTicket.opened_at <= cutoff,
+        ).order_by(RepairTicket.opened_at.asc()).limit(10)
+    ).scalars().all()
+
+    sent = 0
+    for ticket in stale:
+        contact = get_contact(db, tenant.id, ticket.contact_id) if ticket.contact_id else None
+        days_down = max(ESCALATE_DAYS, (now() - ticket.opened_at).days) if ticket.opened_at else int(ESCALATE_DAYS)
+        ev = ticket.evidence or {}
+        diagnosis = ev.get("diagnosis") or ev.get("why") or ticket.description or ticket.title
+        try:
+            from .energy_agent_email import send_repair_escalation_email
+            ok = send_repair_escalation_email(
+                tenant,
+                ticket_id=ticket.id,
+                site=ticket.site_name or "A site",
+                inverter=ticket.inv_name or ticket.serial or "an inverter",
+                fail_type=ticket.fail_type or "down",
+                diagnosis=diagnosis,
+                days_down=int(days_down),
+                loss_usd_month=_ticket_loss_usd_month(ticket),
+                contact_name=(contact.name if contact else None),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("owner escalation email failed ticket=%s: %s", ticket.id, exc)
+            ok = False
+        if ok:
+            ticket.owner_escalated_at = now()
+            sent += 1
+            site = ticket.site_name or "a site"
+            inv = ticket.inv_name or "the inverter"
+            note = (
+                f"I emailed you — {site} / {inv} has been down {int(days_down)} days. "
+                + ("Reply with a repair contact and I'll reach out and coordinate the fix."
+                   if contact is None else
+                   f"I asked whether to push {contact.name} harder or bring in someone else.")
+            )
+            _safe_mind_emit(
+                db, tenant.id, "repair_escalation",
+                f"Escalated ticket #{ticket.id} to owner ({int(days_down)}d down)",
+                ref_id=str(ticket.id),
+                payload={"origin": "repair", "importance": 82, "ticket_id": ticket.id},
+                speak_as_mind=note,
+            )
+            _mirror_email_to_chat(db, tenant.id, note, kind="repair_escalation", ticket_id=ticket.id)
+    if sent:
+        db.commit()
+    return sent
+
+
+def handle_owner_escalation_reply(db, tenant: Tenant, reply_text: str, ticket_id: int) -> dict | None:
+    """The owner replied to a week-long-down escalation. Parse their answer:
+      • gives a repair contact → create+assign it, set the ticket's contact,
+        AUTO-send the first crew outreach (they authorized action), keep them
+        posted. The contact is trusted (owner-authorized) so follow-ups run.
+      • declines → cancel the case.
+      • unclear → return None so the general agent answers naturally.
+    Returns {"handled": True, "reply": <owner-facing text>} or None."""
+    ticket = db.get(RepairTicket, ticket_id)
+    if ticket is None or ticket.tenant_id != tenant.id:
+        return None
+    if ticket.status in TERMINAL_STATUSES:
+        return {"handled": True, "reply": (
+            f"Thanks — that case ({ticket.site_name or 'the site'}) is already closed on my end. "
+            "If something's still off, tell me and I'll reopen it."
+        )}
+
+    site = ticket.site_name or "the site"
+    inv = ticket.inv_name or ticket.serial or "the inverter"
+    sys = (
+        "The solar fleet OWNER replied to an escalation email about a down inverter. Decide what "
+        "they want. Return STRICT JSON only:\n"
+        '{"intent":"contact|decline|unclear","name":"","email":"","phone":"","company":""}\n'
+        "- intent=contact when they give (or clearly point to) a repair person to reach out to; "
+        "fill name/email/phone/company from their message.\n"
+        "- intent=decline when they say no / not now / leave it / they'll handle it.\n"
+        "- intent=unclear otherwise. Never invent an email — only extract what's present."
+    )
+    try:
+        raw = _repair_llm_complete([
+            {"role": "system", "content": sys},
+            {"role": "user", "content": (reply_text or "")[:2000]},
+        ])
+        plan = _parse_llm_json(raw)
+    except Exception as exc:
+        log.warning("escalation reply parse failed ticket=%s: %s", ticket_id, exc)
+        return None
+
+    intent = (plan.get("intent") or "unclear").strip().lower()
+    if intent == "decline":
+        ticket.status = "cancelled"
+        ticket.cancelled_at = now()
+        ticket.next_checkin_at = None
+        ticket.tech_note = ((ticket.tech_note or "") + "\n[owner] declined action on escalation").strip()
+        db.flush()
+        _mirror_email_to_chat(db, tenant.id, f"You asked me to leave {site} for now — case closed.",
+                              kind="repair_escalation", ticket_id=ticket.id)
+        return {"handled": True, "reply": (
+            f"Understood — I'll leave {site} alone for now and close the case. "
+            "Say the word anytime and I'll pick it back up."
+        )}
+
+    if intent == "contact":
+        name = (plan.get("name") or "").strip()
+        email = (plan.get("email") or "").strip()
+        phone = (plan.get("phone") or "").strip()
+        company = (plan.get("company") or "").strip()
+        if not name and not email:
+            return None  # nothing usable — let the general agent ask
+        try:
+            contact = upsert_contact(
+                db, tenant.id,
+                name=name or (email.split("@", 1)[0] if email else "Repair contact"),
+                email=email or None, phone=phone or None, company=company or None,
+                role="om", is_default=False, trusted=True,  # owner authorized action
+            )
+            if ticket.array_id:
+                try:
+                    assign_array_contact(db, tenant.id, ticket.array_id, contact.id, kind="primary")
+                except Exception:
+                    pass
+            ticket.contact_id = contact.id
+            db.flush()
+        except Exception as exc:
+            log.warning("escalation contact create failed ticket=%s: %s", ticket_id, exc)
+            return {"handled": True, "reply": (
+                f"I couldn't quite save that contact for {site} — can you resend their name and "
+                "email? (e.g. \"Rex Miller, rex@sparkelectric.com\")"
+            )}
+
+        # They authorized action by giving a contact → reach out to the tech NOW.
+        crew_ok = False
+        try:
+            send_checkin(db, tenant, ticket, via="agent", force=True)
+            crew_ok = True
+        except Exception as exc:
+            log.warning("escalation first crew outreach failed ticket=%s: %s", ticket_id, exc)
+        who = contact.name or (email or "your repair contact")
+        if crew_ok:
+            return {"handled": True, "reply": (
+                f"On it — I just emailed {who} about {site} / {inv} to get the repair moving, and "
+                "saved them as your contact for this site. When they reply it continues right here "
+                "(and in the app), and I'll keep you posted. I'll follow up with them automatically "
+                "if they go quiet."
+            )}
+        return {"handled": True, "reply": (
+            f"Saved {who} as your repair contact for {site}. I'll reach out to them shortly and "
+            "keep you posted — you'll see the thread here and in the app."
+        )}
+
+    return None  # unclear → general agent turn answers
 
 
 def process_due(db, tenant: Tenant) -> int:
