@@ -356,6 +356,10 @@ export interface ClientRow {
    *  client" placeholder. Cleared the moment the operator renames it
    *  OR arrays land from a portal capture. */
   is_placeholder?: boolean;
+  /** True when this client was eagerly created from a stored Cloud Capture
+   *  login and is still awaiting its first harvested bill. Drives the
+   *  "Pulling bills…" state; cleared on the first capture. */
+  capture_pending?: boolean;
 }
 
 // ─── account ───────────────────────────────────────────────────────────────

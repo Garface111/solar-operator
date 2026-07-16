@@ -459,6 +459,15 @@ class Client(Base):
     # the name — skip the autopop name override entirely.
     name_edited_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+    # Cloud Capture eager-create flag (July 2026): set True when a Client is
+    # created from a stored Cloud Capture login BEFORE the harvester has landed
+    # any bills, so the Clients page can show a 'Pulling bills…' state instead of
+    # an empty dead card. Cleared on the first successful /v1/sync capture that
+    # attaches arrays to this client (which also upgrades the login-derived name
+    # to the real portal holder name). A pending client still autopopulates
+    # normally — this flag is purely a display/naming hint.
+    capture_pending: Mapped[bool] = mapped_column(Boolean, default=False)
+
     # Canvas position (sandbox canvas v1, June 2026). null = not yet placed,
     # auto-arranged on first visit. canvas_pinned reserves a future "lock
     # position" toggle so the operator can anchor frequently-used clients.

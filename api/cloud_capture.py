@@ -10,18 +10,23 @@ harvester). Security invariants enforced here:
 """
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
+from sqlalchemy.exc import IntegrityError
 
 from .account import tenant_from_session
 from .db import SessionLocal
-from .models import PortalCredential, PortalLoginStatus, HarvestRun, now
+from .models import Client, PortalCredential, PortalLoginStatus, HarvestRun, now
+from .stripe_helpers import is_array_operator
 from .harvester import config
 from .harvester import credentials as cc
 from . import ratelimit
+
+log = logging.getLogger("cloud_capture")
 
 router = APIRouter()
 
@@ -68,6 +73,90 @@ def _mirror_roster(db, tenant_id: str, provider: str, username: str, rearm: bool
         row.paused = False
         row.fails = 0
         row.reported_at = now()
+
+
+def _name_from_login(login: str) -> str:
+    """Best-effort human name from a login string — mirrors _smart_client_name's
+    email-local-part fallback (john.doe@x → 'John Doe'). Upgraded to the real
+    portal holder name on the first successful capture."""
+    s = (login or "").strip()
+    local = s.split("@")[0] if "@" in s else s
+    cleaned = local.replace(".", " ").replace("_", " ").replace("-", " ").strip()
+    return (cleaned.title()[:200] or s[:200] or "New client")
+
+
+def ensure_client_for_login(db, tenant, provider: str, username: str) -> None:
+    """Eagerly create (or reuse) a Client for a Cloud Capture utility login so the
+    Clients page shows it IMMEDIATELY — a 'Pulling bills…' card — instead of
+    staying empty until the harvester's first capture lands (Ford 2026-07-16).
+
+    Correctness hinge: we set the SAME login columns + autopop flag the /v1/sync
+    matcher keys on (api/app.py _PROVIDER_AUTOPOP_FIELDS), so when the harvester
+    later POSTs the captured bills the matcher ATTACHES arrays to THIS client
+    rather than auto-creating a duplicate. `capture_pending` marks it as awaiting
+    that first capture (drives the UI state + the name upgrade in the matcher).
+
+    Scope: NEPOOL tenants only (Array Operator uses offtakers, not sub-clients),
+    and only providers the capture path can autopopulate — GMP + SmartHub co-ops.
+    Inverter clouds (fronius/sma/chint/solaredge) and unmapped bespoke utilities
+    have no autopop config, so a pre-created card would never fill in; skip them.
+    """
+    if is_array_operator(getattr(tenant, "product", None)):
+        return
+    login = (username or "").strip()
+    if not login:
+        return
+    # Single source of truth for provider → Client login columns. Lazy import
+    # avoids the app↔cloud_capture module cycle (app includes this router).
+    from .app import _PROVIDER_AUTOPOP_FIELDS  # noqa: PLC0415
+    cfg = _PROVIDER_AUTOPOP_FIELDS.get(provider.strip().lower())
+    if not cfg:
+        return
+
+    login_lc = login.lower()
+    is_email = "@" in login
+    match_terms = [func.lower(cfg["username_col"]) == login_lc]
+    if is_email:
+        match_terms.append(func.lower(cfg["email_col"]) == login_lc)
+    existing = db.execute(
+        select(Client).where(
+            Client.tenant_id == tenant.id,
+            Client.deleted_at.is_(None),
+            or_(*match_terms),
+        ).order_by(Client.id).limit(1)
+    ).scalar_one_or_none()
+    if existing is not None:
+        # Operator already has a client on this login (manual entry, prior
+        # capture, or a re-save). Just make sure autopop is armed so the harvest
+        # attaches — never stomp their curated name / contact.
+        if not getattr(existing, cfg["autopop_attr"]):
+            setattr(existing, cfg["autopop_attr"], True)
+        return
+
+    # New pending client. Suffix on the (tenant_id, name) unique constraint —
+    # two logins can derive the same display name, and it doesn't exclude
+    # soft-deleted rows, so retry inside a SAVEPOINT (begin_nested) with a bumped
+    # suffix. The savepoint keeps a collision from rolling back the credential
+    # save that happens in this same outer transaction.
+    base_name = _name_from_login(login)
+    for attempt in range(20):
+        name = base_name if attempt == 0 else f"{base_name} {attempt + 1}"
+        try:
+            with db.begin_nested():
+                c = Client(tenant_id=tenant.id, name=name, active=True,
+                           capture_pending=True)
+                setattr(c, cfg["username_attr"], login)
+                setattr(c, cfg["autopop_attr"], True)
+                if is_email:
+                    setattr(c, cfg["email_attr"], login_lc)
+                    c.contact_email = login_lc
+                db.add(c)
+                db.flush()
+            return
+        except IntegrityError:
+            continue
+    log.warning("ensure_client_for_login: couldn't create client for %s/%s after 20 tries",
+                tenant.id, provider)
 
 
 @router.get("/v1/cloud-capture/status")
@@ -138,9 +227,7 @@ def save_credential(body: CredentialIn, request: Request,
         raise HTTPException(
             422, "Storing a password with Cloud Capture requires your explicit consent.")
     if body.password:
-        import logging
-        logging.getLogger("cloud_capture").info(
-            "cloud-capture consent recorded: tenant=%s provider=%s", t.id, body.provider)
+        log.info("cloud-capture consent recorded: tenant=%s provider=%s", t.id, body.provider)
     provider = (body.provider or "").strip().lower()
     if not provider or not (body.username or "").strip():
         raise HTTPException(422, "provider and username are required")
@@ -159,6 +246,16 @@ def save_credential(body: CredentialIn, request: Request,
             login_host=body.login_host, enable=body.enable,
         )
         _mirror_roster(db, t.id, provider, body.username, rearm=bool(body.password))
+        # Eagerly surface a Client per utility login so the operator's Clients
+        # page fills in the moment they connect a login — the harvested bills
+        # attach to it on the first capture (Ford 2026-07-16). Convenience only:
+        # never let a client-mirror hiccup fail the credential save.
+        if body.enable:
+            try:
+                ensure_client_for_login(db, t, provider, body.username)
+            except Exception:  # noqa: BLE001
+                log.warning("ensure_client_for_login failed for %s/%s", t.id, provider,
+                            exc_info=True)
         db.commit()
     return {"ok": True, "provider": provider, "username": body.username.strip(),
             "enabled": bool(body.enable), "encryption_ready": cc.crypto_ready()}

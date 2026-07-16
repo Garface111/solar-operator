@@ -412,6 +412,19 @@ def main():
                 "UPDATE clients SET is_placeholder = FALSE WHERE is_placeholder IS NULL"
             ))
             print("  + clients.is_placeholder")
+
+        # 2026-07-16: clients.capture_pending — set when a Client is eagerly
+        # created from a stored Cloud Capture login before the harvester has
+        # landed any bills, so the Clients page shows a 'Pulling bills…' state.
+        # Cleared on the first capture that attaches arrays.
+        if not column_exists(conn, "clients", "capture_pending"):
+            conn.execute(text(
+                "ALTER TABLE clients ADD COLUMN capture_pending BOOLEAN DEFAULT FALSE"
+            ))
+            conn.execute(text(
+                "UPDATE clients SET capture_pending = FALSE WHERE capture_pending IS NULL"
+            ))
+            print("  + clients.capture_pending")
         for idx_sql in [
             "CREATE INDEX IF NOT EXISTS ix_clients_vec_email ON clients (vec_email)",
             "CREATE INDEX IF NOT EXISTS ix_clients_vec_username ON clients (vec_username)",

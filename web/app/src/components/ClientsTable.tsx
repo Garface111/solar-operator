@@ -140,6 +140,20 @@ function credentialForUtil(c: ClientRow, util: string): string | null {
   return null;
 }
 
+/** For a Cloud-Capture client eagerly created from a stored login and still
+ *  awaiting its first harvested bill (no arrays yet), the stored login lives on
+ *  the gmp/vec login columns rather than on any Array. Surface it so the operator
+ *  sees WHICH login the "Pulling bills…" card is tied to. The vec_* columns are
+ *  shared across the whole SmartHub co-op family, so we can't name the exact
+ *  co-op from the row alone — label it generically. */
+function pendingLoginHint(c: ClientRow): { util: string; login: string } | null {
+  const gmp = c.gmp_email || c.gmp_username;
+  if (gmp) return { util: "GMP", login: gmp };
+  const vec = c.vec_email || c.vec_username;
+  if (vec) return { util: "Utility", login: vec };
+  return null;
+}
+
 interface LoginGroup {
   util: string;
   credential: string | null;
@@ -812,7 +826,22 @@ function ClientTableRow({
         <td className="w-28 py-2.5 pr-3">
           {(() => {
             const chips = utilityChips(arrays);
-            if (chips.length === 0) return <span className="text-[11px] text-zinc-400">—</span>;
+            if (chips.length === 0) {
+              // Pending Cloud-Capture client — no arrays yet, but we know the
+              // login it will pull from. Show it muted so the card isn't blank.
+              const hint = client.capture_pending ? pendingLoginHint(client) : null;
+              if (hint) {
+                return (
+                  <span
+                    className="inline-flex max-w-[110px] items-center gap-1 rounded-full bg-zinc-100 px-1.5 py-0.5 text-[9px] font-medium text-zinc-500"
+                    title={`${hint.util}: ${hint.login}`}
+                  >
+                    <span className="truncate">{hint.login}</span>
+                  </span>
+                );
+              }
+              return <span className="text-[11px] text-zinc-400">—</span>;
+            }
             const tooltip = chips
               .map((ch) => `${ch.util}: ${ch.maskedAccounts.join(", ") || "—"}`)
               .join(" | ");
@@ -836,7 +865,11 @@ function ClientTableRow({
 
         {/* Arrays */}
         <td className="w-16 py-2.5 pr-3 text-right font-mono text-[12px] tabular-nums text-zinc-700">
-          {client.array_count}
+          {client.capture_pending && client.array_count === 0 ? (
+            <span className="text-zinc-300">·</span>
+          ) : (
+            client.array_count
+          )}
         </td>
 
         {/* Accounts */}
@@ -846,9 +879,19 @@ function ClientTableRow({
 
         {/* Last capture */}
         <td className="w-28 py-2.5 pr-3 text-[11px] text-zinc-500">
-          <span title={captureIso ? new Date(captureIso).toLocaleString() : undefined}>
-            {relativeTime(captureIso)}
-          </span>
+          {client.capture_pending && client.array_count === 0 ? (
+            <span
+              className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-1.5 py-0.5 text-[10px] font-medium text-sky-700"
+              title="We're signing into the utility portal and pulling this client's bills. This usually lands within a minute or two."
+            >
+              <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-sky-500" />
+              Pulling bills…
+            </span>
+          ) : (
+            <span title={captureIso ? new Date(captureIso).toLocaleString() : undefined}>
+              {relativeTime(captureIso)}
+            </span>
+          )}
         </td>
 
         {/* Delivery badge */}

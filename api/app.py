@@ -1128,6 +1128,33 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                             owner.is_placeholder = False
                     for c in clients:
                         setattr(c, _autopop_cfg["last_sync_attr"], now())
+                    # Cloud-Capture eager client (created from the stored login
+                    # before any bill landed) just got its first real capture.
+                    # Clear the 'Pulling bills…' flag and upgrade the login-
+                    # derived placeholder name to the real portal holder name —
+                    # unless the operator has already curated it (name_edited_at).
+                    if getattr(owner, "capture_pending", False):
+                        owner.capture_pending = False
+                        if owner.name_edited_at is None:
+                            better = _smart_client_name(
+                                captured_user, normalized["accounts"],
+                                user_email, user_username,
+                            )
+                            better = (better or "")[:200]
+                            # Only rename if it's a real upgrade AND the name is
+                            # free — uq_client_per_tenant would 500 the whole
+                            # capture on a collision. On collision, keep the
+                            # login-derived name (operator can merge/rename).
+                            if better and better != "New client" and better != owner.name:
+                                name_taken = db.execute(
+                                    select(Client.id).where(
+                                        Client.tenant_id == tenant.id,
+                                        Client.name == better,
+                                        Client.id != owner.id,
+                                    ).limit(1)
+                                ).scalar_one_or_none()
+                                if name_taken is None:
+                                    owner.name = better
                     capture_result = "updated"
                     capture_client_id = owner.id
                     capture_client_name = owner.name

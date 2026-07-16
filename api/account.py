@@ -402,6 +402,7 @@ def _client_to_dict(c: Client, array_count: int = 0) -> dict:
         "last_bounced_at": c.last_bounced_at.isoformat() if c.last_bounced_at else None,
         "last_bounce_reason": c.last_bounce_reason,
         "is_placeholder": c.is_placeholder,
+        "capture_pending": bool(getattr(c, "capture_pending", False)),
     }
 
 
