@@ -5,6 +5,7 @@ Endpoints:
   GET  /v1/energy-agent/session/{id}     session + recent messages
   POST /v1/energy-agent/realtime-session ephemeral OpenAI Realtime credentials
   POST /v1/energy-agent/chat             text (or voice-transcript) turn → Grok/Claude + tools
+  POST /v1/energy-agent/upload           attach file/image for chat analysis
   POST /v1/energy-agent/confirm          confirm a pending write/ui action
   POST /v1/energy-agent/transcript       append raw Realtime transcript lines
   POST /v1/energy-agent/ui-result        browser driver reports command result
@@ -16,6 +17,7 @@ Models live on shared Base so create_all picks them up (no migration).
 """
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -28,7 +30,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 from sqlalchemy import DateTime, Float, Integer, String, Text, func, select
@@ -418,6 +420,33 @@ class EaCostLedger(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
 
+class EaChatAsset(Base):
+    """File / image the owner attaches for Energy Agent to analyze."""
+    __tablename__ = "ea_chat_assets"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
+    tenant_id: Mapped[str] = mapped_column(String(40), index=True)
+    filename: Mapped[str] = mapped_column(String(260), default="file")
+    mime: Mapped[str] = mapped_column(String(120), default="application/octet-stream")
+    size: Mapped[int] = mapped_column(Integer, default=0)
+    kind: Mapped[str] = mapped_column(String(24), default="file")  # file|snippet|image
+    text_extract: Mapped[str] = mapped_column(Text, default="")
+    storage_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    meta_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+# Attachment limits (owner chat — smaller than Sovereign desk)
+_EA_MAX_UPLOAD_BYTES = int(os.getenv("EA_CHAT_MAX_UPLOAD", str(8 * 1024 * 1024)))
+_EA_MAX_TEXT_EXTRACT = 80_000
+_EA_ASSET_DIR = Path(os.getenv("EA_CHAT_ASSET_DIR", "/tmp/ea_chat_assets"))
+_EA_MAX_IMAGE_B64 = int(os.getenv("EA_CHAT_MAX_IMAGE_B64", str(5 * 1024 * 1024)))  # ~5MB raw → multimodal
+_EA_TEXT_EXTS = {
+    ".txt", ".md", ".markdown", ".json", ".csv", ".tsv", ".py", ".js", ".ts",
+    ".tsx", ".jsx", ".html", ".css", ".yml", ".yaml", ".toml", ".ini", ".env",
+    ".sh", ".bash", ".sql", ".log", ".xml", ".svg", ".xlsx", ".xls",
+}
+
+
 # ── pydantic ────────────────────────────────────────────────────────────────
 class SessionIn(BaseModel):
     context: dict[str, Any] | None = None
@@ -430,9 +459,10 @@ class SessionIn(BaseModel):
 
 class ChatIn(BaseModel):
     session_id: str
-    message: str
+    message: str = ""
     context: dict[str, Any] | None = None
     source: str = "text"  # text | voice
+    attachment_ids: list[str] = Field(default_factory=list)
 
 
 class ConfirmIn(BaseModel):
@@ -5252,6 +5282,55 @@ def _call_grok(messages: list[dict], tools: list) -> dict:
     return {"message": msg, "usage": usage, "provider": "xai"}
 
 
+def _openai_content_to_anthropic(content: Any) -> Any:
+    """Map OpenAI-style multimodal content (text + image_url) → Anthropic blocks."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content)
+    blocks: list[dict] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        ptype = part.get("type")
+        if ptype == "text":
+            blocks.append({"type": "text", "text": part.get("text") or ""})
+        elif ptype == "image_url":
+            url = ((part.get("image_url") or {}) if isinstance(part.get("image_url"), dict)
+                   else {}).get("url") or ""
+            if isinstance(part.get("image_url"), str):
+                url = part.get("image_url") or ""
+            if not url:
+                continue
+            # data:image/png;base64,....
+            media = "image/png"
+            b64 = ""
+            if url.startswith("data:") and ";base64," in url:
+                head, b64 = url.split(";base64,", 1)
+                media = head.replace("data:", "").strip() or "image/png"
+            else:
+                # Non-data URLs — Claude needs base64; skip with a note
+                blocks.append({
+                    "type": "text",
+                    "text": f"[Image URL not inlined: {url[:120]}]",
+                })
+                continue
+            blocks.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media,
+                    "data": b64,
+                },
+            })
+        else:
+            # pass through tool_result etc.
+            blocks.append(part)
+    return blocks if blocks else ""
+
+
 def _call_anthropic(messages: list[dict], tools: list) -> dict:
     if not ANTHROPIC_API_KEY:
         raise RuntimeError("no_anthropic")
@@ -5268,7 +5347,12 @@ def _call_anthropic(messages: list[dict], tools: list) -> dict:
     a_msgs = []
     for m in messages:
         if m["role"] == "system":
-            sys += m["content"] + "\n"
+            sc = m.get("content") or ""
+            if isinstance(sc, list):
+                sc = " ".join(
+                    (p.get("text") or "") for p in sc if isinstance(p, dict) and p.get("type") == "text"
+                )
+            sys += str(sc) + "\n"
         elif m["role"] == "tool":
             a_msgs.append({
                 "role": "user",
@@ -5281,7 +5365,11 @@ def _call_anthropic(messages: list[dict], tools: list) -> dict:
         elif m["role"] == "assistant" and m.get("tool_calls"):
             content = []
             if m.get("content"):
-                content.append({"type": "text", "text": m["content"]})
+                c = m["content"]
+                if isinstance(c, list):
+                    content.extend(_openai_content_to_anthropic(c) or [])
+                else:
+                    content.append({"type": "text", "text": c})
             for tc in m["tool_calls"]:
                 content.append({
                     "type": "tool_use",
@@ -5291,7 +5379,14 @@ def _call_anthropic(messages: list[dict], tools: list) -> dict:
                 })
             a_msgs.append({"role": "assistant", "content": content})
         else:
-            a_msgs.append({"role": m["role"], "content": m.get("content") or ""})
+            raw = m.get("content")
+            if isinstance(raw, list):
+                a_msgs.append({
+                    "role": m["role"],
+                    "content": _openai_content_to_anthropic(raw),
+                })
+            else:
+                a_msgs.append({"role": m["role"], "content": raw or ""})
     body = {
         # claude-sonnet-4-20250514 is retired/404 on current API — use 4.5 alias.
         "model": os.getenv("EA_ANTHROPIC_MODEL", "claude-sonnet-4-5"),
@@ -5483,7 +5578,144 @@ def _visual_fix_fast_path(
     }
 
 
-def _agent_turn(db, tenant: Tenant, session: EaSession, user_text: str, context: dict | None) -> dict:
+def _ea_extract_text(filename: str, mime: str, data: bytes) -> str:
+    """Best-effort text extract for LLM context (no heavy PDF parsers required)."""
+    name = (filename or "file").lower()
+    ext = Path(name).suffix
+    mime = (mime or "").lower()
+    if not data:
+        return ""
+    if ext in _EA_TEXT_EXTS or mime.startswith("text/") or mime in (
+        "application/json", "application/javascript", "application/xml",
+        "application/x-yaml", "application/toml",
+    ):
+        for enc in ("utf-8", "utf-8-sig", "latin-1"):
+            try:
+                return data.decode(enc)[:_EA_MAX_TEXT_EXTRACT]
+            except Exception:
+                continue
+        return ""
+    if ext == ".pdf" or "pdf" in mime:
+        try:
+            raw = data.decode("latin-1", errors="ignore")
+            chunks = re.findall(r"\(([^)]{4,200})\)", raw)
+            text = re.sub(r"\s+", " ", " ".join(chunks)).strip()
+            if len(text) > 80:
+                return text[:_EA_MAX_TEXT_EXTRACT]
+        except Exception:
+            pass
+        return f"[PDF binary: {filename}, {len(data)} bytes — no text extract]"
+    if mime.startswith("image/") or ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"):
+        return f"[Image attachment: {filename}, {mime or 'image'}, {len(data)} bytes]"
+    return f"[Binary attachment: {filename}, {mime or 'unknown'}, {len(data)} bytes]"
+
+
+def _ea_serialize_asset(a: EaChatAsset) -> dict:
+    return {
+        "id": a.id,
+        "filename": a.filename,
+        "mime": a.mime,
+        "size": a.size,
+        "kind": a.kind,
+        "created_at": a.created_at.isoformat() + "Z" if a.created_at else None,
+        "preview": (a.text_extract or "")[:240],
+        "has_text": bool((a.text_extract or "").strip()),
+    }
+
+
+def _ea_ensure_asset_table(db=None) -> None:
+    try:
+        if db is not None:
+            bind = db.get_bind()
+        else:
+            from .db import engine
+            bind = engine
+        Base.metadata.create_all(bind=bind, tables=[EaChatAsset.__table__])
+    except Exception:
+        log.exception("ea_chat_assets table create failed")
+
+
+def _ea_load_assets(db, tenant_id: str, asset_ids: list[str] | None) -> list[EaChatAsset]:
+    if not asset_ids:
+        return []
+    ids = [str(i) for i in asset_ids if i][:12]
+    if not ids:
+        return []
+    rows = db.execute(
+        select(EaChatAsset).where(
+            EaChatAsset.id.in_(ids),
+            EaChatAsset.tenant_id == tenant_id,
+        )
+    ).scalars().all()
+    by_id = {r.id: r for r in rows}
+    return [by_id[i] for i in ids if i in by_id]
+
+
+def _ea_assets_text_block(assets: list[EaChatAsset]) -> str:
+    if not assets:
+        return ""
+    parts = ["## Attachments the owner handed you (ground truth — analyze these)"]
+    for a in assets:
+        body = (a.text_extract or "").strip()
+        if len(body) > 14000:
+            body = body[:14000] + "\n…[truncated]"
+        parts.append(
+            f"### File: {a.filename} ({a.mime}, {a.size} bytes, id={a.id})\n"
+            f"```\n{body or '(binary / image — see visual content if provided)'}\n```"
+        )
+    return "\n\n".join(parts)
+
+
+def _ea_user_content_multimodal(
+    user_text: str, assets: list[EaChatAsset],
+) -> str | list[dict]:
+    """Build OpenAI-compatible user content: text + optional image data URLs."""
+    text_parts = [(user_text or "").strip()]
+    attach_md = _ea_assets_text_block(assets)
+    if attach_md:
+        text_parts.append(attach_md)
+    text = "\n\n".join(p for p in text_parts if p)[:12000]
+    if not text:
+        text = "Please analyze the attached file(s)."
+
+    image_parts: list[dict] = []
+    for a in assets:
+        if (a.kind or "") != "image" and not (a.mime or "").startswith("image/"):
+            continue
+        path = a.storage_path
+        if not path or not Path(path).is_file():
+            continue
+        try:
+            raw = Path(path).read_bytes()
+        except Exception:
+            continue
+        if not raw or len(raw) > _EA_MAX_IMAGE_B64:
+            # Too large for multimodal — text note already covers it
+            continue
+        mime = (a.mime or "image/png").split(";")[0].strip() or "image/png"
+        if mime not in ("image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp"):
+            mime = "image/png"
+        if mime == "image/jpg":
+            mime = "image/jpeg"
+        b64 = base64.b64encode(raw).decode("ascii")
+        image_parts.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:{mime};base64,{b64}"},
+        })
+
+    if not image_parts:
+        return text
+    return [{"type": "text", "text": text}] + image_parts
+
+
+def _agent_turn(
+    db,
+    tenant: Tenant,
+    session: EaSession,
+    user_text: str,
+    context: dict | None,
+    attachment_ids: list[str] | None = None,
+) -> dict:
     budget = _check_budget(db, tenant.id)
     if not budget["ok"]:
         return {
@@ -5501,13 +5733,16 @@ def _agent_turn(db, tenant: Tenant, session: EaSession, user_text: str, context:
             "mind": None,
         }
 
-    # Visual polish: short ack + quiet pipeline (skip multi-tool design lectures)
-    try:
-        fast = _visual_fix_fast_path(db, tenant, session, user_text, context)
-        if fast is not None:
-            return fast
-    except Exception as e:
-        log.warning("visual_fix_fast_path failed: %s", e)
+    assets = _ea_load_assets(db, tenant.id, attachment_ids)
+    # Skip visual-fast path when attachments need real analysis
+    if not assets:
+        # Visual polish: short ack + quiet pipeline (skip multi-tool design lectures)
+        try:
+            fast = _visual_fix_fast_path(db, tenant, session, user_text, context)
+            if fast is not None:
+                return fast
+        except Exception as e:
+            log.warning("visual_fix_fast_path failed: %s", e)
 
     # Operating mind: plan only here (cheap). Do NOT drain heavy tasks on the
     # chat critical path — scheduler + client mind/tick handle that (speed).
@@ -5568,10 +5803,27 @@ def _agent_turn(db, tenant: Tenant, session: EaSession, user_text: str, context:
     except Exception:
         pass
 
+    if assets:
+        system += (
+            "\n\nThe owner attached file(s)/image(s) this turn. Analyze them carefully: "
+            "describe what you see, extract numbers/tables, and answer their question. "
+            "Do not claim you cannot view images if image content is provided."
+        )
+
+    user_content = _ea_user_content_multimodal(user_text, assets)
+    # Stored transcript is always plain text (images referenced by name)
+    store_user = (user_text or "").strip()
+    if assets:
+        names = ", ".join(a.filename for a in assets)
+        if store_user:
+            store_user = f"{store_user}\n\n[Attached: {names}]"
+        else:
+            store_user = f"[Attached: {names}] — please analyze."
+
     messages: list[dict] = [{"role": "system", "content": system}]
     for m in hist:
         messages.append({"role": m.role, "content": (m.content or "")[:1800]})
-    messages.append({"role": "user", "content": user_text[:4000]})
+    messages.append({"role": "user", "content": user_content})
 
     tool_trace = []
     ui_commands = []
@@ -5700,9 +5952,19 @@ def _agent_turn(db, tenant: Tenant, session: EaSession, user_text: str, context:
     _charge(db, tenant.id, total_cost, f"chat:{provider or 'none'}")
     session.cost_usd = float(session.cost_usd or 0) + total_cost
 
+    user_meta: dict[str, Any] = {}
+    if context:
+        user_meta["context"] = context
+    if assets:
+        user_meta["attachment_ids"] = [a.id for a in assets]
+        user_meta["attachments"] = [
+            {"id": a.id, "filename": a.filename, "mime": a.mime, "kind": a.kind}
+            for a in assets
+        ]
     db.add(EaMessage(
-        session_id=session.id, tenant_id=tenant.id, role="user", content=user_text[:8000],
-        meta_json=json.dumps({"context": context}) if context else None,
+        session_id=session.id, tenant_id=tenant.id, role="user",
+        content=(store_user or user_text)[:8000],
+        meta_json=json.dumps(user_meta, default=str) if user_meta else None,
     ))
     db.add(EaMessage(
         session_id=session.id, tenant_id=tenant.id, role="assistant", content=final_text[:8000],
@@ -6056,13 +6318,93 @@ _NO_RE = re.compile(
 )
 
 
+@router.post("/v1/energy-agent/upload")
+async def chat_upload(
+    authorization: str | None = Header(default=None),
+    file: UploadFile | None = File(default=None),
+    snippet: str | None = Form(default=None),
+    filename: str | None = Form(default=None),
+):
+    """Attach a file or image for Energy Agent to analyze on the next chat turn."""
+    t = _auth(authorization)
+    require_not_demo(t)
+    _ea_ensure_asset_table()
+    _EA_ASSET_DIR.mkdir(parents=True, exist_ok=True)
+
+    data = b""
+    fname = (filename or (file.filename if file else None) or "snippet.txt").strip()
+    mime = "text/plain"
+    kind = "snippet"
+
+    if file is not None:
+        kind = "file"
+        mime = (file.content_type or "application/octet-stream")[:120]
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = await file.read(64 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _EA_MAX_UPLOAD_BYTES:
+                raise HTTPException(413, f"File too large (max {_EA_MAX_UPLOAD_BYTES} bytes)")
+            chunks.append(chunk)
+        data = b"".join(chunks)
+        if not fname or fname == "snippet.txt":
+            fname = file.filename or "upload.bin"
+        if mime.startswith("image/"):
+            kind = "image"
+    elif snippet is not None:
+        data = snippet.encode("utf-8")
+        if len(data) > _EA_MAX_UPLOAD_BYTES:
+            raise HTTPException(413, "Snippet too large")
+        kind = "snippet"
+        mime = "text/plain"
+        if not fname.endswith((".txt", ".md", ".json", ".csv")):
+            fname = (fname or "paste") + ".txt"
+    else:
+        raise HTTPException(400, "Provide file= or snippet=")
+
+    text = _ea_extract_text(fname, mime, data)
+    asset_id = f"eca_{uuid.uuid4().hex[:16]}"
+    storage = None
+    try:
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", fname)[:80]
+        path = _EA_ASSET_DIR / f"{asset_id}_{safe_name}"
+        path.write_bytes(data)
+        storage = str(path)
+    except Exception as e:
+        log.warning("ea chat asset disk write failed: %s", e)
+
+    with SessionLocal() as db:
+        _ea_ensure_asset_table(db)
+        row = EaChatAsset(
+            id=asset_id,
+            tenant_id=t.id,
+            filename=fname[:260],
+            mime=mime,
+            size=len(data),
+            kind=kind,
+            text_extract=text[:_EA_MAX_TEXT_EXTRACT],
+            storage_path=storage,
+            meta_json=json.dumps({"source": "ea_chat_upload"}, default=str),
+        )
+        db.add(row)
+        db.commit()
+        return {"ok": True, "asset": _ea_serialize_asset(row)}
+
+
 @router.post("/v1/energy-agent/chat")
 def chat(body: ChatIn, authorization: str | None = Header(default=None)):
     t = _auth(authorization)
     msg = (body.message or "").strip()
-    if not msg:
+    attach_ids = list(body.attachment_ids or [])[:12]
+    if not msg and not attach_ids:
         raise HTTPException(400, "Empty message")
+    if not msg and attach_ids:
+        msg = "Please analyze the attached file(s)."
     with SessionLocal() as db:
+        _ea_ensure_asset_table(db)
         s = _get_session(db, body.session_id, t.id)
         if body.context is not None:
             s.context_json = json.dumps(body.context)
@@ -6070,7 +6412,7 @@ def chat(body: ChatIn, authorization: str | None = Header(default=None)):
         # Voice/text "yes" / "no" while a write is pending → resolve confirm without
         # another LLM round-trip (so offtaker % changes land immediately).
         pending = json.loads(s.pending_json) if s.pending_json else None
-        if pending and _YES_RE.match(msg):
+        if pending and not attach_ids and _YES_RE.match(msg):
             conf = confirm(
                 ConfirmIn(session_id=s.id, confirm=True, pending_id=pending.get("id")),
                 authorization=authorization,
@@ -6095,7 +6437,7 @@ def chat(body: ChatIn, authorization: str | None = Header(default=None)):
                 "budget": _check_budget(db, t.id),
                 "provider": "confirm",
             }
-        if pending and _NO_RE.match(msg):
+        if pending and not attach_ids and _NO_RE.match(msg):
             conf = confirm(
                 ConfirmIn(session_id=s.id, confirm=False, pending_id=pending.get("id")),
                 authorization=authorization,
@@ -6111,7 +6453,7 @@ def chat(body: ChatIn, authorization: str | None = Header(default=None)):
                 "provider": "confirm",
             }
 
-        out = _agent_turn(db, t, s, msg, body.context)
+        out = _agent_turn(db, t, s, msg, body.context, attachment_ids=attach_ids)
         db.commit()
         return {"ok": True, "session_id": s.id, **out}
 
