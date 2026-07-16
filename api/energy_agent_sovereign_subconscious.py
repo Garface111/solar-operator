@@ -57,8 +57,11 @@ def subconscious_enabled() -> bool:
 
 
 def subconscious_llm_enabled() -> bool:
-    """Optional cheap LLM monologue. Default OFF — rule monologue is free + honest."""
-    return subconscious_enabled() and _flag("SOVEREIGN_SUBCONSCIOUS_LLM", "0")
+    """Grok monologue for subconscious. Default ON (Ford 2026-07-15: real mind).
+
+    Kill: SOVEREIGN_SUBCONSCIOUS_LLM=0 (falls back to deterministic rule monologue).
+    """
+    return subconscious_enabled() and _flag("SOVEREIGN_SUBCONSCIOUS_LLM", "1")
 
 
 def sub_interval_sec() -> int:
@@ -269,34 +272,52 @@ def rule_monologue(
     return " · ".join(parts)[:1800]
 
 
+def subconscious_model() -> str:
+    """Grok model for subconscious monologue (default: same rock as cortex)."""
+    return (
+        (os.getenv("SOVEREIGN_SUBCONSCIOUS_MODEL") or "").strip()
+        or (os.getenv("SOVEREIGN_GROK_MODEL") or "").strip()
+        or (os.getenv("ENERGY_AGENT_MODEL") or "").strip()
+        or "grok-4.5"
+    )
+
+
 def _cheap_llm_monologue(
     digests: dict,
     events: list[dict],
     last_monologue: str,
     heat: int,
 ) -> dict[str, Any]:
-    """Optional cheap model: monologue + needs_cortex bit. Never actions."""
+    """Grok subconscious: monologue + needs_cortex bit. Never hard actions."""
     if not subconscious_llm_enabled():
         return {"ok": False, "skipped": True}
-    model = (
-        os.getenv("SOVEREIGN_SUBCONSCIOUS_MODEL")
-        or "grok-4-1-fast-non-reasoning"
-    )
+    model = subconscious_model()
     try:
-        from .energy_agent_sovereign_brain import XAI_API_KEY, XAI_BASE, _http_json
+        from .energy_agent_sovereign_brain import XAI_API_KEY, XAI_BASE, _http_json, _extract_json
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": str(e)[:200]}
-    if not XAI_API_KEY:
+
+    # Prefer Build OIDC / refreshed bearer (same path as cortex Grok)
+    bearer = None
+    try:
+        from .xai_auth import get_xai_bearer
+        bearer = get_xai_bearer()
+    except Exception as e:  # noqa: BLE001
+        if XAI_API_KEY:
+            bearer = XAI_API_KEY
+        else:
+            return {"ok": False, "error": f"no_xai:{e}"[:200]}
+    if not bearer:
         return {"ok": False, "error": "no_xai"}
 
     user = {
         "role": "subconscious",
         "instruction": (
-            "You are Sovereign's subconscious — a filter and memory writer, NOT the actor. "
-            "Rephrase digests into a short rolling monologue. Raise/lower heat honestly. "
-            "Emit needs_cortex true only if something actually needs expensive executive thought "
-            "or hard action. Never invent urgency. Never propose deploy/email/code yourself. "
-            "Output pure JSON only."
+            "You are Sovereign's subconscious — continuous inner monologue, NOT the executive actor. "
+            "Rephrase digests into a short rolling monologue (partner tone, no fake urgency). "
+            "Raise/lower heat honestly 0–100. needs_cortex=true only if expensive executive "
+            "thought or hard action is actually warranted. Never invent customer crises from demos. "
+            "Never propose deploy/email/code yourself. Output pure JSON only."
         ),
         "heat_hint": heat,
         "digests_queues": digests.get("queues"),
@@ -304,11 +325,11 @@ def _cheap_llm_monologue(
         "recent_events": events[:6],
         "last_monologue": (last_monologue or "")[:400],
         "schema": {
-            "monologue": "one short paragraph, factual",
+            "monologue": "one short paragraph, factual, continuous thought",
             "heat": 0,
             "needs_cortex": False,
             "why": "one line",
-            "memory_writes": [{"key": "k", "value": "v"}],
+            "memory_writes": [{"key": "sub_focus", "value": "optional tiny note"}],
         },
     }
     body = {
@@ -317,34 +338,34 @@ def _cheap_llm_monologue(
             {
                 "role": "system",
                 "content": (
-                    "Subconscious of Sovereign. JSON only. No actions. No owner speech. "
-                    "No fake urgency. Tiny monologue."
+                    "You are the SUBCONSCIOUS of Sovereign (Array Operator product mind). "
+                    "JSON only. No actions. No owner speech. No fake urgency. "
+                    "Tiny monologue — think continuously, don't act."
                 ),
             },
             {"role": "user", "content": json.dumps(user, default=str)[:6000]},
         ],
-        "temperature": 0.2,
-        "max_tokens": 400,
+        "temperature": 0.35,
+        "max_tokens": 500,
     }
     try:
         out = _http_json(
             f"{XAI_BASE}/chat/completions",
             {
-                "Authorization": f"Bearer {XAI_API_KEY}",
+                "Authorization": f"Bearer {bearer}",
                 "Content-Type": "application/json",
             },
             body,
-            timeout=25,
+            timeout=45,
         )
         content = (((out.get("choices") or [{}])[0].get("message") or {}).get("content") or "")
-        from .energy_agent_sovereign_brain import _extract_json
         parsed = _extract_json(content)
         parsed["ok"] = True
-        parsed["provider"] = "subconscious_llm"
+        parsed["provider"] = "grok_subconscious"
         parsed["model"] = model
         return parsed
     except Exception as e:  # noqa: BLE001
-        log.warning("subconscious llm failed: %s", e)
+        log.warning("subconscious grok failed: %s", e)
         return {"ok": False, "error": str(e)[:300]}
 
 
