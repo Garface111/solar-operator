@@ -29,7 +29,7 @@ import {
   refreshCapture,
   sendClientReportToMe,
   downloadClientReport,
-  downloadGmpGeneration,
+  downloadGeneration,
   mergeClientInto,
   recentReportQuarters,
 } from "../lib/api";
@@ -1160,9 +1160,9 @@ function ExpandedPanel({
     if (downloadingGmp) return;
     setDownloadingGmp(true);
     try {
-      await downloadGmpGeneration(client.id, client.name, reportQuarter || undefined);
+      await downloadGeneration(client.id, client.name, reportQuarter || undefined);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Couldn't download GMP generation");
+      toast.error(err instanceof Error ? err.message : "Couldn't download generation");
     } finally {
       setDownloadingGmp(false);
     }
@@ -1349,10 +1349,10 @@ function ExpandedPanel({
                 type="button"
                 onClick={handleDownloadGmp}
                 disabled={downloadingGmp}
-                title="Raw GMP generation for the selected quarter — monthly per project, plus daily interval detail where available."
+                title="Raw utility generation for the selected quarter — monthly per project across all utilities (GMP + co-ops), plus daily meter detail where available."
                 className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-cream-border bg-white px-5 py-2.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
               >
-                {downloadingGmp ? <><Spinner /> Downloading…</> : "Download GMP generation .xlsx"}
+                {downloadingGmp ? <><Spinner /> Downloading…</> : "Download generation .xlsx"}
               </button>
               <Link
                 to={`/verify/${client.id}`}

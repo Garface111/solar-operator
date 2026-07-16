@@ -1150,10 +1150,11 @@ export async function downloadClientReport(
   URL.revokeObjectURL(link.href);
 }
 
-/** Download a client's RAW GMP generation workbook for a quarter — a Monthly
- *  Summary (projects × the quarter's 3 months) plus per-project daily interval
- *  detail. GMP data only. `quarter` like 'Q1-2026'; omit for the latest. */
-export async function downloadGmpGeneration(
+/** Download a client's RAW utility generation workbook for a quarter — a Monthly
+ *  Summary (projects × the quarter's 3 months) across all the client's utilities
+ *  (GMP + SmartHub co-ops) plus per-project daily meter detail. `quarter` like
+ *  'Q1-2026'; omit for the latest. */
+export async function downloadGeneration(
   clientId: number,
   clientName: string,
   quarter?: string,
@@ -1161,7 +1162,7 @@ export async function downloadGmpGeneration(
   const token = getSession();
   const qs = quarter ? `?quarter=${encodeURIComponent(quarter)}` : "";
   const res = await fetchWithTimeout(
-    `/v1/account/clients/${clientId}/gmp-generation.xlsx${qs}`,
+    `/v1/account/clients/${clientId}/generation.xlsx${qs}`,
     { headers: token ? { Authorization: `Bearer ${token}` } : {} },
   );
   if (res.status === 401) {
@@ -1169,7 +1170,7 @@ export async function downloadGmpGeneration(
     throw new UnauthorizedError();
   }
   if (!res.ok) {
-    let msg = `Couldn't build the GMP generation export (${res.status})`;
+    let msg = `Couldn't build the generation export (${res.status})`;
     try {
       msg = (await res.json()).detail || msg;
     } catch {
@@ -1182,7 +1183,7 @@ export async function downloadGmpGeneration(
   link.href = URL.createObjectURL(blob);
   const safeName = clientName.replace(/[^A-Za-z0-9_.-]+/g, "_");
   const label = quarter ? quarter.replace(/[^A-Za-z0-9]/g, "-") : "latest";
-  link.download = `${safeName}-GMP-${label}-generation.xlsx`;
+  link.download = `${safeName}-${label}-generation.xlsx`;
   document.body.appendChild(link);
   link.click();
   link.remove();
