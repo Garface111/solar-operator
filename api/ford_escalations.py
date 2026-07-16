@@ -124,7 +124,9 @@ def enqueue_escalation(
 
     if also_email and not quiet:
         try:
-            board = "https://nepooloperator.com/admin/escalations"
+            # Ford-internal board link. arrayoperator.com does NOT proxy /admin,
+            # so post-fold this must be the Railway origin (stable, domain-free).
+            board = "https://web-production-49c83.up.railway.app/admin/escalations"
             body = (
                 f"Energy Agent escalation queued for Ford Operator\n"
                 f"id: {eid}\n"
@@ -341,7 +343,7 @@ def process_open_escalations(limit: int | None = None) -> dict:
                             f"Title: {one_line}\n\n"
                             f"Summary:\n{row.summary}\n\n"
                             f"Plan:\n{plan}\n\n"
-                            f"Board: https://nepooloperator.com/admin/escalations?key=…\n"
+                            f"Board: https://web-production-49c83.up.railway.app/admin/escalations?key=…\n"
                         )
                         send_internal_alert(
                             f"[Ford Operator] {priority.upper()} · {one_line[:60]}",

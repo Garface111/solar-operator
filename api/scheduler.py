@@ -21,6 +21,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import select, or_, func, text
+from . import branding
 from .db import SessionLocal, engine
 from .models import Tenant, Client, Array, Job, UtilitySession, now
 from .notify import (
@@ -617,8 +618,11 @@ def finalize_expired_trials():
                 t.trial_extended = True
                 db.commit()
                 try:
+                    _product = getattr(t, "product", "nepool") or "nepool"
                     send_add_first_array_email(
-                        to=t.contact_email, name=t.operator_name or t.company_name or t.name)
+                        to=t.contact_email, name=t.operator_name or t.company_name or t.name,
+                        dashboard_url=branding.dashboard_url(_product),
+                        product=_product)
                 except Exception:
                     pass
                 send_internal_alert(
@@ -640,10 +644,12 @@ def finalize_expired_trials():
                 t.active = False  # gates report delivery (see filters below)
                 db.commit()
                 try:
+                    _product = getattr(t, "product", "nepool") or "nepool"
                     send_trial_paused_no_card_email(
                         to=t.contact_email,
                         name=t.operator_name or t.company_name or t.name,
-                        product=getattr(t, "product", "nepool"))
+                        dashboard_url=branding.dashboard_url(_product),
+                        product=_product)
                 except Exception as mail_err:
                     logger.warning("send_trial_paused_no_card_email failed: %s", mail_err)
                 send_internal_alert(
@@ -732,6 +738,7 @@ def finalize_expired_trials():
                 try:
                     send_trial_charge_failed_email(
                         to=t.contact_email, name=t.operator_name or t.company_name or t.name,
+                        dashboard_url=branding.dashboard_url(product),
                         product=product)
                 except Exception as mail_err:
                     logger.warning("send_trial_charge_failed_email failed: %s", mail_err)
@@ -765,7 +772,8 @@ def send_trial_ending_reminders() -> dict:
                 end_str = trial_ends_at.strftime(
                     f"%B {trial_ends_at.day}, {trial_ends_at.year}")
                 send_trial_ending_no_card_reminder_email(
-                    to=email, name=name, trial_end_date=end_str, product=product)
+                    to=email, name=name, trial_end_date=end_str,
+                    dashboard_url=branding.dashboard_url(product), product=product)
                 # Stamp only on a successful send so a transient email failure
                 # leaves the tenant eligible next tick (at-least-once on failure,
                 # exactly-once on success).

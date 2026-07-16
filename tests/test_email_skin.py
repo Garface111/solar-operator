@@ -31,9 +31,11 @@ NEPOOL_OLD_DARK = ("#064e3b", "#e6b470", "#faf8f5", "#022c22", "#e8e2d9")
 def _assert_nepool_wordmark(blob: str) -> None:
     """The NEPOOL wordmark strip carries the brand + domain. In HTML the domain
     is wrapped in an <a>, so the two halves are separate substrings; in plain
-    text it's one contiguous line."""
+    text it's one contiguous line. Post-fold (2026-07-16) the domain is the
+    folded home — the sunsetting nepooloperator.com must NOT be emitted."""
     assert "NEPOOL Operator ·" in blob
-    assert "nepooloperator.com" in blob
+    assert "arrayoperator.com" in blob
+    assert "nepooloperator.com" not in blob
 
 
 # ── render_email_skin ─────────────────────────────────────────────────────────
@@ -144,7 +146,7 @@ def test_text_skin_contains_wordmark():
     text = render_email_skin_text(
         headline="H", intro_line="I", body_text="Body."
     )
-    assert "NEPOOL Operator · nepooloperator.com" in text  # rebranded from "Solar Operator · solaroperator.org"
+    assert "NEPOOL Operator · arrayoperator.com" in text  # post-fold wordmark (was · nepooloperator.com)
 
 
 def test_text_skin_cta_rendered_as_label_url():
@@ -194,7 +196,7 @@ def test_send_welcome_smoke():
     text = captured["text"]
     assert text is not None
     assert "NEPOOL OPERATOR" in text  # rebranded from "SOLAR OPERATOR"
-    assert "NEPOOL Operator · nepooloperator.com" in text  # plain-text wordmark is contiguous
+    assert "NEPOOL Operator · arrayoperator.com" in text  # plain-text wordmark is contiguous (post-fold domain)
 
 
 # ── Array Operator (light "day") theme ────────────────────────────────────────

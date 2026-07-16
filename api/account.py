@@ -75,10 +75,12 @@ def _iso_utc(dt: Optional[datetime]) -> Optional[str]:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt.isoformat()
 
-APP_URL = os.getenv("APP_URL", "https://nepooloperator.com").rstrip("/")
-# Public, buyer-facing dashboard URL. Netlify 200-proxies nepooloperator.com/accounts
+APP_URL = os.getenv("APP_URL", "https://arrayoperator.com").rstrip("/")
+# Public, buyer-facing dashboard URL. Netlify 200-proxies arrayoperator.com/accounts
 # to the FastAPI mount at /app/* on Railway, so magic-link emails and Stripe
 # return URLs use the clean marketing-domain path, never the raw Railway host.
+# (Post-fold 2026-07-16: nepooloperator.com is sunsetting; the folded home
+# serves the same proxy.)
 PUBLIC_DASHBOARD_URL = os.getenv("PUBLIC_DASHBOARD_URL", f"{APP_URL}/accounts").rstrip("/")
 SESSION_SECRET = os.getenv("SESSION_SECRET", "")  # if blank, generated at startup
 SESSION_TTL_SECONDS = 30 * 24 * 3600  # 30 days
@@ -733,8 +735,9 @@ def password_login(body: PasswordLoginBody, request: Request):
                     )
                 raise HTTPException(
                     401,
-                    "That password is for NEPOOL Operator — sign in at "
-                    "https://nepooloperator.com/accounts (this page is Array Operator only).",
+                    "That password is for a NEPOOL Operator account, which now "
+                    "lives inside Array Operator — its dashboard is at "
+                    "https://arrayoperator.com/accounts.",
                 )
             matches = product_matches
 

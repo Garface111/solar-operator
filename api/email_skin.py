@@ -72,13 +72,17 @@ _THEMES = {
         "chip_icon_text": "#ffffff",
         "link": "#047857",
         "brand": "NEPOOL Operator",
-        "wordmark": "NEPOOL Operator · nepooloperator.com",
+        # Post-fold (2026-07-16) the NEPOOL product lives inside Array Operator
+        # and nepooloperator.com is sunsetting — the wordmark links to the
+        # folded home. Theme tokens above are unchanged (the skin stays
+        # solarpunk-light for residual nepool-product sends).
+        "wordmark": "NEPOOL Operator · arrayoperator.com",
         # HTML-only wordmark so the domain link is on-brand emerald (not the
         # client's default-blue autolink) on the light footer. Plain `wordmark`
         # above stays for the text/plain fallback (render_email_skin_text).
-        "wordmark_html": ('NEPOOL Operator · <a href="https://nepooloperator.com" '
+        "wordmark_html": ('NEPOOL Operator · <a href="https://arrayoperator.com" '
                           'style="color:#065f46;text-decoration:none;font-weight:600;">'
-                          'nepooloperator.com</a>'),
+                          'arrayoperator.com</a>'),
         "default_tagline": "Quarterly NEPOOL-GIS generation reports, made simple.",
         "footer_default": "Sent by NEPOOL Operator — solar accounting for the rest of us.",
         "chip_caption": "NEPOOL-GIS generation workbook",

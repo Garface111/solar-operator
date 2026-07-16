@@ -3,23 +3,25 @@ public dashboard/marketing URLs used in transactional emails and Stripe
 return URLs.
 
 Two products share ONE backend (see models.Tenant.product):
-  - "nepool"          → NEPOOL Operator  (nepooloperator.com)   [default]
+  - "nepool"          → NEPOOL Operator  [default product key]
   - "array_operator"  → Array Operator   (arrayoperator.com)
 
-IMPORTANT — safe-by-default: arrayoperator.com is not necessarily live/proxied
-yet. So AO_APP_URL DEFAULTS to the NEPOOL domain, which already proxies
-/accounts + /onboarding to Railway and therefore yields a WORKING magic-link
-today. The moment arrayoperator.com resolves + proxies, flip it with a single
-env var (AO_APP_URL=https://arrayoperator.com) — no code change, no redeploy of
-logic. Never emit a dead-link domain just because the brand exists on paper.
+POST-FOLD (2026-07-16, "THE FOLD"): the NEPOOL Operator product folded into
+Array Operator (Invoices → Generation reports) and nepooloperator.com is being
+sunset. Both products now DEFAULT to arrayoperator.com — it proxies /v1/*,
+/accounts (the NEPOOL/verifier SPA) and /onboarding, so every residual
+nepool-product magic link still lands on a page that can exchange it
+(arrayoperator.com/accounts/?token=…). APP_URL / PUBLIC_DASHBOARD_URL env vars
+still override for staging or rollback. Never emit the dying domain.
 """
 from __future__ import annotations
 
 import os
 
 # NEPOOL (default product). Mirrors APP_URL used elsewhere; kept here so all
-# brand/url resolution flows through one module.
-_NEPOOL_APP_URL = os.getenv("APP_URL", "https://nepooloperator.com").rstrip("/")
+# brand/url resolution flows through one module. Post-fold this points at the
+# folded home (arrayoperator.com) — its /accounts proxy serves the NEPOOL SPA.
+_NEPOOL_APP_URL = os.getenv("APP_URL", "https://arrayoperator.com").rstrip("/")
 
 # Array Operator. arrayoperator.com is live + proxying, so it is the default now
 # (no env flip needed). AO_APP_URL can still override for staging/preview.
@@ -56,8 +58,9 @@ def dashboard_url(product: str | None) -> str:
 
     PER-PRODUCT, because the two products serve their owner dashboard at
     DIFFERENT paths:
-      - NEPOOL Operator → nepooloperator.com/accounts (the React SPA, honoring
-        the PUBLIC_DASHBOARD_URL override for back-compat).
+      - NEPOOL Operator → {APP_URL}/accounts — post-fold that is
+        arrayoperator.com/accounts, which proxies to the NEPOOL React SPA
+        (PUBLIC_DASHBOARD_URL still overrides for back-compat).
       - Array Operator  → arrayoperator.com  (the owner dashboard is the SITE
         ROOT / app.js). Its /accounts path proxies to the NEPOOL verifier SPA,
         so /accounts is WRONG for an array owner.
