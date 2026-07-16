@@ -110,17 +110,13 @@ def brain_enabled() -> bool:
 
 
 def primary_provider() -> str:
-    """rock|grok → xAI; cloth|claude → Anthropic.
-
-    Default flipped to Claude when Grok team is credit-capped (Ford 2026-07-16).
-    Override with SOVEREIGN_BRAIN_PRIMARY=grok when xAI is funded again.
-    """
-    raw = (os.getenv("SOVEREIGN_BRAIN_PRIMARY") or "claude").strip().lower()
+    """rock|grok → xAI (Grok Build OIDC or API key); cloth|claude → Anthropic."""
+    raw = (os.getenv("SOVEREIGN_BRAIN_PRIMARY") or "grok").strip().lower()
     if raw in ("rock", "grok", "xai"):
         return "grok"
     if raw in ("cloth", "claude", "anthropic", "claude_code", "claudecode"):
         return "claude"
-    return "claude"
+    return "grok"
 
 
 def fallback_provider() -> str:
@@ -144,10 +140,14 @@ def _http_json(url: str, headers: dict, body: dict, timeout: int = 90) -> dict:
 
 
 def call_grok(messages: list[dict], *, temperature: float = 0.45) -> dict:
-    if not XAI_API_KEY:
-        raise RuntimeError("no_xai")
-    # Short timeout so credit/403 fails fast and Claude can answer chat
-    timeout = int(os.getenv("SOVEREIGN_GROK_TIMEOUT", "20") or 20)
+    try:
+        from .xai_auth import get_xai_bearer
+        bearer = get_xai_bearer()
+    except Exception as e:
+        if not XAI_API_KEY:
+            raise RuntimeError(f"no_xai: {e}") from e
+        bearer = XAI_API_KEY
+    timeout = int(os.getenv("SOVEREIGN_GROK_TIMEOUT", "90") or 90)
     body = {
         "model": GROK_MODEL,
         "messages": messages,
@@ -156,7 +156,7 @@ def call_grok(messages: list[dict], *, temperature: float = 0.45) -> dict:
     out = _http_json(
         f"{XAI_BASE}/chat/completions",
         {
-            "Authorization": f"Bearer {XAI_API_KEY}",
+            "Authorization": f"Bearer {bearer}",
             "Content-Type": "application/json",
         },
         body,

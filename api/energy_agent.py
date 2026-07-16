@@ -5207,10 +5207,28 @@ def _http_json(url: str, headers: dict, body: dict | None = None, method: str = 
         raise HTTPException(502, f"Upstream {e.code}: {err}") from e
 
 
+def _xai_ready() -> bool:
+    if XAI_API_KEY:
+        return True
+    try:
+        from .xai_auth import _oidc_config
+        return bool(_oidc_config())
+    except Exception:
+        return False
+
+
 def _call_grok(messages: list[dict], tools: list) -> dict:
-    """OpenAI-compatible chat.completions via xAI. Returns message dict + usage."""
-    if not XAI_API_KEY:
-        raise RuntimeError("no_xai")
+    """OpenAI-compatible chat.completions via xAI. Returns message dict + usage.
+
+    Bearer may be classic console.x.ai API key OR Grok Build OIDC (prepaid credits).
+    """
+    try:
+        from .xai_auth import get_xai_bearer
+        bearer = get_xai_bearer()
+    except Exception as e:
+        if not XAI_API_KEY:
+            raise RuntimeError(f"no_xai: {e}") from e
+        bearer = XAI_API_KEY
     body = {
         "model": XAI_MODEL,
         "messages": messages,
@@ -5221,11 +5239,11 @@ def _call_grok(messages: list[dict], tools: list) -> dict:
     out = _http_json(
         f"{XAI_BASE}/chat/completions",
         {
-            "Authorization": f"Bearer {XAI_API_KEY}",
+            "Authorization": f"Bearer {bearer}",
             "Content-Type": "application/json",
         },
         body,
-        timeout=int(os.getenv("EA_GROK_TIMEOUT", "20") or 20),
+        timeout=int(os.getenv("EA_GROK_TIMEOUT", "60") or 60),
     )
     choice = (out.get("choices") or [{}])[0]
     msg = choice.get("message") or {}
@@ -5316,18 +5334,18 @@ def _call_anthropic(messages: list[dict], tools: list) -> dict:
 
 
 def _call_llm(messages: list[dict]) -> dict:
-    """Prefer Claude when Grok is credit-capped; still try Grok first only if forced."""
-    primary = (os.getenv("ENERGY_AGENT_LLM_PRIMARY") or "claude").strip().lower()
+    """Grok (Build OIDC / API key) first when ready; Claude cloth fallback."""
+    primary = (os.getenv("ENERGY_AGENT_LLM_PRIMARY") or "grok").strip().lower()
     order = []
-    if primary in ("grok", "xai", "rock"):
-        order = ["grok", "claude"]
-    else:
-        # Default Claude-first (xAI team hit monthly spend limit 2026-07-16)
+    if primary in ("claude", "anthropic", "cloth"):
         order = ["claude", "grok"]
+    else:
+        # Default Grok-first — bills Ford's Grok Build credits when OIDC is wired
+        order = ["grok", "claude"]
     last_err = None
     for who in order:
         try:
-            if who == "grok" and XAI_API_KEY:
+            if who == "grok" and _xai_ready():
                 return _call_grok(messages, TOOL_DEFS)
             if who == "claude" and ANTHROPIC_API_KEY:
                 return _call_anthropic(messages, TOOL_DEFS)
