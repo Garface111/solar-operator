@@ -1,6 +1,11 @@
-"""The GMCS writer must prefer real GMP meter data (GmpDailyGeneration) over the
-bill_prorate estimate for near-fully-covered months — this is what makes monthly
-generation reconcile with Crown REC. Partial GMP coverage must NOT undercount.
+"""_daily_generation_by_month must return only the UTILITY's measured sub-monthly
+generation — the real GMP interval meter (GmpDailyGeneration, near-full coverage).
+It must NOT surface inverter/vendor telemetry (solaredge/fronius/…) or the
+redundant bill_prorate smear (the real bill kWh is applied separately in
+build_workbook via per_group). Ford 2026-07-16: NEPOOL reports settle on GMP,
+not vendor data — London_SE was reporting SolarEdge because inverter rows
+displaced the bill and then won the merge. The bill→report path (no undercount
+when there's no meter) is covered end-to-end in test_gmcs_writer.py.
 """
 from __future__ import annotations
 
@@ -50,24 +55,34 @@ def _fill_gmp(db, y, m, per_day, days):
     db.commit()
 
 
-def test_gmp_real_wins_over_bill_prorate_when_month_fully_covered(db):
+def test_gmp_real_meter_gives_the_month(db):
     _seed(db)
-    _fill_daily(db, 2025, 6, 10.0, "bill_prorate")   # flat estimate: 30 * 10 = 300
+    _fill_daily(db, 2025, 6, 10.0, "bill_prorate")   # redundant smear — must be ignored
     _fill_gmp(db, 2025, 6, 20.0, 30)                 # real, full 30-day coverage = 600
     out = gmcs_writer._daily_generation_by_month(db, 1, date(2025, 6, 1), date(2025, 6, 30))
-    assert out[(2025, 6)] == pytest.approx(600.0)    # GMP meter wins
+    assert out[(2025, 6)] == pytest.approx(600.0)    # GMP interval meter
 
 
-def test_partial_gmp_month_does_not_undercount(db):
+def test_partial_gmp_month_is_rejected_not_undercounted(db):
     _seed(db)
-    _fill_daily(db, 2025, 7, 10.0, "bill_prorate")   # 31 * 10 = 310
-    _fill_gmp(db, 2025, 7, 99.0, 5)                  # only 5 days — guard must reject
+    _fill_daily(db, 2025, 7, 10.0, "bill_prorate")   # redundant smear — ignored here
+    _fill_gmp(db, 2025, 7, 99.0, 5)                  # only 5 days — coverage guard rejects
     out = gmcs_writer._daily_generation_by_month(db, 1, date(2025, 7, 1), date(2025, 7, 31))
-    assert out[(2025, 7)] == pytest.approx(310.0)    # bill estimate kept, not 5*99
+    # No genuine meter for the month → the month is absent from the daily map, so
+    # build_workbook uses the real bill kWh (per_group) instead of a 5-day fragment.
+    assert (2025, 7) not in out
 
 
-def test_no_gmp_data_falls_back_to_daily(db):
+def test_vendor_and_bill_prorate_are_excluded_from_the_base(db):
     _seed(db)
-    _fill_daily(db, 2025, 8, 12.0, "bill_prorate")
+    # One row per (array, day): bill_prorate on days 1-15, solaredge on 16-31.
+    for dd in range(1, 16):
+        db.add(DailyGeneration(tenant_id="ten_t", array_id=1, day=date(2025, 8, dd),
+                               kwh=12.0, source="bill_prorate"))
+    for dd in range(16, 32):
+        db.add(DailyGeneration(tenant_id="ten_t", array_id=1, day=date(2025, 8, dd),
+                               kwh=500.0, source="solaredge"))
+    db.commit()
     out = gmcs_writer._daily_generation_by_month(db, 1, date(2025, 8, 1), date(2025, 8, 31))
-    assert out[(2025, 8)] == pytest.approx(12.0 * 31)
+    # Both excluded and no GMP meter → empty; the bill kWh is applied by build_workbook.
+    assert (2025, 8) not in out

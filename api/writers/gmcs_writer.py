@@ -28,7 +28,7 @@ from collections import defaultdict
 from datetime import datetime, date, timedelta
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
@@ -158,13 +158,29 @@ def _daily_generation_by_month(
     """
     import calendar as _cal
     from ..reports import gmp_daily_read
+    from ..generation_sources import VENDOR_TELEMETRY_SOURCES, EXTENSION_SOURCES
 
+    # NEPOOL RECs settle on the UTILITY's measured generation (GMP bills +
+    # GMP interval meter), never inverter telemetry. Two exclusions here
+    # (Ford 2026-07-16 — London_SE was reporting SolarEdge, not GMP):
+    #   • VENDOR/EXTENSION telemetry (solaredge/fronius/…) — the wrong meter.
+    #     Because DailyGeneration keeps one row/day and an inverter reading
+    #     out-ranks the bill estimate, vendor data was DISPLACING the GMP bill
+    #     and then overriding it in the {**bill, **daily} merge below.
+    #   • bill_prorate — a redundant per-day smear of the SAME utility bill the
+    #     report already computes directly (per_group, the full bill kWh). When
+    #     vendor rows displaced most bill_prorate days, the sparse remainder
+    #     would override the complete bill total for those months. Dropping it
+    #     lets the real bill kWh stand; the GMP interval overlay still wins where
+    #     it has near-full coverage.
+    _exclude = VENDOR_TELEMETRY_SOURCES | EXTENSION_SOURCES | {"bill_prorate"}
     rows = db.execute(
         select(DailyGeneration.day, DailyGeneration.kwh)
         .where(
             DailyGeneration.array_id == array_id,
             DailyGeneration.day >= start,
             DailyGeneration.day <= end,
+            func.lower(DailyGeneration.source).notin_(_exclude),
         )
     ).all()
     buckets: dict[tuple[int, int], float] = {}
