@@ -4,17 +4,25 @@ Not Energy Agent UI. Not owner-facing. Dogfood emails only
 (ford.genereaux@gmail.com + allowlist).
 
 Sovereign no longer injects into the EA panel; it writes here instead.
+
+Extensions (2026-07-16):
+  • File / data attachments on desk turns (text extract into LLM context)
+  • Local computer bridge: queued tool tasks a machine-side agent polls
+    (read/list/shell) — same shape as a build agent, not full cloud shell.
 """
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
+import re
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, File, Form, Header, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import DateTime, Integer, String, Text, select
 from sqlalchemy.orm import Mapped, mapped_column
@@ -31,6 +39,18 @@ _DESK_EMAILS = frozenset({
     "ford.genereaux@dysonswarmtechnologies.com",
     "ford@dysonswarmtechnologies.com",
 })
+
+# Attachment limits
+_MAX_UPLOAD_BYTES = int(os.getenv("SOVEREIGN_DESK_MAX_UPLOAD", str(8 * 1024 * 1024)))
+_MAX_TEXT_EXTRACT = 120_000
+_ASSET_DIR = Path(os.getenv("SOVEREIGN_DESK_ASSET_DIR", "/tmp/sovereign_desk_assets"))
+_TEXT_EXTS = {
+    ".txt", ".md", ".markdown", ".json", ".csv", ".tsv", ".py", ".js", ".ts",
+    ".tsx", ".jsx", ".html", ".css", ".yml", ".yaml", ".toml", ".ini", ".env",
+    ".sh", ".bash", ".zsh", ".sql", ".log", ".xml", ".svg", ".rs", ".go",
+    ".java", ".kt", ".rb", ".php", ".c", ".h", ".cpp", ".hpp", ".swift",
+}
+_BRIDGE_TOKEN = (os.getenv("SOVEREIGN_BRIDGE_TOKEN") or "").strip()
 
 
 def _now() -> datetime:
@@ -60,6 +80,37 @@ class EaSovereignDeskMessage(Base):
     meta_json: Mapped[str] = mapped_column(Text, default="{}")
 
 
+class EaSovereignDeskAsset(Base):
+    """File / data Ford hands Sovereign on the desk."""
+    __tablename__ = "ea_sovereign_desk_assets"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
+    tenant_id: Mapped[str | None] = mapped_column(String(40), nullable=True, index=True)
+    filename: Mapped[str] = mapped_column(String(260), default="file")
+    mime: Mapped[str] = mapped_column(String(120), default="application/octet-stream")
+    size: Mapped[int] = mapped_column(Integer, default=0)
+    kind: Mapped[str] = mapped_column(String(24), default="file")  # file|snippet|image
+    text_extract: Mapped[str] = mapped_column(Text, default="")
+    storage_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    meta_json: Mapped[str] = mapped_column(Text, default="{}")
+
+
+class EaSovereignBridgeTask(Base):
+    """Tool request for a machine-side bridge (local computer agent)."""
+    __tablename__ = "ea_sovereign_bridge_tasks"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+    status: Mapped[str] = mapped_column(String(20), default="queued", index=True)
+    # shell | read | list | write
+    tool: Mapped[str] = mapped_column(String(32), default="shell")
+    args_json: Mapped[str] = mapped_column(Text, default="{}")
+    result_json: Mapped[str] = mapped_column(Text, default="{}")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    desk_message_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    tenant_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
 def desk_emails() -> set[str]:
     extra = (os.getenv("SOVEREIGN_DESK_EMAILS") or "").strip()
     out = set(_DESK_EMAILS)
@@ -86,9 +137,135 @@ def ensure_tables(db=None) -> None:
         else:
             from .db import engine
             bind = engine
-        Base.metadata.create_all(bind=bind, tables=[EaSovereignDeskMessage.__table__])
+        Base.metadata.create_all(
+            bind=bind,
+            tables=[
+                EaSovereignDeskMessage.__table__,
+                EaSovereignDeskAsset.__table__,
+                EaSovereignBridgeTask.__table__,
+            ],
+        )
     except Exception:
         log.exception("desk table create failed")
+
+
+def _extract_text(filename: str, mime: str, data: bytes) -> str:
+    """Best-effort text extract for LLM context (no heavy PDF parsers required)."""
+    name = (filename or "file").lower()
+    ext = Path(name).suffix
+    mime = (mime or "").lower()
+    if not data:
+        return ""
+    if ext in _TEXT_EXTS or mime.startswith("text/") or mime in (
+        "application/json", "application/javascript", "application/xml",
+        "application/x-yaml", "application/toml",
+    ):
+        for enc in ("utf-8", "utf-8-sig", "latin-1"):
+            try:
+                return data.decode(enc)[:_MAX_TEXT_EXTRACT]
+            except Exception:
+                continue
+        return ""
+    if ext == ".pdf" or "pdf" in mime:
+        # Lightweight: try raw text streams (not full PDF parse)
+        try:
+            raw = data.decode("latin-1", errors="ignore")
+            chunks = re.findall(r"\(([^)]{4,200})\)", raw)
+            text = " ".join(chunks)
+            text = re.sub(r"\s+", " ", text).strip()
+            if len(text) > 80:
+                return text[:_MAX_TEXT_EXTRACT]
+        except Exception:
+            pass
+        return f"[PDF binary: {filename}, {len(data)} bytes — no text extract]"
+    if mime.startswith("image/") or ext in (".png", ".jpg", ".jpeg", ".gif", ".webp"):
+        return f"[Image attachment: {filename}, {mime or 'image'}, {len(data)} bytes]"
+    return f"[Binary attachment: {filename}, {mime or 'unknown'}, {len(data)} bytes]"
+
+
+def serialize_asset(a: EaSovereignDeskAsset) -> dict:
+    return {
+        "id": a.id,
+        "filename": a.filename,
+        "mime": a.mime,
+        "size": a.size,
+        "kind": a.kind,
+        "created_at": a.created_at.isoformat() + "Z" if a.created_at else None,
+        "preview": (a.text_extract or "")[:240],
+        "has_text": bool((a.text_extract or "").strip()),
+    }
+
+
+def load_assets(db, asset_ids: list[str] | None) -> list[EaSovereignDeskAsset]:
+    if not asset_ids:
+        return []
+    ids = [str(i) for i in asset_ids if i][:12]
+    if not ids:
+        return []
+    rows = db.execute(
+        select(EaSovereignDeskAsset).where(EaSovereignDeskAsset.id.in_(ids))
+    ).scalars().all()
+    by_id = {r.id: r for r in rows}
+    return [by_id[i] for i in ids if i in by_id]
+
+
+def assets_context_block(assets: list[EaSovereignDeskAsset]) -> str:
+    if not assets:
+        return ""
+    parts = ["## Attachments Ford handed you (ground truth — use these)"]
+    for a in assets:
+        body = (a.text_extract or "").strip()
+        if len(body) > 14000:
+            body = body[:14000] + "\n…[truncated]"
+        parts.append(
+            f"### File: {a.filename} ({a.mime}, {a.size} bytes, id={a.id})\n"
+            f"```\n{body or '(no text extract)'}\n```"
+        )
+    return "\n\n".join(parts)
+
+
+def queue_bridge_task(
+    db,
+    *,
+    tool: str,
+    args: dict,
+    desk_message_id: str | None = None,
+    tenant_id: str | None = None,
+) -> EaSovereignBridgeTask:
+    tool = (tool or "shell").strip().lower()
+    if tool not in ("shell", "read", "list", "write", "glob"):
+        tool = "shell"
+    row = EaSovereignBridgeTask(
+        id=_id("sbt"),
+        status="queued",
+        tool=tool,
+        args_json=json.dumps(args or {}, default=str)[:8000],
+        desk_message_id=desk_message_id,
+        tenant_id=tenant_id,
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
+def _auth_bridge(authorization: str | None, x_bridge_token: str | None = None) -> None:
+    """Bridge uses shared secret (preferred) or Ford session."""
+    tok = (x_bridge_token or "").strip()
+    if _BRIDGE_TOKEN and tok and tok == _BRIDGE_TOKEN:
+        return
+    # Fall back: Ford session can also poll (for debugging)
+    try:
+        _auth_ford(authorization)
+        return
+    except HTTPException:
+        pass
+    if not _BRIDGE_TOKEN:
+        raise HTTPException(
+            503,
+            "Set SOVEREIGN_BRIDGE_TOKEN on Railway and pass it as X-Bridge-Token "
+            "from the local bridge.",
+        )
+    raise HTTPException(401, "Invalid bridge token")
 
 
 def push_sovereign_message(
@@ -226,6 +403,22 @@ You are speaking directly to Ford on the private Sovereign Desk — not the Ener
 - Still never fabricate adapters, money moves, or mass-email owners.
 - Keep replies tight (few short paragraphs unless he asks for depth) — dense, not fluffy.
 
+## Files / data Ford attaches
+- Attachments appear in desk_context.attachments and/or as an attachments block.
+- Treat their text as ground truth. Quote paths/filenames. Prefer edits informed by them.
+- If he pastes a HAR, stacktrace, CSV, or code — reason over it; propose concrete next steps.
+
+## Local computer bridge (build-agent style)
+- You do NOT run shell on Ford's laptop from Railway by default.
+- When you need his machine (read a path, list a dir, run a safe command, write a file),
+  emit an action type `local_tool` in the JSON block:
+  {"type":"local_tool","tool":"shell|read|list|write|glob","args":{...},"why":"..."}
+  Args: shell→{"cmd":"..."}; read→{"path":"..."}; list→{"path":"..."};
+  write→{"path":"...","content":"..."}; glob→{"pattern":"...","cwd":"..."}.
+- The local bridge agent (scripts/sovereign_local_bridge.py on his box) polls and executes.
+- Until results return, tell him what you queued and what you need if the bridge is offline.
+- Prefer small, reversible local tools. Never request mass-delete or destructive rm -rf.
+
 Also return a trailing JSON block after your prose with optional structured side-effects
 (the UI strips this; never put it mid-reply):
 ---JSON---
@@ -243,10 +436,21 @@ Also return a trailing JSON block after your prose with optional structured side
         "ford_says": ford_msg,
         "instruction": "Reply to Ford now as Sovereign on the desk.",
     }
-    return [
+    # Keep room for attachment text outside the JSON dump when large
+    payload = json.dumps(user, default=str)
+    if len(payload) > 42000:
+        payload = payload[:42000] + "…[truncated]"
+    blocks = [
         {"role": "system", "content": system},
-        {"role": "user", "content": json.dumps(user, default=str)[:45000]},
+        {"role": "user", "content": payload},
     ]
+    attach_block = (context or {}).get("_attachments_markdown") or ""
+    if attach_block:
+        blocks.append({
+            "role": "user",
+            "content": attach_block[:50000],
+        })
+    return blocks
 
 
 def _split_reply(raw: str) -> tuple[str, dict]:
@@ -274,7 +478,13 @@ def _split_reply(raw: str) -> tuple[str, dict]:
     return text, meta
 
 
-def desk_turn(db, t, ford_message: str) -> dict:
+def desk_turn(
+    db,
+    t,
+    ford_message: str,
+    *,
+    attachment_ids: list[str] | None = None,
+) -> dict:
     from .energy_agent_sovereign import (
         apply_agenda,
         execute_brain_actions,
@@ -299,8 +509,12 @@ def desk_turn(db, t, ford_message: str) -> dict:
         except Exception:
             pass
     msg = (ford_message or "").strip()
-    if not msg:
+    assets = load_assets(db, attachment_ids)
+    if not msg and not assets:
         raise HTTPException(400, "Empty message")
+    if not msg and assets:
+        names = ", ".join(a.filename for a in assets[:6])
+        msg = f"[Attached: {names}] Please review these files/data."
 
     # Save Ford message first
     ford_row = EaSovereignDeskMessage(
@@ -308,7 +522,14 @@ def desk_turn(db, t, ford_message: str) -> dict:
         role="ford",
         content=msg[:12000],
         tenant_id=t.id,
-        meta_json=json.dumps({"channel": "desk"}),
+        meta_json=json.dumps({
+            "channel": "desk",
+            "attachment_ids": [a.id for a in assets],
+            "attachments": [
+                {"id": a.id, "filename": a.filename, "mime": a.mime, "size": a.size}
+                for a in assets
+            ],
+        }, default=str)[:4000],
     )
     db.add(ford_row)
     db.flush()
@@ -339,6 +560,20 @@ def desk_turn(db, t, ford_message: str) -> dict:
             select(EaSovereignJob).where(EaSovereignJob.status == "queued").limit(8)
         ).scalars().all()
     ]
+    # Pending local-bridge results (so Sovereign can continue after a tool round)
+    bridge_done = db.execute(
+        select(EaSovereignBridgeTask)
+        .where(EaSovereignBridgeTask.status.in_(("done", "failed")))
+        .order_by(EaSovereignBridgeTask.updated_at.desc())
+        .limit(6)
+    ).scalars().all()
+    bridge_pending = db.execute(
+        select(EaSovereignBridgeTask)
+        .where(EaSovereignBridgeTask.status.in_(("queued", "running")))
+        .order_by(EaSovereignBridgeTask.created_at.desc())
+        .limit(8)
+    ).scalars().all()
+
     context = {
         "digests": digests,
         "goals": goals,
@@ -346,6 +581,34 @@ def desk_turn(db, t, ford_message: str) -> dict:
         "recent_notes": recent_notes(db, limit=8),
         "open_jobs": jobs,
         "tenant_id": t.id,
+        "attachments": [serialize_asset(a) for a in assets],
+        "local_bridge": {
+            "pending": [
+                {
+                    "id": b.id,
+                    "tool": b.tool,
+                    "args": json.loads(b.args_json or "{}"),
+                    "status": b.status,
+                }
+                for b in bridge_pending
+            ],
+            "recent_results": [
+                {
+                    "id": b.id,
+                    "tool": b.tool,
+                    "status": b.status,
+                    "result": json.loads(b.result_json or "{}"),
+                    "error": b.error,
+                }
+                for b in bridge_done
+            ],
+            "bridge_token_configured": bool(_BRIDGE_TOKEN),
+            "hint": (
+                "Run scripts/sovereign_local_bridge.py on Ford's machine with "
+                "SOVEREIGN_BRIDGE_TOKEN to execute local_tool actions."
+            ),
+        },
+        "_attachments_markdown": assets_context_block(assets),
     }
 
     messages = _desk_chat_prompt(msg, hist, context)
@@ -405,7 +668,7 @@ def desk_turn(db, t, ford_message: str) -> dict:
     if meta.get("agenda"):
         apply_agenda(db, meta["agenda"])
 
-    # Execute non-speak actions from desk JSON (triage, code_hire, etc.)
+    # Execute non-speak actions from desk JSON (triage, code_hire, local_tool, etc.)
     actions = [
         a for a in (meta.get("actions") or [])
         if isinstance(a, dict) and (a.get("type") or "").lower() not in (
@@ -413,8 +676,37 @@ def desk_turn(db, t, ford_message: str) -> dict:
         )
     ]
     side = []
-    if actions:
-        side = execute_brain_actions(db, actions[:3], tick_id="desk_" + sov_row.id[:10])
+    # Local computer bridge tools first
+    for a in actions:
+        at = (a.get("type") or "").lower()
+        if at in ("local_tool", "computer", "host_tool", "bridge"):
+            try:
+                task = queue_bridge_task(
+                    db,
+                    tool=str(a.get("tool") or a.get("name") or "shell"),
+                    args=a.get("args") or a.get("input") or {},
+                    desk_message_id=sov_row.id,
+                    tenant_id=t.id,
+                )
+                side.append({
+                    "type": "local_tool",
+                    "ok": True,
+                    "task_id": task.id,
+                    "tool": task.tool,
+                    "why": a.get("why"),
+                })
+            except Exception as e:  # noqa: BLE001
+                side.append({"type": "local_tool", "ok": False, "error": str(e)[:200]})
+    remote_actions = [
+        a for a in actions
+        if (a.get("type") or "").lower() not in (
+            "local_tool", "computer", "host_tool", "bridge",
+        )
+    ]
+    if remote_actions:
+        side.extend(
+            execute_brain_actions(db, remote_actions[:3], tick_id="desk_" + sov_row.id[:10])
+        )
 
     db.flush()
     # Stamp created_at for client merge (flush may not refresh server defaults on all DBs)
@@ -651,7 +943,21 @@ def ingest_sovereign_inbound_async(**kwargs) -> None:
 
 # ── HTTP ────────────────────────────────────────────────────────────────────
 class ChatIn(BaseModel):
-    message: str = Field(..., min_length=1, max_length=12000)
+    message: str = Field(default="", max_length=12000)
+    attachment_ids: list[str] = Field(default_factory=list)
+
+
+class BridgeResultIn(BaseModel):
+    task_id: str
+    ok: bool = True
+    result: dict = Field(default_factory=dict)
+    error: str | None = None
+
+
+class BridgeRequestIn(BaseModel):
+    """Ford/bridge can also manually enqueue a local tool."""
+    tool: str = "shell"
+    args: dict = Field(default_factory=dict)
 
 
 @router.get("/v1/sovereign/desk/access")
@@ -659,7 +965,14 @@ def desk_access(authorization: str | None = Header(default=None)):
     """Frontend gate: show desk entry only when true."""
     try:
         t, email = _auth_ford(authorization)
-        return {"ok": True, "email": email, "tenant_id": t.id, "desk": True}
+        return {
+            "ok": True,
+            "email": email,
+            "tenant_id": t.id,
+            "desk": True,
+            "attachments": True,
+            "local_bridge": bool(_BRIDGE_TOKEN),
+        }
     except HTTPException as e:
         if e.status_code in (401, 403):
             return {"ok": False, "desk": False, "detail": e.detail}
@@ -678,14 +991,111 @@ def desk_history(authorization: str | None = Header(default=None), limit: int = 
         }
 
 
+@router.post("/v1/sovereign/desk/upload")
+async def desk_upload(
+    authorization: str | None = Header(default=None),
+    file: UploadFile | None = File(default=None),
+    # Paste a text snippet without a file
+    snippet: str | None = Form(default=None),
+    filename: str | None = Form(default=None),
+):
+    """Attach a file or paste data for Sovereign to reason over."""
+    t, email = _auth_ford(authorization)
+    del email
+    ensure_tables()
+    _ASSET_DIR.mkdir(parents=True, exist_ok=True)
+
+    data = b""
+    fname = (filename or (file.filename if file else None) or "snippet.txt").strip()
+    mime = "text/plain"
+    kind = "snippet"
+
+    if file is not None:
+        kind = "file"
+        mime = (file.content_type or "application/octet-stream")[:120]
+        chunks = []
+        total = 0
+        while True:
+            chunk = await file.read(64 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _MAX_UPLOAD_BYTES:
+                raise HTTPException(413, f"File too large (max {_MAX_UPLOAD_BYTES} bytes)")
+            chunks.append(chunk)
+        data = b"".join(chunks)
+        if not fname or fname == "snippet.txt":
+            fname = file.filename or "upload.bin"
+        if mime.startswith("image/"):
+            kind = "image"
+    elif snippet is not None:
+        data = snippet.encode("utf-8")
+        if len(data) > _MAX_UPLOAD_BYTES:
+            raise HTTPException(413, "Snippet too large")
+        kind = "snippet"
+        mime = "text/plain"
+        if not fname.endswith((".txt", ".md", ".json", ".csv")):
+            fname = (fname or "paste") + ".txt"
+    else:
+        raise HTTPException(400, "Provide file= or snippet=")
+
+    text = _extract_text(fname, mime, data)
+    asset_id = _id("sda")
+    storage = None
+    try:
+        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", fname)[:80]
+        path = _ASSET_DIR / f"{asset_id}_{safe_name}"
+        path.write_bytes(data)
+        storage = str(path)
+    except Exception as e:
+        log.warning("desk asset disk write failed: %s", e)
+
+    with SessionLocal() as db:
+        row = EaSovereignDeskAsset(
+            id=asset_id,
+            tenant_id=t.id,
+            filename=fname[:260],
+            mime=mime,
+            size=len(data),
+            kind=kind,
+            text_extract=text[:_MAX_TEXT_EXTRACT],
+            storage_path=storage,
+            meta_json=json.dumps({"source": "desk_upload"}, default=str),
+        )
+        db.add(row)
+        db.commit()
+        return {"ok": True, "asset": serialize_asset(row)}
+
+
+@router.get("/v1/sovereign/desk/assets")
+def desk_assets_list(
+    authorization: str | None = Header(default=None),
+    limit: int = 30,
+):
+    t, _email = _auth_ford(authorization)
+    ensure_tables()
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(EaSovereignDeskAsset)
+            .where(EaSovereignDeskAsset.tenant_id == t.id)
+            .order_by(EaSovereignDeskAsset.created_at.desc())
+            .limit(min(max(limit, 1), 100))
+        ).scalars().all()
+        return {"ok": True, "assets": [serialize_asset(r) for r in rows]}
+
+
 @router.post("/v1/sovereign/desk/chat")
 def desk_chat(body: ChatIn, authorization: str | None = Header(default=None)):
     t, email = _auth_ford(authorization)
+    del email
     if not _flag("SOVEREIGN_ENABLED", "1"):
         raise HTTPException(503, "Sovereign is offline (SOVEREIGN_ENABLED=0)")
     with SessionLocal() as db:
         try:
-            out = desk_turn(db, t, body.message)
+            out = desk_turn(
+                db, t, body.message or "",
+                attachment_ids=list(body.attachment_ids or [])[:12],
+            )
             db.commit()
             return out
         except HTTPException:
@@ -695,6 +1105,118 @@ def desk_chat(body: ChatIn, authorization: str | None = Header(default=None)):
             db.rollback()
             log.exception("desk_chat failed")
             raise HTTPException(500, f"Desk turn failed: {str(e)[:200]}") from e
+
+
+# ── Local computer bridge (machine-side agent) ─────────────────────────────
+
+@router.get("/v1/sovereign/desk/bridge/pending")
+def bridge_pending(
+    authorization: str | None = Header(default=None),
+    x_bridge_token: str | None = Header(default=None, alias="X-Bridge-Token"),
+    limit: int = 5,
+):
+    """Local bridge polls this for tool work."""
+    _auth_bridge(authorization, x_bridge_token)
+    ensure_tables()
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(EaSovereignBridgeTask)
+            .where(EaSovereignBridgeTask.status == "queued")
+            .order_by(EaSovereignBridgeTask.created_at.asc())
+            .limit(min(max(limit, 1), 20))
+        ).scalars().all()
+        out = []
+        for r in rows:
+            r.status = "running"
+            r.updated_at = _now()
+            try:
+                args = json.loads(r.args_json or "{}")
+            except Exception:
+                args = {}
+            out.append({
+                "id": r.id,
+                "tool": r.tool,
+                "args": args,
+                "created_at": r.created_at.isoformat() + "Z" if r.created_at else None,
+            })
+        db.commit()
+        return {"ok": True, "tasks": out}
+
+
+@router.post("/v1/sovereign/desk/bridge/result")
+def bridge_result(
+    body: BridgeResultIn,
+    authorization: str | None = Header(default=None),
+    x_bridge_token: str | None = Header(default=None, alias="X-Bridge-Token"),
+):
+    _auth_bridge(authorization, x_bridge_token)
+    ensure_tables()
+    with SessionLocal() as db:
+        row = db.get(EaSovereignBridgeTask, body.task_id)
+        if not row:
+            raise HTTPException(404, "task not found")
+        row.status = "done" if body.ok else "failed"
+        row.result_json = json.dumps(body.result or {}, default=str)[:50000]
+        row.error = (body.error or None) and str(body.error)[:2000]
+        row.updated_at = _now()
+        # Surface result into desk chat as a short Sovereign system note
+        try:
+            summary = body.result.get("summary") if isinstance(body.result, dict) else None
+            if not summary and isinstance(body.result, dict):
+                out = body.result.get("stdout") or body.result.get("content") or body.result
+                summary = str(out)[:1500]
+            note = (
+                f"Local bridge finished `{row.tool}` "
+                f"({'ok' if body.ok else 'failed'}).\n\n"
+                f"```\n{(summary or body.error or '(no output)')[:2000]}\n```"
+            )
+            push_sovereign_message(
+                db, note,
+                provider="bridge",
+                meta={"task_id": row.id, "tool": row.tool, "ok": body.ok},
+            )
+        except Exception:
+            log.exception("bridge result desk note failed")
+        db.commit()
+        return {"ok": True, "task_id": row.id, "status": row.status}
+
+
+@router.post("/v1/sovereign/desk/bridge/enqueue")
+def bridge_enqueue(
+    body: BridgeRequestIn,
+    authorization: str | None = Header(default=None),
+):
+    """Ford can manually queue a local tool from the desk (or API)."""
+    t, _email = _auth_ford(authorization)
+    ensure_tables()
+    with SessionLocal() as db:
+        task = queue_bridge_task(
+            db, tool=body.tool, args=body.args or {}, tenant_id=t.id,
+        )
+        db.commit()
+        return {"ok": True, "task_id": task.id, "tool": task.tool, "status": task.status}
+
+
+@router.get("/v1/sovereign/desk/bridge/status")
+def bridge_status(authorization: str | None = Header(default=None)):
+    t, _email = _auth_ford(authorization)
+    del t
+    ensure_tables()
+    with SessionLocal() as db:
+        def _count(st: str) -> int:
+            return len(
+                db.execute(
+                    select(EaSovereignBridgeTask).where(EaSovereignBridgeTask.status == st).limit(200)
+                ).scalars().all()
+            )
+        return {
+            "ok": True,
+            "bridge_token_configured": bool(_BRIDGE_TOKEN),
+            "queued": _count("queued"),
+            "running": _count("running"),
+            "done": _count("done"),
+            "failed": _count("failed"),
+        }
 
 
 # ── Ops control surface (Ford desk) ─────────────────────────────────────────
