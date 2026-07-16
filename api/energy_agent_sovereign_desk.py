@@ -40,6 +40,9 @@ router = APIRouter()
 _desk_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="sov-desk")
 _inflight_lock = threading.Lock()
 _inflight_crids: set[str] = set()
+# Ford interrupt — brain may finish the HTTP call, but we drop the long reply.
+_cancelled_crids: set[str] = set()
+_STOP_REPLY = "*(Stopped.)*"
 
 _DESK_EMAILS = frozenset({
     "ford.genereaux@gmail.com",
@@ -619,6 +622,59 @@ def _safe_json_meta(raw: str | None) -> dict:
         return {}
 
 
+def _is_crid_cancelled(client_request_id: str | None) -> bool:
+    crid = (client_request_id or "").strip()[:80]
+    if not crid:
+        return False
+    with _inflight_lock:
+        return crid in _cancelled_crids
+
+
+def _mark_crid_cancelled(client_request_id: str | None) -> str | None:
+    crid = (client_request_id or "").strip()[:80]
+    if not crid:
+        return None
+    with _inflight_lock:
+        _cancelled_crids.add(crid)
+    return crid
+
+
+def _clear_crid_cancelled(client_request_id: str | None) -> None:
+    crid = (client_request_id or "").strip()[:80]
+    if not crid:
+        return
+    with _inflight_lock:
+        _cancelled_crids.discard(crid)
+
+
+def _write_stopped_reply(
+    db,
+    *,
+    ford: EaSovereignDeskMessage,
+    client_request_id: str | None,
+    tenant_id: str | None = None,
+) -> EaSovereignDeskMessage:
+    """Persist a short stop bubble so polls complete and history is honest."""
+    row = EaSovereignDeskMessage(
+        id=_id("sdm"),
+        role="sovereign",
+        content=_STOP_REPLY,
+        tenant_id=tenant_id or ford.tenant_id,
+        provider="system",
+        meta_json=json.dumps({
+            "channel": "desk",
+            "cancelled": True,
+            "client_request_id": client_request_id,
+            "reply_to_ford": ford.id,
+        }, default=str)[:4000],
+    )
+    if not row.created_at:
+        row.created_at = _now()
+    db.add(row)
+    db.flush()
+    return row
+
+
 def lookup_turn_by_client_request_id(db, client_request_id: str) -> dict | None:
     """Find a prior desk turn by client_request_id (idempotent retries)."""
     crid = (client_request_id or "").strip()[:80]
@@ -1039,52 +1095,95 @@ def desk_turn(
 
     provider = None
     model = None
-    # Stay under SOVEREIGN_DESK_WAIT so the outer chat waiter can return pending
-    desk_timeout = int(os.getenv("SOVEREIGN_DESK_TIMEOUT", "90") or 90)
-    try:
-        raw = call_brain(messages, timeout=desk_timeout)
-        provider = raw.get("provider")
-        model = raw.get("model")
-        reply, meta = _split_reply(raw.get("content") or "")
-        # Belt-and-suspenders: if split left side-JSON as prose, salvage monologue
-        if reply.lstrip().startswith("{") and _looks_like_side_meta(
-            _try_parse_side_json(reply) or {}
-        ):
-            salvaged = _try_parse_side_json(reply) or {}
-            meta = {**salvaged, **meta} if meta else salvaged
-            reply = _prose_from_meta(meta, reply)
-        # Strip any residual fenced side-JSON the model left mid/end of prose
-        if "```" in reply and any(k in reply for k in ('"monologue"', '"actions"', '"mood"')):
-            reply2, meta2 = _split_reply(reply)
-            if meta2:
-                meta = {**meta, **meta2}
-            reply = reply2
-    except Exception as e:  # noqa: BLE001
-        log.exception("desk brain failed")
-        reply = (
-            "Sovereign here — both brains hiccuped just now. "
-            f"I still have your message. Error: {str(e)[:180]}. "
-            "Retry in a moment, or leave the ask and I'll pick it up on the next tick."
-        )
-        meta = {"mood": "concerned", "actions": [], "error": str(e)[:300]}
+    meta: dict[str, Any] = {}
+    cancelled = _is_crid_cancelled(crid)
 
-    if not reply:
-        reply = "Understood. I'm on it — I'll push the next concrete step and note what I need from you."
-    # Never persist raw side-meta JSON into the chat transcript
-    if reply.lstrip().startswith("{") and '"monologue"' in reply[:200]:
-        reply = _prose_from_meta(meta, "Understood.") or "Understood."
+    # Interrupted before brain — don't spend tokens
+    if cancelled:
+        existing = lookup_turn_by_client_request_id(db, crid) if crid else None
+        if existing and existing.get("complete") and existing.get("sov"):
+            sov_ex = existing["sov"]
+            return _format_turn_response(
+                ford=existing["ford"],
+                sov=sov_ex,
+                pending=False,
+                client_request_id=crid,
+                extra={"cancelled": True, "provider": sov_ex.provider},
+            )
+        reply = _STOP_REPLY
+        meta = {"mood": "neutral", "actions": [], "cancelled": True}
+        provider = "system"
+    else:
+        # Stay under SOVEREIGN_DESK_WAIT so the outer chat waiter can return pending
+        desk_timeout = int(os.getenv("SOVEREIGN_DESK_TIMEOUT", "90") or 90)
+        try:
+            raw = call_brain(messages, timeout=desk_timeout)
+            provider = raw.get("provider")
+            model = raw.get("model")
+            reply, meta = _split_reply(raw.get("content") or "")
+            # Belt-and-suspenders: if split left side-JSON as prose, salvage monologue
+            if reply.lstrip().startswith("{") and _looks_like_side_meta(
+                _try_parse_side_json(reply) or {}
+            ):
+                salvaged = _try_parse_side_json(reply) or {}
+                meta = {**salvaged, **meta} if meta else salvaged
+                reply = _prose_from_meta(meta, reply)
+            # Strip any residual fenced side-JSON the model left mid/end of prose
+            if "```" in reply and any(
+                k in reply for k in ('"monologue"', '"actions"', '"mood"')
+            ):
+                reply2, meta2 = _split_reply(reply)
+                if meta2:
+                    meta = {**meta, **meta2}
+                reply = reply2
+        except Exception as e:  # noqa: BLE001
+            log.exception("desk brain failed")
+            reply = (
+                "Sovereign here — both brains hiccuped just now. "
+                f"I still have your message. Error: {str(e)[:180]}. "
+                "Retry in a moment, or leave the ask and I'll pick it up on the next tick."
+            )
+            meta = {"mood": "concerned", "actions": [], "error": str(e)[:300]}
 
-    # If Ford just approved/rejected a mind patch, lead with that confirmation
-    if mind_event and mind_event.get("desk_notice"):
-        notice = mind_event["desk_notice"].strip()
-        if notice and notice not in reply:
-            reply = notice + "\n\n" + reply
-    elif mind_event and mind_event.get("applied"):
-        reply = (
-            f"**Mind update applied.** {mind_event.get('summary') or ''}\n\n" + reply
-        ).strip()
-    elif mind_event and mind_event.get("rejected"):
-        reply = ("**Mind change discarded.**\n\n" + reply).strip()
+        # Interrupted during/after brain — discard long reply, no side effects
+        if _is_crid_cancelled(crid):
+            cancelled = True
+            existing = lookup_turn_by_client_request_id(db, crid) if crid else None
+            if existing and existing.get("complete") and existing.get("sov"):
+                sov_ex = existing["sov"]
+                return _format_turn_response(
+                    ford=existing["ford"],
+                    sov=sov_ex,
+                    pending=False,
+                    client_request_id=crid,
+                    extra={"cancelled": True, "provider": sov_ex.provider},
+                )
+            reply = _STOP_REPLY
+            meta = {"mood": "neutral", "actions": [], "cancelled": True}
+            provider = "system"
+            model = None
+
+    if not cancelled:
+        if not reply:
+            reply = (
+                "Understood. I'm on it — I'll push the next concrete step "
+                "and note what I need from you."
+            )
+        # Never persist raw side-meta JSON into the chat transcript
+        if reply.lstrip().startswith("{") and '"monologue"' in reply[:200]:
+            reply = _prose_from_meta(meta, "Understood.") or "Understood."
+
+        # If Ford just approved/rejected a mind patch, lead with that confirmation
+        if mind_event and mind_event.get("desk_notice"):
+            notice = mind_event["desk_notice"].strip()
+            if notice and notice not in reply:
+                reply = notice + "\n\n" + reply
+        elif mind_event and mind_event.get("applied"):
+            reply = (
+                f"**Mind update applied.** {mind_event.get('summary') or ''}\n\n" + reply
+            ).strip()
+        elif mind_event and mind_event.get("rejected"):
+            reply = ("**Mind change discarded.**\n\n" + reply).strip()
 
     sov_row = EaSovereignDeskMessage(
         id=_id("sdm"),
@@ -1100,12 +1199,56 @@ def desk_turn(
             "succession_gap": meta.get("succession_gap"),
             "client_request_id": crid,
             "reply_to_ford": ford_id,
+            "cancelled": bool(cancelled),
         }, default=str)[:4000],
     )
     db.add(sov_row)
     if not sov_row.created_at:
         sov_row.created_at = _now()
     side: list[Any] = []
+
+    # Cancelled turns never run tools / memory / bridge side effects
+    if cancelled:
+        try:
+            db.flush()
+        except Exception:
+            pass
+        _clear_crid_cancelled(crid)
+        return {
+            "ok": True,
+            "reply": reply,
+            "cancelled": True,
+            "mind_event": mind_event,
+            "provider": provider,
+            "model": model,
+            "mood": meta.get("mood"),
+            "ford_ask": None,
+            "succession_gap": None,
+            "side_effects": [],
+            "message": {
+                "id": sov_row.id,
+                "role": "sovereign",
+                "content": reply,
+                "created_at": (
+                    sov_row.created_at.isoformat() + "Z"
+                    if sov_row.created_at else _now().isoformat() + "Z"
+                ),
+                "provider": provider,
+            },
+            "ford_message": {
+                "id": ford_id,
+                "role": "ford",
+                "content": msg,
+                "created_at": (
+                    ford_created.isoformat() + "Z"
+                    if ford_created else _now().isoformat() + "Z"
+                ),
+            },
+            "ford_message_id": ford_id,
+            "pending": False,
+            "poll": False,
+            "client_request_id": crid,
+        }
 
     # Side effects MUST NOT fail the chat turn — lock contention here used to
     # rollback the whole reply and surface as HTTP 500/504 to Ford.
@@ -1200,6 +1343,7 @@ def desk_turn(
         except Exception as e2:  # noqa: BLE001
             log.exception("desk reply re-add after side-effect failure: %s", e2)
 
+    _clear_crid_cancelled(crid)
     return {
         "ok": True,
         "reply": reply,
@@ -1233,6 +1377,7 @@ def desk_turn(
         "pending": False,
         "poll": False,
         "client_request_id": crid,
+        "cancelled": False,
     }
 
 
@@ -1441,6 +1586,11 @@ class ChatIn(BaseModel):
     poll_only: bool = False
 
 
+class CancelIn(BaseModel):
+    client_request_id: str | None = Field(default=None, max_length=80)
+    ford_message_id: str | None = Field(default=None, max_length=40)
+
+
 class BridgeResultIn(BaseModel):
     task_id: str
     ok: bool = True
@@ -1576,6 +1726,96 @@ def desk_assets_list(
             .limit(min(max(limit, 1), 100))
         ).scalars().all()
         return {"ok": True, "assets": [serialize_asset(r) for r in rows]}
+
+
+@router.post("/v1/sovereign/desk/cancel")
+def desk_cancel(body: CancelIn, authorization: str | None = Header(default=None)):
+    """Interrupt an in-flight Sovereign desk turn (Stop button).
+
+    Marks the client_request_id cancelled so the brain path discards its long
+    reply, and immediately writes a short *(Stopped.)* bubble when Ford's
+    message is already saved and no reply exists yet.
+    """
+    t, _email = _auth_ford(authorization)
+    ensure_tables()
+    crid = (body.client_request_id or "").strip()[:80] or None
+    fid = (body.ford_message_id or "").strip()[:40] or None
+    if not crid and not fid:
+        raise HTTPException(400, "client_request_id or ford_message_id required")
+    if crid:
+        _mark_crid_cancelled(crid)
+
+    with SessionLocal() as db:
+        hit = None
+        if crid:
+            hit = lookup_turn_by_client_request_id(db, crid)
+        if not hit and fid:
+            ford = db.get(EaSovereignDeskMessage, fid)
+            if ford and ford.role == "ford":
+                meta = _safe_json_meta(ford.meta_json)
+                if not crid and meta.get("client_request_id"):
+                    crid = str(meta["client_request_id"])[:80]
+                    _mark_crid_cancelled(crid)
+                hit = {
+                    "ford": ford,
+                    "sov": None,
+                    "complete": False,
+                    "client_request_id": crid,
+                }
+                # Find existing reply if any
+                tmp = lookup_turn_by_client_request_id(db, crid) if crid else None
+                if tmp:
+                    hit = tmp
+
+        if hit and hit.get("complete") and hit.get("sov"):
+            return _format_turn_response(
+                ford=hit["ford"],
+                sov=hit["sov"],
+                pending=False,
+                client_request_id=crid,
+                extra={"cancelled": True, "already_done": True},
+            )
+
+        if hit and hit.get("ford") and not hit.get("complete"):
+            try:
+                sov = _write_stopped_reply(
+                    db,
+                    ford=hit["ford"],
+                    client_request_id=crid,
+                    tenant_id=t.id,
+                )
+                db.commit()
+                _clear_crid_cancelled(crid)
+                return _format_turn_response(
+                    ford=hit["ford"],
+                    sov=sov,
+                    pending=False,
+                    client_request_id=crid,
+                    extra={"cancelled": True},
+                )
+            except Exception as e:  # noqa: BLE001
+                log.exception("desk_cancel write failed: %s", e)
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                return {
+                    "ok": True,
+                    "cancelled": True,
+                    "pending": False,
+                    "client_request_id": crid,
+                    "ford_message_id": hit["ford"].id,
+                    "hint": "Cancel flagged; reply may still be discarded by brain.",
+                    "error": str(e)[:160],
+                }
+
+    return {
+        "ok": True,
+        "cancelled": True,
+        "pending": True,
+        "client_request_id": crid,
+        "hint": "Cancel flagged — brain will not land a full reply.",
+    }
 
 
 @router.get("/v1/sovereign/desk/turn")

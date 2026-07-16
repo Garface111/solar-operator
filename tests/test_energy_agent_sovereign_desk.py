@@ -107,6 +107,58 @@ def test_history_chat_only_survives_worker_flood(monkeypatch):
         assert not any("Sovereign shipped job" in (h["content"] or "") for h in hist)
 
 
+def test_cancel_marks_crid_and_writes_stopped(monkeypatch):
+    """Stop button: mark cancelled + persist *(Stopped.)* when ford exists."""
+    monkeypatch.setenv("SOVEREIGN_ENABLED", "1")
+    from api.models import Base, Tenant
+    import api.energy_agent_sovereign_desk as desk
+    import api.energy_agent_sovereign as sov  # noqa: F401
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    monkeypatch.setattr(desk, "SessionLocal", Session)
+
+    crid = "cr_stop_test_1"
+    with Session() as db:
+        db.add(Tenant(
+            id="ten_ford",
+            tenant_key="sol_live_ford",
+            name="Ford",
+            product="array_operator",
+            contact_email="ford.genereaux@gmail.com",
+            active=True,
+        ))
+        ford = desk.EaSovereignDeskMessage(
+            id="sdm_ford_stop",
+            role="ford",
+            content="long think please",
+            tenant_id="ten_ford",
+            meta_json=json.dumps({"client_request_id": crid, "channel": "desk"}),
+        )
+        db.add(ford)
+        db.commit()
+
+    desk._mark_crid_cancelled(crid)
+    assert desk._is_crid_cancelled(crid)
+
+    with Session() as db:
+        hit = desk.lookup_turn_by_client_request_id(db, crid)
+        assert hit and not hit["complete"]
+        sov_row = desk._write_stopped_reply(
+            db, ford=hit["ford"], client_request_id=crid, tenant_id="ten_ford"
+        )
+        db.commit()
+        assert sov_row.content == desk._STOP_REPLY
+        hit2 = desk.lookup_turn_by_client_request_id(db, crid)
+        assert hit2 and hit2["complete"]
+        assert "Stopped" in (hit2["sov"].content or "")
+
+
 def test_lookup_turn_by_client_request_id_idempotent(monkeypatch):
     """Retries with the same client_request_id find the prior turn."""
     monkeypatch.setenv("SOVEREIGN_ENABLED", "1")
