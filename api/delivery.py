@@ -302,12 +302,19 @@ def deliver_operator_directory(
     Best-effort: failures are logged and returned; callers should not fail
     client delivery because the directory email missed.
     """
+    from .report_eligibility import tenant_has_report_clients
+
     with SessionLocal() as db:
         tenant = db.get(Tenant, tenant_id)
         if not tenant:
             return {"ok": False, "reason": "tenant not found", "tenant": tenant_id}
-        if getattr(tenant, "product", "nepool") == "array_operator":
-            return {"ok": False, "reason": "not a NEPOOL tenant", "tenant": tenant_id}
+        # Data-presence, not product (THE FOLD): any tenant with live report
+        # clients gets the NEPOOL-GIS directory — a migrated Array Operator
+        # tenant included. The demo tenant never emails anyone.
+        if getattr(tenant, "is_demo", False):
+            return {"ok": False, "reason": "demo tenant", "tenant": tenant_id}
+        if not tenant_has_report_clients(db, tenant_id):
+            return {"ok": False, "reason": "no report clients", "tenant": tenant_id}
         tenant_email = (tenant.contact_email or "").strip()
         tenant_name = tenant.company_name or tenant.name or "Operator"
         operator_name = tenant.operator_name or tenant_name

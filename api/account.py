@@ -1074,8 +1074,13 @@ def download_directory_report(
     """
     t = tenant_from_session(authorization)
     require_not_demo(t)
-    if getattr(t, "product", "nepool") == "array_operator":
-        raise HTTPException(404, "Directory reports are for NEPOOL Operator only")
+    # Data presence, not product (THE FOLD): any tenant with live report
+    # clients — a migrated Array Operator tenant included — can pull the
+    # NEPOOL-GIS directory. A tenant with no clients has nothing to direct.
+    from .report_eligibility import tenant_has_report_clients
+    with SessionLocal() as db:
+        if not tenant_has_report_clients(db, t.id):
+            raise HTTPException(404, "Add a client first — the directory covers your clients' arrays")
     reference_date = None
     if quarter:
         try:
@@ -1153,8 +1158,11 @@ def send_directory_report(
     t = tenant_from_session(authorization)
     require_not_demo(t)
     require_active_subscription(t)
-    if getattr(t, "product", "nepool") == "array_operator":
-        raise HTTPException(404, "Directory reports are for NEPOOL Operator only")
+    # Data presence, not product (THE FOLD) — mirrors the download endpoint.
+    from .report_eligibility import tenant_has_report_clients
+    with SessionLocal() as db:
+        if not tenant_has_report_clients(db, t.id):
+            raise HTTPException(404, "Add a client first — the directory covers your clients' arrays")
     reference_date = None
     if quarter:
         try:

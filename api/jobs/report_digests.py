@@ -37,10 +37,10 @@ from ..db import SessionLocal
 from ..models import Tenant, Client, ReportDelivery, now
 from ..notify import _send_via_resend
 from ..email_skin import render_email_skin, render_email_skin_text
+from ..branding import brand_name, dashboard_url
+from ..report_eligibility import tenant_reports_eligible
 
 logger = logging.getLogger(__name__)
-
-DASH_URL = "https://nepooloperator.com/"
 
 # How long after a scheduled send we wait before the receipt, so Resend delivery
 # webhooks have time to land. The receipt cron runs at 11:00 UTC (2h after the
@@ -162,7 +162,12 @@ def _delivery_health_note(client: Client) -> str | None:
 
 
 def _build_review_email(op_name: str, send_date_str: str,
-                        clients: list[dict]) -> tuple[str, str, str]:
+                        clients: list[dict],
+                        product: str | None = None) -> tuple[str, str, str]:
+    # Digests render in the TENANT's product skin (NEPOOL light / AO day-blue)
+    # and link to the tenant's own dashboard — post-fold, a migrated Array
+    # Operator tenant gets AO-branded review/receipt emails, not NEPOOL ones.
+    dash = dashboard_url(product) + "/"
     first = _html.escape(str(op_name).split()[0] if op_name else "there")
     n = len(clients)
     will_send = [c for c in clients if c["recipient"] and c["ready"]]
@@ -222,7 +227,8 @@ def _build_review_email(op_name: str, send_date_str: str,
         else:
             flag = f"ready ({c['cadence']})"
         body_text_lines.append(f"  - {c['name']} → {c['recipient'] or '—'}  [{flag}]")
-    body_text_lines += ["", f"Review/fix anything before it sends: {DASH_URL}", "", "— NEPOOL Operator"]
+    body_text_lines += ["", f"Review/fix anything before it sends: {dash}", "",
+                        f"— {brand_name(product)}"]
     body_text = "\n".join(body_text_lines)
 
     subject = f"Review: {n} report{'s' if n != 1 else ''} going out {send_date_str}"
@@ -230,20 +236,21 @@ def _build_review_email(op_name: str, send_date_str: str,
         preheader=preheader, headline="Reports going out in 2 days",
         intro_line="A heads-up so you can review before they send",
         body_html=body_html,
-        cta={"label": "Review in your dashboard", "url": DASH_URL},
-        product="nepool")
+        cta={"label": "Review in your dashboard", "url": dash},
+        product=product)
     text = render_email_skin_text(
         headline="Reports going out in 2 days",
         intro_line="A heads-up so you can review before they send",
         body_text=body_text,
-        cta={"label": "Review in your dashboard", "url": DASH_URL},
-        product="nepool")
+        cta={"label": "Review in your dashboard", "url": dash},
+        product=product)
     return subject, html, text
 
 
 def run_presend_reviews() -> dict:
-    """Daily. When a cadence batch is exactly 2 days out, email each NEPOOL
-    operator what will be sent to whom so they can review it first."""
+    """Daily. When a cadence batch is exactly 2 days out, email each operator
+    with report clients (any product — data presence, not product, decides)
+    what will be sent to whom so they can review it first."""
     target = now() + timedelta(days=2)
     td = target.date()
     cadences: list[str] = []
@@ -264,7 +271,7 @@ def run_presend_reviews() -> dict:
         report_has_data = lambda _cid: True  # noqa: E731 — degrade to "assume data"
 
     per_tenant: dict[str, list[dict]] = defaultdict(list)
-    op_info: dict[str, tuple[str, str]] = {}
+    op_info: dict[str, tuple[str, str, str]] = {}
     with SessionLocal() as db:
         for cadence in cadences:
             rows = db.execute(
@@ -278,9 +285,12 @@ def run_presend_reviews() -> dict:
                 ))
             ).all()
             for c, t in rows:
-                if getattr(t, "product", "nepool") == "array_operator":
-                    continue
-                if not (t.active or t.subscription_status in ("comped", "trialing")):
+                # Data-presence eligibility (THE FOLD): the join above already
+                # establishes "this tenant has an active client on this
+                # cadence" — the only tenant-level gates left are standing +
+                # not-demo. NO product gate: a migrated Array Operator tenant
+                # with report clients gets the same pre-send review.
+                if not tenant_reports_eligible(t):
                     continue
                 recipient, note = _preview_recipient(c, t)
                 try:
@@ -293,17 +303,19 @@ def run_presend_reviews() -> dict:
                     "health": _delivery_health_note(c),
                 })
                 op_info[t.id] = ((t.contact_email or "").strip(),
-                                 t.operator_name or t.company_name or t.name or "there")
+                                 t.operator_name or t.company_name or t.name or "there",
+                                 getattr(t, "product", "nepool"))
 
     operators = 0
     for tid, clients in per_tenant.items():
-        op_email, op_name = op_info.get(tid, ("", "there"))
+        op_email, op_name, product = op_info.get(tid, ("", "there", "nepool"))
         if not op_email or not clients:
             continue
         try:
-            subject, html, text = _build_review_email(op_name, send_date_str, clients)
+            subject, html, text = _build_review_email(op_name, send_date_str,
+                                                      clients, product=product)
             if _send_via_resend(to=op_email, subject=subject, html=html,
-                                text=text, product="nepool"):
+                                text=text, product=product):
                 operators += 1
         except Exception as exc:  # one operator must not stall the rest
             logger.warning("presend review failed for tenant %s: %s", tid, exc)
@@ -340,7 +352,9 @@ def _classify(db, rows: list[ReportDelivery]) -> dict[str, list[dict]]:
 
 
 def _build_receipt_email(op_name: str, sent_date_str: str, cadences: list[str],
-                         buckets: dict[str, list[dict]]) -> tuple[str, str, str]:
+                         buckets: dict[str, list[dict]],
+                         product: str | None = None) -> tuple[str, str, str]:
+    dash = dashboard_url(product) + "/"
     first = _html.escape(str(op_name).split()[0] if op_name else "there")
     delivered = buckets["delivered"]
     bounced = buckets["bounced"]
@@ -401,7 +415,8 @@ def _build_receipt_email(op_name: str, sent_date_str: str, cadences: list[str],
                 line += f"  [{it['reason']}]"
             text_lines.append(line)
         text_lines.append("")
-    text_lines += [f"Full delivery health in your dashboard: {DASH_URL}", "", "— NEPOOL Operator"]
+    text_lines += [f"Full delivery health in your dashboard: {dash}", "",
+                   f"— {brand_name(product)}"]
     body_text = "\n".join(text_lines)
 
     if bounced or not_sent:
@@ -414,17 +429,17 @@ def _build_receipt_email(op_name: str, sent_date_str: str, cadences: list[str],
         preheader=preheader, headline="Your reports went out",
         intro_line="A receipt of what was sent and where it landed",
         body_html=body_html,
-        cta={"label": "Open your dashboard", "url": DASH_URL}, product="nepool")
+        cta={"label": "Open your dashboard", "url": dash}, product=product)
     text = render_email_skin_text(
         headline="Your reports went out",
         intro_line="A receipt of what was sent and where it landed",
         body_text=body_text,
-        cta={"label": "Open your dashboard", "url": DASH_URL}, product="nepool")
+        cta={"label": "Open your dashboard", "url": dash}, product=product)
     return subject, html, text
 
 
 def run_delivery_receipts() -> dict:
-    """Email each NEPOOL operator a receipt of the batch we sent on their behalf,
+    """Email each operator a receipt of the batch we sent on their behalf,
     with Resend-confirmed delivery status. Processes ReportDelivery rows aged past
     the confirmation window; stamps receipt_sent_at on success so each batch is
     reported exactly once (un-stamped on a transient send failure → retried)."""
@@ -450,13 +465,19 @@ def run_delivery_receipts() -> dict:
                 if not rows:
                     continue
                 # Can't / shouldn't route: stamp so we don't reprocess forever.
-                if tenant is None or getattr(tenant, "product", "nepool") == "array_operator":
+                # Data-presence eligibility (THE FOLD): these rows exist because
+                # the scheduler processed this tenant's clients — no product
+                # gate; a migrated Array Operator tenant gets its receipt too.
+                # Demo stays stamped-and-skipped (seed_demo gives the demo
+                # tenant Client rows; its batches must never email anyone).
+                if tenant is None or getattr(tenant, "is_demo", False):
                     stamp = now()
                     for r in rows:
                         r.receipt_sent_at = stamp
                     db.commit()
                     continue
 
+                product = getattr(tenant, "product", "nepool")
                 op_email = (tenant.contact_email or "").strip()
                 op_name = tenant.operator_name or tenant.company_name or tenant.name or "there"
                 cadences = sorted({r.cadence for r in rows})
@@ -467,9 +488,9 @@ def run_delivery_receipts() -> dict:
                 sent_ok = False
                 if op_email:
                     subject, html, text = _build_receipt_email(
-                        op_name, sent_date_str, cadences, buckets)
+                        op_name, sent_date_str, cadences, buckets, product=product)
                     sent_ok = _send_via_resend(to=op_email, subject=subject,
-                                               html=html, text=text, product="nepool")
+                                               html=html, text=text, product=product)
 
                 # Stamp when we sent, or when there's nothing we can do (no email).
                 if sent_ok or not op_email:

@@ -303,18 +303,21 @@ def _deliver_clients_with_frequency(frequency: str) -> dict:
     from .delivery import deliver_for_client
     from .notify import send_internal_alert
     from .jobs.report_digests import record_scheduled_batch
+    from .report_eligibility import tenant_reports_eligible
 
     sent: list[int] = []
     failed: list[int] = []
     skipped_empty: list[int] = []
     results: list[dict] = []  # full per-client outcome → operator delivery receipt
     with SessionLocal() as db:
-        # All client rows that EITHER explicitly match the cadence OR
-        # inherit it from the tenant
+        # All LIVE client rows that EITHER explicitly match the cadence OR
+        # inherit it from the tenant. (deleted_at filter mirrors
+        # run_presend_reviews — a soft-deleted client must never be scheduled.)
         rows = db.execute(
             select(Client, Tenant)
             .join(Tenant, Client.tenant_id == Tenant.id)
             .where(Client.active == True)  # noqa: E712
+            .where(Client.deleted_at.is_(None))
             .where(
                 or_(
                     Client.report_frequency == frequency,
@@ -323,10 +326,13 @@ def _deliver_clients_with_frequency(frequency: str) -> dict:
                 )
             )
         ).all()
-        candidates = [
-            c.id for (c, t) in rows
-            if (t.active or t.subscription_status in ("comped", "trialing"))
-        ]
+        # Data-presence eligibility (THE FOLD): the join IS the data test —
+        # this tenant has an active client on this cadence. The predicate adds
+        # standing (active/comped/trialing, same as before) and excludes the
+        # demo tenant (whose seeded clients previously churned through as
+        # no-recipient no-ops every quarter). NO product gate: a migrated
+        # Array Operator tenant with clients + a cadence is picked up.
+        candidates = [c.id for (c, t) in rows if tenant_reports_eligible(t)]
         # name + tenant per candidate, so a client that RAISES mid-send still
         # lands a labeled row in the operator's receipt.
         cand_set = set(candidates)
