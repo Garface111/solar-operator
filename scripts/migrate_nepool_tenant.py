@@ -14,6 +14,10 @@ What moves
     separate offtaker_* columns). send_from_email / send_from_name are copied
     ONLY when the target hasn't set its own (they're shared with AO emails).
   * ReportDelivery history rows (re-pointed to the target tenant)
+  * the target gains ``generation_reports=True`` — the explicit marker that
+    makes an Array Operator tenant eligible for scheduled sends / digests /
+    the operator directory (see api/report_eligibility.py for why this is a
+    marker and not clients+cadence inference)
 
 Array mapping (the hard part — "sibling arrays" from dual capture)
 ------------------------------------------------------------------
@@ -369,7 +373,12 @@ def apply_plan(db, plan: Plan) -> None:
                        .where(DailyGeneration.array_id == src_arr.id)
                        .values(tenant_id=target.id))
 
-    # 3. Tenant settings.
+    # 3. Tenant settings + the reports-world marker. generation_reports is what
+    # makes the migrated AO tenant ELIGIBLE for scheduled sends / digests /
+    # the operator directory (api/report_eligibility.tenant_in_reports_world)
+    # — an explicit marker, because AO capture auto-creates Client rows and
+    # bare client-presence can't identify a reports tenant.
+    target.generation_reports = True
     for s in plan.settings:
         if s["action"] == "copy":
             setattr(target, s["field"], getattr(source, s["field"]))
@@ -587,6 +596,9 @@ def _print_plan(plan: Plan) -> None:
         print(f"  - {s['field']}: {s['action']}"
               + (f"  ({s['source']!r} -> target)" if s["action"] == "copy" else ""))
     print(f"\nReportDelivery history rows to re-point: {plan.report_deliveries}")
+    print("Target tenant gains generation_reports=True — this is what turns on "
+          "scheduled sends,\ndigests and the operator directory for the migrated "
+          "AO tenant (report_eligibility).")
     for n in plan.notes:
         print(f"  note: {n}")
     if plan.ambiguities:

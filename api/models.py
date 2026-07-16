@@ -102,6 +102,18 @@ class Tenant(Base):
     ai_pro: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="false", nullable=False
     )
+    # THE FOLD (Jul 2026): this tenant's generation-reports world is LIVE.
+    # NEPOOL tenants are in that world implicitly (legacy default — see
+    # api/report_eligibility.tenant_in_reports_world); an Array Operator tenant
+    # joins it ONLY when scripts/migrate_nepool_tenant.py migrates a NEPOOL
+    # sibling onto it and flips this flag. An explicit marker, NOT inference:
+    # AO capture auto-creates Client rows per utility-login holder (47 non-demo
+    # AO tenants already had live clients in prod, 2026-07-16 probe), so
+    # "has clients + cadence" can never distinguish a migrated reports tenant
+    # from a plain AO tenant.
+    generation_reports: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
     # Send-pipeline pause switch (Ford 2026-07-03): True → the SCHEDULER's
     # billing runs skip this tenant entirely (no auto sends, no auto drafts).
     # Manual sends + draft approvals still work — pause stops the machine,

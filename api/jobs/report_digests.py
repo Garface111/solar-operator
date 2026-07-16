@@ -38,7 +38,7 @@ from ..models import Tenant, Client, ReportDelivery, now
 from ..notify import _send_via_resend
 from ..email_skin import render_email_skin, render_email_skin_text
 from ..branding import brand_name, dashboard_url
-from ..report_eligibility import tenant_reports_eligible
+from ..report_eligibility import tenant_reports_eligible, tenant_in_reports_world
 
 logger = logging.getLogger(__name__)
 
@@ -465,12 +465,14 @@ def run_delivery_receipts() -> dict:
                 if not rows:
                     continue
                 # Can't / shouldn't route: stamp so we don't reprocess forever.
-                # Data-presence eligibility (THE FOLD): these rows exist because
-                # the scheduler processed this tenant's clients — no product
-                # gate; a migrated Array Operator tenant gets its receipt too.
-                # Demo stays stamped-and-skipped (seed_demo gives the demo
-                # tenant Client rows; its batches must never email anyone).
-                if tenant is None or getattr(tenant, "is_demo", False):
+                # THE FOLD: a MIGRATED Array Operator tenant (generation_
+                # reports flag set) gets its receipt like any NEPOOL operator;
+                # an unmigrated AO tenant stays stamped-and-skipped exactly as
+                # under the old product gate. Demo is stamped-and-skipped too
+                # (seed_demo gives the demo tenant Client rows; its batches
+                # must never email anyone).
+                if (tenant is None or getattr(tenant, "is_demo", False)
+                        or not tenant_in_reports_world(tenant)):
                     stamp = now()
                     for r in rows:
                         r.receipt_sent_at = stamp

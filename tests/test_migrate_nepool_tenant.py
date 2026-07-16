@@ -193,6 +193,7 @@ def test_verify_workbooks_identical_and_rolls_back():
         assert ta2.nepool_gis_id is None
         tgt = db.get(Tenant, ids["tgt"])
         assert tgt.email_body_template is None                     # not copied
+        assert tgt.generation_reports is False                     # flag NOT flipped
         rd = db.execute(
             __import__("sqlalchemy").select(ReportDelivery)
             .where(ReportDelivery.client_id == ids["c1"])).scalars().first()
@@ -240,6 +241,11 @@ def test_execute_moves_everything_and_carries_nepool_fields():
         # settings: hard copies land, soft copy keeps the target's own value
         tgt = db.get(Tenant, ids["tgt"])
         src = db.get(Tenant, ids["src"])
+        # the reports-world marker: THIS is what makes the migrated AO tenant
+        # eligible for scheduled sends/digests (api/report_eligibility)
+        assert tgt.generation_reports is True
+        from api.report_eligibility import tenant_reports_eligible
+        assert tenant_reports_eligible(tgt) is True
         assert tgt.email_body_template == "Hello {{client_name}} — custom body"
         assert tgt.email_subject_template == "Sub {{quarter}}"
         assert tgt.email_signoff == "— Bruce"

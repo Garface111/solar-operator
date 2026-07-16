@@ -82,6 +82,10 @@ def main():
             ("consent_ip",             "ALTER TABLE tenants ADD COLUMN consent_ip VARCHAR(64)"),
             # White-glove per-tenant staleness/alert override (Jul 2026).
             ("vip_watch",              "ALTER TABLE tenants ADD COLUMN vip_watch BOOLEAN DEFAULT FALSE NOT NULL"),
+            # THE FOLD (Jul 2026): explicit "generation-reports world is live"
+            # marker, flipped by scripts/migrate_nepool_tenant.py for migrated
+            # AO tenants. FALSE for everyone → behavior-neutral until Phase 4.
+            ("generation_reports",     "ALTER TABLE tenants ADD COLUMN generation_reports BOOLEAN DEFAULT FALSE NOT NULL"),
         ]
         for col, sql in statements:
             if not column_exists(conn, "tenants", col):

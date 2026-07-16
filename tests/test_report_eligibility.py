@@ -1,15 +1,19 @@
-"""Data-presence eligibility for generation-report sends/digests (THE FOLD, Phase 1).
+"""Eligibility for generation-report sends/digests (THE FOLD, Phase 1).
 
 The scheduler + report digests used to gate on ``Tenant.product`` (skip
-"array_operator"). Post-fold, migrated AO tenants carry Client rows + a
-cadence and must keep receiving scheduled sends, pre-send reviews, delivery
-receipts and the operator directory. Eligibility is keyed on DATA PRESENCE:
+"array_operator"). Post-fold, MIGRATED AO tenants must keep receiving
+scheduled sends, pre-send reviews, delivery receipts and the operator
+directory. The AO arm keys on the EXPLICIT ``Tenant.generation_reports``
+marker the fold migration flips — NOT on "has clients + cadence" inference,
+which a 2026-07-16 prod probe proved unsafe (47 non-demo AO tenants already
+have live capture-created Client rows + the default quarterly cadence):
 
-  * nepool tenant w/ active clients + cadence      -> eligible (unchanged)
-  * array_operator tenant w/ clients + cadence     -> eligible (NEW)
-  * array_operator tenant w/o clients              -> not eligible
-  * demo tenant (even with seeded clients)         -> excluded, as today
-  * inactive, non-comped/trialing tenant           -> excluded, as today
+  * nepool tenant w/ active clients + cadence          -> eligible (unchanged)
+  * MIGRATED AO tenant (generation_reports) w/ clients -> eligible (NEW)
+  * unmigrated AO tenant — even WITH capture clients   -> excluded (the
+    load-bearing prod-safety pin; see the probe above)
+  * demo tenant (even with seeded clients)             -> excluded, as today
+  * inactive, non-comped/trialing tenant               -> excluded, as today
 
 Also pins the one-brand direction: digests render in the TENANT's product
 skin (an AO tenant gets AO-branded review/receipt emails, not NEPOOL ones).
@@ -28,12 +32,15 @@ import pytest
 from api.db import SessionLocal
 from api.models import (Tenant, Client, Array, UtilityAccount, Bill,
                         ReportDelivery)
-from api.report_eligibility import tenant_reports_eligible, tenant_has_report_clients
+from api.report_eligibility import (tenant_reports_eligible,
+                                    tenant_has_report_clients,
+                                    tenant_in_reports_world)
 
 
 def _mk_tenant(*, product: str = "nepool", active: bool = True,
                is_demo: bool = False, status: str | None = "active",
-               frequency: str = "weekly") -> tuple[str, str]:
+               frequency: str = "weekly",
+               gen_reports: bool = False) -> tuple[str, str]:
     tid = "ten_" + secrets.token_hex(6)
     email = f"{tid}@eligibility.test"
     with SessionLocal() as db:
@@ -42,6 +49,7 @@ def _mk_tenant(*, product: str = "nepool", active: bool = True,
             tenant_key="k_" + secrets.token_hex(8), plan="standard",
             active=active, product=product, is_demo=is_demo,
             subscription_status=status, report_frequency=frequency,
+            generation_reports=gen_reports,
         ))
         db.commit()
     return tid, email
@@ -62,18 +70,30 @@ def _mk_client(tid: str, *, name: str | None = None, active: bool = True,
 
 # ── the predicate itself ───────────────────────────────────────────────────────
 
-def test_predicate_no_product_gate():
+def test_predicate_keys_on_the_migrated_marker_not_product():
     nep = Tenant(id="t1", name="n", contact_email="n@x", tenant_key="k1",
                  active=True, product="nepool")
-    ao = Tenant(id="t2", name="a", contact_email="a@x", tenant_key="k2",
-                active=True, product="array_operator")
+    ao_migrated = Tenant(id="t2", name="a", contact_email="a@x", tenant_key="k2",
+                         active=True, product="array_operator",
+                         generation_reports=True)
+    ao_plain = Tenant(id="t6", name="p", contact_email="p@x", tenant_key="k6",
+                      active=True, product="array_operator",
+                      generation_reports=False)
+    assert tenant_in_reports_world(nep) is True         # legacy, unchanged
+    assert tenant_in_reports_world(ao_migrated) is True # the fold marker
+    # THE prod-safety pin: 47 non-demo AO tenants have live capture-created
+    # Client rows in prod (2026-07-16 probe) — without the marker they must
+    # stay exactly as excluded as under the old product gate.
+    assert tenant_in_reports_world(ao_plain) is False
     assert tenant_reports_eligible(nep) is True
-    assert tenant_reports_eligible(ao) is True          # product never disqualifies
+    assert tenant_reports_eligible(ao_migrated) is True
+    assert tenant_reports_eligible(ao_plain) is False
 
 
 def test_predicate_excludes_demo_and_inactive():
     demo = Tenant(id="t3", name="d", contact_email="d@x", tenant_key="k3",
-                  active=True, product="array_operator", is_demo=True)
+                  active=True, product="array_operator", is_demo=True,
+                  generation_reports=True)     # even migrated, demo never sends
     dead = Tenant(id="t4", name="i", contact_email="i@x", tenant_key="k4",
                   active=False, product="nepool", subscription_status="canceled")
     comped = Tenant(id="t5", name="c", contact_email="c@x", tenant_key="k5",
@@ -99,17 +119,19 @@ def test_has_report_clients_counts_only_live_active():
 
 # ── scheduler selection (_deliver_clients_with_frequency) ─────────────────────
 
-def test_scheduler_picks_ao_tenant_with_clients_and_excludes_demo(monkeypatch):
+def test_scheduler_picks_migrated_ao_tenant_and_excludes_the_rest(monkeypatch):
     from api import scheduler as sched
 
     nep_tid, _ = _mk_tenant(product="nepool")
-    ao_tid, _ = _mk_tenant(product="array_operator")
-    bare_ao_tid, _ = _mk_tenant(product="array_operator")     # no clients
-    demo_tid, _ = _mk_tenant(product="array_operator", is_demo=True)
+    ao_tid, _ = _mk_tenant(product="array_operator", gen_reports=True)  # migrated
+    plain_ao_tid, _ = _mk_tenant(product="array_operator")    # capture clients only
+    demo_tid, _ = _mk_tenant(product="array_operator", is_demo=True,
+                             gen_reports=True)
     dead_tid, _ = _mk_tenant(product="nepool", active=False, status="canceled")
 
     nep_cid = _mk_client(nep_tid)
     ao_cid = _mk_client(ao_tid)
+    plain_ao_cid = _mk_client(plain_ao_tid)   # the 47-tenants-in-prod shape
     demo_cid = _mk_client(demo_tid)
     dead_cid = _mk_client(dead_tid)
     gone_cid = _mk_client(ao_tid, deleted=True)               # soft-deleted
@@ -133,11 +155,12 @@ def test_scheduler_picks_ao_tenant_with_clients_and_excludes_demo(monkeypatch):
     sched._deliver_clients_with_frequency("weekly")
 
     assert nep_cid in delivered                     # nepool: unchanged
-    assert ao_cid in delivered                      # AO w/ clients: NEW, eligible
+    assert ao_cid in delivered                      # MIGRATED AO: NEW, eligible
+    assert plain_ao_cid not in delivered            # unmigrated AO w/ capture
+                                                    # clients: MUST stay out
     assert demo_cid not in delivered                # demo: excluded as today
     assert dead_cid not in delivered                # inactive non-comped: excluded
     assert gone_cid not in delivered                # soft-deleted client: excluded
-    # bare AO tenant has no client rows, so nothing of its could be delivered
 
 
 # ── pre-send review (run_presend_reviews) ─────────────────────────────────────
@@ -146,12 +169,16 @@ def test_presend_review_is_data_keyed_and_product_skinned(monkeypatch):
     import api.jobs.report_digests as rd
 
     nep_tid, nep_email = _mk_tenant(product="nepool")
-    ao_tid, ao_email = _mk_tenant(product="array_operator")
-    bare_ao_tid, bare_email = _mk_tenant(product="array_operator")   # no clients
-    demo_tid, demo_email = _mk_tenant(product="array_operator", is_demo=True)
+    ao_tid, ao_email = _mk_tenant(product="array_operator", gen_reports=True)
+    plain_ao_tid, plain_email = _mk_tenant(product="array_operator")  # unmigrated
+    bare_ao_tid, bare_email = _mk_tenant(product="array_operator",
+                                         gen_reports=True)            # no clients
+    demo_tid, demo_email = _mk_tenant(product="array_operator", is_demo=True,
+                                      gen_reports=True)
 
     _mk_client(nep_tid, contact_email="n-client@x.test")
     _mk_client(ao_tid, contact_email="a-client@x.test")
+    _mk_client(plain_ao_tid, contact_email="p-client@x.test")  # capture client
     _mk_client(demo_tid, contact_email="d-client@x.test")
 
     # Freeze "now" so now()+2d lands on a Monday -> the weekly cadence fires.
@@ -172,7 +199,9 @@ def test_presend_review_is_data_keyed_and_product_skinned(monkeypatch):
     assert out.get("cadences") == ["weekly"]
 
     assert nep_email in sends                        # nepool operator reviewed
-    assert ao_email in sends                         # AO operator reviewed (NEW)
+    assert ao_email in sends                         # migrated AO reviewed (NEW)
+    assert plain_email not in sends                  # unmigrated AO w/ capture
+                                                     # clients: MUST stay out
     assert bare_email not in sends                   # no clients -> no review
     assert demo_email not in sends                   # demo excluded
 
@@ -186,17 +215,20 @@ def test_presend_review_is_data_keyed_and_product_skinned(monkeypatch):
 
 # ── delivery receipt (run_delivery_receipts) ──────────────────────────────────
 
-def test_delivery_receipt_reaches_ao_tenant_and_stamps_demo(monkeypatch):
+def test_delivery_receipt_reaches_migrated_ao_and_stamps_the_rest(monkeypatch):
     import api.jobs.report_digests as rd
 
-    ao_tid, ao_email = _mk_tenant(product="array_operator")
+    ao_tid, ao_email = _mk_tenant(product="array_operator", gen_reports=True)
+    plain_ao_tid, plain_email = _mk_tenant(product="array_operator")
     nep_tid, nep_email = _mk_tenant(product="nepool")
-    demo_tid, demo_email = _mk_tenant(product="array_operator", is_demo=True)
+    demo_tid, demo_email = _mk_tenant(product="array_operator", is_demo=True,
+                                      gen_reports=True)
 
     aged = datetime.utcnow() - timedelta(hours=3)    # past the 90-min window
     row_ids: dict[str, int] = {}
     with SessionLocal() as db:
-        for key, tid in (("ao", ao_tid), ("nep", nep_tid), ("demo", demo_tid)):
+        for key, tid in (("ao", ao_tid), ("plain", plain_ao_tid),
+                         ("nep", nep_tid), ("demo", demo_tid)):
             r = ReportDelivery(tenant_id=tid, client_id=None,
                                client_name=f"{key} client", recipient="c@x.test",
                                cadence="weekly", status="sent", sent_at=aged)
@@ -215,11 +247,12 @@ def test_delivery_receipt_reaches_ao_tenant_and_stamps_demo(monkeypatch):
 
     rd.run_delivery_receipts()
 
-    assert ao_email in sends                          # AO receipt goes out (NEW)
+    assert ao_email in sends                          # migrated AO receipt (NEW)
     assert sends[ao_email]["product"] == "array_operator"
     assert "arrayoperator.com" in sends[ao_email]["html"]
     assert nep_email in sends                         # nepool unchanged
     assert sends[nep_email]["product"] == "nepool"
+    assert plain_email not in sends                   # unmigrated AO: stamped only
     assert demo_email not in sends                    # demo never emailed
 
     with SessionLocal() as db:                        # every row stamped once
@@ -235,7 +268,7 @@ def test_operator_directory_keys_on_client_presence(monkeypatch):
 
     ref = date(2024, 4, 1)                            # window Q4'22..Q1'24
 
-    ao_tid, _ = _mk_tenant(product="array_operator")
+    ao_tid, _ = _mk_tenant(product="array_operator", gen_reports=True)
     cid = _mk_client(ao_tid)
     with SessionLocal() as db:
         a = Array(tenant_id=ao_tid, client_id=cid, name="Dir Arr",
@@ -256,18 +289,26 @@ def test_operator_directory_keys_on_client_presence(monkeypatch):
     monkeypatch.setattr(delivery_mod, "send_workbook_email",
                         lambda **kw: sent.update(kw) or True)
 
-    # AO tenant WITH clients + data -> directory goes out (was product-refused)
+    # MIGRATED AO tenant with clients + data -> directory goes out
+    # (used to be product-refused: "not a NEPOOL tenant")
     out = deliver_operator_directory(ao_tid, reference_date=ref)
     assert out["ok"] is True and out["sheet_count"] == 1
     assert sent.get("to")
 
-    # AO tenant WITHOUT clients -> data-presence refusal
-    bare_tid, _ = _mk_tenant(product="array_operator")
+    # UNMIGRATED AO tenant — even with a capture client -> refused
+    plain_tid, _ = _mk_tenant(product="array_operator")
+    _mk_client(plain_tid)
+    out1 = deliver_operator_directory(plain_tid, reference_date=ref)
+    assert out1["ok"] is False and out1["reason"] == "generation reports not enabled"
+
+    # migrated AO tenant WITHOUT clients -> data-presence refusal
+    bare_tid, _ = _mk_tenant(product="array_operator", gen_reports=True)
     out2 = deliver_operator_directory(bare_tid, reference_date=ref)
     assert out2["ok"] is False and out2["reason"] == "no report clients"
 
-    # demo tenant (even with a client) -> refused
-    demo_tid, _ = _mk_tenant(product="array_operator", is_demo=True)
+    # demo tenant (even migrated, even with a client) -> refused
+    demo_tid, _ = _mk_tenant(product="array_operator", is_demo=True,
+                             gen_reports=True)
     _mk_client(demo_tid)
     out3 = deliver_operator_directory(demo_tid, reference_date=ref)
     assert out3["ok"] is False and out3["reason"] == "demo tenant"

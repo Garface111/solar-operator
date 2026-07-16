@@ -1074,10 +1074,12 @@ def download_directory_report(
     """
     t = tenant_from_session(authorization)
     require_not_demo(t)
-    # Data presence, not product (THE FOLD): any tenant with live report
-    # clients — a migrated Array Operator tenant included — can pull the
-    # NEPOOL-GIS directory. A tenant with no clients has nothing to direct.
-    from .report_eligibility import tenant_has_report_clients
+    # THE FOLD: the directory belongs to any tenant whose generation-reports
+    # world is live (every NEPOOL tenant; a migrated AO tenant once the fold
+    # migration flips generation_reports) and who has live report clients.
+    from .report_eligibility import tenant_has_report_clients, tenant_in_reports_world
+    if not tenant_in_reports_world(t):
+        raise HTTPException(404, "Generation reports aren't enabled on this account")
     with SessionLocal() as db:
         if not tenant_has_report_clients(db, t.id):
             raise HTTPException(404, "Add a client first — the directory covers your clients' arrays")
@@ -1158,8 +1160,10 @@ def send_directory_report(
     t = tenant_from_session(authorization)
     require_not_demo(t)
     require_active_subscription(t)
-    # Data presence, not product (THE FOLD) — mirrors the download endpoint.
-    from .report_eligibility import tenant_has_report_clients
+    # THE FOLD: reports-world + client presence — mirrors the download endpoint.
+    from .report_eligibility import tenant_has_report_clients, tenant_in_reports_world
+    if not tenant_in_reports_world(t):
+        raise HTTPException(404, "Generation reports aren't enabled on this account")
     with SessionLocal() as db:
         if not tenant_has_report_clients(db, t.id):
             raise HTTPException(404, "Add a client first — the directory covers your clients' arrays")
