@@ -209,6 +209,176 @@ def triage_feature_queue(db, *, limit: int = 20) -> dict:
     return {"ok": True, "triaged": len(out), "items": out}
 
 
+def claim_improvement_for_sovereign(
+    db,
+    *,
+    feature_id: int,
+    text: str,
+    tenant_id: str | None = None,
+    email: str | None = None,
+    product: str = "array_operator",
+    has_screenshot: bool = False,
+) -> dict:
+    """Owner Improve / feature proposal → Sovereign mind immediately.
+
+    Ford 2026-07-16: proposals go straight into Sovereign's working memory and
+    ship queue so work starts now (not only the external fs_watch judge path).
+    """
+    import json as _json
+    from .energy_agent_sovereign import memory_set, memory_get_all, write_note, act_code_hire, audit
+
+    text = (text or "").strip()
+    # Idempotent: already claimed / shipping
+    try:
+        from .feature_suggestions import FeatureSuggestion
+        existing = db.get(FeatureSuggestion, int(feature_id))
+        if existing and existing.status in ("building", "shipped"):
+            return {
+                "ok": True,
+                "feature_id": feature_id,
+                "status": existing.status,
+                "already": True,
+            }
+    except Exception:
+        pass
+    item = {
+        "id": int(feature_id),
+        "text": text[:2000],
+        "tenant_id": tenant_id,
+        "email": email,
+        "product": product,
+        "has_screenshot": bool(has_screenshot),
+        "at": _now().isoformat() + "Z",
+        "status": "new",
+    }
+    # Durable queue (last 40)
+    queue: list = []
+    try:
+        for m in memory_get_all(db, limit=80):
+            if m.get("key") == "improvement_queue":
+                queue = list(_json.loads(m.get("value") or "[]"))
+                break
+    except Exception:
+        queue = []
+    queue = [q for q in queue if q.get("id") != feature_id]
+    queue.append(item)
+    queue = queue[-40:]
+    memory_set(db, "improvement_queue", _json.dumps(queue), source="improve")
+    memory_set(
+        db, "latest_improvement",
+        _json.dumps(item, default=str)[:8000],
+        source="improve",
+    )
+    memory_set(
+        db, f"improvement:{feature_id}",
+        _json.dumps(item, default=str)[:8000],
+        source="improve",
+    )
+    write_note(
+        db,
+        kind="observation",
+        title=f"Owner improve proposal #{feature_id}",
+        body=(
+            f"LIVE owner proposal — act on this.\n"
+            f"Tenant: {tenant_id or '-'}  Email: {email or '-'}\n"
+            f"Screenshot: {'yes' if has_screenshot else 'no'}\n\n"
+            f"{text[:4000]}"
+        ),
+        provider="improve",
+        meta={"feature_id": feature_id, "tenant_id": tenant_id},
+    )
+
+    if not ops_enabled():
+        audit(
+            db, capability="act.feature_queue", decision="observe",
+            rationale=f"improve #{feature_id} noted (ops off)",
+            targets={"feature_id": feature_id},
+            result="ok",
+        )
+        return {"ok": True, "status": "new", "queued_only": True, "feature_id": feature_id}
+
+    # Claim: new → building + code-hire so the worker starts now
+    st = set_feature_status(
+        db, int(feature_id), "building",
+        review_note=(
+            "Sovereign claimed live: owner Improve proposal ingested into mind + "
+            "code job queued (not waiting on external judge alone)."
+        ),
+        actor="sovereign",
+    )
+    job = act_code_hire(
+        db,
+        title=f"Owner improve #{feature_id}: {text[:80]}"[:200],
+        brief=(
+            f"OWNER IMPROVE PROPOSAL #{feature_id} (live ingest → Sovereign).\n"
+            f"Tenant: {tenant_id or '-'}  Product: {product}\n"
+            f"Email: {email or '-'}\n"
+            f"Has marked screenshot: {bool(has_screenshot)}\n\n"
+            f"Owner ask:\n{text[:3500]}\n\n"
+            "Implement a minimal correct UI/product fix on array-operator public/ "
+            "(or solar-operator api/ if backend). Prefer pure CSS/layout/copy when "
+            "that's the ask. Do NOT invent billing math. After ship, mark feature "
+            f"#{feature_id} shipped via admin status if live."
+        ),
+        kind="owner_improve",
+    )
+    item["status"] = "building"
+    item["job_id"] = (job or {}).get("job_id")
+    memory_set(db, "latest_improvement", _json.dumps(item, default=str)[:8000], source="improve")
+    memory_set(
+        db, "improvement_queue",
+        _json.dumps(
+            [{**q, "status": ("building" if q.get("id") == feature_id else q.get("status"))}
+             for q in queue],
+            default=str,
+        )[:8000],
+        source="improve",
+    )
+    audit(
+        db, capability="act.feature_queue", decision="act",
+        rationale=f"claimed improve #{feature_id} → building + code job",
+        targets={
+            "feature_id": feature_id,
+            "job_id": (job or {}).get("job_id"),
+            "status": st.get("status"),
+        },
+        result="ok" if st.get("ok") else "partial",
+    )
+    return {
+        "ok": True,
+        "feature_id": feature_id,
+        "status": "building" if st.get("ok") else "new",
+        "set_status": st,
+        "job_id": (job or {}).get("job_id"),
+        "code_job": job,
+    }
+
+
+def claim_new_improvements_batch(db, *, limit: int = 8) -> dict:
+    """Drain backlog of status=new proposals into Sovereign building jobs."""
+    from .feature_suggestions import FeatureSuggestion
+    if not ops_enabled():
+        return {"ok": False, "denied": True, "denied_reason": "ops authority off"}
+    rows = db.execute(
+        select(FeatureSuggestion)
+        .where(FeatureSuggestion.status == "new")
+        .order_by(FeatureSuggestion.created_at.asc())
+        .limit(limit)
+    ).scalars().all()
+    items = []
+    for fs in rows:
+        items.append(claim_improvement_for_sovereign(
+            db,
+            feature_id=fs.id,
+            text=fs.text or "",
+            tenant_id=fs.tenant_id,
+            email=fs.email,
+            product=getattr(fs, "product", None) or "array_operator",
+            has_screenshot=bool(fs.screenshot_b64),
+        ))
+    return {"ok": True, "claimed": len(items), "items": items}
+
+
 # ── Utilities ───────────────────────────────────────────────────────────────
 def list_utilities(db, *, status: str = "all", limit: int = 50) -> list[dict]:
     from .utility_requests import UtilityRequest, VALID_STATUSES
@@ -992,6 +1162,8 @@ def autonomous_ops_sweep(db) -> dict:
     results: dict[str, Any] = {
         "requeue": requeue_repo_failed_jobs(db, limit=40),
         "triage": triage_feature_queue(db, limit=15),
+        # Drain new → building via claim (mind + job), not only reviewed→building
+        "new_improves": claim_new_improvements_batch(db, limit=8),
         "features": ship_reviewed_features(db, limit=5, also_code_hire=True),
         "building": ship_building_features(db, limit=8, also_code_hire=True),
         "utilities": advance_utility_queue(db, limit=4),

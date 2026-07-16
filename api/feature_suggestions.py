@@ -93,14 +93,17 @@ def _customer_facing_outcome(status: str, review: str | None) -> dict:
             "detail": "Live on the site — refresh to see it.",
         }
     if status == "building":
+        detail = "Sovereign is building this now."
+        if review and "Sovereign claimed" in (review or ""):
+            detail = "Sovereign claimed this and is building it now."
         return {
             "status": "building",
-            "detail": "The AI engineer is building this now.",
+            "detail": detail,
         }
     if status == "new":
         return {
             "status": "new",
-            "detail": "Queued for the judge.",
+            "detail": "Queued — Sovereign and the judge are on it.",
         }
     # reviewed / held
     reason = ""
@@ -111,10 +114,13 @@ def _customer_facing_outcome(status: str, review: str | None) -> dict:
             if line and not line.startswith("#") and len(line) < 240:
                 reason = line
                 break
+    held = bool(re.search(r"\b(hold|reject|blocked|won't|cannot|human)\b", reason, re.I))
     return {
         "status": "reviewed",
         "detail": reason or "Reviewed — held for a human look.",
-        "failed": True if re.search(r"\b(hold|reject|blocked|won't|cannot)\b", reason, re.I) else False,
+        "failed": held,
+        "can_escalate": True,
+        "outcome": "held" if held else "reviewed",
     }
 
 
@@ -171,6 +177,47 @@ def submit_suggestion(body: SuggestionIn, authorization: str | None = Header(def
         db.commit()
         db.refresh(fs)
         sid = fs.id
+        # Hand to Sovereign immediately (mind + queue + optional ship job)
+        claimed = None
+        try:
+            from .energy_agent_sovereign_ops import claim_improvement_for_sovereign
+            claimed = claim_improvement_for_sovereign(
+                db,
+                feature_id=sid,
+                text=text,
+                tenant_id=tenant_id,
+                email=email,
+                product=product,
+                has_screenshot=bool(shot),
+            )
+            db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            claimed = None
+
+    # Live wake: force cortex so Sovereign acts now (not next 5m tick)
+    try:
+        from .energy_agent_sovereign_subconscious import fire_and_forget_wake
+        fire_and_forget_wake(
+            "feature_suggestion",
+            {
+                "id": sid,
+                "text": text[:1200],
+                "tenant_id": tenant_id,
+                "email": email,
+                "product": product,
+                "has_screenshot": bool(shot),
+                "claimed": bool(claimed and claimed.get("ok")),
+                "status": (claimed or {}).get("status") or "new",
+            },
+            source="feature_suggestion",
+            force_cortex=True,
+        )
+    except Exception:
+        pass
 
     try:
         send_internal_alert(
@@ -183,18 +230,23 @@ def submit_suggestion(body: SuggestionIn, authorization: str | None = Header(def
                     if shot
                     else ""
                 )
-                + "\n(Queued for judge / Claude Code agent review.)"
+                + "\n(Handed to Sovereign mind immediately + classic judge path.)"
             ),
         )
     except Exception:
         pass
 
+    status_out = (claimed or {}).get("status") or "new"
     # Frontend (EA Improve + wish widget) requires ok:true + id
     return {
         "ok": True,
         "id": sid,
-        "status": "new",
+        "status": status_out,
         "auto_prompt": auto_prompt,
+        "sovereign": {
+            "claimed": bool(claimed and claimed.get("ok")),
+            "job_id": (claimed or {}).get("job_id"),
+        },
     }
 
 
