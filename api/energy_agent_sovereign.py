@@ -205,6 +205,10 @@ def _id(prefix: str = "sov") -> str:
     return f"{prefix}_{uuid.uuid4().hex[:16]}"
 
 
+# Process-local: seed operating memory at most once per dyno (anti lock-thrash)
+_ops_mem_seeded = False
+
+
 # ── Persistence ─────────────────────────────────────────────────────────────
 class EaSovereignState(Base):
     """Singleton product world model (row id always 'product')."""
@@ -1329,55 +1333,61 @@ _OPERATING_AGREEMENT = {
 
 
 def ensure_operating_memory(db) -> None:
-    """Seed Ford's operating agreement once (skip keys that already match).
+    """Seed Ford's operating agreement once (INSERT-only for missing keys).
 
-    Must not lock-fight every tick — only write missing/changed keys, and
-    always recover the session on failure so desk/tick can continue.
+    Must not lock-fight every tick. Never rewrite keys that already exist —
+    concurrent cortex/sub/jobs thrashing memory UPDATEs saturated the DB pool
+    and made Array Operator API time out (2026-07-16 outage).
     """
     try:
         existing = {m["key"]: m.get("value") for m in memory_get_all(db, limit=100)}
         wrote = 0
         for key, value in _OPERATING_AGREEMENT.items():
-            if existing.get(key) == value:
+            # Only seed missing keys — do not "refresh" content every tick
+            if key in existing and (existing.get(key) or "").strip():
                 continue
             memory_set(db, key, value, source="ford_grant")
             wrote += 1
-        # Expansion powers live memory (supersedes any prior "gaps" framing)
+        # Expansion powers — grant_expand_memory is itself idempotent
         try:
             from .energy_agent_sovereign_expand import grant_expand_memory
             grant_expand_memory(db)
-            wrote += 1
         except Exception:
             log.debug("grant_expand_memory skipped", exc_info=True)
-        compact = (
-            "1) " + _OPERATING_AGREEMENT["authority_ship"] + "\n"
-            "2) " + _OPERATING_AGREEMENT["checkin_cadence"] + "\n"
-            "3) " + _OPERATING_AGREEMENT["job_budget"] + "\n"
-            "4) " + _OPERATING_AGREEMENT["weekly_digest"] + "\n"
-            "5) " + _OPERATING_AGREEMENT["demo_vs_real"] + "\n"
-            "6) " + _OPERATING_AGREEMENT["people_testers"] + "\n"
-            "7) " + _OPERATING_AGREEMENT["capability_grants"]
-        )
-        if existing.get("ford_operating_agreement") != compact:
+        if not (existing.get("ford_operating_agreement") or "").strip():
+            compact = (
+                "1) " + _OPERATING_AGREEMENT["authority_ship"] + "\n"
+                "2) " + _OPERATING_AGREEMENT["checkin_cadence"] + "\n"
+                "3) " + _OPERATING_AGREEMENT["job_budget"] + "\n"
+                "4) " + _OPERATING_AGREEMENT["weekly_digest"] + "\n"
+                "5) " + _OPERATING_AGREEMENT["demo_vs_real"] + "\n"
+                "6) " + _OPERATING_AGREEMENT["people_testers"] + "\n"
+                "7) " + _OPERATING_AGREEMENT.get("capability_grants", "")
+            )
             memory_set(db, "ford_operating_agreement", compact, source="ford_grant")
             wrote += 1
-        if wrote and not existing.get("ford_operating_agreement"):
-            write_note(
-                db,
-                kind="memory",
-                title="Ford operating agreement + people map (seeded)",
-                body=(
-                    _OPERATING_AGREEMENT["authority_ship"]
-                    + "\n\n"
-                    + _OPERATING_AGREEMENT["demo_vs_real"]
-                    + "\n\n"
-                    + _OPERATING_AGREEMENT["people_testers"]
-                ),
-                provider="system",
-                meta={"source": "ford_grant"},
-            )
+            try:
+                write_note(
+                    db,
+                    kind="memory",
+                    title="Ford operating agreement + people map (seeded)",
+                    body=(
+                        _OPERATING_AGREEMENT["authority_ship"]
+                        + "\n\n"
+                        + _OPERATING_AGREEMENT["demo_vs_real"]
+                        + "\n\n"
+                        + _OPERATING_AGREEMENT["people_testers"]
+                    ),
+                    provider="system",
+                    meta={"source": "ford_grant"},
+                )
+            except Exception:
+                pass
         if wrote:
-            db.flush()
+            try:
+                db.flush()
+            except Exception:
+                pass
     except Exception as e:  # noqa: BLE001
         log.warning("ensure_operating_memory failed: %s", e)
         try:
@@ -1392,9 +1402,12 @@ def ensure_default_goals(db) -> None:
     Updating open goals on every desk/tick held row locks and timed out chat
     while the worker drained jobs (LockNotAvailable on ea_sovereign_goals).
     """
-    # Always keep operating agreement fresh in memory
+    # Operating agreement: at most once per process (was rewriting every tick)
+    global _ops_mem_seeded
     try:
-        ensure_operating_memory(db)
+        if not _ops_mem_seeded:
+            ensure_operating_memory(db)
+            _ops_mem_seeded = True
     except Exception:
         pass
     defaults = [
@@ -2593,6 +2606,7 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
             brain_provider = None
 
             # ── Procedural skills (Hermes-style progressive disclosure) ─────
+            # Read-only on this session; never let skills poison the tick txn.
             skills_ctx: dict = {"enabled": False, "index": [], "loaded": []}
             try:
                 from .energy_agent_sovereign_skills import (
@@ -2615,6 +2629,10 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
                     )
             except Exception as e:  # noqa: BLE001
                 log.debug("skills context skip: %s", e)
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
 
             # ── Cortex: independent mind (Grok → Claude fallback) ──────────
             try:

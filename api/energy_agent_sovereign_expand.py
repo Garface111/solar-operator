@@ -942,8 +942,13 @@ def owner_direct_speak(
 
 
 def grant_expand_memory(db) -> None:
-    """Write durable grants (powers, not limits)."""
-    from .energy_agent_sovereign import memory_set, write_note
+    """Write durable grants once (powers, not limits).
+
+    CRITICAL: must NOT rewrite every tick — concurrent cortex/sub/jobs were
+    lock-thrashing ea_sovereign_memory and starving the HTTP connection pool
+    (Array Operator API timeouts / "site down").
+    """
+    from .energy_agent_sovereign import memory_get_all, memory_set, write_note
 
     grants = {
         "capability_grants": (
@@ -975,9 +980,22 @@ def grant_expand_memory(db) -> None:
             "If a power fails, fix/retry or escalate with evidence."
         ),
     }
+    try:
+        existing = {m["key"]: m.get("value") for m in memory_get_all(db, limit=100)}
+    except Exception:
+        existing = {}
+    wrote = 0
     for k, v in grants.items():
-        memory_set(db, k, v, source="ford_grant")
-    write_note(
-        db, kind="memory", title="Ford grant: expansion powers ON",
-        body=grants["capability_grants"], provider="ford",
-    )
+        if existing.get(k) == v:
+            continue
+        if memory_set(db, k, v, source="ford_grant"):
+            wrote += 1
+    # One-time note only when we first land grants
+    if wrote and not existing.get("capability_grants"):
+        try:
+            write_note(
+                db, kind="memory", title="Ford grant: expansion powers ON",
+                body=grants["capability_grants"], provider="ford",
+            )
+        except Exception:
+            pass

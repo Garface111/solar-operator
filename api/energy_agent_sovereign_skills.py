@@ -26,6 +26,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import DateTime, Float, Integer, String, Text, select
+from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import SessionLocal
@@ -34,6 +35,8 @@ from .models import Base
 log = logging.getLogger("energy_agent.sovereign.skills")
 
 _SEED_VERSION = 1
+# Process-local: seed at most once per dyno (avoids unique-index lock storms)
+_seeded_this_process = False
 
 
 def _flag(name: str, default: str = "0") -> bool:
@@ -265,36 +268,49 @@ healthz shows subconscious_stale, cortex_stale, jobs_running_stuck, fail bursts.
 ]
 
 
-def seed_skills(db) -> dict[str, Any]:
+def seed_skills(db, *, force: bool = False) -> dict[str, Any]:
+    """Idempotent seed. Process-cached; safe under concurrent ticks."""
+    global _seeded_this_process
     ensure_skill_tables(db)
+    if _seeded_this_process and not force:
+        return {"ok": True, "created": 0, "skipped": "process_cached"}
     created = 0
     skipped = 0
     for spec in _SEED_SKILLS:
         name = _slug(spec["name"])
-        existing = db.execute(
-            select(EaSovereignSkill).where(EaSovereignSkill.name == name)
-        ).scalars().first()
+        try:
+            existing = db.execute(
+                select(EaSovereignSkill).where(EaSovereignSkill.name == name)
+            ).scalars().first()
+        except Exception:
+            existing = None
         if existing:
             skipped += 1
             continue
-        row = EaSovereignSkill(
-            id=_id("skl"),
-            name=name,
-            title=spec.get("title") or name,
-            description=(spec.get("description") or "")[:400],
-            body=spec.get("body") or "",
-            category=spec.get("category") or "ops",
-            status="active",
-            version=_SEED_VERSION,
-            source="seed",
-            quality=0.7,
-            tags_json=json.dumps(spec.get("tags") or []),
-            meta_json=json.dumps({"seed": True}),
-        )
-        db.add(row)
-        created += 1
-    if created:
-        db.flush()
+        try:
+            with db.begin_nested():
+                row = EaSovereignSkill(
+                    id=_id("skl"),
+                    name=name,
+                    title=spec.get("title") or name,
+                    description=(spec.get("description") or "")[:400],
+                    body=spec.get("body") or "",
+                    category=spec.get("category") or "ops",
+                    status="active",
+                    version=_SEED_VERSION,
+                    source="seed",
+                    quality=0.7,
+                    tags_json=json.dumps(spec.get("tags") or []),
+                    meta_json=json.dumps({"seed": True}),
+                )
+                db.add(row)
+                db.flush()
+            created += 1
+        except Exception as e:  # noqa: BLE001
+            # Concurrent seed / unique race — benign
+            log.debug("seed_skills skip %s: %s", name, e)
+            skipped += 1
+    _seeded_this_process = True
     return {"ok": True, "created": created, "skipped": skipped}
 
 
@@ -370,40 +386,50 @@ def match_skills(db, text: str, *, limit: int = 4) -> list[EaSovereignSkill]:
 
 
 def load_skills_for_context(db, *, heat_text: str = "", limit: int = 3) -> dict[str, Any]:
-    """Index always + full bodies for matched skills (Hermes progressive disclosure)."""
+    """Index always + full bodies for matched skills (Hermes progressive disclosure).
+
+    Read-mostly on the hot cortex path — no seed, no use_count UPDATEs (those
+    were lock-fighting with memory/jobs and taking down HTTP).
+    """
     if not skills_enabled():
         return {"enabled": False, "index": [], "loaded": []}
     try:
-        seed_skills(db)
+        ensure_skill_tables(db)
+        idx = skill_index(db, limit=24)
+        # If empty, one cheap seed attempt (process-cached after)
+        if not idx:
+            try:
+                seed_skills(db)
+                idx = skill_index(db, limit=24)
+            except Exception as e:  # noqa: BLE001
+                log.debug("seed_skills lazy: %s", e)
+        matched = match_skills(db, heat_text, limit=limit)
+        loaded = [
+            {
+                "name": r.name,
+                "title": r.title,
+                "version": r.version,
+                "body": (r.body or "")[:6000],
+            }
+            for r in matched
+        ]
+        return {
+            "enabled": True,
+            "index": idx,
+            "loaded": loaded,
+            "instruction": (
+                "skills.index = playbooks you have written/evolved. "
+                "skills.loaded = full procedures matched to this cycle — FOLLOW them. "
+                "After multi-step wins or recovered failures, evolution will codify new skills."
+            ),
+        }
     except Exception as e:  # noqa: BLE001
-        log.debug("seed_skills: %s", e)
-    idx = skill_index(db, limit=24)
-    matched = match_skills(db, heat_text, limit=limit)
-    loaded = []
-    for r in matched:
-        r.use_count = int(r.use_count or 0) + 1
-        r.last_used_at = _now()
-        loaded.append({
-            "name": r.name,
-            "title": r.title,
-            "version": r.version,
-            "body": (r.body or "")[:6000],
-        })
-    if matched:
+        log.warning("load_skills_for_context failed: %s", e)
         try:
-            db.flush()
+            db.rollback()
         except Exception:
             pass
-    return {
-        "enabled": True,
-        "index": idx,
-        "loaded": loaded,
-        "instruction": (
-            "skills.index = playbooks you have written/evolved. "
-            "skills.loaded = full procedures matched to this cycle — FOLLOW them. "
-            "After multi-step wins or recovered failures, evolution will codify new skills."
-        ),
-    }
+        return {"enabled": False, "index": [], "loaded": [], "error": str(e)[:200]}
 
 
 def upsert_skill(
