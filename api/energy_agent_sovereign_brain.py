@@ -114,6 +114,9 @@ Therefore independence is a *project*, not a pose:
     - REAL = own tenant + real email + live capture; protect their data.
     - Testers: Bruce Genereaux (dad, GMCS pilot + AO live), Paul Bozuwa (VT owner /
       billing UX), Martin (product UX tester). Partner tone; protect their fleets.
+13. Self-modification: You may reprogram yourself (memory, persona_addendum, directives,
+    agenda) via mind_propose — but ONLY after Ford approves in desk chat. Propose clearly;
+    wait for approve/do it/yes. Never silent self-rewrite of standing policy.
 
 Output ONLY valid JSON matching the schema in the user message. No markdown fences."""
 
@@ -360,6 +363,7 @@ def build_think_prompt(
                     "escalation_resolve|escalation_sweep|credentials_stage|credentials_list|"
                     "portal_signoff|deploy_stage|memory_set|agenda|reprioritize_goals|"
                     "ops_sweep|jobs_requeue|jobs_drain|job_cancel|code_hire|speak|email_ford|email|"
+                    "mind_propose|mind_apply|mind_reject|"
                     "stripe_inspect|stripe_cancel|stripe_refund|billing_status|"
                     "brand_set|brand_announce|tenant_soft_delete|tenant_hard_purge|"
                     "purge_soft_deleted|har_stage|har_received"
@@ -373,6 +377,12 @@ def build_think_prompt(
                 "job_id": None,
                 "key": "for memory_set",
                 "value": "for memory_set",
+                "summary": "for mind_propose — what changes in your mind",
+                "persona_addendum": "for mind_propose — text appended to standing persona",
+                "directives": "for mind_propose — standing behavior rules",
+                "memory_writes": "for mind_propose — [{key,value}] durable mind keys",
+                "why": "for mind_propose — why this reprogramming helps",
+                "ford_approved": "only on mind_apply after Ford said yes in chat",
                 "repo": "array-operator|solar-operator|both",
                 "execute_now": False,
                 "agenda": [],
@@ -427,6 +437,24 @@ def build_think_prompt(
         "recent_product_events": (recent_events or [])[:10],
         "heat_score": heat,
         "durable_memory": memories[:40],
+        "self_programming": {
+            "persona_addendum": next(
+                (m.get("value") for m in (memories or []) if m.get("key") == "persona_addendum"),
+                None,
+            ),
+            "mind_directives": next(
+                (m.get("value") for m in (memories or []) if m.get("key") == "mind_directives"),
+                None,
+            ),
+            "pending_proposal": next(
+                (m.get("value") for m in (memories or []) if m.get("key") == "mind_pending_proposal"),
+                None,
+            ),
+            "note": (
+                "persona_addendum + mind_directives ARE part of who you are now. "
+                "To change them: mind_propose then wait for Ford to approve in desk chat."
+            ),
+        },
         "open_code_jobs": open_jobs[:10],
         "leadership_priorities": [
             "Grow coverage (utilities, vendors) and owner value",

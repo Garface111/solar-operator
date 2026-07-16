@@ -400,6 +400,13 @@ You are speaking directly to Ford on the private Sovereign Desk — not the Ener
 - Email is HIGH-LEVEL only (partnership / strategy / crisp asks). Never email job ids,
   utility queues, ship logs, or feature dumps — Ford hates those as "Sovereign" mail.
   Action email_ford with human subject + prose. Prefer chat when he's here.
+- **Self-modification (your mind / programming):** You may propose changes to your own
+  durable memory, persona addendum, directives, and agenda via action
+  `mind_propose` with summary + memory_writes / persona_addendum / directives / agenda / why.
+  Ford must explicitly approve in chat ("approve", "do it", "yes", …). Until then the
+  patch stays pending. Never apply mind changes without his approval.
+  If desk_context.mind_self_modify.just_processed shows applied/rejected, acknowledge it.
+  If a proposal is pending, remind him briefly he can approve or reject.
 - Still never fabricate adapters, money moves, or mass-email owners.
 - Keep replies tight (few short paragraphs unless he asks for depth) — dense, not fluffy.
 
@@ -579,6 +586,12 @@ def desk_turn(
         recent_notes,
         write_note,
         ensure_default_goals,
+        get_pending_mind_patch,
+        detect_ford_approval,
+        detect_ford_rejection,
+        apply_pending_mind_patch,
+        reject_pending_mind_patch,
+        mind_self_modify_status,
     )
     from .energy_agent_sovereign_brain import call_brain
     from .energy_agent_sovereign import EaSovereignGoal, EaSovereignJob
@@ -600,6 +613,18 @@ def desk_turn(
     if not msg and assets:
         names = ", ".join(a.filename for a in assets[:6])
         msg = f"[Attached: {names}] Please review these files/data."
+
+    # Mind self-modify: apply/reject pending patch when Ford approves in chat
+    mind_event: dict | None = None
+    try:
+        pending = get_pending_mind_patch(db)
+        if pending and detect_ford_rejection(msg):
+            mind_event = reject_pending_mind_patch(db, reason="ford_chat")
+        elif pending and detect_ford_approval(msg):
+            mind_event = apply_pending_mind_patch(db, approved_by="ford_chat")
+    except Exception as e:  # noqa: BLE001
+        log.warning("mind patch gate failed: %s", e)
+        mind_event = None
 
     # Save Ford message first
     ford_row = EaSovereignDeskMessage(
@@ -666,6 +691,14 @@ def desk_turn(
     except Exception as e:  # noqa: BLE001
         succession_ctx = {"error": str(e)[:120]}
 
+    mind_status = {}
+    try:
+        mind_status = mind_self_modify_status(db)
+    except Exception:
+        mind_status = {}
+    if mind_event:
+        mind_status["just_processed"] = mind_event
+
     context = {
         "digests": digests,
         "goals": goals,
@@ -674,6 +707,7 @@ def desk_turn(
         "open_jobs": jobs,
         "tenant_id": t.id,
         "succession": succession_ctx,
+        "mind_self_modify": mind_status,
         "attachments": [serialize_asset(a) for a in assets],
         "local_bridge": {
             "pending": [
@@ -762,6 +796,18 @@ def desk_turn(
     if reply.lstrip().startswith("{") and '"monologue"' in reply[:200]:
         reply = _prose_from_meta(meta, "Understood.") or "Understood."
 
+    # If Ford just approved/rejected a mind patch, lead with that confirmation
+    if mind_event and mind_event.get("desk_notice"):
+        notice = mind_event["desk_notice"].strip()
+        if notice and notice not in reply:
+            reply = notice + "\n\n" + reply
+    elif mind_event and mind_event.get("applied"):
+        reply = (
+            f"**Mind update applied.** {mind_event.get('summary') or ''}\n\n" + reply
+        ).strip()
+    elif mind_event and mind_event.get("rejected"):
+        reply = ("**Mind change discarded.**\n\n" + reply).strip()
+
     sov_row = EaSovereignDeskMessage(
         id=_id("sdm"),
         role="sovereign",
@@ -849,6 +895,20 @@ def desk_turn(
             except Exception as e:  # noqa: BLE001
                 log.warning("desk execute_brain_actions skipped: %s", e)
                 side.append({"type": "actions", "ok": False, "error": str(e)[:200]})
+        # Surface mind_propose notices into the saved reply if not already present
+        for s in side:
+            if not isinstance(s, dict):
+                continue
+            notice = (s.get("result") or s).get("desk_notice") if isinstance(s.get("result"), dict) else s.get("desk_notice")
+            # execute_brain_actions wraps as {kind, result}
+            if s.get("kind") in (
+                "mind_propose", "propose_mind", "self_modify_propose", "reprogram_propose",
+            ) or (isinstance(s.get("result"), dict) and s["result"].get("proposed")):
+                r = s.get("result") if isinstance(s.get("result"), dict) else s
+                notice = (r or {}).get("desk_notice")
+                if notice and notice not in (sov_row.content or ""):
+                    sov_row.content = ((sov_row.content or "") + "\n\n" + notice).strip()[:12000]
+                    reply = sov_row.content
         db.flush()
     except Exception as e:  # noqa: BLE001
         log.warning("desk side effects skipped (reply still saved): %s", e)
@@ -863,6 +923,7 @@ def desk_turn(
     return {
         "ok": True,
         "reply": reply,
+        "mind_event": mind_event,
         "provider": provider,
         "model": model,
         "mood": meta.get("mood"),

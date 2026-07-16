@@ -1636,6 +1636,279 @@ def memory_set(db, key: str, value: str, *, source: str = "brain") -> bool:
         return False
 
 
+# ── Self-modification (mind patch) — only after Ford approves in desk chat ──
+# Pending proposal lives in memory key mind_pending_proposal (JSON).
+# Applied patches append to mind_patch_log + persona_addendum / memory keys.
+_PENDING_PATCH_KEY = "mind_pending_proposal"
+_PERSONA_ADDENDUM_KEY = "persona_addendum"
+_MIND_PATCH_LOG_KEY = "mind_patch_log"
+# Keys the mind may rewrite when Ford approves (policy/persona/directives).
+# Explicit denylist for secrets-ish system rows.
+_MIND_DENY_KEYS = frozenset({
+    "last_tick", "last_cortex_at", "last_weekly_digest_at", "last_subconscious",
+    "heat_score", "needs_cortex", "subconscious_monologue",
+})
+
+
+def detect_ford_approval(text: str) -> bool:
+    """True if Ford's chat message is approving a pending mind change."""
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    # Explicit veto wins
+    for no in (
+        "reject", "rejected", "veto", "don't", "do not", "not yet", "cancel",
+        "no don't", "nope", "hold off", "wait",
+    ):
+        if no in t and "approve" not in t:
+            # "don't wait" is not a veto — skip bare wait if approve also present
+            if no == "wait" and any(y in t for y in ("yes", "approve", "go ahead", "do it")):
+                continue
+            if t in ("wait", "not yet", "hold off", "cancel", "reject", "rejected", "veto", "nope", "no"):
+                return False
+            if no in ("reject", "rejected", "veto", "cancel", "not yet", "hold off", "nope"):
+                return False
+    yes_phrases = (
+        "approved", "approve", "i approve", "yes", "yep", "yeah", "do it",
+        "ship it", "apply", "apply it", "go ahead", "make it so", "lgtm",
+        "proceed", "sounds good", "do that", "yes do", "go for it",
+        "change your mind", "update your mind", "reprogram", "as proposed",
+        "implement that", "execute that", "ok do it", "okay do it",
+    )
+    # Short pure affirmatives
+    if t in ("y", "yes", "yep", "yeah", "ok", "okay", "k", "approved", "approve", "lgtm", "do it", "ship it", "go", "proceed"):
+        return True
+    return any(p in t for p in yes_phrases)
+
+
+def detect_ford_rejection(text: str) -> bool:
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    if detect_ford_approval(t):
+        return False
+    for no in ("reject", "rejected", "veto", "don't do that", "do not apply", "cancel the", "no don't", "scrap that"):
+        if no in t:
+            return True
+    return t in ("no", "nope", "cancel", "reject", "veto")
+
+
+def get_pending_mind_patch(db) -> dict | None:
+    row = db.get(EaSovereignMemory, _PENDING_PATCH_KEY)
+    if not row or not (row.value or "").strip():
+        return None
+    try:
+        data = json.loads(row.value)
+        return data if isinstance(data, dict) and data.get("status") == "proposed" else None
+    except Exception:
+        return None
+
+
+def _normalize_mind_patch(raw: dict) -> dict:
+    """Sanitize a proposed patch dict."""
+    summary = (raw.get("summary") or raw.get("title") or raw.get("rationale") or "Mind update").strip()[:500]
+    memory_writes: list[dict] = []
+    for mw in (raw.get("memory_writes") or raw.get("writes") or []):
+        if not isinstance(mw, dict):
+            continue
+        k = str(mw.get("key") or "").strip()[:120]
+        if not k or k in _MIND_DENY_KEYS or k == _PENDING_PATCH_KEY:
+            continue
+        memory_writes.append({"key": k, "value": str(mw.get("value") or "")[:8000]})
+    # Single key/value form
+    if raw.get("key") and raw.get("value") is not None:
+        k = str(raw["key"]).strip()[:120]
+        if k and k not in _MIND_DENY_KEYS and k != _PENDING_PATCH_KEY:
+            memory_writes.append({"key": k, "value": str(raw.get("value") or "")[:8000]})
+    persona = (raw.get("persona_addendum") or raw.get("persona") or "").strip()[:4000]
+    directives = (raw.get("directives") or raw.get("directive") or "").strip()[:4000]
+    agenda = raw.get("agenda") if isinstance(raw.get("agenda"), list) else []
+    return {
+        "summary": summary,
+        "memory_writes": memory_writes[:20],
+        "persona_addendum": persona,
+        "directives": directives,
+        "agenda": agenda[:12],
+        "why": (raw.get("why") or raw.get("rationale") or "")[:1000],
+    }
+
+
+def propose_mind_patch(db, raw: dict, *, source: str = "brain") -> dict:
+    """Stage a self-modification for Ford's explicit chat approval."""
+    patch = _normalize_mind_patch(raw if isinstance(raw, dict) else {})
+    if (
+        not patch["memory_writes"]
+        and not patch["persona_addendum"]
+        and not patch["directives"]
+        and not patch["agenda"]
+    ):
+        return {"ok": False, "denied": True, "denied_reason": "empty mind patch"}
+    proposal = {
+        "status": "proposed",
+        "id": _id("mpatch"),
+        "created_at": _now().isoformat() + "Z",
+        "source": source,
+        "patch": patch,
+    }
+    ok = memory_set(db, _PENDING_PATCH_KEY, json.dumps(proposal, default=str), source="mind_propose")
+    write_note(
+        db,
+        kind="agenda",
+        title=f"mind patch proposed: {patch['summary'][:80]}",
+        body=json.dumps(proposal, default=str)[:12000],
+        provider=source,
+        meta={"mind_patch": proposal["id"]},
+    )
+    audit(
+        db, capability="act.memory_agenda", decision="act",
+        rationale=f"mind_propose: {patch['summary'][:200]}",
+        targets={"patch_id": proposal["id"], "n_writes": len(patch["memory_writes"])},
+        result="ok" if ok else "failed",
+        correlation_id=proposal["id"],
+    )
+    # Human-readable proposal for the desk
+    lines = [
+        f"**Mind change proposed** (`{proposal['id']}`)",
+        "",
+        patch["summary"],
+        "",
+    ]
+    if patch["why"]:
+        lines += [f"_Why:_ {patch['why']}", ""]
+    if patch["persona_addendum"]:
+        lines += ["**Persona addendum** (appended to my standing mind):", patch["persona_addendum"], ""]
+    if patch["directives"]:
+        lines += ["**Directives** (how I should behave):", patch["directives"], ""]
+    if patch["memory_writes"]:
+        lines.append("**Memory keys:**")
+        for mw in patch["memory_writes"]:
+            preview = (mw["value"] or "").replace("\n", " ")[:160]
+            lines.append(f"- `{mw['key']}` → {preview}")
+        lines.append("")
+    if patch["agenda"]:
+        lines.append(f"**Agenda items:** {len(patch['agenda'])}")
+        lines.append("")
+    lines.append("Reply **approve** / **do it** to apply, or **reject** to discard.")
+    return {
+        "ok": True,
+        "proposed": True,
+        "patch_id": proposal["id"],
+        "summary": patch["summary"],
+        "desk_notice": "\n".join(lines),
+        "awaiting_ford_approval": True,
+    }
+
+
+def reject_pending_mind_patch(db, *, reason: str = "ford_reject") -> dict:
+    pending = get_pending_mind_patch(db)
+    if not pending:
+        return {"ok": True, "rejected": False, "reason": "none_pending"}
+    memory_set(db, _PENDING_PATCH_KEY, "", source="mind_reject")
+    write_note(
+        db, kind="decision", title="mind patch rejected",
+        body=json.dumps({"pending": pending, "reason": reason}, default=str)[:8000],
+        provider="system",
+    )
+    return {"ok": True, "rejected": True, "patch_id": pending.get("id")}
+
+
+def apply_pending_mind_patch(db, *, approved_by: str = "ford_chat") -> dict:
+    """Apply staged mind patch after Ford approval. Idempotent if none pending."""
+    pending = get_pending_mind_patch(db)
+    if not pending:
+        return {"ok": False, "applied": False, "reason": "none_pending"}
+    patch = pending.get("patch") or {}
+    applied: list[str] = []
+
+    for mw in patch.get("memory_writes") or []:
+        if isinstance(mw, dict) and mw.get("key"):
+            if memory_set(db, str(mw["key"]), str(mw.get("value") or ""), source="mind_apply"):
+                applied.append(f"memory:{mw['key']}")
+
+    addendum = (patch.get("persona_addendum") or "").strip()
+    if addendum:
+        prev = ""
+        row = db.get(EaSovereignMemory, _PERSONA_ADDENDUM_KEY)
+        if row:
+            prev = row.value or ""
+        stamp = f"\n\n---\n[{_now().isoformat()}Z · approved by {approved_by}]\n"
+        new_val = (prev + stamp + addendum).strip()[-7500:]
+        if memory_set(db, _PERSONA_ADDENDUM_KEY, new_val, source="mind_apply"):
+            applied.append("persona_addendum")
+
+    directives = (patch.get("directives") or "").strip()
+    if directives:
+        prev = ""
+        row = db.get(EaSovereignMemory, "mind_directives")
+        if row:
+            prev = row.value or ""
+        stamp = f"\n\n---\n[{_now().isoformat()}Z]\n"
+        new_val = (prev + stamp + directives).strip()[-7500:]
+        if memory_set(db, "mind_directives", new_val, source="mind_apply"):
+            applied.append("mind_directives")
+
+    if patch.get("agenda"):
+        n = apply_agenda(db, patch["agenda"])
+        if n:
+            applied.append(f"agenda:{n}")
+
+    # Clear pending + append log
+    memory_set(db, _PENDING_PATCH_KEY, "", source="mind_apply")
+    log_prev = ""
+    row = db.get(EaSovereignMemory, _MIND_PATCH_LOG_KEY)
+    if row:
+        log_prev = row.value or ""
+    entry = json.dumps({
+        "id": pending.get("id"),
+        "at": _now().isoformat() + "Z",
+        "approved_by": approved_by,
+        "summary": patch.get("summary"),
+        "applied": applied,
+    }, default=str)
+    memory_set(
+        db, _MIND_PATCH_LOG_KEY,
+        (entry + "\n" + log_prev)[:8000],
+        source="mind_apply",
+    )
+    write_note(
+        db, kind="decision",
+        title=f"mind patch applied: {(patch.get('summary') or '')[:80]}",
+        body=json.dumps({"pending": pending, "applied": applied, "by": approved_by}, default=str)[:12000],
+        provider="system",
+        meta={"mind_patch": pending.get("id"), "applied": True},
+    )
+    audit(
+        db, capability="act.memory_agenda", decision="act",
+        rationale=f"mind_apply: {patch.get('summary')}",
+        targets={"patch_id": pending.get("id"), "applied": applied, "by": approved_by},
+        result="ok",
+        correlation_id=pending.get("id"),
+    )
+    return {
+        "ok": True,
+        "applied": True,
+        "patch_id": pending.get("id"),
+        "applied_parts": applied,
+        "summary": patch.get("summary"),
+        "desk_notice": (
+            f"**Mind update applied** (`{pending.get('id')}`).\n\n"
+            f"{patch.get('summary') or ''}\n\n"
+            f"Changed: {', '.join(applied) if applied else 'nothing'}."
+        ),
+    }
+
+
+def mind_self_modify_status(db) -> dict:
+    pending = get_pending_mind_patch(db)
+    persona = db.get(EaSovereignMemory, _PERSONA_ADDENDUM_KEY)
+    directives = db.get(EaSovereignMemory, "mind_directives")
+    return {
+        "pending": pending,
+        "persona_addendum_preview": ((persona.value if persona else "") or "")[-500:],
+        "directives_preview": ((directives.value if directives else "") or "")[-500:],
+    }
+
+
 def recent_notes(db, *, limit: int = 20) -> list[dict]:
     rows = db.execute(
         select(EaSovereignNote).order_by(EaSovereignNote.created_at.desc()).limit(limit)
@@ -1815,6 +2088,20 @@ def execute_brain_actions(db, actions: list[dict], *, tick_id: str) -> list[dict
                 db, str(raw["key"]), str(raw.get("value") or raw.get("text") or ""),
                 source="brain",
             )
+        elif atype in ("mind_propose", "propose_mind", "self_modify_propose", "reprogram_propose"):
+            res = propose_mind_patch(db, raw, source="brain")
+        elif atype in ("mind_apply", "apply_mind", "self_modify_apply", "reprogram_apply"):
+            # Only when Ford already approved this turn (or explicit ford_approved flag)
+            if raw.get("ford_approved") or raw.get("approved"):
+                res = apply_pending_mind_patch(db, approved_by="brain_with_ford_flag")
+            else:
+                res = {
+                    "ok": False,
+                    "denied": True,
+                    "denied_reason": "mind_apply requires Ford approval in chat (or ford_approved=true after he said yes)",
+                }
+        elif atype in ("mind_reject", "reject_mind"):
+            res = reject_pending_mind_patch(db, reason=str(raw.get("rationale") or "brain"))
         elif atype in ("agenda", "goal_upsert", "reprioritize_goals"):
             from .energy_agent_sovereign_ops import own_agenda, reprioritize_goals
             if raw.get("updates") or atype == "reprioritize_goals":
