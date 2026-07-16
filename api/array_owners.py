@@ -4017,6 +4017,24 @@ def _inverter_capture_for_tenant(tenant: Tenant, provider: str, body: "InverterC
     replays the same payload through this exact function). Opens its own session,
     matches/creates arrays, upserts DailyGeneration / Inverter / InverterDaily
     with the dup-safe helpers, commits, and returns the per-site summary."""
+    # PRODUCT GUARD (Ford 2026-07-16): inverter/vendor telemetry (Fronius/Chint/SMA)
+    # belongs to ARRAY OPERATOR only. NEPOOL Operator builds its Client→Array graph
+    # exclusively from UTILITY data (GMP/SmartHub bills via /v1/sync +
+    # utility-meter-capture). This write-body creates Array rows from vendor sites
+    # (see _safe_create_array below), so if a nepool tenant ever receives an
+    # inverter capture — extension OR the Cloud-Capture harvester scraping a stored
+    # inverter credential — it would pollute NEPOOL's arrays with vendor-derived
+    # solar arrays. Refuse the vendor→array write for non-AO tenants. Guarding the
+    # shared write-body (not just the endpoint) also covers the sibling fan-out.
+    from .stripe_helpers import is_array_operator  # noqa: PLC0415
+    if not is_array_operator(getattr(tenant, "product", None)):
+        log.info(
+            "inverter-capture: REFUSED vendor->array write for non-AO tenant=%s "
+            "product=%s provider=%s sites=%d (NEPOOL uses utility data only)",
+            tenant.id, getattr(tenant, "product", None), provider, len(body.sites),
+        )
+        return {"ok": True, "skipped": "not_array_operator",
+                "results": [], "sites": []}
     # Observability: which tenant this capture wrote to + per-site device counts.
     # Makes "captured but nothing shows" trivially diagnosable (is it the wrong
     # tenant? a 0-device payload?). Counts only — no serials/PII.

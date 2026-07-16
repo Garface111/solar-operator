@@ -33,6 +33,10 @@ def _make_tenant() -> tuple[str, str]:
         db.add(Tenant(
             id=tid, name="Owners Test", contact_email=f"{key}@t.test",
             tenant_key=key, plan="standard", active=True,
+            # Inverter/vendor capture is Array Operator functionality — NEPOOL
+            # tenants are refused the vendor->array write (see
+            # _inverter_capture_for_tenant's product guard).
+            product="array_operator",
         ))
         db.commit()
     return tid, key
