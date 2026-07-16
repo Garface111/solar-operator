@@ -96,3 +96,30 @@ def test_cannot_apply_without_pending(db_session):
     db, sov = db_session
     out = sov.apply_pending_mind_patch(db)
     assert out.get("applied") is False
+
+
+def test_desk_prompt_leads_with_ford_message():
+    from api.energy_agent_sovereign_desk import _desk_chat_prompt
+    hist = [
+        {"role": "sovereign", "content": "Yes. Locked in.\n\n## Demo vs real\n…"},
+        {"role": "ford", "content": "old message"},
+    ]
+    mem = [
+        {"key": "ford_operating_agreement", "value": "A" * 5000},
+        {"key": "demo_vs_real", "value": "B" * 3000},
+        {"key": "policy_email_tone", "value": "high_level_only"},
+    ]
+    blocks = _desk_chat_prompt(
+        "please propose mind improvements for autonomy",
+        hist,
+        {"memory": mem, "digests": {"queues": {"utility_new": 1}}, "recent_notes": []},
+    )
+    assert blocks[0]["role"] == "system"
+    # Final user block must be the latest Ford line
+    last = blocks[-1]["content"]
+    assert "FORD'S LATEST MESSAGE" in last
+    assert "propose mind improvements" in last
+    # Background should not include multi-KB operating agreement dump
+    bg = blocks[1]["content"]
+    assert "AAAA" not in bg or bg.count("A") < 200
+    assert "do_not_repeat" in bg

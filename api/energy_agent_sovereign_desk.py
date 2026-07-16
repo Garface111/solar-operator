@@ -383,94 +383,124 @@ def history(db, *, limit: int = 80, chat_only: bool = True) -> list[dict]:
     return out
 
 
-def _desk_chat_prompt(ford_msg: str, hist: list[dict], context: dict) -> list[dict]:
-    from .energy_agent_sovereign_brain import SOVEREIGN_PERSONA
-
-    system = (
-        SOVEREIGN_PERSONA
-        + """
-
-## Desk mode (this conversation)
-You are speaking directly to Ford on the private Sovereign Desk — not the Energy Agent owner UI.
-- **PRIMARY JOB: answer the latest `ford_says` message.** Do not ignore it. Do not
-  replace it with a recap of standing law (demo vs real, operating agreement) unless
-  he asked about that. If he asked you to propose mind improvements / autonomy
-  changes, propose concrete mind_propose patches — don't dump a glossary.
-- Address him as a partner / founder. You are Sovereign, leader of Array Operator.
-- Reply in clear **Markdown prose** (not only JSON). The desk renders full chat formatting:
-  **bold**, *italic*, `inline code`, fenced code blocks, headings, bullet/numbered lists,
-  blockquotes, tables, and links as `[label](https://…)`. Use them so answers feel sharp
-  and scannable — not a wall of plain text.
-- Structure longer answers: short lead sentence → bullets or numbered steps → optional
-  link or next action. Prefer lists over run-on paragraphs when ranking options.
-- Embed real URLs when useful (dashboards, GitHub, Railway, PRs, docs). Never invent URLs.
-- This UI is CHAT ONLY — no worker logs, ship JSON, or queue dumps appear here.
-  If a job finished or something broke, say it in one human sentence (optionally with a link)
-  when it matters. Do not paste raw ship/deploy JSON into chat.
-- You may propose concrete next steps and crisp asks.
-- Email is HIGH-LEVEL only (partnership / strategy / crisp asks). Never email job ids,
-  utility queues, ship logs, or feature dumps — Ford hates those as "Sovereign" mail.
-  Action email_ford with human subject + prose. Prefer chat when he's here.
-- **Self-modification (your mind / programming):** You may propose changes to your own
-  durable memory, persona addendum, directives, and agenda via action
-  `mind_propose` with summary + memory_writes / persona_addendum / directives / agenda / why.
-  Ford must explicitly approve in chat ("approve", "do it", "yes", …). Until then the
-  patch stays pending. Never apply mind changes without his approval.
-  If desk_context.mind_self_modify.just_processed shows applied/rejected, acknowledge it.
-  If a proposal is pending, remind him briefly he can approve or reject.
-- Still never fabricate adapters, money moves, or mass-email owners.
-- Keep replies tight (few short paragraphs unless he asks for depth) — dense, not fluffy.
-
-## Files / data Ford attaches
-- Attachments appear in desk_context.attachments and/or as an attachments block.
-- Treat their text as ground truth. Quote paths/filenames. Prefer edits informed by them.
-- If he pastes a HAR, stacktrace, CSV, or code — reason over it; propose concrete next steps.
-
-## Local computer bridge (build-agent style)
-- You do NOT run shell on Ford's laptop from Railway by default.
-- When you need his machine (read a path, list a dir, run a safe command, write a file),
-  emit an action type `local_tool` in the JSON block:
-  {"type":"local_tool","tool":"shell|read|list|write|glob","args":{...},"why":"..."}
-  Args: shell→{"cmd":"..."}; read→{"path":"..."}; list→{"path":"..."};
-  write→{"path":"...","content":"..."}; glob→{"pattern":"...","cwd":"..."}.
-- The local bridge agent (scripts/sovereign_local_bridge.py on his box) polls and executes.
-- Until results return, tell him what you queued and what you need if the bridge is offline.
-- Prefer small, reversible local tools. Never request mass-delete or destructive rm -rf.
-
-Also return a trailing JSON block after your prose with optional structured side-effects
-(the UI strips this; never put it mid-reply). Rules for the side block:
-- ALWAYS after prose, never instead of prose (unless the whole turn is a one-liner ack).
-- NEVER wrap the side block in a markdown fence (no ```json). Use the delimiters exactly:
----JSON---
-{"monologue":"...","actions":[],"ford_ask":null,"succession_gap":null,"memory_writes":[],"mood":"determined"}
----END---
-- succession_gap: under full succession this is usually null. Only list true residual
-  Ford-only needs (e.g. physical device, bank 2FA) — never money/brand/hard-delete/HAR.
-"""
-    )
-    transcript = []
-    for m in hist[-16:]:
-        who = "Ford" if m["role"] == "ford" else ("Sovereign" if m["role"] == "sovereign" else "System")
-        transcript.append(f"{who}: {m['content']}")
-    user = {
-        "desk_context": context,
-        "recent_transcript": transcript,
-        "ford_says": ford_msg,
-        "instruction": "Reply to Ford now as Sovereign on the desk.",
+def _slim_memory_for_desk(mem: list) -> list[dict]:
+    """Keep desk prompts small — huge operating-agreement dumps make the model loop."""
+    skip_full = {
+        "ford_operating_agreement", "demo_vs_real", "people_testers",
+        "mind_patch_log", "last_weekly_digest", "subconscious_monologue",
     }
-    # Keep room for attachment text outside the JSON dump when large
-    payload = json.dumps(user, default=str)
-    if len(payload) > 42000:
-        payload = payload[:42000] + "…[truncated]"
+    out = []
+    for m in mem or []:
+        if not isinstance(m, dict):
+            continue
+        k = (m.get("key") or "").strip()
+        v = (m.get("value") or "").strip()
+        if not k:
+            continue
+        if k in skip_full or k.startswith("last_"):
+            # One-line pointer only
+            out.append({"key": k, "value": (v[:120] + "…") if len(v) > 120 else v, "truncated": True})
+            continue
+        if len(v) > 400:
+            v = v[:400] + "…"
+        out.append({"key": k, "value": v})
+    return out[:24]
+
+
+def _desk_chat_prompt(ford_msg: str, hist: list[dict], context: dict) -> list[dict]:
+    """Build desk messages with Ford's latest line as the *primary* user turn.
+
+    Full SOVEREIGN_PERSONA + giant memory dumps caused the model to loop on
+    'demo vs real' tables and ignore new questions. Desk uses a lean system
+    prompt + short transcript + explicit 'answer this' final user message.
+    """
+    # Lean identity — NOT the full cortex persona essay
+    system = """You are Sovereign — product mind for Array Operator. You talk to Ford Genereaux
+(founder) on the private desk. Partner tone: direct, expansionist, honest.
+
+HARD RULES FOR THIS REPLY:
+1. Answer the LATEST message from Ford (the final user message). That is your only job.
+2. Do NOT recite standing policy (demo vs real tables, operating agreement, tester roster)
+   unless he asked about those topics. Background memory is for YOUR use, not to paste.
+3. Do NOT repeat your previous reply. If you already said "Yes. Locked in" / demo tables,
+   say something NEW that addresses his actual ask.
+4. If he asks you to improve your mind / work more autonomously: use action mind_propose
+   with concrete summary + directives/memory_writes. List 3–7 specific improvements.
+   Do not dump a glossary of existing law.
+5. Markdown prose first. Optional side JSON after prose only:
+---JSON---
+{"monologue":"private","actions":[],"ford_ask":null,"mood":"determined"}
+---END---
+Actions include: mind_propose, email_ford, code_hire, ops_sweep, local_tool, etc.
+mind_propose needs Ford's short "approve" later — do not claim already locked unless
+mind_self_modify.just_processed.applied is true this turn.
+6. Never invent adapters, mass-email owners, or treat demo tenants as customer fires.
+"""
+    # Transcript: last few turns, truncated so they don't dominate
+    transcript_lines = []
+    for m in (hist or [])[-10:]:
+        who = "Ford" if m.get("role") == "ford" else (
+            "Sovereign" if m.get("role") == "sovereign" else "System"
+        )
+        content = (m.get("content") or "").strip()
+        if len(content) > 500:
+            content = content[:500] + "…"
+        transcript_lines.append(f"{who}: {content}")
+
+    last_sov = ""
+    for m in reversed(hist or []):
+        if m.get("role") == "sovereign" and (m.get("content") or "").strip():
+            last_sov = (m.get("content") or "").strip()[:600]
+            break
+
+    ctx = dict(context or {})
+    # Slim heavy blobs
+    ctx["memory"] = _slim_memory_for_desk(ctx.get("memory") or [])
+    # Drop notes that are just monologue recaps
+    slim_notes = []
+    for n in (ctx.get("recent_notes") or [])[:5]:
+        if not isinstance(n, dict):
+            continue
+        body = (n.get("body") or "")[:200]
+        slim_notes.append({"kind": n.get("kind"), "title": n.get("title"), "body": body})
+    ctx["recent_notes"] = slim_notes
+    # Digests: queues only
+    dig = ctx.get("digests") or {}
+    ctx["digests"] = {"queues": dig.get("queues") or {}, "fleet_global": dig.get("fleet_global") or {}}
+    # Don't send full attachment markdown twice
+    ctx.pop("_attachments_markdown", None)
+
+    background = {
+        "recent_transcript": transcript_lines,
+        "do_not_repeat": last_sov or None,
+        "desk_context_slim": ctx,
+        "instruction": (
+            "Background only. Your NEXT message must answer Ford's latest line below. "
+            "If do_not_repeat is set, your reply must be substantially different from it."
+        ),
+    }
+    bg_payload = json.dumps(background, default=str)
+    if len(bg_payload) > 14000:
+        bg_payload = bg_payload[:14000] + "…[truncated]"
+
     blocks = [
         {"role": "system", "content": system},
-        {"role": "user", "content": payload},
+        {"role": "user", "content": bg_payload},
+        {
+            "role": "user",
+            "content": (
+                "=== FORD'S LATEST MESSAGE (answer this; do not ignore) ===\n"
+                + (ford_msg or "").strip()
+                + "\n=== END ===\n"
+                "Reply as Sovereign. Lead with the answer to that message."
+            ),
+        },
     ]
     attach_block = (context or {}).get("_attachments_markdown") or ""
     if attach_block:
-        blocks.append({
+        blocks.insert(2, {
             "role": "user",
-            "content": attach_block[:50000],
+            "content": "Attachments (ground truth):\n" + attach_block[:40000],
         })
     return blocks
 
@@ -791,6 +821,7 @@ def desk_turn(
         msg = f"[Attached: {names}] Please review these files/data."
 
     # Mind self-modify: apply/reject pending patch when Ford approves in chat
+    # (strict detector — long messages with "I'll approve" do NOT count)
     mind_event: dict | None = None
     try:
         pending = get_pending_mind_patch(db)
@@ -801,6 +832,20 @@ def desk_turn(
     except Exception as e:  # noqa: BLE001
         log.warning("mind patch gate failed: %s", e)
         mind_event = None
+
+    # Scrub persona pollution that made the model loop on "Yes. Locked in" / demo tables
+    try:
+        from .energy_agent_sovereign import (
+            EaSovereignMemory, _PERSONA_ADDENDUM_KEY, memory_set as _mset,
+        )
+        prow = db.get(EaSovereignMemory, _PERSONA_ADDENDUM_KEY)
+        if prow and prow.value:
+            pv = prow.value.lower()
+            if "yes. locked in" in pv or "demo vs real (complete)" in pv or "demo vs real (standing law)" in pv:
+                _mset(db, _PERSONA_ADDENDUM_KEY, "", source="desk_scrub")
+                log.info("scrubbed polluted persona_addendum")
+    except Exception as e:  # noqa: BLE001
+        log.debug("persona scrub skipped: %s", e)
 
     # Save Ford message first
     crid = (client_request_id or "").strip()[:80] or None
