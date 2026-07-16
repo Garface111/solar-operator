@@ -27,7 +27,7 @@ import pytest
 
 from api.db import SessionLocal
 from api.models import (Tenant, Client, Array, UtilityAccount, Bill,
-                        DailyGeneration, ReportDelivery)
+                        DailyGeneration, GmpDailyGeneration, ReportDelivery)
 from scripts.migrate_nepool_tenant import (
     build_plan, run_verify, run_execute, MigrationBlocked, compare_workbooks,
 )
@@ -111,7 +111,8 @@ def _fixture(capture_client: bool = False) -> dict:
                              account_number="H3_" + secrets.token_hex(3))
         db.add_all([ua1, ua2, ua3])
         db.flush()
-        ids["ua3"] = ua3.id
+        ids["ua1"], ids["ua3"] = ua1.id, ua3.id
+        ids["ua1_num"] = ua1.account_number
 
         db.add(Bill(tenant_id=src, account_id=ua1.id,
                     document_number="d-" + secrets.token_hex(3),
@@ -143,12 +144,15 @@ def _fixture(capture_client: bool = False) -> dict:
         ids["ta1"], ids["ta2"] = ta1.id, ta2.id
         if capture_client:
             ids["ta3"] = ta3.id
+        # dual capture: the twin holds the SAME GMP account number under its
+        # own account row (prod: 4392604400 on both Bruce tenants).
         tua1 = UtilityAccount(tenant_id=tgt, array_id=ta1.id, provider="gmp",
-                              account_number="TN1_" + secrets.token_hex(3))
+                              account_number=ids["ua1_num"])
         tua2 = UtilityAccount(tenant_id=tgt, array_id=ta2.id, provider="gmp",
                               account_number=shared_acct)   # the sibling tell
         db.add_all([tua1, tua2])
         db.flush()
+        ids["tua1"] = tua1.id
         db.add(Bill(tenant_id=tgt, account_id=tua1.id,
                     document_number="d-" + secrets.token_hex(3),
                     **_bill_kwargs(1500)))
@@ -438,6 +442,153 @@ def test_plan_print_flags_claims_deactivation_and_zero_array_clients(capsys):
     assert "(no arrays — moves as-is)" in out
     assert "Clients to DEACTIVATE on target" in out
     assert "1 plain capture array(s) remain" in out
+
+
+# ── --carry-generation: the claimed twin adopts the NEPOOL-reported series ─────
+
+def _diverge_target_twin(ids) -> None:
+    """Writer-VISIBLE DailyGeneration divergence on the A2/TA2 pair: the
+    source series is operator csv (a MEASURED source the writer reads), the
+    twin's is bill_prorate (EXCLUDED by the writer) — so pre-carry the twin
+    renders NO daily generation for that array at all."""
+    from sqlalchemy import delete
+    with SessionLocal() as db:
+        db.execute(delete(DailyGeneration)
+                   .where(DailyGeneration.array_id == ids["ta2"]))
+        for d in (5, 6, 7, 8):
+            db.add(DailyGeneration(tenant_id=ids["tgt"], array_id=ids["ta2"],
+                                   day=date(2024, 1, d), kwh=55.0,
+                                   source="bill_prorate"))
+        db.commit()
+
+
+def _seed_gmp_interval_divergence(ids) -> None:
+    """THE Bruce prod byte-diff mechanism (probe 2026-07-16): the writer
+    overlays GmpDailyGeneration — keyed by the tenant's OWN account row — for
+    any month with near-full coverage. Bruce's source accounts hold 61–1200
+    interval rows; the AO twins hold ZERO (Chester 24.879 interval-true vs
+    23.255 flat-prorate). Seed 30 covered days x 52 kWh on the SOURCE account
+    (1560 != the 1500 bill) and nothing on the twin's account."""
+    with SessionLocal() as db:
+        for d in range(1, 31):                       # 30 days >= 31-2 coverage
+            db.add(GmpDailyGeneration(
+                tenant_id=ids["src"], account_id=ids["ua1"],
+                account_number=ids["ua1_num"], array_id=ids["a1"],
+                day=date(2024, 1, d), kwh=52.0, interval_count=96))
+        db.commit()
+
+
+def test_carry_generation_replaces_target_series_and_leaves_moves_alone():
+    ids = _fixture(capture_client=True)
+    _diverge_target_twin(ids)
+    _seed_gmp_interval_divergence(ids)
+
+    with SessionLocal() as db:
+        plan = build_plan(db, db.get(Tenant, ids["src"]), db.get(Tenant, ids["tgt"]),
+                          claim_from={ids["cap"]}, deactivate_clients={ids["cap"]},
+                          carry_generation=True)
+    assert plan.blockers == []
+    by_src = {a.source_id: a for a in plan.arrays}
+    assert by_src[ids["a2"]].carry_generation is True
+    assert ("generation series carried from source (3 rows replace 4 target rows)"
+            in by_src[ids["a2"]].notes)
+    assert by_src[ids["a1"]].carry_generation is True
+    assert by_src[ids["a1"]].gmp_pairs == [(ids["ua1"], ids["tua1"])]
+    assert ("GMP interval series carried (30 rows replace 0) across 1 matched "
+            "account(s) — the workbook's actual overlay"
+            in by_src[ids["a1"]].notes)
+    assert by_src[ids["a3"]].carry_generation is False    # MOVE: untouched
+
+    run_execute(ids["src"], ids["tgt"], claim_from={ids["cap"]},
+                deactivate_clients={ids["cap"]}, carry_generation=True)
+
+    from sqlalchemy import select
+    with SessionLocal() as db:
+        # claimed twin ends up with EXACTLY the source series
+        rows = db.execute(select(DailyGeneration)
+                          .where(DailyGeneration.array_id == ids["ta2"])
+                          .order_by(DailyGeneration.day)).scalars().all()
+        assert [(r.day, r.kwh) for r in rows] == [
+            (date(2024, 1, 5), 100.0), (date(2024, 1, 6), 100.0),
+            (date(2024, 1, 7), 100.0)]                     # sampled values
+        assert all(r.tenant_id == ids["tgt"] for r in rows)
+        # source array keeps none (rows re-pointed, not copied)
+        assert db.execute(select(DailyGeneration)
+                          .where(DailyGeneration.array_id == ids["a2"])
+                          ).scalars().all() == []
+        # GMP interval overlay re-pointed onto the twin's OWN account row
+        g_rows = db.execute(select(GmpDailyGeneration)
+                            .where(GmpDailyGeneration.account_id == ids["tua1"])
+                            ).scalars().all()
+        assert len(g_rows) == 30
+        assert all(r.tenant_id == ids["tgt"] and r.array_id == ids["ta1"]
+                   and r.kwh == 52.0 for r in g_rows)
+        assert db.execute(select(GmpDailyGeneration)
+                          .where(GmpDailyGeneration.account_id == ids["ua1"])
+                          ).scalars().all() == []          # re-pointed, not copied
+        # MOVE path unaffected: A3's series moved with the array as before
+        a3_rows = db.execute(select(DailyGeneration)
+                             .where(DailyGeneration.array_id == ids["a3"])
+                             ).scalars().all()
+        assert all(r.tenant_id == ids["tgt"] for r in a3_rows)
+        # bills/accounts untouched: the twin keeps its own account
+        accts = db.execute(select(UtilityAccount)
+                           .where(UtilityAccount.array_id == ids["ta2"])
+                           ).scalars().all()
+        assert accts and all(a.tenant_id == ids["tgt"] for a in accts)
+
+
+def test_verify_divergent_twin_fails_without_carry_and_greens_with_it(capsys):
+    ids = _fixture(capture_client=True)
+    _diverge_target_twin(ids)              # writer-visible daily divergence
+    _seed_gmp_interval_divergence(ids)     # the actual Bruce prod mechanism
+
+    # WITHOUT --carry-generation: the byte-diff oracle catches BOTH
+    # divergences (the Bruce prod failure shape) — real cell differences.
+    results = run_verify(ids["src"], ids["tgt"], reference_date=_REF,
+                         claim_from={ids["cap"]},
+                         deactivate_clients={ids["cap"]})
+    assert results[ids["c1"]]["level"] == "different"
+
+    # WITH --carry-generation: byte-parity by construction — the daily series
+    # AND the GMP interval overlay both travel with the claim.
+    results2 = run_verify(ids["src"], ids["tgt"], reference_date=_REF,
+                          claim_from={ids["cap"]},
+                          deactivate_clients={ids["cap"]},
+                          carry_generation=True)
+    for cid in (ids["c1"], ids["c2"], ids["c3"]):
+        assert results2[cid]["level"] in ("identical", "content_identical"), results2[cid]
+    assert results2["_post_state"]["ok"] is True
+
+    # ROLLBACK PROOF: the carried series evaporated with the transaction.
+    from sqlalchemy import select
+    with SessionLocal() as db:
+        twin = db.execute(select(DailyGeneration)
+                          .where(DailyGeneration.array_id == ids["ta2"])
+                          ).scalars().all()
+        assert sorted(r.kwh for r in twin) == [55.0] * 4   # twin untouched
+        src_rows = db.execute(select(DailyGeneration)
+                              .where(DailyGeneration.array_id == ids["a2"])
+                              ).scalars().all()
+        assert len(src_rows) == 3                          # source untouched
+        g_src = db.execute(select(GmpDailyGeneration)
+                           .where(GmpDailyGeneration.account_id == ids["ua1"])
+                           ).scalars().all()
+        assert len(g_src) == 30                            # overlay untouched
+        assert db.execute(select(GmpDailyGeneration)
+                          .where(GmpDailyGeneration.account_id == ids["tua1"])
+                          ).scalars().all() == []
+
+    # and the plan flags the provenance change prominently
+    from scripts.migrate_nepool_tenant import _print_plan
+    _print_plan(results2["_plan"])
+    out = capsys.readouterr().out
+    assert "PROVENANCE CHANGE" in out
+    assert "bill-prorate-only" in out
+    assert "GMP 15-min interval overlay" in out
+    assert "generation series carried from source (3 rows replace 4 target rows)" in out
+    assert ("GMP interval series carried (30 rows replace 0) across 1 matched "
+            "account(s)") in out
 
 
 # ── never guess between two candidates ─────────────────────────────────────────

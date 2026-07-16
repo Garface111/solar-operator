@@ -67,6 +67,32 @@ refuses. Two EXPLICIT operator choices unlock that:
         a nepool_gis_id); only a client whose remaining arrays are plain
         capture arrays may be deactivated. The plan lists it with its
         remaining-array count.
+  * --carry-generation                (only meaningful with claims)
+        For every CLAIMED array, in the same transaction, carry BOTH series
+        the source reports were generated from:
+          1. DailyGeneration — DELETE the target twin's rows, re-point the
+             SOURCE array's rows (array_id + tenant_id) onto the claimed
+             target. Keeps the AO twin's daily history = the NEPOOL-truth
+             blend (measured csv/manual/vendor/extension rows included).
+          2. GmpDailyGeneration (the GMP 15-min interval overlay) — for each
+             source GMP account whose account_number matches a target-twin
+             account: DELETE the target account's interval rows, re-point the
+             source account's rows (account_id + tenant_id + array_id). THIS
+             is the actual workbook divergence carrier: the writer EXCLUDES
+             bill_prorate/vendor/extension DailyGeneration sources entirely
+             (gmcs_writer._daily_generation_by_month) and instead overlays
+             GmpDailyGeneration, which is keyed by the tenant's OWN account
+             row — prod probe 2026-07-16: Bruce's source accounts hold
+             61–1200 interval rows each, the AO twins hold ZERO (Chester
+             24.879 interval-true vs 23.255 flat-prorate).
+        Rows are re-pointed, never recomputed — no date math, local-day
+        discipline untouched. Bills/UtilityAccounts are NOT touched (offtaker
+        invoicing is bill-driven; the target keeps its own account + bills).
+        GmpUsageRaw (the raw CSV sponge) stays on the source account — it is
+        not read by any report path; noted for Phase-5 cleanup. A source GMP
+        account with interval rows but NO matching target account is flagged
+        in the plan (its overlay can't be carried; the byte-diff will show
+        any impact). The plan flags the provenance change prominently.
 
 Safety
 ------
@@ -98,10 +124,11 @@ Usage
   python -m scripts.migrate_nepool_tenant --source ten_SRC --target ten_TGT
   python -m scripts.migrate_nepool_tenant --source ten_SRC --target ten_TGT --report
   python -m scripts.migrate_nepool_tenant --source ten_SRC --target ten_TGT --verify
-  # the Bruce-pair shape: claim the GMP siblings off the capture client and
-  # retire it from the reports iteration, all verified in one transaction:
+  # the Bruce-pair shape: claim the GMP siblings off the capture client,
+  # carry their NEPOOL-reported generation series, and retire the capture
+  # client from the reports iteration — all verified in one transaction:
   python -m scripts.migrate_nepool_tenant --source ten_SRC --target ten_TGT \
-      --claim-linked-from 1557 --deactivate-client 1557 --verify
+      --claim-linked-from 1557 --deactivate-client 1557 --carry-generation --verify
   python -m scripts.migrate_nepool_tenant --source ten_SRC --target ten_TGT \
       --verify --execute --yes-prod        # Phase 4 only
 """
@@ -117,11 +144,11 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Optional
 
-from sqlalchemy import select, update, func
+from sqlalchemy import select, update, delete, func
 
 from api.db import SessionLocal, engine
 from api.models import (Tenant, Client, Array, UtilityAccount, Bill,
-                        DailyGeneration, ReportDelivery)
+                        DailyGeneration, GmpDailyGeneration, ReportDelivery)
 
 # Tenant settings copied wholesale — NEPOOL-report semantics only (AO offtaker
 # invoice emails render from the separate offtaker_* template columns).
@@ -154,6 +181,13 @@ class ArrayAction:
     # Set when the target array was client-linked and the operator explicitly
     # claimed it via --claim-linked-from: the client id it is taken FROM.
     claimed_from: Optional[int] = None
+    # --carry-generation: replace the claimed target's DailyGeneration series
+    # with the source array's (re-pointed rows, byte-parity by construction).
+    carry_generation: bool = False
+    # (src_account_id, tgt_account_id) pairs matched by (gmp, account_number)
+    # whose GmpDailyGeneration interval rows are re-pointed by the carry — the
+    # series the writer's overlay actually reads.
+    gmp_pairs: list = field(default_factory=list)
 
 
 @dataclass
@@ -179,7 +213,8 @@ class Plan:
 def build_plan(db, source: Tenant, target: Tenant,
                allow_products: bool = False,
                claim_from: Optional[set[int]] = None,
-               deactivate_clients: Optional[set[int]] = None) -> Plan:
+               deactivate_clients: Optional[set[int]] = None,
+               carry_generation: bool = False) -> Plan:
     claim_from = set(claim_from or ())
     deactivate_clients = set(deactivate_clients or ())
     plan = Plan(source_id=source.id, target_id=target.id)
@@ -340,6 +375,58 @@ def build_plan(db, source: Tenant, target: Tenant,
                 act.notes.append(
                     f"CLAIMED from client {claimed_from_client} "
                     f"(--claim-linked-from) — re-pointed to the migrated client")
+                if carry_generation:
+                    n_src = db.execute(
+                        select(func.count()).select_from(DailyGeneration)
+                        .where(DailyGeneration.array_id == a.id)).scalar() or 0
+                    n_tgt = db.execute(
+                        select(func.count()).select_from(DailyGeneration)
+                        .where(DailyGeneration.array_id == tgt.id)).scalar() or 0
+                    act.carry_generation = True
+                    act.notes.append(
+                        f"generation series carried from source "
+                        f"({n_src} rows replace {n_tgt} target rows)")
+                    # GMP interval overlay (the writer's ACTUAL daily input —
+                    # DailyGeneration bill_prorate/vendor/extension sources are
+                    # excluded by gmcs_writer): pair source<->target accounts
+                    # by (gmp, account_number) and carry the interval rows.
+                    tgt_gmp = {
+                        ua.account_number: ua for ua in db.execute(
+                            select(UtilityAccount).where(
+                                UtilityAccount.array_id == tgt.id,
+                                UtilityAccount.provider == "gmp",
+                                UtilityAccount.deleted_at.is_(None))
+                        ).scalars().all()
+                    }
+                    g_src_total = g_tgt_total = 0
+                    for ua in src_accts:
+                        if ua.deleted_at is not None or ua.provider != "gmp":
+                            continue
+                        g_src = db.execute(
+                            select(func.count()).select_from(GmpDailyGeneration)
+                            .where(GmpDailyGeneration.account_id == ua.id)
+                        ).scalar() or 0
+                        twin = tgt_gmp.get(ua.account_number)
+                        if twin is None:
+                            if g_src:
+                                act.notes.append(
+                                    f"⚠ source GMP account {ua.account_number} has "
+                                    f"{g_src} interval rows but NO matching target "
+                                    f"account — overlay can't be carried; the "
+                                    f"byte-diff will show any impact")
+                            continue
+                        g_tgt = db.execute(
+                            select(func.count()).select_from(GmpDailyGeneration)
+                            .where(GmpDailyGeneration.account_id == twin.id)
+                        ).scalar() or 0
+                        act.gmp_pairs.append((ua.id, twin.id))
+                        g_src_total += g_src
+                        g_tgt_total += g_tgt
+                    if act.gmp_pairs:
+                        act.notes.append(
+                            f"GMP interval series carried ({g_src_total} rows "
+                            f"replace {g_tgt_total}) across {len(act.gmp_pairs)} "
+                            f"matched account(s) — the workbook's actual overlay")
             if tgt.name != a.name:
                 act.rename_to = a.name
                 act.notes.append(
@@ -381,6 +468,8 @@ def build_plan(db, source: Tenant, target: Tenant,
     for cid in sorted(unused_claims):
         plan.notes.append(
             f"--claim-linked-from {cid}: no linked match was claimed from it")
+    if carry_generation and not any(a.carry_generation for a in plan.arrays):
+        plan.notes.append("--carry-generation: no claimed arrays — nothing to carry")
     for cid in sorted(deactivate_clients):
         c = db.get(Client, cid)
         if c is None or c.tenant_id != target.id or c.deleted_at is not None:
@@ -455,6 +544,30 @@ def apply_plan(db, plan: Plan) -> None:
             if act.rename_to:
                 tgt_arr.name = act.rename_to
             src_arr.client_id = None          # detach the source sibling
+            if act.carry_generation:
+                # --carry-generation: the claimed array must end up with
+                # EXACTLY the series the NEPOOL reports were generated from.
+                # Pure re-pointing, no recomputation, so day values
+                # (fleet-LOCAL) are untouched. Bills/accounts deliberately
+                # NOT touched (offtaker invoicing is bill-driven; the target
+                # keeps its own account + bills).
+                # 1. DailyGeneration: delete the twin's rows, re-point source.
+                db.execute(delete(DailyGeneration)
+                           .where(DailyGeneration.array_id == act.target_id))
+                db.execute(update(DailyGeneration)
+                           .where(DailyGeneration.array_id == act.source_id)
+                           .values(array_id=act.target_id,
+                                   tenant_id=target.id))
+                # 2. GmpDailyGeneration (the writer's actual overlay input),
+                # per (gmp, account_number)-matched account pair.
+                for src_acct_id, tgt_acct_id in act.gmp_pairs:
+                    db.execute(delete(GmpDailyGeneration)
+                               .where(GmpDailyGeneration.account_id == tgt_acct_id))
+                    db.execute(update(GmpDailyGeneration)
+                               .where(GmpDailyGeneration.account_id == src_acct_id)
+                               .values(account_id=tgt_acct_id,
+                                       tenant_id=target.id,
+                                       array_id=act.target_id))
         elif act.action == "skip-excluded":
             src_arr.client_id = None          # detach; never link the sibling
         elif act.action == "move":
@@ -618,7 +731,8 @@ def run_verify(source_id: str, target_id: str, *,
                out_dir: Optional[pathlib.Path] = None,
                allow_products: bool = False,
                claim_from: Optional[set[int]] = None,
-               deactivate_clients: Optional[set[int]] = None) -> dict:
+               deactivate_clients: Optional[set[int]] = None,
+               carry_generation: bool = False) -> dict:
     """The byte-diff oracle: migrate INSIDE one transaction, build every moved
     client's workbook from the migrated target state, compare against the
     source-tenant workbooks built pre-migration, ROLL BACK. Returns
@@ -645,7 +759,8 @@ def run_verify(source_id: str, target_id: str, *,
             raise MigrationBlocked("source or target tenant not found")
         plan = build_plan(session, source, target, allow_products=allow_products,
                           claim_from=claim_from,
-                          deactivate_clients=deactivate_clients)
+                          deactivate_clients=deactivate_clients,
+                          carry_generation=carry_generation)
         results["_plan"] = plan
         if plan.blockers:
             raise MigrationBlocked("; ".join(plan.blockers))
@@ -709,7 +824,8 @@ def run_verify(source_id: str, target_id: str, *,
 def run_execute(source_id: str, target_id: str, *,
                 allow_products: bool = False,
                 claim_from: Optional[set[int]] = None,
-                deactivate_clients: Optional[set[int]] = None) -> Plan:
+                deactivate_clients: Optional[set[int]] = None,
+                carry_generation: bool = False) -> Plan:
     """Apply + COMMIT. Raises MigrationBlocked instead of guessing."""
     with SessionLocal() as session:
         source = session.get(Tenant, source_id)
@@ -718,7 +834,8 @@ def run_execute(source_id: str, target_id: str, *,
             raise MigrationBlocked("source or target tenant not found")
         plan = build_plan(session, source, target, allow_products=allow_products,
                           claim_from=claim_from,
-                          deactivate_clients=deactivate_clients)
+                          deactivate_clients=deactivate_clients,
+                          carry_generation=carry_generation)
         apply_plan(session, plan)    # raises on blockers, flushes
         session.commit()
         return plan
@@ -755,6 +872,17 @@ def _print_plan(plan: Plan) -> None:
     for s in plan.settings:
         print(f"  - {s['field']}: {s['action']}"
               + (f"  ({s['source']!r} -> target)" if s["action"] == "copy" else ""))
+    if any(a.carry_generation for a in plan.arrays):
+        n = sum(1 for a in plan.arrays if a.carry_generation)
+        n_pairs = sum(len(a.gmp_pairs) for a in plan.arrays)
+        print(f"\n⚠ PROVENANCE CHANGE (--carry-generation, {n} claimed array(s)):")
+        print("  AO-side daily series for claimed arrays changes provenance "
+              "(bill-prorate-only\n  → the blended series NEPOOL reports used), "
+              f"and the GMP 15-min interval overlay\n  moves across {n_pairs} "
+              "matched account(s) — the series the workbook actually reads.\n"
+              "  Rows are re-pointed from the source arrays — no values "
+              "recomputed;\n  bills/accounts untouched (GmpUsageRaw raw sponge "
+              "stays on the source).")
     if plan.deactivate:
         print(f"\nClients to DEACTIVATE on target ({len(plan.deactivate)}) — "
               f"retired from the reports iteration, arrays untouched:")
@@ -803,6 +931,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="repeatable: set this TARGET-tenant client active=False in the "
                          "same transaction; refused if it would still hold live report "
                          "arrays (nepool_gis_id) after the claims")
+    ap.add_argument("--carry-generation", action="store_true",
+                    help="for every CLAIMED array: replace the target twin's "
+                         "DailyGeneration with the SOURCE array's rows (re-pointed, "
+                         "never recomputed) so the claimed array carries exactly the "
+                         "series the NEPOOL reports used; bills/accounts untouched")
     ap.add_argument("--quarter", default=None,
                     help="pin the report window, e.g. Q1-2026 (default: the writers' own default)")
     ap.add_argument("--keep-workbooks", default=None,
@@ -840,7 +973,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 2
         plan = build_plan(db, source, target, allow_products=args.allow_products,
                           claim_from=claim_from,
-                          deactivate_clients=deactivate_clients)
+                          deactivate_clients=deactivate_clients,
+                          carry_generation=args.carry_generation)
     _print_plan(plan)
 
     if args.verify:
@@ -851,7 +985,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                                  reference_date=reference_date, out_dir=out_dir,
                                  allow_products=args.allow_products,
                                  claim_from=claim_from,
-                                 deactivate_clients=deactivate_clients)
+                                 deactivate_clients=deactivate_clients,
+                                 carry_generation=args.carry_generation)
         except MigrationBlocked as e:
             print(f"VERIFY BLOCKED: {e}")
             return 3
@@ -881,7 +1016,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             run_execute(args.source, args.target,
                         allow_products=args.allow_products,
                         claim_from=claim_from,
-                        deactivate_clients=deactivate_clients)
+                        deactivate_clients=deactivate_clients,
+                        carry_generation=args.carry_generation)
         except MigrationBlocked as e:
             print(f"EXECUTE BLOCKED: {e}")
             return 3
