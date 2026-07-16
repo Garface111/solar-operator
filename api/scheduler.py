@@ -2145,12 +2145,17 @@ def _run_energy_agent_sovereign_jobs() -> None:
         mark_jobs_inflight(True)
         try:
             with SessionLocal() as db:
-                # Safer default: 2 jobs/tick (was 3). Env SOVEREIGN_JOB_DRAIN_LIMIT, cap 4.
+                # Energy Agent Prime: one project at a time (default drain 1).
+                # Cap 2 even if env is higher — never batch thrash the site.
                 try:
-                    limit = int(os.getenv("SOVEREIGN_JOB_DRAIN_LIMIT", "2") or 2)
-                except (TypeError, ValueError):
-                    limit = 2
-                limit = min(max(1, limit), 4)
+                    from .energy_agent_prime_site import job_drain_limit
+                    limit = job_drain_limit()
+                except Exception:
+                    try:
+                        limit = int(os.getenv("SOVEREIGN_JOB_DRAIN_LIMIT", "1") or 1)
+                    except (TypeError, ValueError):
+                        limit = 1
+                limit = min(max(1, limit), 2)
                 res = drain_jobs(db, limit=limit)
                 if res.get("processed"):
                     logger.info("sovereign_jobs: %s", res)

@@ -750,6 +750,20 @@ def watchdog_tick(*, force: bool = False) -> dict[str, Any]:
     health = diagnose()
     problems = [p for p in (health.get("problems") or []) if p != "storm_breaker_open"]
 
+    # Energy Agent Prime: site-first probe (web /health). Pause heavy work if AO is sick.
+    site_guard: dict[str, Any] | None = None
+    try:
+        from .energy_agent_prime_site import site_guardian_tick
+        site_guard = site_guardian_tick()
+        if site_guard and not site_guard.get("ok") and not site_guard.get("skipped"):
+            log.warning(
+                "prime site_guardian unhealthy fail_streak=%s",
+                site_guard.get("fail_streak"),
+            )
+    except Exception as e:  # noqa: BLE001
+        log.warning("prime site_guardian failed: %s", e)
+        site_guard = {"ok": False, "error": str(e)[:200]}
+
     # Always try to finish desk turns orphaned by deploys (even when otherwise healthy)
     desk_recover: dict[str, Any] | None = None
     try:
@@ -775,6 +789,7 @@ def watchdog_tick(*, force: bool = False) -> dict[str, Any]:
             "mode": "healthy",
             "recovered": bool(desk_recover and desk_recover.get("recovered")),
             "desk_recover": desk_recover,
+            "site_guardian": site_guard,
             "health": health,
         }
 

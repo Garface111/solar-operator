@@ -1191,18 +1191,69 @@ def requeue_failed_jobs(
     }
 
 
-def drain_jobs(db, *, limit: int = 2) -> dict[str, Any]:
-    """Process queued sovereign jobs (oldest first).
+def drain_jobs(db, *, limit: int | None = None) -> dict[str, Any]:
+    """Process queued Prime (Sovereign) jobs — oldest first, one project at a time.
 
-    Default limit=2 (safer for pool). Scheduler uses SOVEREIGN_JOB_DRAIN_LIMIT
-    (default 2, hard cap 4). Manual admin drain may pass a higher limit.
+    Safety (Energy Agent Prime / site-first):
+      • SOVEREIGN_CODE_LIVE must be on
+      • Site guardian: skip if web /health is down or pool-hot
+      • Max concurrent running jobs = SOVEREIGN_MAX_CONCURRENT_JOBS (default 1)
+      • Drain batch = min(limit, max_concurrent) default SOVEREIGN_JOB_DRAIN_LIMIT=1
+      • sovereign_guard single-flight / auto-pause still apply at scheduler layer
     Each job is isolated: failure/rollback of one never aborts the batch.
     """
     from .energy_agent_sovereign import EaSovereignJob
-    from sqlalchemy import select
+    from sqlalchemy import select, func
 
     if not code_live_enabled():
         return {"ok": True, "skipped": True, "reason": "code live off", "processed": 0}
+
+    # Site-first: never ship code while Array Operator is sick
+    try:
+        from .energy_agent_prime_site import site_is_safe_for_heavy, max_concurrent_jobs, job_drain_limit
+        safe, why = site_is_safe_for_heavy()
+        if not safe:
+            return {
+                "ok": True, "skipped": True, "reason": f"site_unsafe:{why}",
+                "processed": 0,
+            }
+        max_n = max_concurrent_jobs()
+        if limit is None:
+            limit = job_drain_limit()
+        limit = max(1, min(int(limit), max_n))
+    except Exception:
+        max_n = 1
+        if limit is None:
+            limit = 1
+        limit = max(1, min(int(limit), 2))
+
+    # One project at a time: if anything is already running, wait
+    try:
+        running_n = int(
+            db.execute(
+                select(func.count()).select_from(EaSovereignJob).where(
+                    EaSovereignJob.status == "running"
+                )
+            ).scalar() or 0
+        )
+    except Exception:
+        running_n = 0
+    if running_n >= max_n:
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": f"already_running:{running_n}>={max_n}",
+            "processed": 0,
+            "running": running_n,
+        }
+    # Only pull as many as free slots
+    free = max(0, max_n - running_n)
+    limit = min(limit, free) if free else 0
+    if limit <= 0:
+        return {
+            "ok": True, "skipped": True, "reason": "no_free_slots",
+            "processed": 0, "running": running_n,
+        }
 
     # Ensure repos before processing so first job doesn't burn on clone race
     repo_status = {}
