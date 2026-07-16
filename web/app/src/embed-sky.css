@@ -96,7 +96,11 @@ body {
    translucent white track, active pill = the solid Sky action blue with the
    same blue glow AO uses (.vs-seg-btn.on). NavLink stamps aria-current. */
 nav[role="tablist"] {
-  background: rgba(255, 255, 255, 0.62);
+  /* !important: AO theme-day.css:83 paints EVERY <nav> with the top-bar
+     gradient (html[data-theme=day] nav{background:...!important}) — that
+     element-level leak reaches inside the embed, so this must out-rank it
+     (same flag, higher specificity once prefixed under #so-genrep). */
+  background: rgba(255, 255, 255, 0.62) !important;
   border-color: rgba(20, 60, 120, 0.13);
   box-shadow: 0 4px 18px -4px rgba(20, 60, 120, 0.14);
   padding: 4px;
