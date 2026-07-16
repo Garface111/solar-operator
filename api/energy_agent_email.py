@@ -471,6 +471,17 @@ _QUOTED_TAIL_RE = re.compile(
 )
 
 
+def _email_plain(text: str) -> str:
+    """Chat replies carry markdown; email clients render it literally. Strip
+    the common tokens without touching the content."""
+    t = text or ""
+    t = re.sub(r"\*\*(.+?)\*\*", r"\1", t)
+    t = re.sub(r"(?<!\w)\*(.+?)\*(?!\w)", r"\1", t)
+    t = re.sub(r"`([^`]+)`", r"\1", t)
+    t = re.sub(r"^#{1,4}\s*", "", t, flags=re.M)
+    return t
+
+
 def _strip_reply_body(body: str) -> str:
     txt = (body or "").strip()
     m = _QUOTED_TAIL_RE.search(txt)
@@ -659,6 +670,7 @@ def ingest_owner_email(
         )
 
     # Email the reply back, threaded on the subject.
+    reply_text = _email_plain(reply_text)
     subj = (subject or "Your Energy Agent").strip()
     if not subj.lower().startswith("re:"):
         subj = f"Re: {subj}"
