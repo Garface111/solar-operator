@@ -290,7 +290,11 @@ def _cheap_llm_monologue(
     last_monologue: str,
     heat: int,
 ) -> dict[str, Any]:
-    """Grok subconscious: monologue + needs_cortex bit. Never hard actions."""
+    """Grok subconscious: monologue + needs_cortex bit. Never hard actions.
+
+    # SESSION BOUNDARY: no LLM inside open session
+    Pure HTTP — callers must not hold SessionLocal across this call.
+    """
     if not subconscious_llm_enabled():
         return {"ok": False, "skipped": True}
     model = subconscious_model()
@@ -499,14 +503,23 @@ def subconscious_tick(
         observe_product,
         write_note,
         memory_set,
-        memory_get_all,
         world_get,
         world_save,
         sovereign_sense_enabled,
     )
 
-    with SessionLocal() as db:
-        try:
+    # ── Phase 1: short DB read ─────────────────────────────────────────────
+    digests: dict = {}
+    events: list[dict] = []
+    unconsumed: list[dict] = []
+    last_mono = ""
+    age: float | None = None
+    digest_heat = 0
+    event_heat = 0
+    heat = 0
+
+    try:
+        with SessionLocal() as db:
             ensure_event_tables()
             digests = observe_product(db) if sovereign_sense_enabled() else {}
             events = recent_events(db, limit=10)
@@ -519,63 +532,86 @@ def subconscious_tick(
             heat = max(digest_heat, event_heat)
 
             last_mono = _memory_get(db, "subconscious_monologue") or ""
-            mono = rule_monologue(
-                digests, events, last_monologue=last_mono, heat=heat,
-            )
-            provider = "rules"
-            model = None
-            llm_needs: bool | None = None
-            why = ""
-
-            if not skip_llm and subconscious_llm_enabled():
-                llm = _cheap_llm_monologue(digests, events, last_mono, heat)
-                if llm.get("ok") and (llm.get("monologue") or "").strip():
-                    mono = str(llm["monologue"]).strip()[:1800]
-                    provider = llm.get("provider") or "subconscious_llm"
-                    model = llm.get("model")
-                    if "heat" in llm:
-                        try:
-                            # Blend: never trust LLM heat alone above rule heat+15
-                            llm_h = int(llm["heat"])
-                            heat = max(heat, min(llm_h, heat + 15, 100))
-                        except Exception:
-                            pass
-                    if "needs_cortex" in llm:
-                        llm_needs = bool(llm["needs_cortex"])
-                    why = str(llm.get("why") or "")[:240]
-                    for mw in llm.get("memory_writes") or []:
-                        if isinstance(mw, dict) and mw.get("key"):
-                            # Only allow a short allowlist of keys from subconscious
-                            k = str(mw["key"])[:80]
-                            if k.startswith("sub_") or k in (
-                                "pressure_point", "ambient_note", "subconscious_focus",
-                            ):
-                                memory_set(
-                                    db, k, str(mw.get("value") or "")[:500],
-                                    source="subconscious",
-                                )
-
             age = _last_cortex_age_sec(db)
-            needs, needs_why = decide_needs_cortex(
-                heat=heat,
-                reason=reason,
-                force=False,
-                last_cortex_age_sec=age,
-                digests=digests,
-                unconsumed_events=len(unconsumed),
-            )
-            if llm_needs is True and heat >= max(40, cortex_heat_threshold() - 20):
-                needs = True
-                needs_why = (needs_why + "; llm_flag").strip("; ")
-            elif llm_needs is False and heat < cortex_heat_threshold() and reason == "scheduler":
-                # Cheap mind says cool and rules agree
-                needs = False
-                needs_why = "llm_cool+" + needs_why
+            try:
+                db.commit()
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+        # SESSION BOUNDARY: no LLM inside open session
+    except Exception as e:  # noqa: BLE001
+        log.exception("subconscious_tick read phase failed")
+        return {
+            "ok": False,
+            "tick_id": tick_id,
+            "mode": "error",
+            "reason": reason,
+            "error": f"read_phase: {e}"[:400],
+        }
 
-            if why:
-                needs_why = f"{needs_why} | {why}"[:300]
+    mono = rule_monologue(
+        digests, events, last_monologue=last_mono, heat=heat,
+    )
+    provider = "rules"
+    model = None
+    llm_needs: bool | None = None
+    why = ""
+    llm: dict[str, Any] = {}
 
-            # Persist tape
+    # ── Phase 2: cheap LLM monologue — connection pool free ────────────────
+    # SESSION BOUNDARY: no LLM inside open session
+    if not skip_llm and subconscious_llm_enabled():
+        llm = _cheap_llm_monologue(digests, events, last_mono, heat)
+        if llm.get("ok") and (llm.get("monologue") or "").strip():
+            mono = str(llm["monologue"]).strip()[:1800]
+            provider = llm.get("provider") or "subconscious_llm"
+            model = llm.get("model")
+            if "heat" in llm:
+                try:
+                    # Blend: never trust LLM heat alone above rule heat+15
+                    llm_h = int(llm["heat"])
+                    heat = max(heat, min(llm_h, heat + 15, 100))
+                except Exception:
+                    pass
+            if "needs_cortex" in llm:
+                llm_needs = bool(llm["needs_cortex"])
+            why = str(llm.get("why") or "")[:240]
+
+    needs, needs_why = decide_needs_cortex(
+        heat=heat,
+        reason=reason,
+        force=False,
+        last_cortex_age_sec=age,
+        digests=digests,
+        unconsumed_events=len(unconsumed),
+    )
+    if llm_needs is True and heat >= max(40, cortex_heat_threshold() - 20):
+        needs = True
+        needs_why = (needs_why + "; llm_flag").strip("; ")
+    elif llm_needs is False and heat < cortex_heat_threshold() and reason == "scheduler":
+        needs = False
+        needs_why = "llm_cool+" + needs_why
+
+    if why:
+        needs_why = f"{needs_why} | {why}"[:300]
+
+    # ── Phase 3: short DB write ────────────────────────────────────────────
+    with SessionLocal() as db:
+        try:
+            if llm.get("ok"):
+                for mw in llm.get("memory_writes") or []:
+                    if isinstance(mw, dict) and mw.get("key"):
+                        k = str(mw["key"])[:80]
+                        if k.startswith("sub_") or k in (
+                            "pressure_point", "ambient_note", "subconscious_focus",
+                        ):
+                            memory_set(
+                                db, k, str(mw.get("value") or "")[:500],
+                                source="subconscious",
+                            )
+
             write_note(
                 db,
                 kind="subconscious",
@@ -618,10 +654,8 @@ def subconscious_tick(
                 source="subconscious",
             )
 
-            # Mark unconsumed events seen by subconscious
             mark_events_consumed(db, [e["id"] for e in unconsumed if e.get("id")])
 
-            # Patch world snapshot (light)
             try:
                 state = world_get(db)
                 state["heat"] = heat
@@ -647,7 +681,7 @@ def subconscious_tick(
                 "digests": {"queues": digests.get("queues")},
             }
         except Exception as e:  # noqa: BLE001
-            log.exception("subconscious_tick failed")
+            log.exception("subconscious_tick write phase failed")
             try:
                 db.rollback()
             except Exception:

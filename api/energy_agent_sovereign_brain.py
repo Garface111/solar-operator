@@ -271,6 +271,11 @@ def call_brain(messages: list[dict], *, timeout: int | None = None) -> dict:
 
     timeout: optional per-call HTTP timeout (desk uses a shorter one so the
     Netlify proxy does not 504 before we can return a reply).
+
+    # SESSION BOUNDARY: no LLM inside open session
+    Callers (cortex think_cycle, skill evolution, desk) must close SessionLocal
+    before invoking this — long Grok/Claude HTTP must not hold pool connections
+    or row locks (outage class: pool exhaustion + lock thrash).
     """
     order = [primary_provider(), fallback_provider()]
     # Dedup while preserving order
@@ -521,7 +526,12 @@ def think_cycle(
     heat: int | None = None,
     skills: dict | None = None,
 ) -> dict[str, Any]:
-    """Run one independent think. Returns structured plan + provider meta."""
+    """Run one independent think. Returns structured plan + provider meta.
+
+    Pure in-memory + HTTP — no DB session. Callers must pass plain dicts and
+    must not hold SessionLocal open across this call.
+    # SESSION BOUNDARY: no LLM inside open session
+    """
     if not brain_enabled():
         return {
             "ok": False,
@@ -543,6 +553,7 @@ def think_cycle(
         heat=heat,
         skills=skills,
     )
+    # SESSION BOUNDARY: no LLM inside open session
     try:
         raw = call_brain(messages)
     except Exception as e:  # noqa: BLE001

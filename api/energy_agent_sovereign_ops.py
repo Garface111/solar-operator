@@ -1004,13 +1004,10 @@ def autonomous_ops_sweep(db) -> dict:
         "jobs": execute_jobs_now(db, limit=2),
         "summary": ops_summary(db),
     }
-    # Expansion powers: light mission drain on every ops sweep
-    try:
-        from .energy_agent_sovereign_expand import mission_loop_tick, expand_enabled
-        if expand_enabled():
-            results["mission_loop"] = mission_loop_tick(db)
-    except Exception as e:  # noqa: BLE001
-        results["mission_loop"] = {"ok": False, "error": str(e)[:160]}
+    # Mission loop (browser HTTP) is NOT nested here — it owns short SessionLocal
+    # segments and runs from the dedicated scheduler job so we never hold this
+    # ops connection across external HTTP. See mission_loop_tick.
+    # SESSION BOUNDARY: no LLM inside open session
     # Durable succession snapshot so Sovereign runs the desk offline
     memory_set(
         db, "ops_last_sweep",

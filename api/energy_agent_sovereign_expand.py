@@ -814,22 +814,47 @@ def process_email_attachments_to_objects(
 
 
 # ── 6. Long-running mission loops ───────────────────────────────────────────
-def mission_loop_tick(db) -> dict[str, Any]:
-    """Drain expand missions outside the normal sub/cortex/ops cadence."""
+def mission_loop_tick(db=None) -> dict[str, Any]:
+    """Drain expand missions outside the normal sub/cortex/ops cadence.
+
+    Always owns short SessionLocal segments so browser HTTP never holds a pool
+    connection. Optional `db` is ignored (call-site compatibility only) —
+    callers must not wrap this in an outer long-lived session.
+
+    Session policy: short DB read → close → HTTP → short DB write.
+    # SESSION BOUNDARY: no LLM inside open session
+    """
+    del db  # never hold caller's connection across browser HTTP
     if not expand_enabled():
         return {"ok": False, "skipped": True, "reason": "expand off"}
+    from .db import SessionLocal
     from .energy_agent_sovereign import memory_get_all, memory_set, write_note, audit
 
     results: dict[str, Any] = {"steps": []}
 
-    # 1) HAR queue: public recon for awaiting items with URL
-    queue = []
-    for m in memory_get_all(db, limit=100):
-        if m.get("key") == "har_capture_queue":
+    # ── Phase 1: load HAR queue (short session) ────────────────────────────
+    queue: list = []
+    try:
+        with SessionLocal() as s:
+            for m in memory_get_all(s, limit=100):
+                if m.get("key") == "har_capture_queue":
+                    try:
+                        queue = list(json.loads(m.get("value") or "[]"))
+                    except Exception:
+                        queue = []
             try:
-                queue = list(json.loads(m.get("value") or "[]"))
+                s.commit()
             except Exception:
-                queue = []
+                try:
+                    s.rollback()
+                except Exception:
+                    pass
+        # SESSION BOUNDARY: no LLM inside open session
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": f"read_phase: {e}"[:200]}
+
+    # ── Phase 2: public recon HTTP — connection pool free ──────────────────
+    # SESSION BOUNDARY: no LLM inside open session
     advanced = 0
     for item in queue:
         if item.get("status") != "awaiting_har":
@@ -849,45 +874,45 @@ def mission_loop_tick(db) -> dict[str, Any]:
             advanced += 1
         if advanced >= 3:
             break
-    if advanced:
-        memory_set(db, "har_capture_queue", json.dumps(queue[-60:]), source="expand")
-        results["steps"].append({"har_recon": advanced})
 
-    # 2) Credential live refresh for fleet (light)
+    # ── Phase 3: short DB write + light local ops ──────────────────────────
     try:
-        from .energy_agent_sovereign_ops import credentials_unlocked
-        if credentials_unlocked():
-            ref = credential_live_refresh(db, tenant_id=None, provider=None)
-            results["steps"].append({"cred_refresh": bool(ref.get("ok"))})
-    except Exception as e:  # noqa: BLE001
-        results["steps"].append({"cred_refresh_error": str(e)[:120]})
+        with SessionLocal() as s:
+            if advanced:
+                memory_set(s, "har_capture_queue", json.dumps(queue[-60:]), source="expand")
+                results["steps"].append({"har_recon": advanced})
 
-    # 3) Ops soft drain if jobs piled
-    try:
-        from .energy_agent_sovereign_ops import execute_jobs_now, ops_enabled
-        if ops_enabled():
-            jobs = execute_jobs_now(db, limit=1)
-            results["steps"].append({"jobs": jobs.get("processed")})
-    except Exception as e:  # noqa: BLE001
-        results["steps"].append({"jobs_error": str(e)[:120]})
+            try:
+                from .energy_agent_sovereign_ops import credentials_unlocked
+                if credentials_unlocked():
+                    ref = credential_live_refresh(s, tenant_id=None, provider=None)
+                    results["steps"].append({"cred_refresh": bool(ref.get("ok"))})
+            except Exception as e:  # noqa: BLE001
+                results["steps"].append({"cred_refresh_error": str(e)[:120]})
 
-    memory_set(
-        db, "mission_loop_last",
-        json.dumps({"at": _now().isoformat() + "Z", **results}, default=str)[:8000],
-        source="expand",
-    )
-    write_note(
-        db, kind="decision", title="mission loop tick",
-        body=json.dumps(results, default=str)[:4000], provider="expand",
-    )
-    audit(
-        db, capability="act.mission_loop", decision="act",
-        rationale="expand mission loop",
-        targets=results,
-        result="ok",
-    )
-    results["ok"] = True
-    return results
+            # Jobs drain intentionally omitted here: drain_jobs may call LLM/CLI
+            # under the open session. Ops sweep + job worker own that path.
+
+            memory_set(
+                s, "mission_loop_last",
+                json.dumps({"at": _now().isoformat() + "Z", **results}, default=str)[:8000],
+                source="expand",
+            )
+            write_note(
+                s, kind="decision", title="mission loop tick",
+                body=json.dumps(results, default=str)[:4000], provider="expand",
+            )
+            audit(
+                s, capability="act.mission_loop", decision="act",
+                rationale="expand mission loop",
+                targets=results,
+                result="ok",
+            )
+            s.commit()
+            results["ok"] = True
+            return results
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)[:200], "steps": results.get("steps") or []}
 
 
 # ── 7. Direct owner surfaces (non-routine, rate-limited) ────────────────────

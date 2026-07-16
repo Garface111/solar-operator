@@ -1998,20 +1998,22 @@ def _run_energy_agent_sovereign_subconscious() -> None:
 
 
 def _run_energy_agent_sovereign_mission_loop() -> None:
-    """Long-running expand missions (HAR recon, cred refresh) every ~2m."""
+    """Long-running expand missions (HAR recon, cred refresh) every ~2m.
+
+    mission_loop_tick owns short SessionLocal segments around browser HTTP —
+    do not wrap it in an outer session (pool exhaustion class).
+    # SESSION BOUNDARY: no LLM inside open session
+    """
     try:
         from .energy_agent_sovereign import sovereign_enabled
         from .energy_agent_sovereign_expand import expand_enabled, mission_loop_tick
-        from .db import SessionLocal
         if not sovereign_enabled() or not expand_enabled():
             return
         if _sov_guard_skip("mission_loop"):
             return
-        with SessionLocal() as db:
-            res = mission_loop_tick(db)
-            db.commit()
-            if res.get("steps"):
-                logger.info("sovereign_mission_loop steps=%s", res.get("steps"))
+        res = mission_loop_tick()
+        if res.get("steps"):
+            logger.info("sovereign_mission_loop steps=%s", res.get("steps"))
     except Exception as exc:  # noqa: BLE001
         logger.exception("energy_agent_sovereign_mission_loop crashed: %s", exc)
 

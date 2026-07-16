@@ -631,7 +631,11 @@ def _deterministic_from_job(job: dict) -> dict | None:
 
 
 def _llm_evolve(traces: list[dict], existing_index: list[dict]) -> list[dict]:
-    """Ask Grok/Claude to propose skill create/patch ops from traces."""
+    """Ask Grok/Claude to propose skill create/patch ops from traces.
+
+    # SESSION BOUNDARY: no LLM inside open session
+    Callers must close SessionLocal before this (see evolution_cycle).
+    """
     if not evolution_enabled():
         return []
     try:
@@ -729,20 +733,26 @@ def evolution_cycle(*, force: bool = False) -> dict[str, Any]:
     """One learning-loop tick: harvest → propose → upsert → curator.
 
     Safe to run on a schedule. Idempotent-ish (version bumps on patch).
+
+    Session policy: short DB read → close → LLM → short DB write.
+    Never hold SessionLocal open across Grok/Claude HTTP.
     """
     if not skills_enabled() and not force:
         return {"ok": True, "mode": "dark", "enabled": False}
 
-    with SessionLocal() as db:
-        try:
+    # ── Phase 1: short DB read + deterministic proposals ───────────────────
+    traces: list[dict] = []
+    idx: list[dict] = []
+    seed: dict[str, Any] = {}
+    proposals: list[dict] = []
+    outcome_records: list[tuple[str, bool]] = []  # (name, success) applied in write phase
+
+    try:
+        with SessionLocal() as db:
             ensure_skill_tables(db)
             seed = seed_skills(db)
             traces = harvest_traces(db, hours=36, limit=30)
             idx = skill_index(db, limit=40)
-
-            created = []
-            patched = []
-            proposals: list[dict] = []
 
             # 1) Deterministic from recent jobs (always — even if LLM off)
             for tr in traces:
@@ -751,37 +761,62 @@ def evolution_cycle(*, force: bool = False) -> dict[str, Any]:
                 draft = _deterministic_from_job(tr)
                 if not draft:
                     continue
-                # Only create new deterministic skills for done jobs or novel errors
                 existing = get_skill(db, draft["name"])
                 if existing and tr.get("status") == "done":
-                    record_skill_outcome(db, draft["name"], success=True)
+                    outcome_records.append((draft["name"], True))
                     continue
                 if existing and tr.get("status") == "failed":
-                    record_skill_outcome(db, draft["name"], success=False)
+                    outcome_records.append((draft["name"], False))
                     # still allow body patch if error text new
                     if draft["body"] and draft["body"][:200] not in (existing.body or ""):
                         proposals.append({**draft, "op": "patch"})
                     continue
                 proposals.append({**draft, "op": "create"})
 
-            # 2) LLM evolution from full trace set
-            llm_props = _llm_evolve(traces, idx) if traces else []
-            curator_req = None
-            for p in llm_props:
-                if "_curator" in p:
-                    curator_req = p["_curator"]
-                    continue
-                proposals.append(p)
+            try:
+                db.commit()
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+        # SESSION BOUNDARY: no LLM inside open session
+    except Exception as e:  # noqa: BLE001
+        log.exception("evolution_cycle read phase failed")
+        return {"ok": False, "error": f"read_phase: {e}"[:400]}
 
-            # Dedup by name, prefer LLM body if longer
-            by_name: dict[str, dict] = {}
-            for p in proposals:
-                n = _slug(str(p.get("name") or ""))
-                if not n:
-                    continue
-                prev = by_name.get(n)
-                if not prev or len(str(p.get("body") or "")) > len(str(prev.get("body") or "")):
-                    by_name[n] = p
+    # ── Phase 2: LLM evolution — connection pool free ──────────────────────
+    # SESSION BOUNDARY: no LLM inside open session
+    llm_props = _llm_evolve(traces, idx) if traces else []
+    curator_req = None
+    for p in llm_props:
+        if "_curator" in p:
+            curator_req = p["_curator"]
+            continue
+        proposals.append(p)
+
+    # Dedup by name, prefer LLM body if longer
+    by_name: dict[str, dict] = {}
+    for p in proposals:
+        n = _slug(str(p.get("name") or ""))
+        if not n:
+            continue
+        prev = by_name.get(n)
+        if not prev or len(str(p.get("body") or "")) > len(str(prev.get("body") or "")):
+            by_name[n] = p
+
+    # ── Phase 3: short DB write — upsert + curator + memory ────────────────
+    with SessionLocal() as db:
+        try:
+            ensure_skill_tables(db)
+            created = []
+            patched = []
+
+            for name, success in outcome_records:
+                try:
+                    record_skill_outcome(db, name, success=success)
+                except Exception as e:  # noqa: BLE001
+                    log.debug("record_skill_outcome %s: %s", name, e)
 
             for n, p in list(by_name.items())[:5]:
                 row = upsert_skill(
@@ -812,7 +847,6 @@ def evolution_cycle(*, force: bool = False) -> dict[str, Any]:
                         cur.setdefault("deprecated", []).append(sk.name)
                 db.flush()
 
-            # Memory + note for continuity
             try:
                 from .energy_agent_sovereign import memory_set, write_note
                 memory_set(

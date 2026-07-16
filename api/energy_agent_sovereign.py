@@ -2356,8 +2356,13 @@ def execute_brain_actions(db, actions: list[dict], *, tick_id: str) -> list[dict
                 from_email=raw.get("from_email"),
             )
         elif atype in ("mission_loop", "expand_loop"):
+            # Own sessions + HTTP outside this caller's txn when possible.
+            # Prefer scheduler cadence; action is best-effort (may still nest
+            # under cortex write session — mission_loop_tick releases its own
+            # connections between browser fetches).
+            # SESSION BOUNDARY: no LLM inside open session
             from .energy_agent_sovereign_expand import mission_loop_tick
-            res = mission_loop_tick(db)
+            res = mission_loop_tick()
         elif atype in ("owner_direct", "owner_speak", "speak_owner") and raw.get("tenant_id"):
             from .energy_agent_sovereign_expand import owner_direct_speak
             res = owner_direct_speak(
@@ -2495,6 +2500,12 @@ def decide_and_act(db, digests: dict) -> list[dict]:
 
 
 def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
+    """One cortex cycle.
+
+    Session policy (pool exhaustion / lock thrash hardening):
+      short DB read → close → call LLM → short DB write.
+    Never hold SessionLocal open across Grok/Claude HTTP.
+    """
     tick_id = _id("tick")
     if not sovereign_enabled():
         return {
@@ -2506,8 +2517,20 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
             "decisions": [],
         }
 
-    with SessionLocal() as db:
-        try:
+    # ── Phase 1: short DB read — plain dicts only ──────────────────────────
+    digests: dict[str, Any] = {}
+    state: dict[str, Any] = {}
+    goals_payload: list[dict] = []
+    notes_payload: list[dict] = []
+    mem_payload: list[dict] = []
+    jobs_payload: list[dict] = []
+    subconscious_tape: list[dict] = []
+    recent_events_payload: list[dict] = []
+    heat_score: int | None = None
+    skills_ctx: dict = {"enabled": False, "index": [], "loaded": []}
+
+    try:
+        with SessionLocal() as db:
             # Ensure new note/memory tables exist (idempotent)
             try:
                 from .db import engine
@@ -2564,10 +2587,6 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
                 for j in jobs_rows
             ]
 
-            # Subconscious tape + event stream (continuity between cortex ticks)
-            subconscious_tape: list[dict] = []
-            recent_events_payload: list[dict] = []
-            heat_score: int | None = None
             try:
                 sub_rows = db.execute(
                     select(EaSovereignNote)
@@ -2601,13 +2620,7 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
             except Exception:
                 heat_score = state.get("heat") if isinstance(state.get("heat"), int) else None
 
-            brain_plan: dict[str, Any] = {}
-            decisions: list[dict] = []
-            brain_provider = None
-
-            # ── Procedural skills (Hermes-style progressive disclosure) ─────
-            # Read-only on this session; never let skills poison the tick txn.
-            skills_ctx: dict = {"enabled": False, "index": [], "loaded": []}
+            # Procedural skills — read-only (no use_count UPDATEs on hot path)
             try:
                 from .energy_agent_sovereign_skills import (
                     load_skills_for_context,
@@ -2634,32 +2647,62 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
                 except Exception:
                     pass
 
-            # ── Cortex: independent mind (Grok → Claude fallback) ──────────
             try:
-                from .energy_agent_sovereign_brain import think_cycle
-                brain_plan = think_cycle(
-                    digests=digests,
-                    world=state,
-                    goals=goals_payload,
-                    recent_notes=notes_payload,
-                    memories=mem_payload,
-                    open_jobs=jobs_payload,
-                    subconscious_tape=subconscious_tape,
-                    recent_events=recent_events_payload,
-                    heat=heat_score,
-                    skills=skills_ctx,
-                )
-            except Exception as e:  # noqa: BLE001
-                brain_plan = {
-                    "ok": False,
-                    "error": str(e)[:400],
-                    "fallback_to_rules": True,
-                    "actions": [],
-                    "monologue": f"(think import/run failed) {e}",
-                }
+                db.commit()
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+        # SESSION BOUNDARY: no LLM inside open session
+    except Exception as e:  # noqa: BLE001
+        log.exception("sovereign_tick read phase failed")
+        try:
+            from .notify import send_internal_alert
+            send_internal_alert("Sovereign tick read failed", str(e)[:2000])
+        except Exception:
+            pass
+        return {
+            "ok": False,
+            "tick_id": tick_id,
+            "mode": "error",
+            "reason": reason,
+            "error": f"read_phase: {e}"[:500],
+        }
 
-            brain_provider = brain_plan.get("provider")
-            monologue = brain_plan.get("monologue") or ""
+    # ── Phase 2: cortex LLM — connection pool free ─────────────────────────
+    # SESSION BOUNDARY: no LLM inside open session
+    brain_plan: dict[str, Any] = {}
+    try:
+        from .energy_agent_sovereign_brain import think_cycle
+        brain_plan = think_cycle(
+            digests=digests,
+            world=state,
+            goals=goals_payload,
+            recent_notes=notes_payload,
+            memories=mem_payload,
+            open_jobs=jobs_payload,
+            subconscious_tape=subconscious_tape,
+            recent_events=recent_events_payload,
+            heat=heat_score,
+            skills=skills_ctx,
+        )
+    except Exception as e:  # noqa: BLE001
+        brain_plan = {
+            "ok": False,
+            "error": str(e)[:400],
+            "fallback_to_rules": True,
+            "actions": [],
+            "monologue": f"(think import/run failed) {e}",
+        }
+
+    brain_provider = brain_plan.get("provider")
+    monologue = brain_plan.get("monologue") or ""
+
+    # ── Phase 3: short DB write — persist plan + act ───────────────────────
+    with SessionLocal() as db:
+        try:
+            decisions: list[dict] = []
 
             # Persist self-notes + memory + agenda from the brain
             for sn in brain_plan.get("self_notes") or []:
@@ -2685,7 +2728,6 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
             for mw in brain_plan.get("memory_writes") or []:
                 if isinstance(mw, dict) and mw.get("key"):
                     memory_set(db, str(mw["key"]), str(mw.get("value") or ""), source="brain")
-            # Leadership continuity fields
             if brain_plan.get("ford_ask"):
                 memory_set(
                     db, "ford_ask",
@@ -2703,7 +2745,6 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
             if brain_plan.get("agenda"):
                 apply_agenda(db, brain_plan["agenda"])
 
-            # Ivory-tower observation log (structured digests snapshot)
             write_note(
                 db,
                 kind="observation",
@@ -2721,10 +2762,12 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
                 tick_id=tick_id,
             )
 
-            # Execute brain actions, or fall back to rule engine if brain failed
-            if brain_plan.get("ok") and (brain_plan.get("actions") or brain_plan.get("speak_product") or brain_plan.get("ford_ask")):
+            if brain_plan.get("ok") and (
+                brain_plan.get("actions")
+                or brain_plan.get("speak_product")
+                or brain_plan.get("ford_ask")
+            ):
                 actions = list(brain_plan.get("actions") or [])
-                # Prefer desk channel for anything meant for Ford (not EA chat)
                 desk_line = brain_plan.get("speak_product")
                 if not desk_line and brain_plan.get("ford_ask"):
                     desk_line = (
@@ -2751,21 +2794,22 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
                     correlation_id=tick_id,
                 )
             else:
-                # Self-repair path: rule engine when both LLM providers fail
                 write_note(
                     db, kind="system", title="fallback rules",
-                    body=str(brain_plan.get("error") or brain_plan.get("denied_reason") or "no brain plan"),
+                    body=str(
+                        brain_plan.get("error")
+                        or brain_plan.get("denied_reason")
+                        or "no brain plan"
+                    ),
                     provider="rules", tick_id=tick_id,
                 )
                 decisions = decide_and_act(db, digests) if digests else []
                 brain_provider = brain_provider or "rules"
 
-            # Full ops authority sweep (features / utilities / escalations / jobs)
-            # Ford authorized thorough product control — runs every tick when enabled.
+            # Ops sweep — mission_loop owns its own sessions for external HTTP
             try:
                 from .energy_agent_sovereign_ops import ops_enabled, autonomous_ops_sweep
                 if ops_enabled():
-                    # Light cadence: every tick if queues hot, else still once
                     q = digests.get("queues") or {}
                     hot = (
                         (q.get("feature_reviewed") or 0) > 0
@@ -2786,7 +2830,6 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
             except Exception as e:  # noqa: BLE001
                 log.warning("ops sweep failed: %s", e)
 
-            # Memory: last tick meta for continuity
             memory_set(
                 db, "last_tick",
                 json.dumps({
@@ -2799,7 +2842,6 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
                 source="system",
             )
             memory_set(db, "last_cortex_at", _now().isoformat() + "Z", source="system")
-            # Cortex consumed the handoff bit
             memory_set(
                 db, "needs_cortex",
                 json.dumps({
@@ -2811,6 +2853,8 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
                 source="system",
             )
 
+            # Fresh world row for write (avoid stale ORM from read phase)
+            state = world_get(db)
             state["health"] = digests.get("health") or state.get("health") or {}
             state["queues"] = digests.get("queues") or {}
             state["fleet_global"] = digests.get("fleet_global") or {}
@@ -2874,7 +2918,7 @@ def sovereign_tick(*, reason: str = "scheduler") -> dict[str, Any]:
                 "revision": state.get("revision"),
             }
         except Exception as e:  # noqa: BLE001
-            log.exception("sovereign_tick failed")
+            log.exception("sovereign_tick write phase failed")
             try:
                 db.rollback()
             except Exception:
