@@ -18,18 +18,31 @@ os.environ.setdefault("DB_LOCK_TIMEOUT_MS", "0")
 
 from datetime import datetime, timedelta
 from sqlalchemy import text, inspect
+from sqlalchemy.exc import NoSuchTableError
 from .db import engine, init_db
 
 
 def column_exists(conn, table: str, column: str) -> bool:
     insp = inspect(conn)
-    cols = [c["name"] for c in insp.get_columns(table)]
+    try:
+        cols = [c["name"] for c in insp.get_columns(table)]
+    except NoSuchTableError:
+        # Fresh/empty DB: the table doesn't exist yet. Some models are
+        # registered only in the app process (app.py imports them and runs
+        # create_all at the latest schema on startup), so this migrate process
+        # can't see them. A column backfill against a not-yet-existing table is
+        # a no-op — skip it instead of crashing the whole migration. (Prod
+        # always has the table, so behavior there is unchanged.)
+        return False
     return column in cols
 
 
 def index_exists(conn, table: str, index: str) -> bool:
     insp = inspect(conn)
-    return any(i["name"] == index for i in insp.get_indexes(table))
+    try:
+        return any(i["name"] == index for i in insp.get_indexes(table))
+    except NoSuchTableError:
+        return False
 
 
 def main():
