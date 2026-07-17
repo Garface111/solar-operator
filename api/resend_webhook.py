@@ -50,10 +50,30 @@ _ON_RAILWAY = bool(
 router = APIRouter()
 
 
-def _fetch_received_email_text(email_id: str) -> str | None:
-    """Pull plain-text (or stripped HTML) body for an inbound message by id."""
+def _headers_get(data: dict, *names) -> str | None:
+    """Pull a header value from a Resend received-email object, whether headers
+    are a dict, a list of {name,value}, or a top-level field."""
+    wanted = {n.lower() for n in names}
+    for n in names:
+        v = data.get(n) or data.get(n.replace("-", "_"))
+        if v:
+            return str(v)
+    h = data.get("headers")
+    if isinstance(h, dict):
+        for k, v in h.items():
+            if str(k).lower() in wanted and v:
+                return str(v)
+    elif isinstance(h, list):
+        for item in h:
+            if isinstance(item, dict) and str(item.get("name", "")).lower() in wanted:
+                return str(item.get("value") or "") or None
+    return None
+
+
+def _fetch_received_email(email_id: str) -> tuple[str | None, str | None]:
+    """Pull (plain-text body, Message-ID) for an inbound message by id."""
     if not email_id or not RESEND_API_KEY:
-        return None
+        return None, None
     try:
         import urllib.request
         import json as _json
@@ -69,22 +89,23 @@ def _fetch_received_email_text(email_id: str) -> str | None:
         with urllib.request.urlopen(req, timeout=20) as resp:
             payload = _json.loads(resp.read().decode("utf-8"))
         data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
-        text = (
-            data.get("text")
-            or data.get("text_body")
-            or data.get("body")
-            or ""
-        )
+        msgid = _headers_get(data, "message-id", "message_id", "Message-ID")
+        text = data.get("text") or data.get("text_body") or data.get("body") or ""
         if text:
-            return str(text)
+            return str(text), msgid
         html = data.get("html") or data.get("html_body") or ""
         if html:
             text = _re.sub(r"<[^>]+>", " ", str(html))
             text = _re.sub(r"\s+", " ", text).strip()
-            return text or None
+            return (text or None), msgid
+        return None, msgid
     except Exception:
         logger.exception("resend: failed to fetch received email %s", email_id)
-    return None
+    return None, None
+
+
+def _fetch_received_email_text(email_id: str) -> str | None:
+    return _fetch_received_email(email_id)[0]
 
 
 def _verify_signature(secret: str, svix_id: str | None, svix_ts: str | None,
@@ -187,8 +208,12 @@ async def resend_webhook(
             or ""
         )
         email_id = data.get("email_id") or data.get("id")
-        if (not body) and email_id:
-            body = _fetch_received_email_text(email_id) or ""
+        # The tech's Message-ID — so our reply threads under it in Gmail.
+        inbound_msgid = _headers_get(data, "message-id", "message_id", "Message-ID")
+        if (not body or not inbound_msgid) and email_id:
+            _t, _mid = _fetch_received_email(email_id)
+            body = body or (_t or "")
+            inbound_msgid = inbound_msgid or _mid
         if not body and data.get("html"):
             import re as _re
             body = _re.sub(r"<[^>]+>", " ", str(data.get("html")))
@@ -268,6 +293,7 @@ async def resend_webhook(
                     subject=subject,
                     body=body,
                     resend_email_id=str(email_id) if email_id else None,
+                    inbound_message_id=inbound_msgid,
                 )
             logger.info(
                 "resend inbound repair: email_id=%s matched=%s ticket=%s reason=%s",

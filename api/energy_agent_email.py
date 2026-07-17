@@ -457,6 +457,42 @@ def send_gap_alert_email(tenant: Tenant, setup_status: dict, top_gap: dict) -> b
     )
 
 
+def send_reminder_email(tenant: Tenant, *, note: str, detail: str = "") -> bool:
+    """Deliver a fired Energy Agent reminder/watch to the owner, from the agent
+    mailbox so a reply routes back to her. Opt-out link included."""
+    from .email_skin import render_email_skin
+    from .notify import _send_via_resend
+
+    to = (getattr(tenant, "contact_email", None) or "").strip()
+    if not to or "@" not in to:
+        return False
+    body = (note or "Your reminder.").strip()
+    if detail:
+        body += f"\n\n{detail.strip()}"
+    body += "\n\nYou asked me to watch for this. Reply if you want me to do something about it."
+    off_url = _optout_url(tenant.id, on=True)
+    esc = body.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\n", "<br>")
+    footer = "You set this reminder with me."
+    if off_url:
+        footer += f' · <a href="{off_url}">Fewer emails</a>'
+    html = render_email_skin(
+        preheader=(detail or note or "Your reminder")[:88],
+        headline="You asked me to let you know",
+        intro_line="From Energy Agent",
+        body_html=f"<p style='white-space:pre-line'>{esc}</p>",
+        footer_line=footer,
+        product="array_operator",
+    )
+    text = body + ("\n\nFewer emails: " + off_url if off_url else "")
+    subject = f"Heads up: {(detail or note)[:80]}"
+    return bool(
+        _send_via_resend(
+            to=to, subject=subject, html=html, text=text,
+            from_addr=OWNER_AGENT_FROM, reply_to=OWNER_AGENT_FROM, product="array_operator",
+        )
+    )
+
+
 def send_repair_escalation_email(
     tenant: Tenant,
     *,

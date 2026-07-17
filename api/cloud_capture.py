@@ -21,7 +21,6 @@ from sqlalchemy.exc import IntegrityError
 from .account import tenant_from_session
 from .db import SessionLocal
 from .models import Client, PortalCredential, PortalLoginStatus, HarvestRun, now
-from .stripe_helpers import is_array_operator
 from .harvester import config
 from .harvester import credentials as cc
 from . import ratelimit
@@ -96,12 +95,15 @@ def ensure_client_for_login(db, tenant, provider: str, username: str) -> None:
     rather than auto-creating a duplicate. `capture_pending` marks it as awaiting
     that first capture (drives the UI state + the name upgrade in the matcher).
 
-    Scope: NEPOOL tenants only (Array Operator uses offtakers, not sub-clients),
-    and only providers the capture path can autopopulate — GMP + SmartHub co-ops.
-    Inverter clouds (fronius/sma/chint/solaredge) and unmapped bespoke utilities
-    have no autopop config, so a pre-created card would never fill in; skip them.
+    Scope: tenants in the generation-reports world — NEPOOL tenants, and (post
+    THE FOLD) Array Operator tenants with generation_reports set. A regular AO
+    tenant uses offtakers, not sub-clients, so it's skipped. Only providers the
+    capture path can autopopulate — GMP + SmartHub co-ops. Inverter clouds
+    (fronius/sma/chint/solaredge) and unmapped bespoke utilities have no autopop
+    config, so a pre-created card would never fill in; skip them.
     """
-    if is_array_operator(getattr(tenant, "product", None)):
+    from .report_eligibility import tenant_in_reports_world  # noqa: PLC0415
+    if not tenant_in_reports_world(tenant):
         return
     login = (username or "").strip()
     if not login:

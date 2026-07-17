@@ -1450,6 +1450,16 @@ def main():
             added.append("repair_tickets.owner_escalated_at")
             print("  + repair_tickets.owner_escalated_at")
 
+        # 2026-07-16 Email threading — keep the crew conversation one Gmail thread.
+        if not column_exists(conn, "repair_tickets", "email_last_msgid"):
+            conn.execute(text("ALTER TABLE repair_tickets ADD COLUMN email_last_msgid VARCHAR(400) NULL"))
+            added.append("repair_tickets.email_last_msgid")
+            print("  + repair_tickets.email_last_msgid")
+        if not column_exists(conn, "repair_tickets", "email_refs"):
+            conn.execute(text("ALTER TABLE repair_tickets ADD COLUMN email_refs TEXT NULL"))
+            added.append("repair_tickets.email_refs")
+            print("  + repair_tickets.email_refs")
+
     print("=== Migration complete ===")
 
 

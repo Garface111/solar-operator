@@ -1408,6 +1408,13 @@ def start():
         reconcile_repair_ops,
         "interval", minutes=15, id="reconcile_repair_ops", replace_existing=True,
     )
+    # Every 10 min: Energy Agent reminders/watches the owner asked her to keep
+    # (time reminders + condition watches like "tell me if an inverter goes down")
+    # → email + chat when they fire. Distinct from the robotic Fleet Alerts.
+    scheduler.add_job(
+        _run_ea_reminders,
+        IntervalTrigger(minutes=10), id="ea_reminders", replace_existing=True,
+    )
     # RE-ENABLED 2026-07-08 (was briefly paused same day: "too many real accounts
     # stale" turned out to be Ford's own test tenants, since is_demo was never
     # filtered here -- see fronius-real-stale-census memory. Now fixed at the
@@ -2488,6 +2495,33 @@ def _run_gmp_daily_backfill() -> None:
             "GMP daily backfill: unhandled exception",
             f"The scheduled GMP daily-generation backfill raised an error:\n{exc}",
         )
+
+
+def _run_ea_reminders() -> None:
+    """Fire due Energy Agent reminders + condition watches (per-tenant, only for
+    tenants with active reminders). Wrapper so errors never crash the scheduler."""
+    try:
+        from sqlalchemy import distinct, select as _select
+        from .db import SessionLocal
+        from .energy_agent import EaReminder, evaluate_ea_reminders_for_tenant
+        from .models import Tenant
+        with SessionLocal() as db:
+            tids = db.execute(
+                _select(distinct(EaReminder.tenant_id)).where(EaReminder.status == "active")
+            ).scalars().all()
+        fired = 0
+        for tid in tids[:200]:
+            try:
+                with SessionLocal() as db:
+                    t = db.get(Tenant, tid)
+                    if t is not None:
+                        fired += evaluate_ea_reminders_for_tenant(db, t)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("ea reminders tenant %s: %s", tid, exc)
+        if fired:
+            logger.info("ea reminders fired: %d", fired)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ea reminders job failed: %s", exc)
 
 
 def _run_inbound_email_sync() -> None:

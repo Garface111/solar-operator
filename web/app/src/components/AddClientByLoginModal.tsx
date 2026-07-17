@@ -2,7 +2,14 @@ import { useEffect, useState, useMemo } from "react";
 import { Modal } from "../ui/Modal";
 import { Button } from "../ui/Button";
 import { useToast } from "../ui/Toast";
-import { requestUtilityAddition, getProviders } from "../lib/api";
+import {
+  requestUtilityAddition,
+  getProviders,
+  getPortalAccess,
+  createClient,
+  setCloudCredential,
+  type PortalAccessUnassigned,
+} from "../lib/api";
 import {
   useExtensionStatus,
   type ExtensionStatus,
@@ -21,6 +28,9 @@ interface SmartHubEntry {
    *  shares their location. Empty for utilities with no state on file. */
   stateCode: string;
   url: string;
+  /** SmartHub subdomain host — the login_host Cloud Capture needs to open the
+   *  right co-op portal. Empty for GMP (fixed login URL in the harvester). */
+  host: string;
 }
 
 interface Props {
@@ -40,6 +50,371 @@ interface Props {
 }
 
 const GMP_FRIENDLY = "Green Mountain Power";
+
+// Utility logins we can turn straight into a client (createClient carries a
+// {gmp,vec}_username + autopopulate that attaches the login's captured bills to
+// the new client). Inverter logins (fronius/chint) and co-op logins aren't
+// utility-bill sources for a NEPOOL client, so they're not offered here —
+// they're managed in the credential vault ("Add more logins" below).
+const ATTACHABLE: Record<string, { label: string; field: "gmp" | "vec" }> = {
+  gmp: { label: "Green Mountain Power", field: "gmp" },
+  vec: { label: "Vermont Electric Coop", field: "vec" },
+};
+
+/**
+ * LinkedLoginsPicker — the primary Add-Client path (Ford 2026-07-16):
+ * pick a utility login you've ALREADY linked (from GET /v1/portal-access
+ * unassigned_logins, i.e. saved logins no client claims yet) and spin up a
+ * client from it — no re-signing into a portal. Plus a big button that opens
+ * the Master-account credential vault to add more logins.
+ */
+function LinkedLoginsPicker({
+  onCreated,
+  onAddMore,
+}: {
+  onCreated: () => void;
+  onAddMore: () => void;
+}) {
+  const toast = useToast();
+  const [logins, setLogins] = useState<PortalAccessUnassigned[] | null>(null);
+  const [openFor, setOpenFor] = useState<string | null>(null);
+  const [name, setName] = useState("");
+  const [creating, setCreating] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    getPortalAccess()
+      .then((p) => {
+        if (cancelled) return;
+        setLogins(p.unassigned_logins.filter((l) => ATTACHABLE[l.provider]));
+      })
+      .catch(() => {
+        if (!cancelled) setLogins([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function create(login: PortalAccessUnassigned) {
+    const nm = name.trim();
+    if (!nm) {
+      toast.show("Name the client first.", "info");
+      return;
+    }
+    setCreating(true);
+    try {
+      const input =
+        login.provider === "gmp"
+          ? { name: nm, gmp_username: login.username, gmp_autopopulate: true }
+          : { name: nm, vec_username: login.username, vec_autopopulate: true };
+      await createClient(input);
+      toast.success(
+        `Added ${nm} — pulling ${ATTACHABLE[login.provider].label} data now.`,
+      );
+      setOpenFor(null);
+      setName("");
+      onCreated();
+    } catch (e) {
+      toast.show(
+        e instanceof Error ? e.message : "Couldn't create that client.",
+        "error",
+      );
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <p className="text-sm font-semibold text-zinc-900">
+          Add from a login you&apos;ve already linked
+        </p>
+        <p className="mt-0.5 text-xs text-zinc-500">
+          Pick a saved utility login and we&apos;ll create the client from it —
+          no need to sign in again.
+        </p>
+      </div>
+
+      {logins === null ? (
+        <div className="rounded-xl border border-cream-border px-4 py-3 text-sm text-zinc-500">
+          Loading your linked logins&hellip;
+        </div>
+      ) : logins.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-cream-border px-4 py-3 text-sm text-zinc-600">
+          No unassigned utility logins yet. Add one below, then it&apos;ll show
+          up here to attach to a client.
+        </div>
+      ) : (
+        <ul className="space-y-2">
+          {logins.map((l) => {
+            const meta = ATTACHABLE[l.provider];
+            const isOpen = openFor === l.username + ":" + l.provider;
+            return (
+              <li
+                key={l.provider + ":" + l.username}
+                className="rounded-xl border border-cream-border bg-white p-3 shadow-sm"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-zinc-900">
+                      {l.username}
+                    </p>
+                    <p className="text-xs text-zinc-500">
+                      {meta.label}
+                      {l.status === "automated" ? " · syncing automatically" : ""}
+                    </p>
+                  </div>
+                  {!isOpen && (
+                    <Button
+                      onClick={() => {
+                        setOpenFor(l.username + ":" + l.provider);
+                        setName("");
+                      }}
+                      className="shrink-0 px-3 py-1.5 text-xs"
+                    >
+                      Use this login →
+                    </Button>
+                  )}
+                </div>
+                {isOpen && (
+                  <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+                    <input
+                      autoFocus
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") void create(l);
+                      }}
+                      placeholder="Client name (e.g. Town of Glover)"
+                      className="min-w-0 flex-1 rounded-lg border border-cream-border px-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-primary-400 focus:outline-none focus:ring-2 focus:ring-primary-500/30"
+                    />
+                    <div className="flex gap-2">
+                      <Button
+                        onClick={() => void create(l)}
+                        disabled={creating || !name.trim()}
+                        className="px-3 py-2 text-sm"
+                      >
+                        {creating ? "Creating…" : "Create client"}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        onClick={() => setOpenFor(null)}
+                        className="px-3 py-2 text-sm"
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      <button
+        type="button"
+        onClick={onAddMore}
+        className="flex w-full items-center justify-center gap-2 rounded-xl bg-primary-600 px-4 py-3 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+      >
+        <span aria-hidden className="text-base leading-none">＋</span>
+        Add more logins to the utility accounts
+      </button>
+    </div>
+  );
+}
+
+/**
+ * CloudAddLoginForm — the Cloud-Capture "Add a client" path (Ford 2026-07-16).
+ *
+ * On a cloud-capture tenant the operator should NOT be sent to the utility's
+ * website to sign in with the Chrome extension. Instead they hand us the login
+ * (utility + username + password + consent); we store it server-side
+ * (POST /v1/cloud-capture/credentials) and the backend immediately spins up a
+ * "Pulling bills…" client NAMED FROM THE LOGIN (ensure_client_for_login), then
+ * the headless harvester signs in and fills that client's arrays. No extension.
+ */
+function CloudAddLoginForm({
+  portals,
+  onCreated,
+}: {
+  portals: SmartHubEntry[];
+  onCreated: () => void;
+}) {
+  const toast = useToast();
+  // Utility selection: GMP by default, or a co-op picked from the live list.
+  const [util, setUtil] = useState<{ provider: string; label: string; host: string }>({
+    provider: "gmp",
+    label: GMP_FRIENDLY,
+    host: "",
+  });
+  const [pickingUtil, setPickingUtil] = useState(false);
+  const [utilQuery, setUtilQuery] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [consent, setConsent] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const utilMatches = useMemo(() => {
+    const q = utilQuery.trim().toLowerCase();
+    const base = q
+      ? portals.filter(
+          (p) => p.name.toLowerCase().includes(q) || p.hint.toLowerCase().includes(q),
+        )
+      : portals;
+    return base.slice(0, 40);
+  }, [portals, utilQuery]);
+
+  async function submit() {
+    const user = username.trim();
+    if (!user) {
+      toast.show("Enter the login's username or email.", "info");
+      return;
+    }
+    if (!password) {
+      toast.show("Enter the login's password.", "info");
+      return;
+    }
+    if (!consent) {
+      toast.show("Tick the box to store this login securely.", "info");
+      return;
+    }
+    setSaving(true);
+    try {
+      await setCloudCredential({
+        provider: util.provider,
+        username: user,
+        password,
+        login_host: util.host || null,
+        enable: true,
+        consent: true,
+      });
+      toast.success(
+        `Connected ${util.label} — creating the client and pulling its bills now.`,
+      );
+      onCreated();
+    } catch (e) {
+      toast.show(
+        e instanceof Error ? e.message : "Couldn't save that login — try again.",
+        "error",
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <p className="text-sm font-semibold text-zinc-900">Add a client by its utility login</p>
+        <p className="mt-0.5 text-xs text-zinc-500">
+          Give us the login and we create the client from it — no signing into a
+          portal, no extension. Their arrays fill in as we pull the bills.
+        </p>
+      </div>
+
+      {/* Utility selector */}
+      <div>
+        <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-zinc-500">
+          Utility
+        </label>
+        {!pickingUtil ? (
+          <button
+            type="button"
+            onClick={() => {
+              setPickingUtil(true);
+              setUtilQuery("");
+            }}
+            className="flex w-full items-center justify-between rounded-lg border border-cream-border bg-white px-3 py-2 text-left text-sm text-zinc-900 hover:border-primary-400"
+          >
+            <span>{util.label}</span>
+            <span className="text-xs text-primary-700">Change ▾</span>
+          </button>
+        ) : (
+          <div className="rounded-lg border border-cream-border bg-white p-2">
+            <input
+              autoFocus
+              value={utilQuery}
+              onChange={(e) => setUtilQuery(e.target.value)}
+              placeholder="Search utilities…"
+              className="mb-2 w-full rounded-md border border-cream-border px-2 py-1.5 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-primary-400 focus:outline-none"
+            />
+            <ul className="max-h-40 space-y-0.5 overflow-y-auto">
+              <li>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setUtil({ provider: "gmp", label: GMP_FRIENDLY, host: "" });
+                    setPickingUtil(false);
+                  }}
+                  className="w-full rounded-md px-2 py-1.5 text-left text-sm text-zinc-800 hover:bg-primary-50"
+                >
+                  {GMP_FRIENDLY} <span className="text-xs text-zinc-400">· VT</span>
+                </button>
+              </li>
+              {utilMatches.map((p) => (
+                <li key={p.provider}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setUtil({ provider: p.provider, label: p.name, host: p.host });
+                      setPickingUtil(false);
+                    }}
+                    className="w-full rounded-md px-2 py-1.5 text-left text-sm text-zinc-800 hover:bg-primary-50"
+                  >
+                    {p.name} <span className="text-xs text-zinc-400">· {p.hint}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+
+      {/* Credentials */}
+      <div className="grid gap-2 sm:grid-cols-2">
+        <input
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          placeholder="Login username or email"
+          autoComplete="off"
+          className="rounded-lg border border-cream-border px-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-primary-400 focus:outline-none focus:ring-2 focus:ring-primary-500/30"
+        />
+        <input
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          type="password"
+          placeholder="Login password"
+          autoComplete="new-password"
+          className="rounded-lg border border-cream-border px-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-primary-400 focus:outline-none focus:ring-2 focus:ring-primary-500/30"
+        />
+      </div>
+
+      <label className="flex items-start gap-2 text-xs text-zinc-600">
+        <input
+          type="checkbox"
+          checked={consent}
+          onChange={(e) => setConsent(e.target.checked)}
+          className="mt-0.5 h-4 w-4 shrink-0 rounded border-cream-border text-primary-600 focus:ring-primary-500/40"
+        />
+        <span>
+          Store this login securely on our servers so we can pull {util.label}
+          &rsquo;s bills automatically. Remove it anytime in the credential vault.
+        </span>
+      </label>
+
+      <Button
+        onClick={() => void submit()}
+        disabled={saving || !username.trim() || !password || !consent}
+        className="w-full py-2.5 text-sm"
+      >
+        {saving ? "Connecting…" : "Add client from this login"}
+      </Button>
+    </div>
+  );
+}
 
 /**
  * AddClientByLoginModal — the "click a portal, sign in, done" flow.
@@ -129,6 +504,7 @@ export function AddClientByLoginModal({
             hint: p.state || "SmartHub",
             stateCode: (p.state || "").toUpperCase(),
             url: p.portal_url || `https://${p.smarthub_host}/`,
+            host: p.smarthub_host || "",
           }))
           .sort((a, b) => a.name.localeCompare(b.name));
         setSmarthubPortals(portals);
@@ -285,21 +661,57 @@ export function AddClientByLoginModal({
       }
     >
       <div className="space-y-4">
+        {/* PRIMARY path (Ford 2026-07-16): reuse a login you've already linked,
+            + a big button to add more logins. The connect-a-new-portal picker
+            is demoted below the divider. */}
+        <LinkedLoginsPicker
+          onCreated={() => {
+            void onCaptured();
+            onClose();
+          }}
+          onAddMore={() => {
+            onClose();
+            const w = window as { __aoOpenCredentialVault?: (focus?: boolean) => void };
+            if (typeof w.__aoOpenCredentialVault === "function") {
+              w.__aoOpenCredentialVault(true);
+            } else {
+              // Fallback: route the host to the Master account tab where the
+              // credential vault lives.
+              try {
+                window.location.hash = "#account";
+              } catch {
+                /* ignore */
+              }
+            }
+          }}
+        />
+
         {cloudMode ? (
-          <p className="text-sm text-zinc-600">
-            Pick a portal to open, or{" "}
-            <button
-              type="button"
-              onClick={onSwitchToManual}
-              className="font-semibold text-primary-700 underline-offset-2 hover:underline"
-            >
-              add the client manually
-            </button>
-            . Utility bills refresh via Master account → Auto-refresh — no
-            extension required.
-          </p>
+          <>
+            <div className="flex items-center gap-3 pt-1">
+              <span className="h-px flex-1 bg-cream-border" />
+              <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                or add a new login
+              </span>
+              <span className="h-px flex-1 bg-cream-border" />
+            </div>
+            <CloudAddLoginForm
+              portals={smarthubPortals}
+              onCreated={() => {
+                void onCaptured();
+                onClose();
+              }}
+            />
+          </>
         ) : (
           <>
+            <div className="flex items-center gap-3 pt-1">
+              <span className="h-px flex-1 bg-cream-border" />
+              <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                or connect a new portal
+              </span>
+              <span className="h-px flex-1 bg-cream-border" />
+            </div>
             <ExtensionStatusBanner status={ext.status} version={ext.version} />
 
             {extensionUsable && (
@@ -331,7 +743,8 @@ export function AddClientByLoginModal({
           </>
         )}
 
-        <div className={!cloudMode && extensionAbsent ? "opacity-50" : ""}>
+        {!cloudMode && (<>
+        <div className={extensionAbsent ? "opacity-50" : ""}>
           {/* GMP — its own button, not SmartHub */}
           <PortalCard
             label="Green Mountain Power"
@@ -448,6 +861,7 @@ export function AddClientByLoginModal({
           Each sign-in captures another client automatically — you don't need
           to come back here between them.
         </p>
+        </>)}
       </div>
     </Modal>
   );

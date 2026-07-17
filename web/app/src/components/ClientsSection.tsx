@@ -49,8 +49,16 @@ interface Props {
 // world. Render-only: the raw `clients` state still holds every row so all
 // mutation/merge/undo logic is unchanged. The standalone /accounts SPA leaves
 // the flag unset and shows inactive rows (its reactivate flow lives on them).
-const HIDE_INACTIVE =
-  typeof window !== "undefined" && (window as { __soGenrepEmbed?: boolean }).__soGenrepEmbed === true;
+//
+// Evaluated at RENDER, not module load: embed.tsx sets window.__soGenrepEmbed
+// in its own module body, which the bundler runs AFTER this module's top-level
+// — a module-const captured it as false and the filter never fired.
+function hideInactiveClients(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    (window as { __soGenrepEmbed?: boolean }).__soGenrepEmbed === true
+  );
+}
 
 export function ClientsSection({ expandClientId }: Props) {
   const toast = useToast();
@@ -59,7 +67,7 @@ export function ClientsSection({ expandClientId }: Props) {
   const [clients, setClients] = useState<ClientRow[] | null>(null);
   // Roster shown to the user — inactive clients filtered out in the embed only.
   const rosterClients =
-    HIDE_INACTIVE && clients ? clients.filter((c) => c.active) : clients;
+    hideInactiveClients() && clients ? clients.filter((c) => c.active) : clients;
   const [adding, setAdding] = useState(false);
   const [addingByLogin, setAddingByLogin] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -629,7 +637,7 @@ export function ClientsSection({ expandClientId }: Props) {
 
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <SectionTitle title="Clients" count={clients?.length} />
+          <SectionTitle title="Clients" count={rosterClients?.length} />
           {/* Live polling indicator: subtle at 50% opacity, pulses green for 1s on new data. */}
           <span
             aria-hidden

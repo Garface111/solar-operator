@@ -580,7 +580,7 @@ export function ClientsTable({
   }
 
   return (
-    <div className="relative rounded-xl border border-cream-border">
+    <div className="relative rounded-xl border border-cream-border bg-white shadow-sm">
       {/* Gradient edge on mobile to signal horizontal scroll. Hidden on sm+
           where the table fits or the wider viewport makes it obvious. */}
       <div
