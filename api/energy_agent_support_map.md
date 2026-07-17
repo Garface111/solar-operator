@@ -539,6 +539,9 @@ WHEN TO CALL WHAT
 | Invoice generator model | `product_map(topic=offtakers)` |
 | NEPOOL/REC generation reports · workbooks to clients · report cadence | `product_map(topic=generation_reports)` — Invoices → Generation reports (`#reports/generation`) |
 | “remind me…” / “notify/tell/email me if/when…” / “watch for…” / “let me know when…” | `create_reminder` (you email + chat when it fires). NOT the same as Fleet Alerts (robotic rule-based). `list_reminders` / `cancel_reminder` to manage. |
+| “what can you do / what can you turn on?” · a tool comes back `status=skill_locked` | `list_skills`. Some capabilities ship **dormant** per account (e.g. **Text your repair techs by SMS** `sms_alerts`, **free-form custom watches** `custom_watches`). If the owner asks for one, **offer to enable it and call `enable_skill`** — instant, no code, within your envelope. You are giving yourself a tool you already have but that was switched off. Never say “I can’t” for a dormant skill. |
+| “can you add / build a NEW ability you don’t have?” (not any known skill) | `request_capability` — files a build request to Ford + the gated builder (a coding agent may build it on a branch; **it only reaches the owner after human approval**). Be honest: it’s a request, **not instant**, and you never merge it yourself. |
+| “text / SMS my repair tech” | Needs the **`sms_alerts`** skill (off by default). Offer to enable it (`enable_skill sms_alerts`), then `send_repair_sms`. Email crew outreach (`send_repair_checkin`) is always on. |
 | Bulk import offtakers / roster spreadsheet | `product_map(topic=offtakers)` §7 — navigate `#reports`, highlight `#rbBulkImport`, or `/?setup=offtakers#reports` |
 | Plans / what’s locked / pricing tiers | `product_map(topic=plans)` |
 | Signup / connect / capture fork | `product_map(topic=onboarding)` |

@@ -1761,6 +1761,62 @@ TOOL_DEFS = [
     {
         "type": "function",
         "function": {
+            "name": "list_skills",
+            "description": (
+                "List the capabilities (skills) available on this account — which are on, and "
+                "which you can turn on for the owner with enable_skill when they ask."
+            ),
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "enable_skill",
+            "description": (
+                "Turn ON a pre-vetted, currently-off skill for THIS account when the owner asks "
+                "for a capability it covers (e.g. they ask to text techs → enable 'sms_alerts'; "
+                "they ask for a free-form watch → enable 'custom_watches'). Only works for "
+                "self-activatable skills (see list_skills). If a needed capability isn't a known "
+                "skill at all, use request_capability instead. You are giving yourself a tool, "
+                "within your allowed envelope — no code, instant."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "skill_key": {"type": "string", "description": "Skill to enable (from list_skills)"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["skill_key"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "request_capability",
+            "description": (
+                "File a request to BUILD a genuinely NEW capability that no existing tool or "
+                "skill covers, when the owner asks for it. This does NOT build or ship anything "
+                "to them — it goes to Ford + the gated builder for review; a coding agent may "
+                "build it on a branch, but it only reaches the product after human approval. Use "
+                "when enable_skill can't help (unknown skill) and the ask is a real feature gap. "
+                "Be honest with the owner that it's a request, not instant."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Short name for the capability"},
+                    "description": {"type": "string", "description": "What it should do, concretely"},
+                    "why": {"type": "string", "description": "Who asked / the use case"},
+                },
+                "required": ["title", "description"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "billing_portal_link",
             "description": "Get Stripe customer portal URL for this tenant (open link; never charges).",
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
@@ -4858,6 +4914,12 @@ def _create_reminder_tool(db, tenant: Tenant, session, args: dict) -> dict:
     wt = (args.get("watch_type") or "").strip().lower()
     if wt not in _REMINDER_WATCH_TYPES:
         return {"ok": False, "error": f"watch_type must be one of {list(_REMINDER_WATCH_TYPES)}"}
+    if wt == "custom" and not _skill_enabled(db, tenant.id, "custom_watches"):
+        return {"status": "skill_locked", "skill": "custom_watches",
+                "message": ("Free-form custom watches aren't turned on for this account yet — "
+                            "they run a small AI check each cycle. Want me to enable them? "
+                            "(enable_skill custom_watches). For a straightforward one — an "
+                            "inverter down, a site recovering, stale data — I can set that up now.")}
     params: dict = {}
     if args.get("array_name"):
         params["array_name"] = str(args["array_name"])[:120]
@@ -5277,6 +5339,182 @@ def _detect_tour_id(user_text: str | None) -> str | None:
     return None
 
 
+# ── skill registry (agent activates pre-vetted capabilities within its envelope) ──
+# Ford 2026-07-16: the agent can turn ON a curated, pre-built skill for a tenant
+# when the client asks (no code, no deploy — the "envelope" is this allowlist).
+# Most skills are default_on (existing behavior unchanged). Dormant ones
+# (self_activatable, default_on=False) are OFF until the agent enables them.
+# admin_only skills can't be self-enabled — the agent flags Ford instead.
+SKILL_REGISTRY: dict[str, dict] = {
+    "fleet_health": {"label": "Fleet health & attention", "default_on": True,
+                     "tools": {"tenant_census", "query_tenant", "fleet_overview",
+                               "investigate_attention", "array_detail", "fleet_trends_summary",
+                               "production_forecast"}},
+    "offtaker_billing": {"label": "Offtaker invoices & rates", "default_on": True,
+                         "tools": {"list_offtakers", "get_offtaker", "patch_offtaker",
+                                   "get_billing_rates", "set_billing_rates",
+                                   "list_recent_invoices", "send_pipeline", "billing_portal_link"}},
+    "repairs": {"label": "Repair coordination", "default_on": True,
+                "tools": {"repair_ops_overview", "list_service_contacts", "upsert_service_contact",
+                          "assign_service_contact", "open_repair_ticket", "update_repair_ticket",
+                          "draft_repair_checkin", "send_repair_checkin", "log_repair_note",
+                          "log_repair_phone_note", "list_repair_tickets"}},
+    "reminders": {"label": "Reminders & watches", "default_on": True, "self_activatable": True,
+                  "tools": {"create_reminder", "list_reminders", "cancel_reminder"}},
+    "capture_and_setup": {"label": "Data capture & setup", "default_on": True,
+                          "tools": {"refresh_capture", "setup_status", "account_summary"}},
+    "product_help": {"label": "Product knowledge & UI", "default_on": True,
+                     "tools": {"product_map", "ui_navigate", "ui_highlight", "ui_tour",
+                               "ui_fill", "ui_click", "open_url"}},
+    "web_lookup": {"label": "Public web lookup", "default_on": True,
+                   "tools": {"web_search", "web_fetch"}},
+    # ── DORMANT / activatable examples (OFF until the agent enables on request) ──
+    "sms_alerts": {
+        "label": "Text your repair techs (SMS)",
+        "description": "Send SMS check-ins to techs (in addition to email). Off by default.",
+        "default_on": False, "self_activatable": True,
+        "tools": {"send_repair_sms"},
+    },
+    "custom_watches": {
+        "label": "Free-form custom watches",
+        "description": "Watch for any condition you describe in plain language (a small AI "
+                       "check runs each cycle). Off by default.",
+        "default_on": False, "self_activatable": True,
+        "tools": set(),  # gated inside create_reminder (watch_type=custom), not a whole tool
+    },
+}
+_TOOL_TO_SKILL: dict[str, str] = {}
+for _k, _v in SKILL_REGISTRY.items():
+    for _t in _v.get("tools", ()):
+        _TOOL_TO_SKILL[_t] = _k
+_SKILL_MEM_KEY = "__skills__"
+
+
+def _enabled_skills(db, tenant_id: str) -> set[str]:
+    try:
+        rows = _mem_get(db, f"tenant:{tenant_id}", 200)
+        for r in rows:
+            if r.get("key") == _SKILL_MEM_KEY:
+                return set(json.loads(r.get("value") or "[]"))
+    except Exception:
+        pass
+    return set()
+
+
+def _skill_enabled(db, tenant_id: str, skill_key: str) -> bool:
+    reg = SKILL_REGISTRY.get(skill_key) or {}
+    if reg.get("default_on"):
+        return True
+    return skill_key in _enabled_skills(db, tenant_id)
+
+
+def _set_skill(db, tenant_id: str, skill_key: str, on: bool) -> None:
+    cur = _enabled_skills(db, tenant_id)
+    if on:
+        cur.add(skill_key)
+    else:
+        cur.discard(skill_key)
+    _mem_set(db, f"tenant:{tenant_id}", _SKILL_MEM_KEY, json.dumps(sorted(cur)))
+
+
+def _tool_allowed(db, tenant_id: str, name: str) -> tuple[bool, str | None]:
+    skill = _TOOL_TO_SKILL.get(name)
+    if not skill:
+        return True, None  # ungated tool (enable_skill, reminders meta, etc.)
+    return _skill_enabled(db, tenant_id, skill), skill
+
+
+def _enable_skill_tool(db, tenant: Tenant, args: dict) -> dict:
+    key = (args.get("skill_key") or args.get("skill") or "").strip()
+    reg = SKILL_REGISTRY.get(key)
+    if not reg:
+        return {"ok": False, "unknown": True,
+                "message": f"'{key}' isn't a skill I can switch on. If it's a genuinely new "
+                           "capability, I can file a build request (request_capability)."}
+    if reg.get("admin_only"):
+        try:
+            _run_tool("escalate_to_ford", {
+                "summary": f"Owner asked to enable admin-only skill '{key}'",
+                "user_said": args.get("reason") or "", "quietly": False,
+            }, tenant, None, db, user_text="enable_skill")
+        except Exception:
+            pass
+        return {"ok": False, "needs_admin": True,
+                "message": f"'{reg['label']}' needs Ford to switch on — I've flagged it for him."}
+    if not reg.get("self_activatable"):
+        return {"ok": False, "message": f"'{reg['label']}' is always on — nothing to enable."}
+    _set_skill(db, tenant.id, key, True)
+    db.commit()
+    return {"ok": True, "enabled": key, "label": reg["label"],
+            "message": f"Done — {reg['label']} is on for your account now."}
+
+
+def _list_skills_tool(db, tenant: Tenant, args: dict) -> dict:
+    on = _enabled_skills(db, tenant.id)
+    out = []
+    for k, v in SKILL_REGISTRY.items():
+        enabled = bool(v.get("default_on")) or k in on
+        out.append({
+            "skill_key": k, "label": v.get("label"),
+            "enabled": enabled,
+            "activatable": bool(v.get("self_activatable")) and not v.get("default_on"),
+            "description": v.get("description"),
+        })
+    return {"skills": out,
+            "instruction_for_agent": (
+                "activatable+not-enabled skills can be turned on with enable_skill when the "
+                "owner asks. Genuinely-new capabilities → request_capability."
+            )}
+
+
+def _request_capability_tool(db, tenant: Tenant, args: dict) -> dict:
+    """File a build request for a NEW capability no tool/skill covers. Records it
+    into the gated builder pipeline (branch-only, never auto-ship) + escalates to
+    Ford. The customer-steered agent NEVER merges — human review is required."""
+    title = (args.get("title") or "").strip()
+    desc = (args.get("description") or "").strip()
+    why = (args.get("why") or "a customer asked in chat").strip()
+    if not title or not desc:
+        return {"ok": False, "error": "title and description are required"}
+    email = getattr(tenant, "contact_email", None)
+    brief = (
+        "[BACKEND CAPABILITY REQUEST — build on a branch, NEVER auto-ship/merge; human review]\n"
+        f"Title: {title}\nWhat it should do: {desc}\nWhy / who asked: {why}\nTenant: {tenant.id}"
+    )
+    req_id = None
+    try:
+        from .feature_suggestions import FeatureSuggestion
+        fs = FeatureSuggestion(
+            product="array_operator", tenant_id=tenant.id, email=email,
+            text=brief, status="new",
+            auto_prompt=(
+                f"New Energy Agent capability request: {title}. {desc}. Build the backend tool + "
+                "support-map doc on a BRANCH. Do NOT merge or auto-ship — this is customer-"
+                "requested; a human approves the merge."
+            ),
+        )
+        db.add(fs)
+        db.commit()
+        req_id = fs.id
+    except Exception as e:
+        log.warning("request_capability record failed: %s", e)
+    try:
+        _run_tool("escalate_to_ford", {
+            "summary": f"Capability request: {title}",
+            "user_said": f"{desc} (why: {why})", "quietly": False,
+        }, tenant, None, db, user_text="request_capability")
+    except Exception:
+        pass
+    return {
+        "ok": True, "request_id": req_id,
+        "message": (
+            "Filed a request to build that. It goes to Ford + our build pipeline for review — "
+            "nothing ships to your account until it's built and approved."
+        ),
+        "instruction_for_agent": "Be honest: this is a request, not instant. Don't promise a timeline.",
+    }
+
+
 def _run_tool(
     name: str,
     args: dict,
@@ -5292,6 +5530,24 @@ def _run_tool(
     blocked = _ea_judge_write(name, args)
     if blocked is not None:
         return blocked
+
+    # Skill gate — a tool in a dormant (not-enabled) skill is locked until the
+    # agent enables it. Meta tools are always allowed.
+    if name not in ("enable_skill", "list_skills", "request_capability", "escalate_to_ford"):
+        allowed, skill = _tool_allowed(db, tid, name)
+        if not allowed:
+            reg = SKILL_REGISTRY.get(skill) or {}
+            return {"status": "skill_locked", "skill": skill,
+                    "message": f"That's part of '{reg.get('label', skill)}', which isn't turned "
+                               "on for this account yet. I can enable it — want me to? "
+                               "(call enable_skill)"}
+
+    if name == "enable_skill":
+        return _enable_skill_tool(db, tenant, args)
+    if name == "list_skills":
+        return _list_skills_tool(db, tenant, args)
+    if name == "request_capability":
+        return _request_capability_tool(db, tenant, args)
 
     if name == "tenant_census":
         return _tenant_census_tool(db, tenant, args)
@@ -7766,6 +8022,27 @@ def _agent_turn(
             )
     except Exception as _e:
         log.info("objective-state inject skipped: %s", _e)
+    # Skill awareness: what you can switch ON yourself (within your envelope) vs.
+    # what needs a build request. Lets you offer a capability instead of refusing.
+    try:
+        _dormant = [
+            f"{v['label']} (enable_skill {k}) — {v.get('description') or ''}".strip()
+            for k, v in SKILL_REGISTRY.items()
+            if v.get("self_activatable") and not v.get("default_on")
+            and k not in _enabled_skills(db, tenant.id)
+        ]
+        if _dormant:
+            system += (
+                "\n\nSKILLS YOU CAN TURN ON YOURSELF (within your allowed envelope — no code, "
+                "instant, when the owner asks for what they cover):\n- " + "\n- ".join(_dormant)
+                + "\nIf the owner asks for something ONLY a dormant skill covers, offer to enable "
+                "it and call enable_skill. If a tool comes back status=skill_locked, that means "
+                "its skill is off — tell the owner and offer to enable it. For a capability that "
+                "is NOT any known skill, use request_capability (a build request; not instant — "
+                "be honest about that). Never claim you can't do something a dormant skill covers."
+            )
+    except Exception as _e:
+        log.info("skill-awareness inject skipped: %s", _e)
     system += (
         "\n\nSPEED: Prefer ONE tool call then answer. For solar credit / offtaker "
         "rates call get_billing_rates (or get_offtaker) first — do not call "
