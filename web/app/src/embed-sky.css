@@ -137,3 +137,20 @@ nav[role="tablist"] [role="tab"]:not([aria-current="page"]):hover {
 .react-flow__background-pattern.dots {
   fill: #a9c8e8;
 }
+
+/* ── 6 · TEXT CONTRAST: darken the washed-out grays ─────────────────────────
+   Ford (2026-07-16): "most of the important gray text should be near-black."
+   On the light frosted sheet the lighter Tailwind zincs (400/500) washed out.
+   Bump every muted tier a couple steps darker so labels, descriptions and
+   values read crisply; true headings (zinc-800/900) are already dark. Scoped
+   under #so-genrep by the prefixer; loads after Tailwind so it wins. */
+.text-zinc-400 { color: #52525b; }   /* was #a1a1aa → zinc-600 */
+.text-zinc-500 { color: #3f3f46; }   /* was #71717a → zinc-700 */
+.text-zinc-600 { color: #27272a; }   /* was #52525b → zinc-800 */
+.text-gray-400 { color: #52525b; }
+.text-gray-500 { color: #3f3f46; }
+.text-gray-600 { color: #27272a; }
+/* Uppercase micro-eyebrows (DELIVERY SETTINGS, EMAIL TEMPLATE, section labels)
+   often ride text-zinc-400/500 with tracking — the darkening above covers them.
+   Placeholder text stays lighter (intentional low emphasis). */
+::placeholder { color: #71717a; }

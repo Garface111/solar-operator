@@ -49,10 +49,11 @@ function SectionSpinner() {
   );
 }
 
-/** Internal section nav — Reports is the headline surface, Clients the roster. */
+/** Internal section nav — Clients is the landing (the roster you work from,
+ *  matching the standalone app's default), Reports is one tab over. */
 const SECTIONS = [
-  { to: "/reports", label: "Reports" },
   { to: "/clients", label: "Clients" },
+  { to: "/reports", label: "Reports" },
 ] as const;
 
 /**
@@ -147,10 +148,10 @@ function EmbedApp() {
   if (expired || !getSession()) return <SessionExpired />;
 
   return (
-    <MemoryRouter initialEntries={["/reports"]}>
+    <MemoryRouter initialEntries={["/clients"]}>
       <Routes>
         <Route element={<EmbedShell />}>
-          <Route index element={<Navigate to="/reports" replace />} />
+          <Route index element={<Navigate to="/clients" replace />} />
           <Route path="/reports" element={<NepoolReportsTab />} />
           <Route path="/clients" element={<ClientsTab />} />
           <Route path="/clients/:clientId" element={<ClientsTab />} />
@@ -162,7 +163,7 @@ function EmbedApp() {
               </Suspense>
             }
           />
-          <Route path="*" element={<Navigate to="/reports" replace />} />
+          <Route path="*" element={<Navigate to="/clients" replace />} />
         </Route>
       </Routes>
     </MemoryRouter>
