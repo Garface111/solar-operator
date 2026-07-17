@@ -7705,6 +7705,35 @@ def _check_email_delivery_tool(db, tenant: Tenant, args: dict) -> dict:
     } for r in rows]
 
     bounced = [r for r in out if r["status"] in ("bounced", "complained")]
+    if not out:
+        # An empty result is silence, not bad news. The agent read found=0 as
+        # "either the emails aren't reaching him" (Ford 2026-07-16) — inventing a
+        # delivery failure out of no data, the very thing this tool exists to
+        # stop. Receipts only exist for mail sent since recording was added, so
+        # found=0 is the NORMAL answer for older sends. Say that here, next to
+        # the data, because a rule further up the prompt did not hold.
+        return {
+            "ok": True,
+            "found": 0,
+            "window_days": days,
+            "receipts": [],
+            "bounced_count": 0,
+            "means": "NO INFORMATION — this is not evidence of a delivery problem.",
+            "why_empty": (
+                "Delivery receipts are only recorded for mail sent since receipt recording "
+                "was added to this system, and only once Resend reports the event. Anything "
+                "sent before that has no receipt by design."
+            ),
+            "instruction_for_agent": (
+                "You have NO delivery information for this window — that is NOT evidence of "
+                "failure. Do NOT say the mail 'isn't reaching' them, 'didn't send', or might "
+                "have bounced, and do NOT offer it as a possible explanation for silence. Say "
+                "plainly that you don't have delivery receipts for that window. The ONLY "
+                "evidence of a delivery problem is a 'bounced' or 'complained' receipt. You "
+                "DID send the mail — the repair check-in log shows it — and the absence of a "
+                "receipt says nothing at all about whether it landed."
+            ),
+        }
     return {
         "ok": True,
         "found": len(out),
@@ -7713,10 +7742,9 @@ def _check_email_delivery_tool(db, tenant: Tenant, args: dict) -> dict:
         "bounced_count": len(bounced),
         "instruction_for_agent": (
             "These are Resend's own delivery receipts — real evidence, not a guess. "
-            "A 'delivered' receipt means it reached their mail server. If found=0, say you have "
-            "NO receipt for that window — do NOT say it wasn't delivered; receipts only exist for "
-            "mail sent recently, and absence of a receipt is not evidence of failure. "
-            "A bounce IS actionable: tell the owner the address is bad and why."
+            "A 'delivered' receipt means it reached their mail server: say so with "
+            "confidence. A 'bounced'/'complained' receipt IS actionable — name the address "
+            "and the reason. Never infer anything from receipts you do not have."
         ),
     }
 
