@@ -1969,6 +1969,28 @@ TOOL_DEFS = [
     {
         "type": "function",
         "function": {
+            "name": "see_screen",
+            "description": (
+                "SEE the owner's actual screen — capture a real screenshot of what they're "
+                "looking at right now and analyze it with your vision. Use when they report a "
+                "UI problem ('this didn't work', 'the button's missing', 'it looks broken'), "
+                "ask what they're looking at, or you need to verify the rendered UI before "
+                "guiding them or proposing a change. The screenshot comes back on the NEXT "
+                "turn as an image you can see — so call this, tell them you're taking a look, "
+                "and read the image when it arrives. The owner grants screen access once (the "
+                "app asks); if they haven't, this prompts them."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reason": {"type": "string", "description": "What you're looking for (e.g. 'the improve-site markup UI')"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "list_gen_clients",
             "description": (
                 "List the Generation-Reports CLIENT roster (Invoices → Generation reports): "
@@ -5731,6 +5753,15 @@ SKILL_REGISTRY: dict[str, dict] = {
         "default_on": False, "self_activatable": True,
         "tools": {"send_repair_sms"},
     },
+    "screen_vision": {
+        "label": "See your screen (live screenshot vision)",
+        "description": "Let Energy Agent capture and SEE your actual screen to debug UI, guide "
+                       "you, or propose changes from what's really rendered. You grant screen "
+                       "access once in the browser (nothing is captured until you approve). "
+                       "On by default (request 60); the browser permission is the real gate.",
+        "default_on": True, "self_activatable": True,
+        "tools": {"see_screen"},
+    },
     "custom_watches": {
         "label": "Free-form custom watches",
         "description": "Watch for any condition you describe in plain language (a small AI "
@@ -6322,6 +6353,8 @@ def _run_tool(
         return _request_capability_tool(db, tenant, args)
     if name == "check_email_delivery":
         return _check_email_delivery_tool(db, tenant, args)
+    if name == "see_screen":
+        return _see_screen_tool(db, tenant, args)
     if name == "list_gen_clients":
         return _list_gen_clients_tool(db, tenant, args)
     if name == "get_gen_client":
@@ -8381,6 +8414,30 @@ def _ea_ensure_asset_table(db=None) -> None:
         Base.metadata.create_all(bind=bind, tables=[EaChatAsset.__table__])
     except Exception:
         log.exception("ea_chat_assets table create failed")
+
+
+def _see_screen_tool(db, tenant: Tenant, args: dict) -> dict:
+    """Ask the browser to capture the owner's real screen. The frontend runs the
+    ui_command, screenshots the rendered page, uploads it as an image asset, and
+    re-invokes the turn WITH the image — which reaches Claude vision through the
+    normal attachment pipeline (_ea_user_content_multimodal). Request 60."""
+    reason = (args.get("reason") or "").strip()
+    return {
+        "status": "ui_command",
+        "command": {
+            "id": uuid.uuid4().hex[:12],
+            "type": "see_screen",
+            "reason": reason or "look at what's on screen",
+            "needs_confirm": False,
+        },
+        "message": "Capturing the screen — I'll look at it in a moment.",
+        "instruction_for_agent": (
+            "You asked to see the screen. Tell the owner in ONE short line that you're taking "
+            "a look, then STOP — the screenshot arrives on the next turn as an image you can "
+            "actually see. Don't guess at the UI now; wait for the image. If the app says "
+            "screen access isn't granted, ask the owner to click the eye button to allow it."
+        ),
+    }
 
 
 def _ea_ensure_email_delivery_table(db=None) -> None:
