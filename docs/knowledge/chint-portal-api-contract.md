@@ -73,6 +73,19 @@ each gateway `.commDevices[]` (the connected devices). Filter commDevices to
 `assetTypeName === "Inverter"` (or `assetType === 2`) — the gateway itself
 (`assetType:1`, "Gateway") is also in gwDevices, skip it.
 
+⚠️ DATA-LOGGER / "DETECTOR" LEAK (fixed 2026-07-17, commit 5cb77b86): the
+FlexOM/collector can also surface among a gateway's commDevices (hex serial like
+`00009e021902bb00`, no `model`, never produces). It was slipping into the inverter
+list via the `assetType === 2` fallback and getting flagged as a dead/"gone quiet"
+inverter — Ford called it "a detector, not an inverter." Both parsers now classify
+POSITIVELY and reject non-inverter kinds: `isInverterDevice`/`_is_inverter_device`
+(extension chint_content.js + harvester chint.py) reject by name
+(gateway|collector|logger|detector|meter|sensor|environment|weather|combiner|…),
+by `assetType === 1`, and by the gateway-serial echo (commDevice.sn == parent
+gwDevice.sn). Real Chint inverter SNs are 16 DECIMAL digits with a model
+(`SCA50KTL-DO/US-480`); loggers are hex + model-less — that signature is what the
+one-off cleanup used to purge the 8 mis-ingested rows.
+
 Per-inverter (commDevice) fields:
 - `sn` — serial (e.g. `"0001013791738041"`) — the stable per-inverter key
 - `assetAlias` — display name (often == sn)
