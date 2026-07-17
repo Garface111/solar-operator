@@ -7,6 +7,7 @@ import {
   getProviders,
   getPortalAccess,
   createClient,
+  setCloudCredential,
   type PortalAccessUnassigned,
 } from "../lib/api";
 import {
@@ -27,6 +28,9 @@ interface SmartHubEntry {
    *  shares their location. Empty for utilities with no state on file. */
   stateCode: string;
   url: string;
+  /** SmartHub subdomain host — the login_host Cloud Capture needs to open the
+   *  right co-op portal. Empty for GMP (fixed login URL in the harvester). */
+  host: string;
 }
 
 interface Props {
@@ -223,6 +227,196 @@ function LinkedLoginsPicker({
 }
 
 /**
+ * CloudAddLoginForm — the Cloud-Capture "Add a client" path (Ford 2026-07-16).
+ *
+ * On a cloud-capture tenant the operator should NOT be sent to the utility's
+ * website to sign in with the Chrome extension. Instead they hand us the login
+ * (utility + username + password + consent); we store it server-side
+ * (POST /v1/cloud-capture/credentials) and the backend immediately spins up a
+ * "Pulling bills…" client NAMED FROM THE LOGIN (ensure_client_for_login), then
+ * the headless harvester signs in and fills that client's arrays. No extension.
+ */
+function CloudAddLoginForm({
+  portals,
+  onCreated,
+}: {
+  portals: SmartHubEntry[];
+  onCreated: () => void;
+}) {
+  const toast = useToast();
+  // Utility selection: GMP by default, or a co-op picked from the live list.
+  const [util, setUtil] = useState<{ provider: string; label: string; host: string }>({
+    provider: "gmp",
+    label: GMP_FRIENDLY,
+    host: "",
+  });
+  const [pickingUtil, setPickingUtil] = useState(false);
+  const [utilQuery, setUtilQuery] = useState("");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [consent, setConsent] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const utilMatches = useMemo(() => {
+    const q = utilQuery.trim().toLowerCase();
+    const base = q
+      ? portals.filter(
+          (p) => p.name.toLowerCase().includes(q) || p.hint.toLowerCase().includes(q),
+        )
+      : portals;
+    return base.slice(0, 40);
+  }, [portals, utilQuery]);
+
+  async function submit() {
+    const user = username.trim();
+    if (!user) {
+      toast.show("Enter the login's username or email.", "info");
+      return;
+    }
+    if (!password) {
+      toast.show("Enter the login's password.", "info");
+      return;
+    }
+    if (!consent) {
+      toast.show("Tick the box to store this login securely.", "info");
+      return;
+    }
+    setSaving(true);
+    try {
+      await setCloudCredential({
+        provider: util.provider,
+        username: user,
+        password,
+        login_host: util.host || null,
+        enable: true,
+        consent: true,
+      });
+      toast.success(
+        `Connected ${util.label} — creating the client and pulling its bills now.`,
+      );
+      onCreated();
+    } catch (e) {
+      toast.show(
+        e instanceof Error ? e.message : "Couldn't save that login — try again.",
+        "error",
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <p className="text-sm font-semibold text-zinc-900">Add a client by its utility login</p>
+        <p className="mt-0.5 text-xs text-zinc-500">
+          Give us the login and we create the client from it — no signing into a
+          portal, no extension. Their arrays fill in as we pull the bills.
+        </p>
+      </div>
+
+      {/* Utility selector */}
+      <div>
+        <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-zinc-500">
+          Utility
+        </label>
+        {!pickingUtil ? (
+          <button
+            type="button"
+            onClick={() => {
+              setPickingUtil(true);
+              setUtilQuery("");
+            }}
+            className="flex w-full items-center justify-between rounded-lg border border-cream-border bg-white px-3 py-2 text-left text-sm text-zinc-900 hover:border-primary-400"
+          >
+            <span>{util.label}</span>
+            <span className="text-xs text-primary-700">Change ▾</span>
+          </button>
+        ) : (
+          <div className="rounded-lg border border-cream-border bg-white p-2">
+            <input
+              autoFocus
+              value={utilQuery}
+              onChange={(e) => setUtilQuery(e.target.value)}
+              placeholder="Search utilities…"
+              className="mb-2 w-full rounded-md border border-cream-border px-2 py-1.5 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-primary-400 focus:outline-none"
+            />
+            <ul className="max-h-40 space-y-0.5 overflow-y-auto">
+              <li>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setUtil({ provider: "gmp", label: GMP_FRIENDLY, host: "" });
+                    setPickingUtil(false);
+                  }}
+                  className="w-full rounded-md px-2 py-1.5 text-left text-sm text-zinc-800 hover:bg-primary-50"
+                >
+                  {GMP_FRIENDLY} <span className="text-xs text-zinc-400">· VT</span>
+                </button>
+              </li>
+              {utilMatches.map((p) => (
+                <li key={p.provider}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setUtil({ provider: p.provider, label: p.name, host: p.host });
+                      setPickingUtil(false);
+                    }}
+                    className="w-full rounded-md px-2 py-1.5 text-left text-sm text-zinc-800 hover:bg-primary-50"
+                  >
+                    {p.name} <span className="text-xs text-zinc-400">· {p.hint}</span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+
+      {/* Credentials */}
+      <div className="grid gap-2 sm:grid-cols-2">
+        <input
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          placeholder="Login username or email"
+          autoComplete="off"
+          className="rounded-lg border border-cream-border px-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-primary-400 focus:outline-none focus:ring-2 focus:ring-primary-500/30"
+        />
+        <input
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          type="password"
+          placeholder="Login password"
+          autoComplete="new-password"
+          className="rounded-lg border border-cream-border px-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-primary-400 focus:outline-none focus:ring-2 focus:ring-primary-500/30"
+        />
+      </div>
+
+      <label className="flex items-start gap-2 text-xs text-zinc-600">
+        <input
+          type="checkbox"
+          checked={consent}
+          onChange={(e) => setConsent(e.target.checked)}
+          className="mt-0.5 h-4 w-4 shrink-0 rounded border-cream-border text-primary-600 focus:ring-primary-500/40"
+        />
+        <span>
+          Store this login securely on our servers so we can pull {util.label}
+          &rsquo;s bills automatically. Remove it anytime in the credential vault.
+        </span>
+      </label>
+
+      <Button
+        onClick={() => void submit()}
+        disabled={saving || !username.trim() || !password || !consent}
+        className="w-full py-2.5 text-sm"
+      >
+        {saving ? "Connecting…" : "Add client from this login"}
+      </Button>
+    </div>
+  );
+}
+
+/**
  * AddClientByLoginModal — the "click a portal, sign in, done" flow.
  *
  * Earlier versions of this modal sat operators on a "Watching for sign-in…"
@@ -310,6 +504,7 @@ export function AddClientByLoginModal({
             hint: p.state || "SmartHub",
             stateCode: (p.state || "").toUpperCase(),
             url: p.portal_url || `https://${p.smarthub_host}/`,
+            host: p.smarthub_host || "",
           }))
           .sort((a, b) => a.name.localeCompare(b.name));
         setSmarthubPortals(portals);
@@ -491,29 +686,32 @@ export function AddClientByLoginModal({
           }}
         />
 
-        <div className="flex items-center gap-3 pt-1">
-          <span className="h-px flex-1 bg-cream-border" />
-          <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
-            or connect a new portal
-          </span>
-          <span className="h-px flex-1 bg-cream-border" />
-        </div>
-
         {cloudMode ? (
-          <p className="text-sm text-zinc-600">
-            Pick a portal to open, or{" "}
-            <button
-              type="button"
-              onClick={onSwitchToManual}
-              className="font-semibold text-primary-700 underline-offset-2 hover:underline"
-            >
-              add the client manually
-            </button>
-            . Utility bills refresh via Master account → Auto-refresh — no
-            extension required.
-          </p>
+          <>
+            <div className="flex items-center gap-3 pt-1">
+              <span className="h-px flex-1 bg-cream-border" />
+              <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                or add a new login
+              </span>
+              <span className="h-px flex-1 bg-cream-border" />
+            </div>
+            <CloudAddLoginForm
+              portals={smarthubPortals}
+              onCreated={() => {
+                void onCaptured();
+                onClose();
+              }}
+            />
+          </>
         ) : (
           <>
+            <div className="flex items-center gap-3 pt-1">
+              <span className="h-px flex-1 bg-cream-border" />
+              <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                or connect a new portal
+              </span>
+              <span className="h-px flex-1 bg-cream-border" />
+            </div>
             <ExtensionStatusBanner status={ext.status} version={ext.version} />
 
             {extensionUsable && (
@@ -545,7 +743,8 @@ export function AddClientByLoginModal({
           </>
         )}
 
-        <div className={!cloudMode && extensionAbsent ? "opacity-50" : ""}>
+        {!cloudMode && (<>
+        <div className={extensionAbsent ? "opacity-50" : ""}>
           {/* GMP — its own button, not SmartHub */}
           <PortalCard
             label="Green Mountain Power"
@@ -662,6 +861,7 @@ export function AddClientByLoginModal({
           Each sign-in captures another client automatically — you don't need
           to come back here between them.
         </p>
+        </>)}
       </div>
     </Modal>
   );
