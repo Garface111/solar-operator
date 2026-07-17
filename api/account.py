@@ -4676,11 +4676,23 @@ def get_reports_next_run(
     cy, cq = today.year, _quarter_of(today.month)
 
     with SessionLocal() as db:
+        # Only arrays under an ACTIVE, live client actually ship in the run —
+        # a NEPOOL report is generated per active client. Post-fold an Array
+        # Operator tenant can carry many arrays under retired capture clients
+        # (or unassigned); counting all tenant arrays overstated "will include
+        # N arrays" (Ford's demo_100: 54 tenant arrays vs ~7 report-client
+        # arrays). Behavior-neutral for standalone NEPOOL tenants (every array
+        # is under an active client). The actual send is already correctly
+        # per-active-client; this only fixes the preview count.
         arrays = db.execute(
-            select(Array).where(
+            select(Array)
+            .join(Client, Client.id == Array.client_id)
+            .where(
                 Array.tenant_id == t.id,
                 Array.deleted_at.is_(None),
                 Array.excluded.is_(False),
+                Client.active.is_(True),
+                Client.deleted_at.is_(None),
             )
         ).scalars().all()
         array_ids = [a.id for a in arrays]
