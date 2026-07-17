@@ -35,7 +35,17 @@ from .notify import (
     send_gmp_reauth_needed_email,
 )
 
-scheduler = BackgroundScheduler(timezone="UTC")
+# job_defaults: APScheduler's built-in misfire_grace_time is 1 SECOND, so any
+# daily cron whose fire moment lands during a restart / GC pause was silently
+# marked "missed" and skipped until the next day, with no trace (this is why the
+# morning digest went quiet on Ford, 2026-07-17). A 1-hour grace + coalesce means
+# a job whose window we were briefly down for still fires exactly once when the
+# process comes back, instead of vanishing. Jobs that set their own coalesce/
+# max_instances still override these defaults.
+scheduler = BackgroundScheduler(
+    timezone="UTC",
+    job_defaults={"misfire_grace_time": 3600, "coalesce": True},
+)
 
 
 def scheduler_enabled() -> bool:
@@ -1645,6 +1655,19 @@ def start():
         _run_morning_fleet_digest,
         CronTrigger(hour=12, minute=0),
         id="morning_fleet_digest", replace_existing=True,
+        # Explicit (also covered by job_defaults): a restart anywhere in the noon
+        # hour must not silently drop that day's digest. coalesce so a backlog
+        # never sends twice.
+        misfire_grace_time=3600, coalesce=True,
+    )
+    # Daily at 15:00 UTC: watchdog. If the noon digest did NOT run today (missed
+    # trigger, crash before the heartbeat), turn that invisible miss into a visible
+    # internal alert instead of silence. Reads the KVFlag heartbeat below.
+    scheduler.add_job(
+        _run_morning_digest_watchdog,
+        CronTrigger(hour=15, minute=0),
+        id="morning_digest_watchdog", replace_existing=True,
+        misfire_grace_time=3600, coalesce=True,
     )
     # Every 15 min: inbound-email safety net. Re-lists Resend receiving and
     # ingests anything the live webhook missed (deduped on the Resend id) —
@@ -2578,6 +2601,41 @@ def _run_morning_fleet_digest() -> None:
             "Morning fleet digest: unhandled exception",
             f"The morning fleet-health digest job raised an unexpected error:\n{exc}",
         )
+
+
+def _run_morning_digest_watchdog() -> None:
+    """If the morning digest did not run today, alert — don't stay silent.
+
+    The digest job stamps a KVFlag heartbeat (morning_digest:last_run) on every
+    execution. If today's date is missing from that heartbeat when this runs
+    (~3h later), the noon job never fired (missed trigger / early crash), which is
+    exactly the failure that had no trace before. Turn it into a visible alert."""
+    try:
+        import json
+        from datetime import datetime, timezone
+        from .db import SessionLocal
+        from .models import KVFlag
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        with SessionLocal() as db:
+            row = db.get(KVFlag, "morning_digest:last_run")
+            last = {}
+            if row and row.value:
+                try:
+                    last = json.loads(row.value)
+                except Exception:
+                    last = {}
+            if last.get("date") == today:
+                logger.info("morning_digest_watchdog: ok (ran today: %s)", last)
+                return
+        send_internal_alert(
+            "Morning digest did NOT run today",
+            "The 12:00 UTC morning fleet digest has no run-heartbeat for "
+            f"{today} (last heartbeat: {last or 'none'}). It likely missed its "
+            "trigger (restart/misfire) or crashed before sending. No customer "
+            "digests went out this morning — investigate the scheduler.",
+        )
+    except Exception as exc:
+        logger.warning("morning_digest_watchdog failed: %s", exc)
 
 
 def _run_delivery_receipts() -> None:
