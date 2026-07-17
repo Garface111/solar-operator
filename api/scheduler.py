@@ -322,6 +322,13 @@ def _deliver_clients_with_frequency(frequency: str) -> dict:
             .join(Tenant, Client.tenant_id == Tenant.id)
             .where(Client.active == True)  # noqa: E712
             .where(Client.deleted_at.is_(None))
+            # AUTO-SEND ENROLLMENT (THE FOLD): only clients the operator explicitly
+            # enrolled auto-send (and so consent to the $15/quarter on first output).
+            # Auto-propagated capture-artifact clients default auto_send=False and are
+            # never auto-sent/charged; legacy NEPOOL clients were backfilled True
+            # (migrate.py) so their existing auto-sends continue. Manual sends +
+            # downloads still work for any client regardless of this flag.
+            .where(Client.auto_send == True)  # noqa: E712
             .where(
                 or_(
                     Client.report_frequency == frequency,
