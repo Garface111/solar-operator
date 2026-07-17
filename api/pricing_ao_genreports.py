@@ -5,22 +5,29 @@ THE FOLD (Jul 2026): NEPOOL Operator became Array Operator's Invoices ->
 operator uses Array Operator to auto-generate + deliver NEPOOL/REC generation
 workbooks to each of their reporting clients.
 
-Pricing model (Ford, Jul 2026 — FINAL): **$15.00 per client per calendar QUARTER,
-charged on the FIRST real OUTPUT for that (client, quarter), then unlimited.** An
+Pricing model (Ford, Jul 2026 — FINAL): **$15.00 per ARRAY per calendar QUARTER,
+charged on the FIRST real OUTPUT covering that (array, quarter), then unlimited.** An
 "output" = a report SEND (auto or manual) OR a DOWNLOAD of the deliverable workbook
 (per-client or the all-clients directory). Building + previewing + auto-propagating
 the whole fleet is FREE; the $15 fires only when the operator actually takes a
-deliverable for a client-quarter. Every subsequent output for that same
-(client, quarter) is free; a DIFFERENT quarter is a fresh $15.
+deliverable. Every subsequent output covering that same (array, quarter) is free; a
+DIFFERENT quarter is a fresh $15.
 
-  first output for a (client, quarter)   $15.00   (then unlimited that quarter)
+The UNIT IS THE ARRAY, not the client (Ford corrected this 2026-07-16, before any
+price was minted): we bill exactly the arrays that RENDER in the workbook
+(writers.gmcs_writer.reported_array_ids — non-excluded, non-deleted, actually
+producing in the window). A force-hidden or non-producing array never bills.
 
-  3 clients, one quarter, each output once or ten times -> $45
-  same 3 clients, next quarter                          -> another $45
+  first output for an (array, quarter)   $15.00   (then unlimited that quarter)
+
+  a 5-array client, one quarter, output once or ten times -> $75
+  the same 5 arrays, next quarter                         -> another $75
+  3 clients of 2 / 3 / 5 arrays, one quarter              -> $150
 
 Mechanics (see api/delivery.py + api/jobs/genreports_usage.py):
-  * Each first output writes a GenReportCharge ledger row, idempotent via
-    UNIQUE(tenant_id, client_id, quarter) — that uniqueness IS the "then unlimited".
+  * Each first output writes one GenReportCharge ledger row PER REPORTED ARRAY,
+    idempotent via UNIQUE(tenant_id, array_id, quarter) — that uniqueness IS the
+    "then unlimited".
   * A METERED Stripe price (usage_type='metered', unit_amount=1500) receives one
     usage unit per un-pushed ledger row, summed per tenant per billing period.
 
@@ -31,18 +38,18 @@ helper both guard on it).
 """
 from __future__ import annotations
 
-# The flat billing unit, whole cents. $15.00 per client per quarter (per the first
-# output). This plan is in whole dollars.
+# The flat billing unit, whole cents. $15.00 per ARRAY per quarter (per the first
+# output covering it). This plan is in whole dollars.
 PRICE_CENTS: int = 1_500
 
-# Readable alias.
-PER_CLIENT_CENTS: int = PRICE_CENTS
+# Readable alias — the unit is one reported ARRAY for one quarter.
+PER_ARRAY_CENTS: int = PRICE_CENTS
 
 
 def compute_monthly_cents(billable_units: int | None) -> int:
-    """Total cents for N billable client-quarter units at the flat $15 unit.
+    """Total cents for N billable array-quarter units at the flat $15 unit.
 
-    A "billable unit" is one (client, quarter) that has had its first output — i.e.
+    A "billable unit" is one (array, quarter) that has had its first output — i.e.
     one GenReportCharge row. 0 for units <= 0.
 
       0 -> 0    1 -> 1500 ($15)    3 -> 4500 ($45)    10 -> 15000 ($150)

@@ -1,8 +1,8 @@
 """Report generation-report OUTPUT charges to Stripe (metered billing — THE FOLD).
 
-Generation reports bill $15 per client per calendar quarter, charged on the FIRST
-real output (send or download) for that (client, quarter) — recorded as a
-GenReportCharge ledger row in api/delivery.py (idempotent per client+quarter). This
+Generation reports bill $15 per ARRAY per calendar quarter, charged on the FIRST
+real output (send or download) covering that (array, quarter) — recorded as a
+GenReportCharge ledger row in api/delivery.py (idempotent per array+quarter). This
 job sums each tenant's UN-PUSHED ledger rows and reports them to Stripe as metered
 usage against the tenant's METERED generation-reports subscription item (unit_amount
 = $15, aggregate_usage='sum'), then stamps pushed_at so each $15 is billed exactly

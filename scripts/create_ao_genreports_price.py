@@ -1,6 +1,6 @@
 """One-shot: create the ARRAY OPERATOR *generation-reports* Stripe price.
 
-The generation-reports plan (api/pricing_ao_genreports.py) bills $15.00 per client
+The generation-reports plan (api/pricing_ao_genreports.py) bills $15.00 per ARRAY
 per calendar QUARTER, charged on the FIRST real OUTPUT (a report SEND or a DOWNLOAD
 of the deliverable) for that (client, quarter), then unlimited (THE FOLD — Invoices
 -> "Generation reports"). Building + previewing + auto-propagating the fleet is FREE.
@@ -38,12 +38,12 @@ from api.pricing_ao_genreports import PRICE_CENTS  # noqa: E402
 CONFIRM_LIVE = "--confirm-live" in sys.argv
 
 PRODUCT_NAME = "Array Operator — Generation reports"
-PRICE_NICKNAME = "AO Generation reports — per client per quarter (metered)"
+PRICE_NICKNAME = "AO Generation reports — per array per quarter (metered)"
 
 
 def _summary() -> str:
-    return (f"${PRICE_CENTS/100:.2f} per client per quarter (first output), metered "
-            f"(usage_type=metered, aggregate_usage=sum; 1 usage unit per client-quarter)")
+    return (f"${PRICE_CENTS/100:.2f} per array per quarter (first output), metered "
+            f"(usage_type=metered, aggregate_usage=sum; 1 usage unit per array-quarter)")
 
 
 def main() -> None:
@@ -56,7 +56,7 @@ def main() -> None:
         print(f'  Product: "{PRODUCT_NAME}"')
         print("  METERED monthly price:")
         print("    billing_scheme=per_unit  usage_type=metered  aggregate_usage=sum  interval=month")
-        print(f"    unit_amount={PRICE_CENTS} (cents) = ${PRICE_CENTS/100:.2f} per usage unit (per client-quarter)")
+        print(f"    unit_amount={PRICE_CENTS} (cents) = ${PRICE_CENTS/100:.2f} per usage unit (per array-quarter)")
         print("  (No setup fee; no per-client subscription quantity — usage-based.)")
         print("\nNo Stripe calls made. Re-run with --confirm-live against a real key to mint.")
         return
@@ -82,7 +82,7 @@ def main() -> None:
         product = stripe.Product.create(
             name=PRODUCT_NAME,
             description="Automatic NEPOOL/REC generation reports for solar operators "
-                        "(EnergyAgent — Array Operator). Billed $15 per client per "
+                        "(EnergyAgent — Array Operator). Billed $15 per array per "
                         "report sent (metered).",
         )
         print(f"  created product: {product.id}")

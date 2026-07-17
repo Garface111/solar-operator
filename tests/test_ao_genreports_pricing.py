@@ -1,9 +1,11 @@
-"""Metered generation-reports billing — $15/client/QUARTER on first OUTPUT (THE FOLD).
+"""Metered generation-reports billing — $15/ARRAY/QUARTER on first OUTPUT (THE FOLD).
 
 Ford's FINAL model: building + previewing + auto-propagating the fleet is FREE; the
-$15 fires on the FIRST real OUTPUT for a (client, calendar quarter) — a report SEND
-(auto or manual) OR a DOWNLOAD of the deliverable (per-client or all-clients
-directory) — then unlimited that quarter. Idempotent per (tenant, client, quarter).
+$15 fires on the FIRST real OUTPUT covering an (array, calendar quarter) — a report
+SEND (auto or manual) OR a DOWNLOAD of the deliverable (per-client or all-clients
+directory) — then unlimited that quarter. The UNIT IS THE ARRAY, not the client
+(Ford 2026-07-16): a 5-array client reported once = 5 × $15 = $75. Idempotent per
+(tenant, array, quarter) — we bill exactly the arrays that render in the workbook.
 The scheduler only auto-sends clients enrolled with auto_send=True. Pushing charges
 to Stripe is a separate job, INERT until STRIPE_AO_GENREPORTS_PRICE_ID is minted.
 
@@ -33,11 +35,25 @@ REF_Q1 = date(2026, 4, 1)   # last complete quarter = 2026-Q1
 
 
 @pytest.fixture(autouse=True)
-def _always_has_data(monkeypatch):
-    """Default: every client "has data" for the quarter, so the require_data gate
-    passes. Individual tests override to False to prove the empty-output case."""
-    monkeypatch.setattr("api.writers.gmcs_writer.report_has_data",
-                        lambda *a, **k: True)
+def _reports_all_arrays(monkeypatch):
+    """Default: every one of a client's live arrays "renders" in the workbook, so
+    each is a billable unit. Stands in for gmcs_writer.reported_array_ids (whose real
+    job — window/producing/excluded filtering — is covered by the writer's own tests);
+    here we pin the BILLING behavior: one $15 per reported array per quarter.
+    Individual tests override to [] to prove the empty-output case."""
+    from api.models import Array
+
+    def _fake(client_id, *a, **k):
+        with SessionLocal() as db:
+            return [r[0] for r in db.execute(
+                select(Array.id).where(
+                    Array.client_id == client_id,
+                    Array.excluded.is_(False),
+                    Array.deleted_at.is_(None),
+                ).order_by(Array.id)
+            ).all()]
+
+    monkeypatch.setattr("api.writers.gmcs_writer.reported_array_ids", _fake)
 
 
 # ── fixtures ────────────────────────────────────────────────────────────────────
@@ -59,13 +75,19 @@ def _mk_tenant(*, product: str = "array_operator", gen_reports: bool = True,
 
 
 def _mk_client(tid: str, *, contact_email: str | None = "client@genrep.test",
-               auto_send: bool = False) -> int:
+               auto_send: bool = False, arrays: int = 1) -> int:
+    """A client with `arrays` live arrays — the arrays ARE the billing units."""
+    from api.models import Array
     with SessionLocal() as db:
         c = Client(tenant_id=tid, name="Cl " + secrets.token_hex(3),
                    active=True, contact_email=contact_email, auto_send=auto_send)
         db.add(c)
         db.flush()
         cid = c.id
+        for i in range(arrays):
+            db.add(Array(tenant_id=tid, client_id=cid,
+                         name=f"Arr {secrets.token_hex(3)}-{i}",
+                         excluded=False, fuel_type="solar"))
         db.commit()
     return cid
 
@@ -92,7 +114,7 @@ def _count(tid: str) -> int:
 
 def test_price_is_fifteen_dollars():
     assert genrep.PRICE_CENTS == 1500
-    assert genrep.PER_CLIENT_CENTS == 1500
+    assert genrep.PER_ARRAY_CENTS == 1500
 
 
 @pytest.mark.parametrize("n,cents", [
@@ -104,11 +126,11 @@ def test_compute_monthly_cents(n, cents):
 
 # ── first output bills once; repeat outputs free (record_genreport_output) ──────
 
-def test_first_download_records_one_15_dollar_row():
+def test_first_download_records_one_15_dollar_row_per_array():
     tid = _mk_tenant()
-    cid = _mk_client(tid)
+    cid = _mk_client(tid, arrays=1)
     assert record_genreport_output(tid, cid, reference_date=REF_Q2,
-                                   first_source="download") is True
+                                   first_source="download") == 1
     rows = _rows(tid)
     assert len(rows) == 1
     quarter, amount, source, pushed = rows[0]
@@ -120,24 +142,24 @@ def test_first_download_records_one_15_dollar_row():
 
 def test_second_output_same_client_quarter_is_free():
     tid = _mk_tenant()
-    cid = _mk_client(tid)
+    cid = _mk_client(tid, arrays=1)
     for src in ("download", "send", "directory", "download"):
         record_genreport_output(tid, cid, reference_date=REF_Q2, first_source=src)
     assert _count(tid) == 1          # first output billed; the rest free
 
 
 def test_send_then_download_same_quarter_charges_once():
-    """A send and a download of the SAME client-quarter = one $15 (either can be first)."""
+    """A send and a download of the SAME array-quarter = one $15 (either can be first)."""
     tid = _mk_tenant()
-    cid = _mk_client(tid)
-    assert record_genreport_output(tid, cid, reference_date=REF_Q2, first_source="send") is True
-    assert record_genreport_output(tid, cid, reference_date=REF_Q2, first_source="download") is False
+    cid = _mk_client(tid, arrays=1)
+    assert record_genreport_output(tid, cid, reference_date=REF_Q2, first_source="send") == 1
+    assert record_genreport_output(tid, cid, reference_date=REF_Q2, first_source="download") == 0
     assert _count(tid) == 1
 
 
 def test_different_quarter_is_a_new_charge():
     tid = _mk_tenant()
-    cid = _mk_client(tid)
+    cid = _mk_client(tid, arrays=1)
     record_genreport_output(tid, cid, reference_date=REF_Q2, first_source="download")
     record_genreport_output(tid, cid, reference_date=REF_Q1, first_source="download")
     rows = _rows(tid)
@@ -146,57 +168,112 @@ def test_different_quarter_is_a_new_charge():
 
 
 def test_empty_output_records_nothing(monkeypatch):
-    """A client with no report data for the quarter is a preview/empty output — free."""
-    monkeypatch.setattr("api.writers.gmcs_writer.report_has_data", lambda *a, **k: False)
+    """No array renders for the quarter = a preview/empty output — free."""
+    monkeypatch.setattr("api.writers.gmcs_writer.reported_array_ids", lambda *a, **k: [])
     tid = _mk_tenant()
-    cid = _mk_client(tid)
+    cid = _mk_client(tid, arrays=3)
     assert record_genreport_output(tid, cid, reference_date=REF_Q2,
-                                   first_source="download") is False
+                                   first_source="download") == 0
     assert _count(tid) == 0
+
+
+def test_bills_one_row_per_reported_array():
+    """THE unit: a 5-array client output once = 5 rows = $75."""
+    tid = _mk_tenant()
+    cid = _mk_client(tid, arrays=5)
+    assert record_genreport_output(tid, cid, reference_date=REF_Q2,
+                                   first_source="send") == 5
+    rows = _rows(tid)
+    assert len(rows) == 5
+    assert all(r[1] == 1500 for r in rows)
+    assert genrep.compute_monthly_cents(len(rows)) == 7500      # $75
+    # a repeat output of the same 5 arrays that quarter is free
+    assert record_genreport_output(tid, cid, reference_date=REF_Q2,
+                                   first_source="download") == 0
+    assert _count(tid) == 5
+
+
+def test_excluded_array_never_bills():
+    """A force-hidden array renders no sheet, so it is never a billable unit."""
+    from api.models import Array
+    tid = _mk_tenant()
+    cid = _mk_client(tid, arrays=3)
+    with SessionLocal() as db:
+        arr = db.execute(select(Array).where(Array.client_id == cid)
+                         .order_by(Array.id)).scalars().first()
+        arr.excluded = True
+        db.commit()
+    assert record_genreport_output(tid, cid, reference_date=REF_Q2) == 2   # not 3
+    assert _count(tid) == 2
+
+
+def test_new_array_same_quarter_bills_only_the_new_one():
+    """Idempotency is per (array, quarter): an array added later bills on its own."""
+    from api.models import Array
+    tid = _mk_tenant()
+    cid = _mk_client(tid, arrays=2)
+    assert record_genreport_output(tid, cid, reference_date=REF_Q2) == 2
+    with SessionLocal() as db:
+        db.add(Array(tenant_id=tid, client_id=cid, name="Late " + secrets.token_hex(3),
+                     excluded=False, fuel_type="solar"))
+        db.commit()
+    # same quarter: only the NEW array is billable (the first 2 are already paid)
+    assert record_genreport_output(tid, cid, reference_date=REF_Q2) == 1
+    assert _count(tid) == 3
 
 
 def test_demo_and_unmigrated_tenants_never_charge():
     demo = _mk_tenant(is_demo=True)
     dcid = _mk_client(demo)
-    assert record_genreport_output(demo, dcid, reference_date=REF_Q2) is False
+    assert record_genreport_output(demo, dcid, reference_date=REF_Q2) == 0
     unmig = _mk_tenant(gen_reports=False)          # AO not in reports world
     ucid = _mk_client(unmig)
-    assert record_genreport_output(unmig, ucid, reference_date=REF_Q2) is False
+    assert record_genreport_output(unmig, ucid, reference_date=REF_Q2) == 0
     assert _count(demo) == 0 and _count(unmig) == 0
 
 
 def test_nepool_tenant_is_charged():
     tid = _mk_tenant(product="nepool", gen_reports=False)   # always reports-world
-    cid = _mk_client(tid)
-    assert record_genreport_output(tid, cid, reference_date=REF_Q2) is True
+    cid = _mk_client(tid, arrays=1)
+    assert record_genreport_output(tid, cid, reference_date=REF_Q2) == 1
     assert _count(tid) == 1
 
 
-# ── directory download: one row per client with data; re-download free ──────────
+# ── directory download: one row per reported ARRAY; re-download free ────────────
 
-def test_directory_download_records_one_row_per_client():
+def test_directory_download_records_one_row_per_array_across_clients():
+    """Clients of 2 / 3 / 5 arrays → 10 rows = $150 for the quarter."""
     tid = _mk_tenant()
-    cids = [_mk_client(tid) for _ in range(3)]
+    for n_arrays in (2, 3, 5):
+        _mk_client(tid, arrays=n_arrays)
     n = record_genreport_directory(tid, reference_date=REF_Q2)
-    assert n == 3
-    assert _count(tid) == 3
+    assert n == 10
+    assert _count(tid) == 10
+    assert genrep.compute_monthly_cents(n) == 15000              # $150
     # re-download the SAME quarter -> zero new
     assert record_genreport_directory(tid, reference_date=REF_Q2) == 0
-    assert _count(tid) == 3
-    # a different quarter -> 3 new
-    assert record_genreport_directory(tid, reference_date=REF_Q1) == 3
-    assert _count(tid) == 6
+    assert _count(tid) == 10
+    # a different quarter -> the same 10 arrays bill again
+    assert record_genreport_directory(tid, reference_date=REF_Q1) == 10
+    assert _count(tid) == 20
 
 
 def test_directory_skips_clients_without_data(monkeypatch):
     tid = _mk_tenant()
-    c_data = _mk_client(tid)
-    c_empty = _mk_client(tid)
-    monkeypatch.setattr("api.writers.gmcs_writer.report_has_data",
-                        lambda cid, **k: cid == c_data)
-    n = record_genreport_directory(tid, reference_date=REF_Q2)
-    assert n == 1
-    assert _count(tid) == 1
+    c_data = _mk_client(tid, arrays=2)
+    _mk_client(tid, arrays=4)                       # renders nothing → free
+    from api.models import Array
+
+    def _only_c_data(client_id, *a, **k):
+        if client_id != c_data:
+            return []
+        with SessionLocal() as db:
+            return [r[0] for r in db.execute(
+                select(Array.id).where(Array.client_id == client_id)).all()]
+
+    monkeypatch.setattr("api.writers.gmcs_writer.reported_array_ids", _only_c_data)
+    assert record_genreport_directory(tid, reference_date=REF_Q2) == 2
+    assert _count(tid) == 2
 
 
 # ── the send path (deliver_for_client) charges on success ───────────────────────

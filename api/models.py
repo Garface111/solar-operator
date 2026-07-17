@@ -540,19 +540,29 @@ class ReportDelivery(Base):
 
 
 class GenReportCharge(Base):
-    """A billable generation-report OUTPUT event ($15/client/quarter — THE FOLD, Jul
-    2026). One row = the FIRST real output for a (tenant, client, calendar quarter),
-    then unlimited. The metered billing trigger.
+    """A billable generation-report OUTPUT event ($15 per ARRAY per quarter — THE
+    FOLD, Ford Jul 2026). One row = the FIRST real output for a (tenant, ARRAY,
+    calendar quarter), then unlimited. The metered billing trigger.
 
     Ford's model: building + previewing clients and their reports is FREE; auto-
-    propagating the whole fleet is free. The $15 fires on the FIRST real OUTPUT for a
-    (client, quarter) — where an "output" is a report SEND (auto or manual) OR a
+    propagating the whole fleet is free. The $15 fires on the FIRST real OUTPUT for an
+    (array, quarter) — where an "output" is a report SEND (auto or manual) OR a
     DOWNLOAD of the deliverable workbook (per-client or all-clients directory). Every
-    subsequent send/download for that SAME (client, quarter) is free; a DIFFERENT
-    quarter is a fresh $15. IDEMPOTENT per (tenant_id, client_id, quarter): the unique
-    constraint IS the idempotency — a duplicate output insert-or-ignores (the
-    delivery/download layer catches the IntegrityError, mirroring the capture upsert
-    pattern).
+    subsequent send/download covering that SAME (array, quarter) is free; a DIFFERENT
+    quarter is a fresh $15.
+
+    The unit is the ARRAY, not the client (Ford corrected this 2026-07-16, before any
+    price was minted): reporting a 5-array client for a quarter = 5 rows = $75. We bill
+    exactly the arrays that RENDER in the workbook — writers.gmcs_writer.reported_array_ids
+    (non-excluded, non-deleted, actually producing in the window) — never an array that
+    gets no sheet.
+
+    IDEMPOTENT per (tenant_id, array_id, quarter): the unique constraint IS the
+    idempotency — a duplicate output insert-or-ignores (the delivery/download layer
+    catches the IntegrityError, mirroring the capture upsert pattern). `client_id` is a
+    denormalized reference (which client the array reported under at charge time) and is
+    deliberately NOT part of the key: moving an array between clients must never
+    re-bill the same array for the same quarter.
 
     INERT money-wise: writing a row never touches Stripe. A separate metered-usage
     job (api/jobs/genreports_usage.py) sums each tenant's un-pushed rows and reports
@@ -563,12 +573,17 @@ class GenReportCharge(Base):
     __tablename__ = "gen_report_charges"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
-    client_id: Mapped[int] = mapped_column(Integer, ForeignKey("clients.id"), index=True)
+    # THE billing unit: one reported array. Part of the unique key.
+    array_id: Mapped[int] = mapped_column(Integer, ForeignKey("arrays.id"), index=True)
+    # Denormalized: the client this array reported under at charge time. Reference
+    # only — NOT part of the key (re-parenting an array must not re-bill it).
+    client_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("clients.id"),
+                                                  nullable=True, index=True)
     # The calendar quarter this output covered — the headline rolling quarter, e.g.
     # "2026-Q1". THE idempotency axis: same quarter = same $15, repeat outputs free.
     quarter: Mapped[str] = mapped_column(String(16), index=True)
     amount_cents: Mapped[int] = mapped_column(Integer, default=1500)
-    # What the FIRST output for this (client, quarter) was: "send" (auto/manual email)
+    # What the FIRST output for this (array, quarter) was: "send" (auto/manual email)
     # | "download" (per-client workbook) | "directory" (all-clients directory).
     first_source: Mapped[str] = mapped_column(String(16), default="send")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
@@ -578,8 +593,8 @@ class GenReportCharge(Base):
     pushed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     __table_args__ = (
-        UniqueConstraint("tenant_id", "client_id", "quarter",
-                         name="uq_genreport_charge_quarter"),
+        UniqueConstraint("tenant_id", "array_id", "quarter",
+                         name="uq_genreport_charge_array_quarter"),
         Index("ix_genreport_charge_unpushed", "tenant_id", "pushed_at"),
     )
 

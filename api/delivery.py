@@ -77,80 +77,97 @@ def _report_quarter(reference_date) -> tuple[int, int, str]:
 
 def record_genreport_output(tenant_id: str, client_id: int, *,
                             reference_date=None, first_source: str = "download",
-                            require_data: bool = True) -> bool:
-    """Record the $15 billable OUTPUT for one (client, calendar quarter) — THE FOLD.
+                            require_data: bool = True) -> int:
+    """Record the $15 billable OUTPUT for each ARRAY this client reports — THE FOLD.
 
     Ford's model: building + previewing is free; the $15 fires on the FIRST real
-    OUTPUT for a (client, quarter) — a report SEND or a DOWNLOAD of the deliverable —
-    then unlimited. IDEMPOTENT per (tenant, client, quarter): the DB unique constraint
-    makes any later output for the SAME quarter a no-op (insert-or-ignore, catching the
-    IntegrityError like the capture upsert); a DIFFERENT quarter is a fresh $15.
+    OUTPUT — a report SEND or a DOWNLOAD of the deliverable — then unlimited that
+    quarter. The UNIT IS THE ARRAY, not the client (Ford 2026-07-16): one output of a
+    5-array client = 5 rows = $75.
 
-    Only records for a REAL client (live, active, this tenant) WITH report data for
-    the quarter (require_data), in a reports-world, non-demo tenant. Returns True iff a
-    NEW ledger row was written. INERT money-wise (just a ledger row; Stripe push is a
-    separate, price-gated job). Never raises — a billing-ledger hiccup must not fail
-    (or unsend) the actual output.
+    We bill exactly the arrays that RENDER in the workbook (gmcs_writer.
+    reported_array_ids: non-excluded, non-deleted, actually producing in the window) —
+    so an empty/preview output bills nothing, and a force-hidden or non-producing array
+    is never charged. IDEMPOTENT per (tenant, array, quarter): the DB unique constraint
+    makes any later output covering the same array+quarter a no-op (insert-or-ignore,
+    catching the IntegrityError like the capture upsert); a DIFFERENT quarter is fresh.
+
+    Only records for a REAL client (live, active, this tenant) in a reports-world,
+    non-demo tenant. Returns the COUNT of NEW ledger rows (0 = nothing newly billable;
+    still falsy, so existing truthiness call sites keep working). INERT money-wise
+    (just ledger rows; the Stripe push is a separate, price-gated job). Never raises —
+    a billing-ledger hiccup must not fail (or unsend) the actual output.
+
+    `require_data` is retained for call-site compatibility: array-level producing-ness
+    is now inherent to reported_array_ids, so this is always effectively enforced.
     """
     try:
         from sqlalchemy.exc import IntegrityError
         from .models import GenReportCharge
         from .pricing_ao_genreports import PRICE_CENTS
         from .report_eligibility import tenant_in_reports_world
-        from .writers.gmcs_writer import report_has_data
+        from .writers.gmcs_writer import reported_array_ids
 
         _y, _q, quarter = _report_quarter(reference_date)
         with SessionLocal() as db:
             tenant = db.get(Tenant, tenant_id)
             # Only bill reports-world, non-demo tenants for generation reports.
             if tenant is None or getattr(tenant, "is_demo", False):
-                return False
+                return 0
             if not tenant_in_reports_world(tenant):
-                return False
+                return 0
             client = db.get(Client, client_id)
             if (client is None or client.tenant_id != tenant_id
                     or not client.active or client.deleted_at is not None):
-                return False
-            if require_data and not report_has_data(
-                    client_id, reference_date=reference_date):
-                return False   # empty / preview output — nothing extracted, no charge
-            # Idempotency (fast path): skip if this client+quarter is already billed.
-            already = db.execute(
-                select(GenReportCharge.id).where(
-                    GenReportCharge.tenant_id == tenant_id,
-                    GenReportCharge.client_id == client_id,
-                    GenReportCharge.quarter == quarter,
-                ).limit(1)
-            ).first()
-            if already:
-                return False
-            db.add(GenReportCharge(
-                tenant_id=tenant_id, client_id=client_id, quarter=quarter,
-                amount_cents=PRICE_CENTS, first_source=first_source,
-            ))
-            try:
-                db.commit()
-                return True
-            except IntegrityError:
-                # A concurrent output inserted the same (tenant, client, quarter)
-                # first — the unique constraint held; treat as already charged.
-                db.rollback()
-                return False
+                return 0
+
+        # The arrays that actually render in this client's workbook = the billing
+        # units. Empty (no producing arrays / preview) → nothing extracted, no charge.
+        array_ids = reported_array_ids(client_id, reference_date=reference_date)
+        if not array_ids:
+            return 0
+
+        new_rows = 0
+        for arr_id in array_ids:
+            with SessionLocal() as db:
+                # Idempotency (fast path): already billed this array+quarter?
+                already = db.execute(
+                    select(GenReportCharge.id).where(
+                        GenReportCharge.tenant_id == tenant_id,
+                        GenReportCharge.array_id == arr_id,
+                        GenReportCharge.quarter == quarter,
+                    ).limit(1)
+                ).first()
+                if already:
+                    continue
+                db.add(GenReportCharge(
+                    tenant_id=tenant_id, array_id=arr_id, client_id=client_id,
+                    quarter=quarter, amount_cents=PRICE_CENTS,
+                    first_source=first_source,
+                ))
+                try:
+                    db.commit()
+                    new_rows += 1
+                except IntegrityError:
+                    # A concurrent output inserted the same (tenant, array, quarter)
+                    # first — the unique constraint held; treat as already charged.
+                    db.rollback()
+        return new_rows
     except Exception:  # noqa: BLE001 — a billing-ledger failure must never break output
         logger.warning("genreport output ledger write failed for client %s (%s)",
                        client_id, tenant_id, exc_info=True)
-        return False
+        return 0
 
 
 def record_genreport_directory(tenant_id: str, *, reference_date=None,
                                client_ids=None, first_source: str = "directory") -> int:
-    """Record a $15 OUTPUT for EACH of the tenant's active report clients that has
-    data for the quarter — the value an ALL-CLIENTS directory download extracts.
+    """Record a $15 OUTPUT for EVERY ARRAY the tenant's active report clients report
+    this quarter — the value an ALL-CLIENTS directory download extracts.
 
-    Downloading the directory delivers every client's sheet at once, so each client
-    with report data is a billable output for the quarter (idempotent per client —
-    a re-download charges nothing new). Optional `client_ids` scopes it to a subset
-    (e.g. a picker). Returns the count of NEW rows. Never raises.
+    Downloading the directory delivers every client's arrays at once, so each reported
+    array is a billable output for the quarter (idempotent per array — a re-download
+    charges nothing new). Optional `client_ids` scopes it to a subset (e.g. a picker).
+    Returns the count of NEW ARRAY rows. Never raises.
     """
     try:
         with SessionLocal() as db:
@@ -164,9 +181,8 @@ def record_genreport_directory(tenant_id: str, *, reference_date=None,
             cids = [r[0] for r in db.execute(q).all()]
         n = 0
         for cid in cids:
-            if record_genreport_output(tenant_id, cid, reference_date=reference_date,
-                                       first_source=first_source):
-                n += 1
+            n += record_genreport_output(tenant_id, cid, reference_date=reference_date,
+                                         first_source=first_source)
         return n
     except Exception:  # noqa: BLE001 — a directory-billing hiccup must not fail download
         logger.warning("genreport directory ledger write failed for tenant %s",
