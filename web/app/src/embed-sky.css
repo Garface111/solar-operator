@@ -158,3 +158,13 @@ nav[role="tablist"] [role="tab"]:not([aria-current="page"]):hover {
    often ride text-zinc-400/500 with tracking — the darkening above covers them.
    Placeholder text stays lighter (intentional low emphasis). */
 ::placeholder { color: #71717a; }
+
+/* ── 7 · FIXED-OVERLAY STACKING ─────────────────────────────────────────────
+   The embed's full-screen overlays (Add Client modal, template studio) are
+   Tailwind z-40. The AO Invoices sub-tab nav is .vs-seg{position:relative;
+   z-index:55}, so the Offtakers|Bill audit|Trends|Generation-reports pills
+   rendered OVER the modal header (Ford 2026-07-16). Raise the embed overlays
+   above the sub-nav + panel chrome (still below AO's own top modals ~9999). */
+.fixed.inset-0 {
+  z-index: 9990 !important;
+}

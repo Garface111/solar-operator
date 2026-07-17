@@ -637,7 +637,7 @@ export function ClientsSection({ expandClientId }: Props) {
 
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <SectionTitle title="Clients" count={clients?.length} />
+          <SectionTitle title="Clients" count={rosterClients?.length} />
           {/* Live polling indicator: subtle at 50% opacity, pulses green for 1s on new data. */}
           <span
             aria-hidden
