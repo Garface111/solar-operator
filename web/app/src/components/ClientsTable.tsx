@@ -690,7 +690,7 @@ function ClientTableRow({
 
   // Per-client auto-send toggle (THE FOLD): flipping it on enrolls this client
   // in automatic per-period delivery AND is the operator's opt-in to the
-  // $15/client/quarter meter (which fires on the first real output). Off by
+  // $15/ARRAY/quarter meter (which fires on the first real output). Off by
   // default; manual send/download always work regardless.
   async function handleAutoSend(e: React.MouseEvent) {
     e.stopPropagation();
@@ -700,9 +700,11 @@ function ClientTableRow({
     try {
       const updated = await updateClient(client.id, { auto_send: next });
       onChange(updated);
+      const n = client.array_count || 0;
+      const est = n ? ` (${n} array${n === 1 ? "" : "s"} · ~$${n * 15}/quarter)` : "";
       toast.success(
         next
-          ? `Auto-send on for ${client.name} — reports ship automatically ($15/quarter, billed on the first output).`
+          ? `Auto-send on for ${client.name}${est} — reports ship automatically. $15/array, billed on the first output.`
           : `Auto-send off for ${client.name}.`,
       );
     } catch (err) {
@@ -953,8 +955,8 @@ function ClientTableRow({
               disabled={savingAutoSend}
               title={
                 client.auto_send
-                  ? "Auto-send ON — this client's report ships each period. $15/quarter, billed on the first output (send or download)."
-                  : "Turn ON auto-send so this client's report ships automatically each period ($15/quarter, billed on the first output)."
+                  ? `Auto-send ON — this client's report ships each period. $15/array/quarter (${client.array_count || 0} array${(client.array_count || 0) === 1 ? "" : "s"} ≈ $${(client.array_count || 0) * 15}/quarter), billed on the first output.`
+                  : `Turn ON auto-send so this client's report ships automatically each period. $15/array/quarter (${client.array_count || 0} array${(client.array_count || 0) === 1 ? "" : "s"} ≈ $${(client.array_count || 0) * 15}/quarter), billed on the first output.`
               }
               className={[
                 "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold transition-colors disabled:opacity-50",
