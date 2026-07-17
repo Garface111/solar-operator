@@ -105,16 +105,22 @@ def record_genreport_output(tenant_id: str, client_id: int, *,
         from sqlalchemy.exc import IntegrityError
         from .models import GenReportCharge
         from .pricing_ao_genreports import PRICE_CENTS
-        from .report_eligibility import tenant_in_reports_world
         from .writers.gmcs_writer import reported_array_ids
 
         _y, _q, quarter = _report_quarter(reference_date)
         with SessionLocal() as db:
             tenant = db.get(Tenant, tenant_id)
-            # Only bill reports-world, non-demo tenants for generation reports.
+            # Never bill the shared demo tenant or a dead account. NOTE: we do NOT
+            # require tenant.generation_reports here — generation reports are
+            # enabled for EVERY operator (Ford, Jul 2026), and TAKING A REAL OUTPUT
+            # *is* the engagement that bills. Gating on the marker would mean an
+            # operator who never explicitly enrolled could report all quarter for
+            # free. Enrollment instead FOLLOWS the output (auto-enroll below).
             if tenant is None or getattr(tenant, "is_demo", False):
                 return 0
-            if not tenant_in_reports_world(tenant):
+            if not (tenant.active
+                    or getattr(tenant, "subscription_status", None)
+                    in ("comped", "trialing")):
                 return 0
             client = db.get(Client, client_id)
             if (client is None or client.tenant_id != tenant_id
@@ -152,6 +158,22 @@ def record_genreport_output(tenant_id: str, client_id: int, *,
                     # A concurrent output inserted the same (tenant, array, quarter)
                     # first — the unique constraint held; treat as already charged.
                     db.rollback()
+
+        # AUTO-ENROLL on first real engagement: an operator who has actually
+        # reported an array IS a generation-reports customer, so turn their
+        # reports world on (scheduled sends for the clients they enrol, digests,
+        # the operator directory). Enrollment follows the output rather than
+        # gating it — see the note above. Idempotent + never fatal.
+        if new_rows:
+            try:
+                with SessionLocal() as db:
+                    t = db.get(Tenant, tenant_id)
+                    if t is not None and not getattr(t, "generation_reports", False):
+                        t.generation_reports = True
+                        db.commit()
+            except Exception:  # noqa: BLE001
+                logger.warning("genreport auto-enroll failed for %s", tenant_id,
+                               exc_info=True)
         return new_rows
     except Exception:  # noqa: BLE001 — a billing-ledger failure must never break output
         logger.warning("genreport output ledger write failed for client %s (%s)",

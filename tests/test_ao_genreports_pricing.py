@@ -222,14 +222,31 @@ def test_new_array_same_quarter_bills_only_the_new_one():
     assert _count(tid) == 3
 
 
-def test_demo_and_unmigrated_tenants_never_charge():
+def test_demo_tenant_never_charges():
     demo = _mk_tenant(is_demo=True)
-    dcid = _mk_client(demo)
+    dcid = _mk_client(demo, arrays=3)
     assert record_genreport_output(demo, dcid, reference_date=REF_Q2) == 0
-    unmig = _mk_tenant(gen_reports=False)          # AO not in reports world
-    ucid = _mk_client(unmig)
-    assert record_genreport_output(unmig, ucid, reference_date=REF_Q2) == 0
-    assert _count(demo) == 0 and _count(unmig) == 0
+    assert _count(demo) == 0
+
+
+def test_inactive_tenant_never_charges():
+    dead = _mk_tenant(active=False, status="canceled")
+    cid = _mk_client(dead, arrays=2)
+    assert record_genreport_output(dead, cid, reference_date=REF_Q2) == 0
+    assert _count(dead) == 0
+
+
+def test_output_bills_and_AUTO_ENROLLS_an_unmarked_tenant():
+    """Generation reports are enabled for everyone: taking a real output IS the
+    engagement, so it bills AND turns the tenant's reports world on. Gating the
+    charge on the marker would let an un-enrolled operator report for free."""
+    tid = _mk_tenant(gen_reports=False)            # never explicitly enrolled
+    cid = _mk_client(tid, arrays=2)
+    assert record_genreport_output(tid, cid, reference_date=REF_Q2,
+                                   first_source="download") == 2
+    assert _count(tid) == 2
+    with SessionLocal() as db:
+        assert db.get(Tenant, tid).generation_reports is True   # auto-enrolled
 
 
 def test_nepool_tenant_is_charged():
