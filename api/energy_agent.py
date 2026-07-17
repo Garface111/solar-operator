@@ -6897,64 +6897,37 @@ def _spoken_line(reply: str) -> str:
     return spoken or _plain_for_speech(text)
 
 
-_VOICE_SUMMARY_SYSTEM = (
-    "Rewrite this assistant answer as natural SPOKEN words — what a sharp colleague would "
-    "actually say out loud in a real conversation. Keep the substance, but say it as flowing "
-    "connected speech: COMPLETE sentences, finish every thought, however many sentences it "
-    "genuinely takes — do not clip it to a caption. Lead with the headline (keep any total "
-    "count or dollar figure). Weave any lists into speech — never read bullets, headings, "
-    "symbols, or item-by-item. Say numbers the human way ('about $170 a month', not "
-    "'$170.00/mo'; 'four sites', not '4'). When there's a lot, cover the important parts "
-    "fully, then end by offering to go deeper ('want the rundown?'). No markdown, no stage "
-    "directions. Return ONLY the spoken words."
-)
+# Option B (Ford 2026-07-16): the ONE brain authors its own spoken line in the
+# same reasoning pass — no dumber summarizer between the mind and its mouth. On
+# voice-active turns the model ends its reply with a "[SPOKEN] …" line: the text
+# above is shown on the panel, the [SPOKEN] line is what the voice speaks. Same
+# mind, so the spoken words carry the tools it just called and its actual plan.
+_SPOKEN_MARKER_RE = re.compile(r"(?is)\n?[ \t]*\[\s*spoken\s*\][ \t:]*")
 
 
-def _spoken_summarize(reply: str) -> str | None:
-    """Cheap, fast humanizer pass — turns a long/listy answer into one spoken
-    sentence. Falls back (returns None) on any error so the caller uses the
-    deterministic lead."""
-    if not ANTHROPIC_API_KEY:
-        return None
-    model = os.getenv("EA_VOICE_SUMMARY_MODEL", "claude-haiku-4-5-20251001")
-    try:
-        out = _http_json(
-            "https://api.anthropic.com/v1/messages",
-            {
-                "x-api-key": ANTHROPIC_API_KEY,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            {
-                "model": model,
-                "max_tokens": int(os.getenv("EA_VOICE_SUMMARY_MAX_TOKENS", "500") or 500),
-                "system": _VOICE_SUMMARY_SYSTEM,
-                "messages": [{"role": "user", "content": _plain_for_speech(reply)[:3000]}],
-            },
-            timeout=int(os.getenv("EA_VOICE_SUMMARY_TIMEOUT", "12") or 12),
-        )
-        parts = [b.get("text", "") for b in (out.get("content") or []) if b.get("type") == "text"]
-        line = re.sub(r"\s+", " ", " ".join(parts)).strip().strip('"“”')
-        return line or None
-    except Exception as e:  # noqa: BLE001
-        log.info("voice summarize fell back to lead: %s", e)
-        return None
+def _split_spoken(text: str) -> tuple[str, str | None]:
+    """Return (panel_text, spoken_line|None). Splits on the LAST [SPOKEN] marker
+    the brain authored. Falls back to (text, None) when the model didn't emit one
+    — the caller then speaks the brain's own lead sentence (still no Haiku)."""
+    t = text or ""
+    matches = list(_SPOKEN_MARKER_RE.finditer(t))
+    if not matches:
+        return t.strip(), None
+    m = matches[-1]
+    panel = t[: m.start()].strip()
+    spoken = _plain_for_speech(t[m.end():])
+    # Strip any stray earlier markers from the panel text (defensive).
+    panel = _SPOKEN_MARKER_RE.sub(" ", panel).strip()
+    if not spoken:
+        return panel or t.strip(), None
+    # If the model put everything after the marker (no panel text), show it too.
+    return (panel or spoken), spoken
 
 
 def _make_spoken(reply: str, *, voice_active: bool) -> str:
-    """The line the mouth actually speaks. Deterministic lead by default; a
-    humanized one-liner when voice is live AND the answer is long or listy (the
-    exact case that used to read a truncated list fragment aloud)."""
-    lead = _spoken_line(reply)
-    if not voice_active:
-        return lead
-    listy = bool(_LIST_LINE_RE.search(reply or "")) or "\n- " in (reply or "")
-    long = len((reply or "").split()) > 45
-    if listy or long:
-        summarized = _spoken_summarize(reply)
-        if summarized:
-            return summarized
-    return lead
+    """Fallback spoken line when the brain didn't author a [SPOKEN] line: its own
+    lead sentence (never a Haiku re-summary)."""
+    return _spoken_line(reply)
 
 
 def _agent_turn(
@@ -7071,19 +7044,25 @@ def _agent_turn(
         "product_map for rate questions. Avoid multi-tool fishing."
     )
     voice_turn = _is_voice_turn(source, context)
-    if voice_turn:
+    voice_active = voice_turn or bool((context or {}).get("voice_active"))
+    if voice_active:
+        # ONE mind, two outputs it authors itself (Ford 2026-07-16, Option B):
+        # the panel text (full) + a [SPOKEN] line YOU speak aloud. Same reasoning
+        # pass, so the spoken words carry the tools you just called and your plan.
         system += (
-            "\n\nCHANNEL=VOICE (spoken aloud — a real, flowing conversation):\n"
-            "- Talk like a person, not a written report. FINISH your thoughts — never "
-            "trail off or clip yourself mid-sentence.\n"
-            "- Lead with the answer, then say as much as it genuinely takes to be useful. "
-            "It's fine to take several sentences; you're having a conversation, not reading "
-            "a caption. Don't pad, but don't cut yourself short either.\n"
-            "- NEVER read markdown, bullet symbols, headings, or lists item-by-item aloud — "
-            "weave the points into natural connected speech.\n"
-            "- When there's a lot to cover, hit the important parts fully, then ask if they "
-            "want you to go deeper — don't stop halfway through explaining.\n"
-            "- No stage directions, no 'as an AI'. Just talk, and complete every thought."
+            "\n\nYOU WILL BE HEARD (voice is live). Produce your answer in TWO parts:\n"
+            "1) Your normal text answer for the on-screen panel — clear and complete "
+            "(the owner may be reading it).\n"
+            "2) Then a final line that starts EXACTLY with `[SPOKEN]` — the words your "
+            "voice actually says out loud. Everything above `[SPOKEN]` is shown on screen; "
+            "the `[SPOKEN]` line is NOT shown, only spoken.\n"
+            "The [SPOKEN] line: brief and human — your answer plus where you're headed — "
+            "said like a sharp colleague, not read like a report. You KNOW what you just "
+            "did (the tools you called, your plan) — let that intelligence show, briefly. "
+            "Usually 1–3 sentences; go longer only if it genuinely needs it. FINISH your "
+            "thought (never trail off), offer to go deeper if there's more, and put NO "
+            "markdown / bullets / headings / '#' in it. If your whole answer is one short "
+            "line, the [SPOKEN] line can just be that line, phrased for the ear."
         )
     else:
         system += (
@@ -7149,7 +7128,9 @@ def _agent_turn(
         voice_max = int(os.getenv("EA_VOICE_MAX_TOKENS", "1500") or 1500)
     except (TypeError, ValueError):
         voice_max = 1500
-    llm_max_tokens = voice_max if voice_turn else default_max
+    # Voice-active turns author BOTH the panel text and the [SPOKEN] line, so
+    # give them the larger budget (not just source=voice turns).
+    llm_max_tokens = voice_max if voice_active else default_max
 
     for _round in range(MAX_TOOL_ROUNDS):
         # Release the pooled DB connection before the (long, blocking) LLM HTTP
@@ -7278,8 +7259,10 @@ def _agent_turn(
     _charge(db, tenant.id, total_cost, f"chat:{provider or 'none'}")
     session.cost_usd = float(session.cost_usd or 0) + total_cost
 
-    # Panel-clean the text once — stored + returned + spoken all read from this.
-    final_text = _tidy_chat_text(final_text)
+    # Option B: split the brain's authored [SPOKEN] line off the panel text FIRST
+    # (it was written in the same pass, tool-aware), then panel-clean what's shown.
+    _panel_text, _authored_spoken = _split_spoken(final_text)
+    final_text = _tidy_chat_text(_panel_text)
 
     user_meta: dict[str, Any] = {}
     if context:
@@ -7313,12 +7296,13 @@ def _agent_turn(
             ),
         }
 
-    voice_active = voice_turn or bool((context or {}).get("voice_active"))
-    spoken = _make_spoken(final_text, voice_active=voice_active)
+    # The brain's own authored spoken line (same mind, tool-aware) when present;
+    # else its own lead sentence — never a separate summarizer.
+    spoken = _authored_spoken or _make_spoken(final_text, voice_active=voice_active)
     return {
         "reply": final_text,
-        # Mouth speaks this — a real spoken one-liner, not a truncation of the
-        # text. Humanized when voice is live and the answer is long/listy.
+        # Mouth speaks this — authored by the SAME brain that just reasoned and
+        # called tools, so the spoken words carry its plan (no Haiku middleman).
         "speak": spoken,
         "ui_commands": ui_commands,
         "pending": pending,
