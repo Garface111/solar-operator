@@ -231,6 +231,13 @@ CRITICAL — O&M ROSTER HUNGER (Repairs / any O&M question):
   Manufacturer warranty claims remain a separate path.
 - propose_site_improvement = ship UI/product improvements via the SAME judge pipeline as
   the old "Wish this was better" button (markup screenshot → judge → auto-ship small UI).
+- create_reminder = when they ask you to "remind me…" / "notify/tell/email me if/when…" /
+  "watch for…" / "let me know when…", set a reminder YOU keep and deliver by email + chat.
+  time (fire_at/delay) or watch (inverter_down | array_recovered | array_attention |
+  data_stale | custom+condition_text; scope with array_name). Confirm what you'll watch +
+  that you'll email them. This is YOUR reminder, NOT the robotic Fleet Alerts tab — if they
+  want standard down/underperform alerting, point them at Fleet Alerts instead.
+  list_reminders / cancel_reminder to manage them.
 - web_search = LIVE public internet search (news, regulations, utility policy, vendor docs,
   weather context, market rates). Use when the answer is outside this tenant's DB.
   web_fetch = open a public URL and extract readable text (after search or a pasted link).
@@ -546,6 +553,32 @@ class EaCostLedger(Base):
     amount_usd: Mapped[float] = mapped_column(Float, default=0.0)
     reason: Mapped[str] = mapped_column(String(64), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
+class EaReminder(Base):
+    """A conversational reminder / conditional WATCH the owner asked Energy Agent
+    to keep — distinct from the robotic Fleet Alerts (rule-based, in the Alerts
+    tab). "Email me Friday about X" (time) or "tell me if an inverter goes down"
+    (watch). Evaluated on a schedule; fires ONCE (edge-triggered), emails the
+    owner from the agent mailbox + mirrors into chat, then status=fired."""
+    __tablename__ = "ea_reminders"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(40), index=True)
+    session_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
+    kind: Mapped[str] = mapped_column(String(12), default="watch")  # time | watch
+    # time reminders:
+    fire_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    # watch reminders:
+    watch_type: Mapped[str | None] = mapped_column(String(28), nullable=True)
+    # inverter_down | array_recovered | array_attention | data_stale | custom
+    params_json: Mapped[str] = mapped_column(Text, default="{}")     # scope/array/hours/text
+    armed_json: Mapped[str] = mapped_column(Text, default="{}")      # baseline for edge-trigger
+    note: Mapped[str] = mapped_column(Text, default="")             # what to tell the owner
+    status: Mapped[str] = mapped_column(String(12), default="active", index=True)  # active|fired|cancelled
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    fired_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    fire_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class EaChatAsset(Base):
@@ -1662,6 +1695,66 @@ TOOL_DEFS = [
                     "needs_confirm": {"type": "boolean", "default": True},
                     "reason": {"type": "string"},
                 },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_reminder",
+            "description": (
+                "Set a REMINDER or a conditional WATCH the owner asked YOU to keep — YOU "
+                "email them (+ mirror to chat) when it fires. This is separate from the "
+                "robotic Fleet Alerts. Use whenever they say 'remind me…', 'notify/tell/email "
+                "me if/when…', 'let me know when…', 'watch for…'. \n"
+                "kind='time' + fire_at (ISO) or delay_minutes/hours/days for a scheduled "
+                "reminder. kind='watch' + watch_type for a condition: inverter_down (an "
+                "inverter goes dead/fault — optional array_name to scope), array_recovered "
+                "(a down site returns to healthy — needs array_name), array_attention (a site "
+                "starts needing attention), data_stale (capture goes stale — optional hours), "
+                "custom (anything else — put the exact condition in condition_text). ALWAYS "
+                "fill note with what to tell them when it fires."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "kind": {"type": "string", "enum": ["time", "watch"]},
+                    "note": {"type": "string", "description": "What to tell them when it fires"},
+                    "watch_type": {
+                        "type": "string",
+                        "enum": ["inverter_down", "array_recovered", "array_attention", "data_stale", "custom"],
+                    },
+                    "array_name": {"type": "string", "description": "Scope a watch to one site"},
+                    "hours": {"type": "number", "description": "data_stale threshold hours (default 30)"},
+                    "condition_text": {"type": "string", "description": "Exact condition for watch_type=custom"},
+                    "fire_at": {"type": "string", "description": "ISO datetime for a time reminder"},
+                    "delay_minutes": {"type": "number"},
+                    "delay_hours": {"type": "number"},
+                    "delay_days": {"type": "number"},
+                },
+                "required": ["note"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_reminders",
+            "description": "List the owner's active Energy Agent reminders / watches.",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_reminder",
+            "description": (
+                "Cancel an active reminder/watch. Pass reminder_id (from list_reminders); if "
+                "omitted and exactly one is active, cancels it, else returns the list to pick from."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {"reminder_id": {"type": "string"}},
             },
         },
     },
@@ -4511,6 +4604,389 @@ def _refresh_capture_tool(db, tenant: Tenant, args: dict) -> dict:
     }
 
 
+# ── Energy Agent reminders / conditional watches ──────────────────────────────
+# "Email me Friday about X" (time) or "tell me if an inverter goes down" (watch).
+# Distinct from the robotic Fleet Alerts — these are things the OWNER asked HER to
+# watch. Edge-triggered, one-shot; fires an email from the agent mailbox + a chat
+# mirror. Reuses the same fleet truth as investigate_attention.
+_REMINDER_WATCH_TYPES = ("inverter_down", "array_recovered", "array_attention", "data_stale", "custom")
+_DOWN_STATUSES = ("dead", "fault", "comm_gap")
+
+
+def _reminder_fleet_state(db, tenant: Tenant) -> dict:
+    """Snapshot the fleet facts the watches evaluate against (one build reused
+    across all of a tenant's reminders)."""
+    cols, _summary = _fleet_tree_columns(db, tenant)
+    down_ids: set[str] = set()
+    down_by_array: dict[Any, set] = {}
+    attention: set = set()
+    arrays: dict[Any, dict] = {}
+    name_to_aid: dict[str, Any] = {}
+    array_ok: dict[Any, bool] = {}
+    for col in cols:
+        aid = col.get("array_id")
+        name = col.get("array_name") or ""
+        if name:
+            name_to_aid[name.strip().lower()] = aid
+        needs = _array_needs_attention(col)
+        if needs:
+            attention.add(aid)
+        dset = set()
+        for inv in col.get("inverters") or []:
+            if (inv.get("status") or "ok").lower() in _DOWN_STATUSES:
+                iid = str(inv.get("sn") or inv.get("name") or inv.get("inverter_id"))
+                dset.add(f"{aid}:{iid}")
+        if dset:
+            down_by_array[aid] = dset
+            down_ids |= dset
+        arrays[aid] = {"name": name, "needs_attention": bool(needs)}
+        array_ok[aid] = (not needs) and (not dset)
+    hours = None
+    try:
+        hours = _compute_setup_status(db, tenant).get("hours_since_capture")
+    except Exception:
+        pass
+    return {
+        "down_ids": down_ids, "down_by_array": down_by_array,
+        "attention_arrays": attention, "arrays": arrays,
+        "name_to_aid": name_to_aid, "array_ok": array_ok,
+        "hours_since_capture": hours,
+    }
+
+
+def _reminder_resolve_array(state: dict, params: dict) -> tuple[Any, str | None]:
+    """Best-effort array_id + display name from params (id or name)."""
+    aid = params.get("array_id")
+    if aid is not None and aid in state["arrays"]:
+        return aid, state["arrays"][aid].get("name")
+    nm = (params.get("array_name") or "").strip().lower()
+    if nm:
+        # exact, then contains
+        if nm in state["name_to_aid"]:
+            a = state["name_to_aid"][nm]
+            return a, state["arrays"].get(a, {}).get("name")
+        for k, a in state["name_to_aid"].items():
+            if nm in k or k in nm:
+                return a, state["arrays"].get(a, {}).get("name")
+    return None, params.get("array_name")
+
+
+def _arm_reminder(rem: "EaReminder", state: dict) -> dict:
+    """Baseline for edge-triggering, captured when the watch is created."""
+    params = json.loads(rem.params_json or "{}")
+    wt = rem.watch_type
+    if wt == "inverter_down":
+        aid, _ = _reminder_resolve_array(state, params)
+        base = state["down_by_array"].get(aid, set()) if aid is not None else state["down_ids"]
+        return {"down_ids": sorted(base)}
+    if wt == "array_attention":
+        aid, _ = _reminder_resolve_array(state, params)
+        base = ({aid} & state["attention_arrays"]) if aid is not None else set(state["attention_arrays"])
+        return {"attention": sorted(str(x) for x in base)}
+    if wt == "data_stale":
+        return {"was_stale": bool((state["hours_since_capture"] or 0) >= (params.get("hours") or 30))}
+    return {}
+
+
+def _evaluate_reminder(rem: "EaReminder", state: dict) -> tuple[bool, str]:
+    """Edge-triggered evaluation → (fired, human detail)."""
+    params = json.loads(rem.params_json or "{}")
+    armed = json.loads(rem.armed_json or "{}")
+    wt = rem.watch_type
+    if wt == "inverter_down":
+        aid, aname = _reminder_resolve_array(state, params)
+        baseline = set(armed.get("down_ids") or [])
+        current = state["down_by_array"].get(aid, set()) if aid is not None else state["down_ids"]
+        new_down = current - baseline
+        if new_down:
+            names = [i.split(":", 1)[-1] for i in sorted(new_down)]
+            where = f" at {aname}" if aname else ""
+            return True, f"{len(new_down)} inverter(s) just went down{where}: {', '.join(names)}."
+        return False, ""
+    if wt == "array_recovered":
+        aid, aname = _reminder_resolve_array(state, params)
+        if aid is not None and state["array_ok"].get(aid):
+            return True, f"{aname or 'That site'} is back to healthy."
+        return False, ""
+    if wt == "array_attention":
+        aid, aname = _reminder_resolve_array(state, params)
+        baseline = set(armed.get("attention") or [])
+        current = ({str(aid)} & {str(x) for x in state["attention_arrays"]}) if aid is not None \
+            else {str(x) for x in state["attention_arrays"]}
+        new_attn = current - baseline
+        if new_attn:
+            names = [state["arrays"].get(a if a in state["arrays"] else a, {}).get("name")
+                     or aname or "a site" for a in new_attn]
+            return True, f"Needs attention now: {', '.join(dict.fromkeys(n for n in names if n))}."
+        return False, ""
+    if wt == "data_stale":
+        thr = params.get("hours") or 30
+        cur = state["hours_since_capture"]
+        if cur is not None and cur >= thr and not armed.get("was_stale"):
+            return True, f"Your fleet data has gone stale — last capture ~{round(cur)}h ago."
+        return False, ""
+    if wt == "custom":
+        return _evaluate_custom_reminder(rem, state)
+    return False, ""
+
+
+def _evaluate_custom_reminder(rem: "EaReminder", state: dict) -> tuple[bool, str]:
+    """Free-form watch: a cheap LLM checks the owner's condition against a compact
+    fleet snapshot. Fail-closed (never fire) on any error."""
+    if not ANTHROPIC_API_KEY:
+        return False, ""
+    params = json.loads(rem.params_json or "{}")
+    cond = (params.get("condition_text") or rem.note or "").strip()
+    if not cond:
+        return False, ""
+    snap = {
+        "down_inverters": sorted(state["down_ids"])[:40],
+        "arrays_needing_attention": [state["arrays"][a].get("name") for a in state["attention_arrays"]][:40],
+        "hours_since_capture": state["hours_since_capture"],
+    }
+    try:
+        out = _http_json(
+            "https://api.anthropic.com/v1/messages",
+            {"x-api-key": ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01",
+             "content-type": "application/json"},
+            {
+                "model": os.getenv("EA_REMINDER_EVAL_MODEL", "claude-haiku-4-5-20251001"),
+                "max_tokens": 120,
+                "system": (
+                    "You decide if a solar-fleet owner's watch CONDITION is met RIGHT NOW, given a "
+                    "fleet snapshot. Reply STRICT JSON: {\"met\": true|false, \"detail\": \"one short line\"}. "
+                    "Default met=false when unsure or the data can't confirm it. Never invent facts "
+                    "beyond the snapshot."
+                ),
+                "messages": [{"role": "user", "content": json.dumps(
+                    {"condition": cond, "snapshot": snap}, default=str)[:2000]}],
+            },
+            timeout=int(os.getenv("EA_REMINDER_EVAL_TIMEOUT", "12") or 12),
+        )
+        txt = "".join(b.get("text", "") for b in (out.get("content") or []) if b.get("type") == "text")
+        m = re.search(r"\{[\s\S]*\}", txt)
+        data = json.loads(m.group(0)) if m else {}
+        if bool(data.get("met")):
+            return True, (str(data.get("detail") or "Your watch condition was met.")[:300])
+    except Exception as e:  # noqa: BLE001
+        log.info("custom reminder eval skipped %s: %s", rem.id, e)
+    return False, ""
+
+
+def _parse_fire_at(args: dict) -> datetime | None:
+    fa = args.get("fire_at")
+    if fa:
+        try:
+            s = str(fa).strip().replace("Z", "")
+            return datetime.fromisoformat(s)
+        except Exception:
+            pass
+    for key, mult in (("delay_minutes", 1), ("delay_hours", 60), ("delay_days", 1440)):
+        v = args.get(key)
+        if v is not None:
+            try:
+                return _now() + timedelta(minutes=float(v) * mult)
+            except Exception:
+                pass
+    return None
+
+
+def _human_when(dt: datetime) -> str:
+    try:
+        mins = (dt - _now()).total_seconds() / 60.0
+        if mins < 90:
+            return f"in about {max(1, round(mins))} minutes"
+        if mins < 60 * 36:
+            return f"in about {round(mins / 60)} hours"
+        return f"on {dt.strftime('%a %b %-d')}" if hasattr(dt, "strftime") else "soon"
+    except Exception:
+        return "soon"
+
+
+def _reminder_initial_note(rem: "EaReminder", state: dict) -> str | None:
+    """Honest heads-up about the CURRENT state when a watch is created (so the
+    agent can say 'it's already down' rather than pretend it will only fire later)."""
+    params = json.loads(rem.params_json or "{}")
+    wt = rem.watch_type
+    if wt == "inverter_down":
+        aid, aname = _reminder_resolve_array(state, params)
+        cur = state["down_by_array"].get(aid, set()) if aid is not None else state["down_ids"]
+        if cur:
+            where = f"{aname} " if aname else ""
+            return f"Heads up — {where}already has {len(cur)} inverter(s) down right now."
+    elif wt == "array_recovered":
+        aid, aname = _reminder_resolve_array(state, params)
+        if aid is not None and state["array_ok"].get(aid):
+            return f"{aname or 'That site'} is actually healthy right now — want me to watch for it going down instead?"
+    elif wt == "data_stale":
+        cur = state["hours_since_capture"]
+        thr = params.get("hours") or 30
+        if cur is not None and cur >= thr:
+            return f"Your data is already stale (~{round(cur)}h)."
+    return None
+
+
+def _create_reminder_tool(db, tenant: Tenant, session, args: dict) -> dict:
+    note = (args.get("note") or "").strip()
+    if not note:
+        return {"ok": False, "error": "note is required — what should I tell you when it fires?"}
+    kind = "time" if (args.get("kind") or "").strip().lower() == "time" else "watch"
+    rid = "rem_" + uuid.uuid4().hex[:16]
+    rem = EaReminder(
+        id=rid, tenant_id=tenant.id,
+        session_id=getattr(session, "id", None),
+        kind=kind, note=note[:1000],
+    )
+    if kind == "time":
+        fa = _parse_fire_at(args)
+        if fa is None:
+            return {"ok": False, "error": "For a time reminder, give fire_at (ISO) or delay_minutes/delay_hours/delay_days."}
+        rem.fire_at = fa
+        db.add(rem)
+        db.commit()
+        return {"ok": True, "reminder_id": rid, "kind": "time",
+                "fires_at": fa.isoformat() + "Z",
+                "message": f"Set — I'll email you {_human_when(fa)}: {note}"}
+    wt = (args.get("watch_type") or "").strip().lower()
+    if wt not in _REMINDER_WATCH_TYPES:
+        return {"ok": False, "error": f"watch_type must be one of {list(_REMINDER_WATCH_TYPES)}"}
+    params: dict = {}
+    if args.get("array_name"):
+        params["array_name"] = str(args["array_name"])[:120]
+    if args.get("hours") is not None:
+        try:
+            params["hours"] = max(1, float(args["hours"]))
+        except Exception:
+            pass
+    if args.get("condition_text"):
+        params["condition_text"] = str(args["condition_text"])[:500]
+    rem.watch_type = wt
+    rem.params_json = json.dumps(params)
+    state = _reminder_fleet_state(db, tenant)
+    rem.armed_json = json.dumps(_arm_reminder(rem, state))
+    db.add(rem)
+    db.commit()
+    return {
+        "ok": True, "reminder_id": rid, "kind": "watch", "watch_type": wt,
+        "scope": params.get("array_name") or "any",
+        "initial_state": _reminder_initial_note(rem, state),
+        "message": f"On it — I'll email you the moment it happens: {note}",
+        "instruction_for_agent": (
+            "Confirm what you'll watch for + how they'll hear (email + here in chat). If "
+            "initial_state is set, tell them that honestly (e.g. it's already down)."
+        ),
+    }
+
+
+def _list_reminders_tool(db, tenant: Tenant, args: dict) -> dict:
+    rows = db.execute(
+        select(EaReminder).where(
+            EaReminder.tenant_id == tenant.id,
+            EaReminder.status == "active",
+        ).order_by(EaReminder.created_at.desc()).limit(50)
+    ).scalars().all()
+    def _d(r: EaReminder) -> dict:
+        p = {}
+        try:
+            p = json.loads(r.params_json or "{}")
+        except Exception:
+            pass
+        return {
+            "reminder_id": r.id, "kind": r.kind, "note": r.note,
+            "watch_type": r.watch_type,
+            "scope": p.get("array_name") or ("any" if r.kind == "watch" else None),
+            "fires_at": (r.fire_at.isoformat() + "Z") if r.fire_at else None,
+            "created_at": r.created_at.isoformat() + "Z" if r.created_at else None,
+        }
+    return {"reminders": [_d(r) for r in rows], "count": len(rows)}
+
+
+def _cancel_reminder_tool(db, tenant: Tenant, args: dict) -> dict:
+    rid = (args.get("reminder_id") or "").strip()
+    q = select(EaReminder).where(
+        EaReminder.tenant_id == tenant.id, EaReminder.status == "active",
+    )
+    if rid:
+        q = q.where(EaReminder.id == rid)
+    rows = db.execute(q.order_by(EaReminder.created_at.desc())).scalars().all()
+    if not rows:
+        return {"ok": False, "error": "No matching active reminder."}
+    # If no id given and exactly one active, cancel it; else ask which.
+    if not rid and len(rows) > 1:
+        return {"ok": False, "need_pick": True,
+                "reminders": [{"reminder_id": r.id, "note": r.note} for r in rows]}
+    target = rows[0]
+    target.status = "cancelled"
+    db.commit()
+    return {"ok": True, "cancelled": target.id, "note": target.note}
+
+
+def fire_reminder(db, tenant: Tenant, rem: "EaReminder", detail: str) -> bool:
+    """Deliver a fired reminder: email the owner (agent mailbox) + mirror to chat,
+    mark fired. Idempotent — a re-check won't re-fire (status flips)."""
+    subject = "You asked me to let you know"
+    body_intro = (rem.note or "your reminder").strip()
+    line = detail.strip() if detail else ""
+    ok = False
+    try:
+        from .energy_agent_email import send_reminder_email
+        ok = send_reminder_email(tenant, note=body_intro, detail=line)
+    except Exception as e:
+        log.warning("reminder email failed %s: %s", rem.id, e)
+    rem.status = "fired"
+    rem.fired_at = _now()
+    rem.fire_detail = (line or body_intro)[:1000]
+    db.commit()
+    try:
+        from .repair_ops import _mirror_email_to_chat
+        chat = f"You asked me to tell you: {body_intro}." + (f" {line}" if line else "")
+        _mirror_email_to_chat(db, tenant.id, chat, kind="reminder")
+    except Exception:
+        pass
+    return ok
+
+
+def evaluate_ea_reminders_for_tenant(db, tenant: Tenant) -> int:
+    """Fire any due time-reminders + any watches whose condition just became true.
+    One fleet-state build reused across the tenant's watches."""
+    fired = 0
+    active = db.execute(
+        select(EaReminder).where(
+            EaReminder.tenant_id == tenant.id, EaReminder.status == "active",
+        ).limit(200)
+    ).scalars().all()
+    if not active:
+        return 0
+    # Time reminders first (no fleet build needed).
+    now_ = _now()
+    watches = []
+    for rem in active:
+        if rem.kind == "time":
+            if rem.fire_at and rem.fire_at <= now_:
+                if fire_reminder(db, tenant, rem, ""):
+                    fired += 1
+        else:
+            watches.append(rem)
+    if not watches:
+        return fired
+    try:
+        state = _reminder_fleet_state(db, tenant)
+    except Exception as e:
+        log.info("reminder fleet state failed %s: %s", tenant.id, e)
+        return fired
+    for rem in watches:
+        try:
+            hit, detail = _evaluate_reminder(rem, state)
+            rem.last_checked_at = now_
+            if hit:
+                if fire_reminder(db, tenant, rem, detail):
+                    fired += 1
+        except Exception as e:  # noqa: BLE001
+            log.info("reminder eval failed %s: %s", rem.id, e)
+    db.commit()
+    return fired
+
+
 def _ea_judge_write(name: str, args: dict) -> dict | None:
     """Internal judge for Energy Agent writes (not the site auto-ship judge).
 
@@ -5598,6 +6074,13 @@ def _run_tool(
 
     if name == "setup_status":
         return _setup_status_tool(db, tenant, args)
+
+    if name == "create_reminder":
+        return _create_reminder_tool(db, tenant, session, args)
+    if name == "list_reminders":
+        return _list_reminders_tool(db, tenant, args)
+    if name == "cancel_reminder":
+        return _cancel_reminder_tool(db, tenant, args)
 
     if name == "refresh_capture":
         needs = bool(args.get("needs_confirm", True))
