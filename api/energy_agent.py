@@ -7608,19 +7608,27 @@ def _ea_ensure_email_delivery_table(db=None) -> None:
         log.exception("ea_email_delivery table create failed")
 
 
-def _tenant_known_emails(db, tenant_id: str) -> dict[str, str]:
-    """Every address this tenant legitimately mails → who it is.
+def _tenant_known_emails(db, tenant_id: str) -> dict[str, list[str]]:
+    """Every address this tenant legitimately mails → who it is (possibly several).
 
     The read scope for delivery receipts. Receipts are stored unscoped (a
     webhook carries no tenant), so the tenant's own recipient set is what keeps
     one operator from reading another's mail status.
+
+    One address can be more than one person — an operator is often their own
+    first repair contact, so the owner and a tech share an inbox. Keep every
+    label: collapsing to the first one hid a real contact behind "you (account
+    owner)" and made "did Rex get it?" answer "no such contact" (2026-07-16).
     """
-    known: dict[str, str] = {}
+    known: dict[str, list[str]] = {}
 
     def _add(addr, who):
         a = (addr or "").strip().lower()
-        if a:
-            known.setdefault(a, who)
+        if not a:
+            return
+        labels = known.setdefault(a, [])
+        if who not in labels:
+            labels.append(who)
 
     t = db.get(Tenant, tenant_id)
     if t is not None:
@@ -7664,15 +7672,19 @@ def _check_email_delivery_tool(db, tenant: Tenant, args: dict) -> dict:
     days = max(1, min(days, 90))
     since = _now() - timedelta(days=days)
 
+    def _who(addr: str) -> str:
+        return ", ".join(known.get(addr) or []) or addr
+
     targets = list(known.keys())
     if who:
         # Accept an address or a name ("Rex") — resolve against this tenant only.
         hits = [e for e in known if e == who] or \
-               [e for e in known if who in e or who in known[e].lower()]
+               [e for e in known
+                if who in e or any(who in lbl.lower() for lbl in known[e])]
         if not hits:
             return {"ok": False, "found": 0,
                     "message": f"No contact matching '{args.get('recipient')}' on this account.",
-                    "known_contacts": sorted(known.values())}
+                    "known_contacts": sorted(_who(e) for e in known)}
         targets = hits
 
     rows = db.execute(
@@ -7685,7 +7697,7 @@ def _check_email_delivery_tool(db, tenant: Tenant, args: dict) -> dict:
 
     out = [{
         "to": r.to_email,
-        "who": known.get(r.to_email, r.to_email),
+        "who": _who(r.to_email),
         "status": r.event,
         "at": r.created_at.isoformat() if r.created_at else None,
         "subject": r.subject,
