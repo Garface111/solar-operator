@@ -3474,6 +3474,64 @@ def dismiss_array_merge_suggestion(array_id: int, other_id: int,
         return {"ok": True}
 
 
+class AutoSendAllBody(BaseModel):
+    enabled: bool = True
+
+
+@router.post("/v1/account/clients/auto-send-all")
+def set_auto_send_all(body: AutoSendAllBody,
+                      authorization: Optional[str] = Header(default=None)):
+    """Turn generation-report auto-send ON (or off) for EVERY active client.
+
+    THE FOLD (Ford 2026-07-16): this is the one deliberate "turn my account on"
+    action — the operator has reviewed their auto-propagated clients, and now
+    commits: every client's report ships automatically each period, and each
+    array they report bills $15 once per quarter (metered, on first output).
+    Flipping it on also enrolls the tenant in the reports world so the scheduler,
+    digests and the operator directory come alive.
+
+    Idempotent. Returns the counts the UI already showed the operator before they
+    confirmed the cost, so the two can never disagree.
+    """
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    require_active_subscription(t)
+    enabled = bool(body.enabled)
+    with SessionLocal() as db:
+        clients = db.execute(
+            select(Client).where(
+                Client.tenant_id == t.id,
+                Client.active == True,  # noqa: E712
+                Client.deleted_at.is_(None),
+            )
+        ).scalars().all()
+        for c in clients:
+            c.auto_send = enabled
+        if enabled and clients:
+            row = db.get(Tenant, t.id)
+            if row is not None:
+                row.generation_reports = True
+        db.commit()
+        n_clients = len(clients)
+        arrays = int(db.execute(
+            select(func.count()).select_from(Array).where(
+                Array.tenant_id == t.id,
+                Array.deleted_at.is_(None),
+                Array.excluded.is_(False),
+                Array.client_id.in_([c.id for c in clients]) if clients else False,
+            )
+        ).scalar() or 0) if clients else 0
+    from .pricing_ao_genreports import PRICE_CENTS
+    return {
+        "ok": True,
+        "auto_send": enabled,
+        "clients": n_clients,
+        "arrays": arrays,
+        "price_cents_per_array": PRICE_CENTS,
+        "estimated_quarterly_cents": arrays * PRICE_CENTS if enabled else 0,
+    }
+
+
 @router.patch("/v1/account/clients/{client_id}")
 def update_client(client_id: int, body: ClientUpdate,
                   authorization: Optional[str] = Header(default=None)):
