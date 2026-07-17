@@ -26,13 +26,23 @@
    red=failed/bounced), every id/behavior, all copy. Re-skin, not redesign.
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/* ── 1 · GROUND: transparent — the .rb2 Sky sheet shows through ─────────────
-   index.css compiles body{background:var(--so-cream)} to
-   #so-genrep{background-color:#faf8f5}; this block is the same selector
-   (html/body/:root all collapse to #so-genrep), later in the bundle -> wins.
-   The --so-* tokens are re-pointed for any var() consumer. */
+/* ── 1 · GROUND: the BOTTOMMOST frosted-glass sheet ─────────────────────────
+   Ford (2026-07-16): "the white cards should sit on frosted glass, very
+   contrasty text." Was transparent (leaning on the host .rb2 .66 sheet, which
+   is UN-blurred — the alpine photo read straight through and the content
+   blended in). Give the embed its own frosted-glass sheet so the whole surface
+   reads as glass, and the white content cards pop off it. One blur layer for
+   the entire embed (not per-card), so the 48-array canvas GPU budget is safe.
+   index.css compiles body{background:var(--so-cream)} to #so-genrep{...}; this
+   is the same selector (html/body/:root collapse to #so-genrep), later in the
+   bundle -> wins. */
 body {
-  background-color: transparent;
+  background-color: rgba(255, 255, 255, 0.58);
+  backdrop-filter: blur(20px) saturate(1.5);
+  -webkit-backdrop-filter: blur(20px) saturate(1.5);
+  border-radius: 20px;
+  padding: 14px;
+  box-shadow: 0 10px 34px -12px rgba(20, 60, 120, 0.22);
 
   --so-cream: transparent;
   --so-cream-border: rgba(20, 60, 120, 0.13);
@@ -41,12 +51,13 @@ body {
   --so-shadow-card: 0 8px 30px rgba(20, 60, 120, 0.08);
 }
 
-/* ── 2 · CARD MATERIAL: near-solid frosted white, no blur ───────────────────
-   bg-white cards become the .86 inner-card tier (they already sit on the
-   host's blurred .66 sheet -- translucency alone reads as glass, and per-card
-   blur would blow the GPU budget on the 48-array canvas). */
+/* ── 2 · CARD MATERIAL: the TOPMOST near-solid WHITE cards ──────────────────
+   bg-white cards go near-solid (.96) so text is high-contrast and each card
+   reads as a crisp white plane floating on the frosted sheet above. No
+   per-card blur (the sheet below already carries the glass; per-card blur
+   would blow the GPU budget on the 48-array canvas). */
 .bg-white {
-  background-color: rgba(255, 255, 255, 0.86);
+  background-color: rgba(255, 255, 255, 0.96);
 }
 
 /* Floating layers stay SOLID for legibility (AO keeps --card:#fff for the
