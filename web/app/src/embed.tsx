@@ -28,6 +28,7 @@ import { ToastProvider } from "./ui/Toast";
 import { Spinner } from "./ui/Spinner";
 import ClientsTab from "./screens/ClientsTab";
 import NepoolReportsTab from "./screens/NepoolReportsTab";
+import { SetupProgress } from "./components/SetupProgress";
 import { lazyWithRetry } from "./lib/lazyWithRetry";
 import type { DashboardContext } from "./screens/DashboardLayout";
 import {
@@ -119,6 +120,7 @@ function EmbedShell() {
           </NavLink>
         ))}
       </nav>
+      <SetupProgress />
       <Outlet context={ctx} />
     </div>
   );
