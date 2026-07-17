@@ -255,10 +255,19 @@ def main():
             conn.execute(text(
                 "ALTER TABLE clients ADD COLUMN auto_send BOOLEAN DEFAULT FALSE NOT NULL"))
             print("  + clients.auto_send")
+            # Backfill TRUE for every client on a tenant already in the
+            # generation-reports world — NEPOOL tenants AND the migrated Array
+            # Operator reports tenants (generation_reports=TRUE, e.g. Bruce's
+            # GMCS / Norwich). THE FOLD retired their capture-artifact clients
+            # (soft-deleted) during migration, so their remaining ACTIVE clients
+            # are real report clients whose existing auto-sends must keep running.
+            # New signups + auto-propagated artifact clients on non-reports-world
+            # tenants stay FALSE and enroll deliberately via the per-client toggle.
             conn.execute(text(
                 "UPDATE clients SET auto_send = TRUE WHERE tenant_id IN "
-                "(SELECT id FROM tenants WHERE product IS NULL OR product <> 'array_operator')"))
-            print("  ↪ clients.auto_send backfilled TRUE for legacy NEPOOL clients")
+                "(SELECT id FROM tenants WHERE product IS NULL "
+                " OR product <> 'array_operator' OR generation_reports = TRUE)"))
+            print("  ↪ clients.auto_send backfilled TRUE for reports-world clients")
 
         # Backfill defaults for existing rows so the columns are never NULL
         # where the model declares a default.
