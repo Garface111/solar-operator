@@ -555,6 +555,28 @@ class EaCostLedger(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
 
+class EaEmailDelivery(Base):
+    """What Resend told us actually happened to an email we sent.
+
+    Resend webhooks already report email.delivered / email.bounced /
+    email.complained for EVERY message, but the handler only stamped Client
+    rows (offtakers) — so an event for a repair tech or the owner matched
+    nothing and was discarded. The agent then had no way to answer "did that
+    email land?" and guessed, contradicting itself (Ford 2026-07-16: it denied
+    sending emails it had just sent). This keeps the receipt.
+
+    Not tenant-scoped at write time (a webhook carries no tenant): the read
+    tool scopes by the tenant's OWN known recipients instead."""
+    __tablename__ = "ea_email_delivery"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    to_email: Mapped[str] = mapped_column(String(200), index=True)
+    event: Mapped[str] = mapped_column(String(24), index=True)  # delivered|bounced|complained
+    subject: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(200), nullable=True)  # bounce reason
+    resend_email_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
+
+
 class EaReminder(Base):
     """A conversational reminder / conditional WATCH the owner asked Energy Agent
     to keep — distinct from the robotic Fleet Alerts (rule-based, in the Alerts
@@ -1755,6 +1777,27 @@ TOOL_DEFS = [
             "parameters": {
                 "type": "object",
                 "properties": {"reminder_id": {"type": "string"}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_email_delivery",
+            "description": (
+                "Check whether email you sent actually landed — Resend's own delivery receipts "
+                "(delivered / bounced / complained) for this account's contacts. Use whenever the "
+                "owner asks 'did that email send/arrive?', 'did Rex get it?', or you are about to "
+                "claim something did or didn't go out. This is EVIDENCE — check it instead of "
+                "guessing. Omit recipient for everything recent; pass a name or address to narrow. "
+                "IMPORTANT: no receipt does NOT mean not delivered — say you have no receipt."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "recipient": {"type": "string", "description": "Name or email (e.g. 'Rex'). Omit for all."},
+                    "days": {"type": "integer", "description": "Look-back window, default 7, max 90"},
+                },
             },
         },
     },
@@ -5358,7 +5401,8 @@ SKILL_REGISTRY: dict[str, dict] = {
                 "tools": {"repair_ops_overview", "list_service_contacts", "upsert_service_contact",
                           "assign_service_contact", "open_repair_ticket", "update_repair_ticket",
                           "draft_repair_checkin", "send_repair_checkin", "log_repair_note",
-                          "log_repair_phone_note", "list_repair_tickets"}},
+                          "log_repair_phone_note", "list_repair_tickets",
+                          "check_email_delivery"}},
     "reminders": {"label": "Reminders & watches", "default_on": True, "self_activatable": True,
                   "tools": {"create_reminder", "list_reminders", "cancel_reminder"}},
     "capture_and_setup": {"label": "Data capture & setup", "default_on": True,
@@ -5548,6 +5592,8 @@ def _run_tool(
         return _list_skills_tool(db, tenant, args)
     if name == "request_capability":
         return _request_capability_tool(db, tenant, args)
+    if name == "check_email_delivery":
+        return _check_email_delivery_tool(db, tenant, args)
 
     if name == "tenant_census":
         return _tenant_census_tool(db, tenant, args)
@@ -7548,6 +7594,119 @@ def _ea_ensure_asset_table(db=None) -> None:
         Base.metadata.create_all(bind=bind, tables=[EaChatAsset.__table__])
     except Exception:
         log.exception("ea_chat_assets table create failed")
+
+
+def _ea_ensure_email_delivery_table(db=None) -> None:
+    try:
+        if db is not None:
+            bind = db.get_bind()
+        else:
+            from .db import engine
+            bind = engine
+        Base.metadata.create_all(bind=bind, tables=[EaEmailDelivery.__table__])
+    except Exception:
+        log.exception("ea_email_delivery table create failed")
+
+
+def _tenant_known_emails(db, tenant_id: str) -> dict[str, str]:
+    """Every address this tenant legitimately mails → who it is.
+
+    The read scope for delivery receipts. Receipts are stored unscoped (a
+    webhook carries no tenant), so the tenant's own recipient set is what keeps
+    one operator from reading another's mail status.
+    """
+    known: dict[str, str] = {}
+
+    def _add(addr, who):
+        a = (addr or "").strip().lower()
+        if a:
+            known.setdefault(a, who)
+
+    t = db.get(Tenant, tenant_id)
+    if t is not None:
+        _add(getattr(t, "contact_email", None), "you (account owner)")
+    try:
+        from .models import ServiceContact
+        for c in db.execute(
+            select(ServiceContact).where(ServiceContact.tenant_id == tenant_id)
+        ).scalars().all():
+            _add(c.email, f"{c.name} (repair contact)")
+    except Exception:
+        log.exception("known emails: service contacts lookup failed")
+    try:
+        for c in db.execute(
+            select(Client).where(Client.tenant_id == tenant_id)
+        ).scalars().all():
+            _add(c.contact_email, f"{getattr(c, 'name', 'client')} (offtaker)")
+    except Exception:
+        log.exception("known emails: clients lookup failed")
+    return known
+
+
+def _check_email_delivery_tool(db, tenant: Tenant, args: dict) -> dict:
+    """Did an email we sent actually land? Answers from Resend's own receipts.
+
+    Honest by construction: "no receipt" and "not delivered" are different
+    answers, and this must never collapse them — receipts only exist for mail
+    sent after this shipped, and only if Resend's webhook is wired.
+    """
+    _ea_ensure_email_delivery_table(db)
+    known = _tenant_known_emails(db, tenant.id)
+    if not known:
+        return {"ok": True, "found": 0,
+                "message": "No contacts on this account yet, so there's no mail to check."}
+
+    who = (args.get("recipient") or "").strip().lower()
+    try:
+        days = int(args.get("days") or 7)
+    except (TypeError, ValueError):
+        days = 7
+    days = max(1, min(days, 90))
+    since = _now() - timedelta(days=days)
+
+    targets = list(known.keys())
+    if who:
+        # Accept an address or a name ("Rex") — resolve against this tenant only.
+        hits = [e for e in known if e == who] or \
+               [e for e in known if who in e or who in known[e].lower()]
+        if not hits:
+            return {"ok": False, "found": 0,
+                    "message": f"No contact matching '{args.get('recipient')}' on this account.",
+                    "known_contacts": sorted(known.values())}
+        targets = hits
+
+    rows = db.execute(
+        select(EaEmailDelivery)
+        .where(EaEmailDelivery.to_email.in_(targets),
+               EaEmailDelivery.created_at >= since)
+        .order_by(EaEmailDelivery.created_at.desc())
+        .limit(40)
+    ).scalars().all()
+
+    out = [{
+        "to": r.to_email,
+        "who": known.get(r.to_email, r.to_email),
+        "status": r.event,
+        "at": r.created_at.isoformat() if r.created_at else None,
+        "subject": r.subject,
+        "reason": r.reason,
+    } for r in rows]
+
+    bounced = [r for r in out if r["status"] in ("bounced", "complained")]
+    return {
+        "ok": True,
+        "found": len(out),
+        "window_days": days,
+        "receipts": out,
+        "bounced_count": len(bounced),
+        "instruction_for_agent": (
+            "These are Resend's own delivery receipts — real evidence, not a guess. "
+            "A 'delivered' receipt means it reached their mail server. If found=0, say you have "
+            "NO receipt for that window — do NOT say it wasn't delivered; receipts only exist for "
+            "mail sent recently, and absence of a receipt is not evidence of failure. "
+            "A bounce IS actionable: tell the owner the address is bad and why."
+        ),
+    }
 
 
 def _ea_load_assets(db, tenant_id: str, asset_ids: list[str] | None) -> list[EaChatAsset]:

@@ -320,6 +320,7 @@ async def resend_webhook(
     reason = _bounce_reason(event_type, data) if event_type != "email.delivered" else None
     ts = now()
     matched: list[int] = []
+    recorded = 0
     with SessionLocal() as db:
         for email in recipients:
             clients = db.execute(
@@ -332,6 +333,25 @@ async def resend_webhook(
                     c.last_bounced_at = ts
                     c.last_bounce_reason = reason
                 matched.append(c.id)
+
+            # Keep the receipt for EVERY recipient, not just offtakers. Resend
+            # reports on all of them; we used to bin anything that wasn't a
+            # Client — including repair techs and the owner — which left the
+            # agent unable to answer "did that email land?" (Ford 2026-07-16).
+            try:
+                from .energy_agent import EaEmailDelivery, _ea_ensure_email_delivery_table
+                _ea_ensure_email_delivery_table(db)
+                db.add(EaEmailDelivery(
+                    to_email=email,
+                    event=(event_type or "").replace("email.", "")[:24],
+                    subject=(data.get("subject") or None),
+                    reason=reason,
+                    resend_email_id=(data.get("email_id") or data.get("id") or None),
+                    created_at=ts,
+                ))
+                recorded += 1
+            except Exception:  # noqa: BLE001 — a receipt must never break the webhook
+                logger.exception("resend: failed to record delivery receipt for %s", email)
         db.commit()
 
-    return {"ok": True, "event": event_type, "matched": matched}
+    return {"ok": True, "event": event_type, "matched": matched, "recorded": recorded}
