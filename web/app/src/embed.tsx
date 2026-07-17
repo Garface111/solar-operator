@@ -201,8 +201,15 @@ declare global {
   interface Window {
     NepoolGenReports?: { mount: typeof mount };
     __soEventsBase?: string;
+    __soGenrepEmbed?: boolean;
   }
 }
+
+// Signals the shared screens they're mounted inside Array Operator's Invoices
+// tab (not the standalone /accounts SPA). The Clients roster reads this to hide
+// retired (inactive) clients — after the fold a folded tenant can carry many
+// inactive capture-artifact clients that would otherwise clutter the view.
+window.__soGenrepEmbed = true;
 
 // SSE must skip the Netlify /v1 proxy (it buffers event-streams ~21s to first
 // byte — measured live 2026-07-16). Point SSE, and only SSE, at the Railway

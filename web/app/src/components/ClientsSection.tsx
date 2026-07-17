@@ -43,11 +43,23 @@ interface Props {
   expandClientId?: number;
 }
 
+// Inside the Array Operator "Generation reports" embed, hide retired (inactive)
+// clients from the ROSTER (table + empty state) — a folded tenant can carry
+// many inactive capture-artifact clients that aren't part of its reporting
+// world. Render-only: the raw `clients` state still holds every row so all
+// mutation/merge/undo logic is unchanged. The standalone /accounts SPA leaves
+// the flag unset and shows inactive rows (its reactivate flow lives on them).
+const HIDE_INACTIVE =
+  typeof window !== "undefined" && (window as { __soGenrepEmbed?: boolean }).__soGenrepEmbed === true;
+
 export function ClientsSection({ expandClientId }: Props) {
   const toast = useToast();
   const { account } = useDashboardContext();
   const operatorEmail = account?.email ?? null;
   const [clients, setClients] = useState<ClientRow[] | null>(null);
+  // Roster shown to the user — inactive clients filtered out in the embed only.
+  const rosterClients =
+    HIDE_INACTIVE && clients ? clients.filter((c) => c.active) : clients;
   const [adding, setAdding] = useState(false);
   const [addingByLogin, setAddingByLogin] = useState(false);
   const [importing, setImporting] = useState(false);
@@ -629,7 +641,7 @@ export function ClientsSection({ expandClientId }: Props) {
           />
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {clients && clients.length > 0 && (
+          {rosterClients && rosterClients.length > 0 && (
             <button
               type="button"
               onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
@@ -661,14 +673,14 @@ export function ClientsSection({ expandClientId }: Props) {
         </div>
       </div>
 
-      {clients === null ? (
+      {rosterClients === null ? (
         <Card>
           <div className="flex items-center gap-2 text-sm text-zinc-400">
             <Spinner className="h-4 w-4" />
             Loading clients…
           </div>
         </Card>
-      ) : clients.length === 0 ? (
+      ) : rosterClients.length === 0 ? (
         <Card>
           <div className="space-y-3">
             <h3 className="text-base font-semibold text-zinc-900">
@@ -712,7 +724,7 @@ export function ClientsSection({ expandClientId }: Props) {
         </Card>
       ) : (
         <ClientsTable
-          clients={clients}
+          clients={rosterClients}
           operatorEmail={operatorEmail}
           expandClientId={expandClientId}
           selectMode={selectMode}
@@ -726,7 +738,7 @@ export function ClientsSection({ expandClientId }: Props) {
           }}
           onUndo={scheduleUndo}
           onOpenAddByLogin={() => setAddingByLogin(true)}
-          allClients={clients}
+          allClients={rosterClients}
           onMerged={(dst, _srcId, undoToken) => {
             scheduleUndo(undoToken, `Merged into "${dst.name}"`, "merge");
             notifyFleetChanged("table-delete");
