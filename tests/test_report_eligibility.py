@@ -56,10 +56,14 @@ def _mk_tenant(*, product: str = "nepool", active: bool = True,
 
 
 def _mk_client(tid: str, *, name: str | None = None, active: bool = True,
-               deleted: bool = False, contact_email: str | None = None) -> int:
+               deleted: bool = False, contact_email: str | None = None,
+               auto_send: bool = True) -> int:
+    # auto_send defaults True here so these ELIGIBILITY tests keep exercising the
+    # scheduler's eligibility logic (the separate per-client auto_send enrollment
+    # gate — THE FOLD — is covered by tests/test_ao_genreports_pricing.py).
     with SessionLocal() as db:
         c = Client(tenant_id=tid, name=name or ("Cl " + secrets.token_hex(3)),
-                   active=active, contact_email=contact_email,
+                   active=active, contact_email=contact_email, auto_send=auto_send,
                    deleted_at=(datetime.utcnow() if deleted else None))
         db.add(c)
         db.flush()
