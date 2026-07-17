@@ -2220,3 +2220,46 @@ class AgentDocument(Base):
     __table_args__ = (
         Index("ix_agent_documents_tenant_created", "tenant_id", "created_at"),
     )
+
+
+class ExchangeDemand(Base):
+    """Offtaker Exchange — a DEMAND lead (v0 concierge). Someone who wants bill
+    credits in a utility territory: an operator adding a caller to their waitlist,
+    or (v1) a public intake signup. v0 STORES the lead only — it never sends
+    anything and never touches money. Ford brokers matches by hand from the
+    admin board; the sealed-bid matcher + ExchangeListing/ExchangeMatch machinery
+    come in v1 (see the plan §5). New tables auto-create via
+    Base.metadata.create_all — no migrate.py change needed.
+
+    tenant_id is the OPERATOR who captured the lead (operator_waitlist); NULL for
+    an unattributed public/marketing signup. No cross-tenant field ever crosses a
+    boundary — the admin board reads leads server-side only, never through a
+    tenant-scoped API.
+    """
+    __tablename__ = "exchange_demand"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # The operator who captured the lead (waitlist). NULL for public/marketing.
+    tenant_id: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("tenants.id"), nullable=True, index=True)
+    contact_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    contact_email: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    contact_phone: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # The utility territory the demand is in (gmp | vec | …) — the hard match key.
+    utility: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # Rough size band the caller wants (free text in v0: e.g. "~2,000 kWh/mo").
+    desired_band: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    # Their rough current monthly bill, if they gave one (helps size the match).
+    monthly_bill_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # operator_waitlist | public_intake | marketing
+    source: Mapped[str] = mapped_column(
+        String(32), default="operator_waitlist",
+        server_default="operator_waitlist", nullable=False)
+    # new | qualified | matched | dead
+    status: Mapped[str] = mapped_column(
+        String(24), default="new", server_default="new", nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+
+    __table_args__ = (
+        Index("ix_exchange_demand_tenant_created", "tenant_id", "created_at"),
+    )

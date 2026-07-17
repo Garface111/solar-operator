@@ -5591,3 +5591,89 @@ def list_offtaker_payments(
             "created_at": r.created_at.isoformat() if r.created_at else None,
         } for r in rows]
     return {"ok": True, "payments": items, "count": len(items)}
+
+
+# ─── Offtaker Exchange (v0) — vacancy + demand intake ─────────────────────────
+# Read-only vacancy (single-player-valuable) + a demand-intake surface that
+# STORES leads only. NO money code lives here — the v1 placement fee is elsewhere.
+
+@router.get("/vacancy")
+def offtaker_vacancy(authorization: Optional[str] = Header(default=None)):
+    """This tenant's arrays with their computed UNALLOCATED-excess vacancy
+    (bill-side primary, registry-side secondary, honest confidence tier) + a FIFO
+    expiry read. Tenant-scoped: an operator sees only their OWN arrays' vacancy —
+    no cross-tenant data crosses this boundary in v0."""
+    t = tenant_from_session(authorization)
+    from ..market_vacancy import tenant_vacancy
+    with SessionLocal() as db:
+        return tenant_vacancy(db, t.id)
+
+
+class _DemandBody(BaseModel):
+    contact_name: Optional[str] = None
+    contact_email: Optional[str] = None
+    contact_phone: Optional[str] = None
+    utility: Optional[str] = None
+    desired_band: Optional[str] = None
+    monthly_bill_usd: Optional[float] = None
+    notes: Optional[str] = None
+
+
+@router.post("/exchange/demand")
+def add_exchange_demand(body: _DemandBody,
+                        authorization: Optional[str] = Header(default=None)):
+    """Add a demand lead to the operator's waitlist (someone who wants credits in
+    a utility territory). v0 STORES the lead — it does NOT send anything and does
+    NOT take money. Ford brokers matches by hand from the admin board.
+    # v1: sealed-bid matcher proposes ExchangeMatch rows off these leads.
+    """
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    from ..models import ExchangeDemand
+    name = (body.contact_name or "").strip()
+    email = (body.contact_email or "").strip()
+    if not name and not email:
+        raise HTTPException(422, "Add at least a name or an email for the lead.")
+    with SessionLocal() as db:
+        row = ExchangeDemand(
+            tenant_id=t.id,
+            contact_name=name or None,
+            contact_email=email or None,
+            contact_phone=(body.contact_phone or "").strip() or None,
+            utility=((body.utility or "").strip().lower() or None),
+            desired_band=(body.desired_band or "").strip() or None,
+            monthly_bill_usd=body.monthly_bill_usd,
+            notes=(body.notes or "").strip() or None,
+            source="operator_waitlist",
+            status="new",
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        return {"ok": True, "id": row.id}
+
+
+@router.get("/exchange/demand")
+def list_exchange_demand(authorization: Optional[str] = Header(default=None)):
+    """This operator's own waitlist leads (tenant-scoped, newest first)."""
+    t = tenant_from_session(authorization)
+    from ..models import ExchangeDemand
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(ExchangeDemand).where(ExchangeDemand.tenant_id == t.id)
+            .order_by(ExchangeDemand.id.desc()).limit(200)
+        ).scalars().all()
+        items = [{
+            "id": r.id,
+            "contact_name": r.contact_name,
+            "contact_email": r.contact_email,
+            "contact_phone": r.contact_phone,
+            "utility": r.utility,
+            "desired_band": r.desired_band,
+            "monthly_bill_usd": r.monthly_bill_usd,
+            "source": r.source,
+            "status": r.status,
+            "notes": r.notes,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        } for r in rows]
+    return {"ok": True, "leads": items, "count": len(items)}
