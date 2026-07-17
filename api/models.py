@@ -2087,6 +2087,11 @@ class RepairTicket(Base):
     # Stamped when we escalate a week-long-down fault to the OWNER by email
     # (asking for action + a repair contact). Prevents re-escalating the same case.
     owner_escalated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Email threading (RFC In-Reply-To / References) so the crew conversation
+    # stays ONE Gmail thread: last_msgid = the message to reply to; refs = the
+    # accumulated Message-ID chain.
+    email_last_msgid: Mapped[str | None] = mapped_column(String(400), nullable=True)
+    email_refs: Mapped[str | None] = mapped_column(Text, nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     cancelled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     cleared_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

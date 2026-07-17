@@ -34,6 +34,7 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
                      bcc: list[str] | str | None = None,
                      from_addr: str | None = None,
                      reply_to: str | None = None,
+                     headers: dict | None = None,
                      product: str = "nepool",
                      log_failures: bool = True) -> bool:
     """Returns True on success, False otherwise. Uses the official Resend
@@ -73,6 +74,10 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
     # From (whose mailbox may not receive) never strands a customer reply.
     # An explicit reply_to (e.g. report "send as me") is respected as-is.
     params["reply_to"] = reply_to or branding.reply_to_address(product)
+    if headers:
+        # Custom email headers — In-Reply-To / References / Message-ID for RFC
+        # threading (keeps a reply in the same Gmail conversation).
+        params["headers"] = {k: v for k, v in headers.items() if v}
     if attachments:
         params["attachments"] = attachments
 
@@ -1113,6 +1118,9 @@ def send_repair_checkin_email(
     *,
     reply_to: str | None = None,
     from_name: str | None = None,
+    message_id: str | None = None,
+    in_reply_to: str | None = None,
+    references: str | None = None,
 ) -> bool:
     """O&M / installer status check-in for a repair ticket.
 
@@ -1141,6 +1149,13 @@ def send_repair_checkin_email(
     from_addr = REPAIR_MAIL_FROM
     # Hard rule: Reply-To == From (ignore mismatched reply_to / env split)
     same = from_addr
+    thread_headers = {}
+    if message_id:
+        thread_headers["Message-ID"] = message_id
+    if in_reply_to:
+        thread_headers["In-Reply-To"] = in_reply_to
+    if references:
+        thread_headers["References"] = references
     return _send_via_resend(
         to=to,
         subject=subject,
@@ -1148,6 +1163,7 @@ def send_repair_checkin_email(
         text=body_text,
         from_addr=from_addr,
         reply_to=same,
+        headers=thread_headers or None,
         product="array_operator",
     )
 

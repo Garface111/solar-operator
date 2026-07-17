@@ -19,6 +19,7 @@ import os
 import re
 import urllib.error
 import urllib.request
+import uuid
 from datetime import timedelta
 from typing import Any, Optional
 
@@ -136,6 +137,34 @@ VALID_ROLES = (
     "general_contractor", "other",
 )
 VALID_TICKET_STATUSES = ACTIVE_TICKET_STATUSES + TERMINAL_STATUSES
+
+
+# ── email threading (keep the crew conversation one Gmail thread) ─────────────
+def _gen_msgid(ticket_id) -> str:
+    return f"<ao-t{ticket_id}-{uuid.uuid4().hex[:16]}@agent.arrayoperator.com>"
+
+
+def _record_msgid(ticket, msgid: str | None) -> None:
+    """Track a message in the ticket's thread chain (last = what to reply to next)."""
+    if not msgid:
+        return
+    ticket.email_last_msgid = msgid
+    prev = (getattr(ticket, "email_refs", None) or "").strip()
+    if msgid not in prev:
+        # Keep the chain bounded from the FRONT (RFC: earliest refs first).
+        ticket.email_refs = ((prev + " " + msgid).strip())[-1900:]
+
+
+def _thread_send_kwargs(ticket) -> dict:
+    """Headers for the NEXT outbound so it threads under the last message +
+    seeds our own Message-ID into the chain."""
+    our = _gen_msgid(getattr(ticket, "id", "x"))
+    kw = {
+        "message_id": our,
+        "in_reply_to": getattr(ticket, "email_last_msgid", None) or None,
+        "references": (getattr(ticket, "email_refs", None) or "").strip() or None,
+    }
+    return kw, our
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -967,11 +996,15 @@ def send_checkin(
     # contact.email is set (including when it equals the owner email for testing).
     send_body = body
 
+    _thk, _our_msgid = _thread_send_kwargs(ticket)
     ok = notify.send_repair_checkin_email(
         to=go_to,
         subject=subject,
         body_text=send_body,
+        **_thk,
     )
+    if ok:
+        _record_msgid(ticket, _our_msgid)
 
     row = RepairCheckIn(
         tenant_id=tenant.id,
@@ -1939,11 +1972,15 @@ def continue_repair_email_conversation(
             ticket.status = "waiting_reply"
 
     try:
+        _thk, _our_msgid = _thread_send_kwargs(ticket)
         ok = notify.send_repair_checkin_email(
             to=to,
             subject=subject,
             body_text=body,
+            **_thk,
         )
+        if ok:
+            _record_msgid(ticket, _our_msgid)
     except Exception as exc:
         log.exception("repair convo send failed ticket=%s", ticket.id)
         result["skipped"] = "send_error"
@@ -2077,6 +2114,7 @@ def ingest_inbound_email(
     ticket_id: int | None = None,
     tenant_id: str | None = None,
     resend_email_id: str | None = None,
+    inbound_message_id: str | None = None,
 ) -> dict:
     """Parse a tech reply email into a RepairCheckIn. Used by Resend inbound webhook + poller."""
     # Dedupe by Resend id (webhook + poller may both see the same message)
@@ -2109,6 +2147,10 @@ def ingest_inbound_email(
     tenant = db.get(Tenant, ticket.tenant_id)
     if tenant is None:
         return {"ok": False, "matched": False, "reason": "no_tenant"}
+
+    # Thread: reply UNDER the tech's message next time (In-Reply-To their Message-ID).
+    if inbound_message_id:
+        _record_msgid(ticket, inbound_message_id)
 
     text = (body or "").strip() or (subject or "").strip()
     if not text:
@@ -2262,7 +2304,16 @@ def sync_inbound_from_resend(db, *, limit: int = 25, tenant_id: str | None = Non
             subject = data.get("subject") or subject
             from_email = data.get("from") or from_email
             to_emails = data.get("to") or to_emails
+            inbound_msgid = data.get("message_id") or data.get("message-id")
+            h = data.get("headers")
+            if not inbound_msgid and isinstance(h, list):
+                for it in h:
+                    if isinstance(it, dict) and str(it.get("name", "")).lower() == "message-id":
+                        inbound_msgid = it.get("value"); break
+            elif not inbound_msgid and isinstance(h, dict):
+                inbound_msgid = h.get("Message-ID") or h.get("message-id")
         except Exception:
+            inbound_msgid = None
             log.exception("resend receiving get failed id=%s", eid)
             continue
 
@@ -2302,6 +2353,7 @@ def sync_inbound_from_resend(db, *, limit: int = 25, tenant_id: str | None = Non
             body=text,
             tenant_id=tenant_id,
             resend_email_id=str(eid),
+            inbound_message_id=inbound_msgid,
         )
         # If tenant-scoped and no match for this tenant, still count
         if tenant_id and result.get("matched") and result.get("tenant_id") != tenant_id:
