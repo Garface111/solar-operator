@@ -40,6 +40,17 @@ from .rates import DEFAULT_RATE_USD_PER_KWH, get_energy_rate
 
 AGE_THRESHOLD_YEARS = 11   # ≤11 vs >11 — VT 10-yr adder expiry boundary (+1 grace)
 
+# Non-production tenants whose SEEDED bills carry invented rates (api/seed_demo.py
+# rigs GMP bills at 0.140–0.176 $/kWh) and must NEVER enter the cross-tenant
+# medians that price REAL invoices — _fleet_credit_rate (banked-month reference)
+# and derive_blended_rate_from_bills (the RateSchedule discount basis). Both of
+# these tenants carry is_demo=False — a known seed-hygiene gap (SHARED-BACKLOG
+# 2026-07-16, fold-backend) — so the usual Tenant.is_demo filter alone does NOT
+# catch them; we filter is_demo AND this explicit set (belt and suspenders). The
+# systemic fix (marking them is_demo=True) is Ford's call: it flips
+# ten_demo_realistic to read-only (see the Tenant.is_demo note in models.py).
+SYNTHETIC_TENANT_IDS = ("ten_demo_realistic", "ten_ford_demo_100")
+
 
 # ─── 1. Derivation from captured bills ──────────────────────────────────────
 
@@ -294,12 +305,18 @@ def derive_blended_rate_from_bills(
     empty / falls back). Median is used (robust to outliers) over the bills whose
     period_end lands in [effective_start, effective_end).
     """
-    from .models import Bill, UtilityAccount, Array
+    from .models import Bill, UtilityAccount, Array, Tenant
 
+    # Same demo/synthetic exclusion as _fleet_credit_rate: this median feeds the
+    # RateSchedule table (the discount basis), so seeded non-production bills must
+    # never enter it. See SYNTHETIC_TENANT_IDS.
     q = (select(Bill, Array.first_connect_date)
          .join(UtilityAccount, Bill.account_id == UtilityAccount.id)
+         .join(Tenant, UtilityAccount.tenant_id == Tenant.id)
          .join(Array, UtilityAccount.array_id == Array.id, isouter=True)
          .where(UtilityAccount.provider == utility,
+                Tenant.is_demo.is_(False),
+                UtilityAccount.tenant_id.notin_(SYNTHETIC_TENANT_IDS),
                 Bill.raw_json.isnot(None),
                 Bill.period_end >= effective_start))
     if effective_end is not None:
@@ -485,17 +502,6 @@ def _account_credit_rate(db, utility_account_id: int) -> Optional[float]:
             Bill.kwh_sent_to_grid.isnot(None), Bill.kwh_sent_to_grid > 0)
     ).all()
     return _median([float(c) / float(k) for c, k in rows if k])
-
-
-# Non-production tenants whose SEEDED bills carry invented credit rates
-# (api/seed_demo.py rigs GMP bills at 0.140–0.176 $/kWh) and must NEVER enter the
-# cross-tenant reference median that prices REAL banked-month offtaker invoices.
-# Both of these carry is_demo=False — a known seed-hygiene gap (SHARED-BACKLOG
-# 2026-07-16, fold-backend) — so the usual Tenant.is_demo filter alone does NOT
-# catch them; we filter is_demo AND this explicit set (belt and suspenders). The
-# systemic fix (marking them is_demo=True) is Ford's call: it flips
-# ten_demo_realistic to read-only (see the Tenant.is_demo note in models.py).
-SYNTHETIC_TENANT_IDS = ("ten_demo_realistic", "ten_ford_demo_100")
 
 
 def _fleet_credit_rate(db, *, provider: str, age_bucket: str,

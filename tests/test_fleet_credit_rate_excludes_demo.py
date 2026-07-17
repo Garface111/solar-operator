@@ -9,13 +9,14 @@ those low synthetic rates dragged the GMP fleet median down under real invoices.
 import os
 os.environ.setdefault("SOLAR_DATA_DIR", "/tmp/ao_fleet_demo_excl_test")
 
-from datetime import datetime
+from datetime import date, datetime
 import secrets
 
 from api.db import SessionLocal
 from api.models import Tenant, Array, UtilityAccount, Bill
 from api.rate_schedule import (
     _fleet_credit_rate, array_age_bucket, SYNTHETIC_TENANT_IDS,
+    derive_blended_rate_from_bills,
 )
 
 # Unique provider so ONLY this test's bills match the fleet query — isolates the
@@ -93,3 +94,51 @@ def test_all_demo_means_no_fleet_rate():
         bucket = array_age_bucket(FIRST_CONNECT, datetime(2025, 6, 28).date())
         med = _fleet_credit_rate(db, provider=prov_only_demo, age_bucket=bucket)
     assert med is None, f"synthetic-only cell should yield no fleet rate, got {med}"
+
+
+# ── derive_blended_rate_from_bills (RateSchedule discount basis) ──────────────
+PROV_RAW = "zzz_blend_excl_" + secrets.token_hex(3)
+
+
+def _raw_bill(consumed, net_charge):
+    """Minimal GMP-shaped bill: blended_rate_from_bill = net_charge / consumed."""
+    return {"billSegments": [{"segmentLineItems": [
+        {"unitOfMeasure": "KWH", "unitCode": "CONSUMED", "unitCount": consumed},
+        {"unitOfMeasure": "KWH", "unitCode": "NET", "unitCount": consumed,
+         "dollarAmount": net_charge}]}]}
+
+
+def _seed_raw(db, tid, *, consumed, net_charge, n, is_demo=False):
+    db.add(Tenant(id=tid, tenant_key=secrets.token_hex(8), name=tid,
+                  contact_email=f"{tid}@e.com", active=True,
+                  product="array_operator", is_demo=is_demo))
+    db.flush()
+    a = Array(tenant_id=tid, name=tid + " arr", region="VT",
+              first_connect_date=FIRST_CONNECT)
+    db.add(a); db.flush()
+    acct = UtilityAccount(tenant_id=tid, array_id=a.id, provider=PROV_RAW,
+                          account_number="A" + secrets.token_hex(3))
+    db.add(acct); db.flush()
+    for m in range(n):
+        db.add(Bill(tenant_id=tid, account_id=acct.id,
+                    period_start=datetime(2025, (m % 12) + 1, 1),
+                    period_end=datetime(2025, (m % 12) + 1, 28),
+                    kwh_generated=int(consumed), kwh_sent_to_grid=0.0,
+                    raw_json=_raw_bill(consumed, net_charge)))
+
+
+def test_derive_blended_excludes_demo_and_synthetic():
+    real = "ten_real_b" + secrets.token_hex(3)
+    demo_marked = "ten_demomark_b" + secrets.token_hex(3)
+    with SessionLocal() as db:
+        _seed_raw(db, real, consumed=1000, net_charge=300.0, n=8)            # 0.30 REAL
+        _seed_raw(db, demo_marked, consumed=1000, net_charge=140.0, n=8, is_demo=True)  # is_demo
+        _seed_raw(db, "ten_ford_demo_100", consumed=1000, net_charge=140.0, n=8)        # denylist (2nd id)
+        db.commit()
+        dr = derive_blended_rate_from_bills(
+            db, utility=PROV_RAW,
+            effective_start=date(2025, 1, 1), effective_end=date(2026, 1, 1),
+            min_samples=8)
+    assert dr is not None, "real tenant alone has 8 samples"
+    assert abs(dr.rate - 0.30) < 1e-6, f"demo/synthetic leaked into blended rate: {dr.rate}"
+    assert dr.sample_size == 8, f"only the 8 real bills should count, got {dr.sample_size}"
