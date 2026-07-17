@@ -983,6 +983,25 @@ export async function createClient(
   return res.client;
 }
 
+export interface AutoSendAllResult {
+  ok: boolean;
+  auto_send: boolean;
+  clients: number;
+  arrays: number;
+  price_cents_per_array: number;
+  estimated_quarterly_cents: number;
+}
+
+/** Turn generation-report auto-send on (or off) for EVERY active client — the
+ *  one deliberate "turn my account on" action. Enabling also enrolls the tenant
+ *  in the reports world; each reported array then bills $15 once per quarter. */
+export async function setAutoSendAll(enabled: boolean): Promise<AutoSendAllResult> {
+  return request<AutoSendAllResult>("/v1/account/clients/auto-send-all", {
+    method: "POST",
+    body: { enabled },
+  });
+}
+
 export async function updateClient(
   id: number,
   patch: Partial<ClientCreateInput> & { active?: boolean },
