@@ -24,6 +24,7 @@ Responsibilities:
 from __future__ import annotations
 
 import logging
+import os
 import re
 from collections import defaultdict
 from datetime import timedelta, date as _date, datetime
@@ -514,6 +515,30 @@ def _merged_daily(db, inverter_id: int, live_series: list[dict]) -> list[dict]:
 
 # ─────────────────────────── discovery / persistence ─────────────────────────
 
+def _vendor_discovery_enabled() -> bool:
+    """False when this environment must NEVER call a vendor API.
+
+    Preprod/staging mirrors production's data (see scripts/refresh_preprod_data.sh)
+    and must not reach out to vendors: the SolarEdge api_key rides inline in the
+    connection config (so a second environment silently burns the quota'd key),
+    SMA rotates its OAuth refresh token (a staging refresh invalidates PROD's
+    token), and GMP/SmartHub sessions are cookie-bound + dedup'd. Prod leaves
+    FLEET_VENDOR_DISCOVERY unset → discovery stays on, unchanged.
+    """
+    return (os.getenv("FLEET_VENDOR_DISCOVERY", "1") or "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+
+
+def _persisted_inverters(db, tenant: Tenant) -> list[Inverter]:
+    """The tenant's live (non-deleted) inverters, in the owner's arrangement."""
+    return db.execute(
+        select(Inverter).where(
+            Inverter.tenant_id == tenant.id, Inverter.deleted_at.is_(None)
+        ).order_by(Inverter.array_id, Inverter.position)
+    ).scalars().all()
+
+
 def discover_and_persist(db, tenant: Tenant, *, force_refresh: bool = False) -> list[Inverter]:
     """Walk every array's connection, pull live inventory, and upsert one
     persisted Inverter per real serial. IDEMPOTENT and owner-safe:
@@ -527,6 +552,10 @@ def discover_and_persist(db, tenant: Tenant, *, force_refresh: bool = False) -> 
 
     Returns the tenant's live (non-deleted) inverters.
     """
+    if not _vendor_discovery_enabled():
+        # Vendor-silent environment (preprod): serve the mirrored fleet as-is.
+        return _persisted_inverters(db, tenant)
+
     arrays = db.execute(
         select(Array).where(Array.tenant_id == tenant.id, Array.deleted_at.is_(None))
     ).scalars().all()
@@ -594,11 +623,7 @@ def discover_and_persist(db, tenant: Tenant, *, force_refresh: bool = False) -> 
             iv.last_seen_at = now()
 
     db.commit()
-    return db.execute(
-        select(Inverter).where(
-            Inverter.tenant_id == tenant.id, Inverter.deleted_at.is_(None)
-        ).order_by(Inverter.array_id, Inverter.position)
-    ).scalars().all()
+    return _persisted_inverters(db, tenant)
 
 
 # ─────────────────────────────── fleet tree ──────────────────────────────────
