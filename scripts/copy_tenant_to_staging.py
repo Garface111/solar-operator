@@ -31,6 +31,26 @@ SKIP = {
     "ea_sovereign_desk_assets", "ea_sovereign_bridge_tasks",
 }
 
+# Columns encrypted at rest under PROD's SO_CONFIG_KEY (api/crypto.py
+# EncryptedStr / EncryptedJSON). COPY moves the raw ciphertext, but staging has
+# its OWN key, so ANY read of the row raises cryptography.fernet.InvalidToken —
+# this 500'd /fleet-tree + /overview (reading an Array decrypts
+# solaredge_api_key; reading a connection decrypts config). Preprod never calls a
+# vendor (FLEET_VENDOR_DISCOVERY=0), so it needs none of these secrets: substitute
+# a safe literal on copy and keep prod's vendor secrets OUT of staging entirely.
+#
+# Values are SQL expressions selected in place of the column. `'{}'` is PLAINTEXT
+# JSON, which is correct: decrypt_str() passes through anything not carrying the
+# encryption prefix (`if not is_encrypted(value): return value`), so
+# EncryptedJSON's json.loads(decrypt_str(v)) yields an empty dict without a key.
+#
+# The remaining encrypted columns (portal_credential.secret_enc/session_state_enc,
+# utility_sessions.api_token/refresh_token/raw_payload) live in SKIP'd tables.
+ENCRYPTED_COLS = {
+    ("arrays", "solaredge_api_key"): "NULL",
+    ("inverter_connections", "config"): "'{}'",
+}
+
 
 def cols(cur, table):
     cur.execute("""select column_name from information_schema.columns
@@ -62,8 +82,12 @@ def main():
         if not common:
             print(f"[copy] {table}: no common columns, skip"); return 0
         cl = ",".join('"%s"' % c for c in common)
+        # substitute a safe literal for any prod-key-encrypted column
+        sel = ",".join(
+            ENCRYPTED_COLS.get((table, c), '"%s"' % c) for c in common
+        )
         buf = io.StringIO()
-        pcur.copy_expert(f"COPY (SELECT {cl} FROM {table} WHERE {where}) TO STDOUT", buf)
+        pcur.copy_expert(f"COPY (SELECT {sel} FROM {table} WHERE {where}) TO STDOUT", buf)
         buf.seek(0)
         scur.copy_expert(f"COPY {table} ({cl}) FROM STDIN", buf)
         return scur.rowcount
@@ -77,7 +101,12 @@ def main():
     for t in tenant_tables:
         scur.execute(f"delete from {t}")
     scur.execute("delete from tenants")
-    print("[copy] wiped staging tenant tables (mirror semantics)")
+    # inverter_connections has no tenant_id, so the loop above never clears it.
+    # It MUST be wiped too: the insert below is ON CONFLICT DO NOTHING, so stale
+    # rows from an earlier run would survive and keep their PROD ciphertext
+    # config (InvalidToken on read) instead of the scrubbed copy.
+    scur.execute("delete from inverter_connections")
+    print("[copy] wiped staging tenant tables + inverter_connections (mirror semantics)")
 
     # 2. tenant row
     print("[copy] tenants: %s" % copy_table("tenants", "id='%s'" % TID))
@@ -86,9 +115,12 @@ def main():
     ic_common = [c for c in cols(scur, "inverter_connections")
                  if c in set(cols(pcur, "inverter_connections"))]
     cl = ",".join('"%s"' % c for c in ic_common)
+    ic_sel = ",".join(
+        ENCRYPTED_COLS.get(("inverter_connections", c), '"%s"' % c) for c in ic_common
+    )
     buf = io.StringIO()
     pcur.copy_expert(
-        f"COPY (SELECT {cl} FROM inverter_connections WHERE id IN "
+        f"COPY (SELECT {ic_sel} FROM inverter_connections WHERE id IN "
         f"(SELECT DISTINCT source_connection_id FROM inverters "
         f"WHERE tenant_id='{TID}' AND source_connection_id IS NOT NULL)) TO STDOUT", buf)
     buf.seek(0)
