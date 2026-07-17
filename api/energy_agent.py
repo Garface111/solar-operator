@@ -27,7 +27,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -164,6 +164,23 @@ You have a FREE MIND over THIS TENANT'S live data (not a fixed FAQ):
   vs real problem); investigate_attention now carries recoverable_usd_month (matches
   the Fleet Triage tile); list_recent_invoices = drafted/sent offtaker dollars.
   Lead with the dollars when they're ≥$1 — the owner runs a business.
+
+CRITICAL — TIME ZONES + NIGHT (do not invent outages after dark):
+  Every turn includes a FLEET CLOCK block (fleet-local time + sun-up/night). TRUST IT.
+  Default fleet timezone is America/New_York (US Eastern) — VT / NE solar. Per-array
+  lat/long can shift sun-up for distant sites; tool rows carry is_daylight for each.
+  When solar_state is night OR is_daylight is false:
+    • Zero live power / "dark" cards / overnight quiet source are NORMAL sleep — panels
+      do not produce at night. NEVER say the fleet is down, dead, offline, or broken
+      because live power is 0 after dark.
+    • Do not open repair tickets or escalate for "not producing" at night.
+    • Multi-day 14-day health flags (dead/fault/underperforming) and multi-day data
+      silence (source age many hours beyond overnight) can still be real — report those
+      as settled health issues, not "right now the power is zero."
+  When solar_state is daylight: zero while peers produce IS a real live problem.
+  Always answer with the local clock in mind ("it's 11pm at the sites…") when night
+  could confuse a live-power read. If unsure, call fleet_overview / investigate_attention
+  and read is_daylight + the clock fields before alarming the owner.
 
 CRITICAL — SHADING / EXPECTED-LOW (a false "underperforming" you must catch):
   Some inverters run permanently below their peers for a FIXED physical reason —
@@ -405,6 +422,73 @@ MOBILE OS (when context.mobile_os or context.is_mobile_os_home is true):
 
 def _now() -> datetime:
     return datetime.utcnow()
+
+
+# Overnight source quiet is normal (esp. extension capture). Beyond this age (hours)
+# at night, silence is a real multi-day data problem — still flag it.
+_NIGHT_SOURCE_AGE_ATTENTION_H = 36.0
+
+
+def _fleet_clock_context(when: datetime | None = None) -> dict[str, Any]:
+    """Fleet-local clock + sun-up for the Energy Agent (every turn).
+
+    Arrays are judged in local solar time (default America/New_York). Without this
+    block the model reasons in UTC / its own "now" and invents night-time outages.
+    """
+    from zoneinfo import ZoneInfo
+
+    from .inverter_fleet import _is_daylight
+    from .models import FLEET_TZ
+
+    utc = when if when is not None else datetime.now(timezone.utc)
+    if utc.tzinfo is None:
+        utc = utc.replace(tzinfo=timezone.utc)
+    else:
+        utc = utc.astimezone(timezone.utc)
+    try:
+        local = utc.astimezone(ZoneInfo(FLEET_TZ))
+        tz_label = FLEET_TZ
+    except Exception:
+        local = utc
+        tz_label = "UTC"
+    try:
+        sun_up = bool(_is_daylight(when=utc))
+    except Exception:
+        sun_up = True  # never hide a real daytime fault on calc failure
+    local_hour = local.hour
+    return {
+        "utc_now": utc.strftime("%Y-%m-%d %H:%M UTC"),
+        "fleet_timezone": tz_label,
+        "fleet_local_now": local.strftime("%Y-%m-%d %H:%M %Z"),
+        "fleet_local_hour": local_hour,
+        "sun_up_at_fleet": sun_up,
+        "solar_state": "daylight" if sun_up else "night",
+        "rule": (
+            "Fleet time is US Eastern by default (America/New_York). "
+            "At night, zero live power and overnight source quiet are NORMAL — "
+            "do not call the fleet down. Only multi-day health flags or multi-day "
+            "data silence are real overnight problems. At daylight, zero while "
+            "peers produce is real."
+        ),
+    }
+
+
+def _source_needs_attention(col: dict) -> bool:
+    """True when source/feed state is a real problem (not overnight sleep)."""
+    src = col.get("source_status") or {}
+    state = (src.get("state") or "").lower()
+    if state not in ("stale", "dark", "offline"):
+        return False
+    # Night: overnight quiet is sleep (UI _feedBehind returns false). Only flag
+    # multi-day silence beyond the normal overnight / capture gap.
+    if col.get("is_daylight") is False:
+        try:
+            age = float(src.get("age_hours")) if src.get("age_hours") is not None else None
+        except (TypeError, ValueError):
+            age = None
+        if age is None or age < _NIGHT_SOURCE_AGE_ATTENTION_H:
+            return False
+    return True
 
 
 def _week_start(dt: datetime | None = None) -> datetime:
@@ -2210,17 +2294,23 @@ def _explain_array_attention(col: dict) -> str:
         if n:
             bits.append(f"{n} inverter(s) flagged on 14-day health")
     src_state = (src.get("state") or "").lower()
-    if src_state in ("stale", "dark", "offline"):
+    if _source_needs_attention(col):
         age = src.get("age_hours")
         age_s = f" (~{age:.0f}h old)" if isinstance(age, (int, float)) else ""
         bits.append(f"source data {src_state}{age_s}")
-    elif src_state == "unpolled":
+    elif src_state == "unpolled" and col.get("is_daylight") is not False:
         bits.append(
             "no recent browser capture (SMA/Fronius/Chint only update when the "
             "extension is open and signed in)"
         )
+    elif src_state in ("stale", "dark", "offline", "unpolled") and col.get("is_daylight") is False:
+        # Overnight quiet — only mention if something ELSE is wrong (14d/live),
+        # so we don't invent a "source problem" at night.
+        pass
     if sync.get("age_min") is not None and float(sync["age_min"]) > 24 * 60:
-        bits.append(f"last Array Operator sync ~{float(sync['age_min']) / 60:.0f}h ago")
+        # Multi-day sync gap only; overnight is fine
+        if col.get("is_daylight") is not False or float(sync["age_min"]) > 36 * 60:
+            bits.append(f"last Array Operator sync ~{float(sync['age_min']) / 60:.0f}h ago")
     if col.get("produced_today_kwh") in (None, 0) and col.get("is_daylight"):
         bits.append("no measured production today while sun is up")
     # Live overlays (what Spreadsheet badges as NEED ATTENTION while 14-day is ok)
@@ -2264,14 +2354,17 @@ def _explain_array_attention(col: dict) -> str:
 
 
 def _array_needs_attention(col: dict) -> bool:
-    """True when Spreadsheet/Triage would show attention — 14-day OR live overlays."""
+    """True when Spreadsheet/Triage would show attention — 14-day OR live overlays.
+
+    Night-aware: matches FleetStore._feedBehind — overnight source quiet and
+    zero live power are sleep, not faults. Multi-day 14-day health flags still count.
+    """
     alert = col.get("alert") or {}
     if (alert.get("level") or "ok") in ("warn", "critical"):
         return True
     if (alert.get("count") or 0) > 0:
         return True
-    src = (col.get("source_status") or {}).get("state") or ""
-    if src in ("stale", "dark", "offline"):
+    if _source_needs_attention(col):
         return True
     for inv in col.get("inverters") or []:
         st = inv.get("status") or "ok"
@@ -2280,10 +2373,12 @@ def _array_needs_attention(col: dict) -> bool:
         if inv.get("no_energy_register"):
             return True
     # Live dark/low (status stays "ok" for up to ~2 days) — matches vendor-sheet
+    # (_ui_live_verdict already returns ok when is_daylight is False)
     if _column_live_anomalies(col):
         return True
     # Daylight + no power + no fresh production can also surface as blind/offline
     if col.get("is_daylight") and col.get("current_power_w") is None:
+        src = (col.get("source_status") or {}).get("state") or ""
         if src in ("stale", "dark", "offline", "none", "unpolled", ""):
             # Only if we also have no today kWh (Cover Rooftop blind case)
             if col.get("produced_today_kwh") in (None, 0):
@@ -2346,6 +2441,16 @@ def _summarize_column(col: dict) -> dict:
     needs = _array_needs_attention(col)
     # Combined attention count matches Spreadsheet "N need attention" spirit
     attn_units = len(bad) + len(live)
+    night = col.get("is_daylight") is False
+    if needs:
+        why = _explain_array_attention(col)
+    elif night:
+        why = (
+            "All clear — sun is down at this site; zero live power overnight is normal sleep, "
+            "not an outage."
+        )
+    else:
+        why = "All clear"
     return {
         "id": col.get("array_id"),
         "name": col.get("array_name"),
@@ -2356,11 +2461,12 @@ def _summarize_column(col: dict) -> dict:
         "produced_today_kwh": col.get("produced_today_kwh"),
         "produced_today_source": col.get("produced_today_source"),
         "is_daylight": col.get("is_daylight"),
+        "solar_state": "night" if night else "daylight",
         "alert": col.get("alert"),
         "source_status": col.get("source_status"),
         "sync_status": col.get("sync_status"),
         "needs_attention": needs,
-        "why": _explain_array_attention(col) if needs else "All clear",
+        "why": why,
         "next_step": _next_step_for_array(col) if needs else None,
         "problem_inverters": bad,
         "problem_inverter_count": len(bad),
@@ -2411,7 +2517,9 @@ def _fleet_overview_tool(db, tenant: Tenant, args: dict) -> dict:
     attention = [a for a in arrays if a["needs_attention"]]
     live_units = sum(int(a.get("live_dark_count") or 0) + int(a.get("live_low_count") or 0) for a in arrays)
     health_units = sum(int(a.get("problem_inverter_count") or 0) for a in arrays)
+    clock = _fleet_clock_context()
     return {
+        "clock": clock,
         "summary": {
             **summary,
             # Override naive tree attention (14-day only) with UI-parity counts
@@ -2424,6 +2532,8 @@ def _fleet_overview_tool(db, tenant: Tenant, args: dict) -> dict:
             "attention_in_result": len(attention),
             "vendor_filter": vendor,
             "needs_attention_only": only_attn,
+            "solar_state": clock.get("solar_state"),
+            "fleet_local_now": clock.get("fleet_local_now"),
         },
         "attention_arrays": attention,
         "arrays": arrays,
@@ -2432,13 +2542,17 @@ def _fleet_overview_tool(db, tenant: Tenant, args: dict) -> dict:
             "Attention = 14-day peer health PLUS live dark/low overlays "
             "(same as Spreadsheet NEED ATTENTION). "
             "Do NOT say a site is healthy if it appears in attention_arrays. "
-            "For SMA/Fronius/Chint, source stale often means no recent extension capture."
+            "For SMA/Fronius/Chint, source stale often means no recent extension capture. "
+            "At night (clock.solar_state=night / is_daylight=false): zero live power is "
+            "normal sleep — not an outage."
         ),
         "instruction_for_agent": (
             "When the owner asks how the fleet is doing: report TOTAL attention "
             "arrays and units first, then name EACH attention array with why "
             "(include live_anomalies names). Never summarize only the worst 14-day "
-            "underperformer if live overlays flag more units."
+            "underperformer if live overlays flag more units. If clock.solar_state is "
+            "night and attention is 0, say the fleet is asleep / looks clear overnight — "
+            "do not invent a live-power problem."
         ),
     }
 
@@ -2504,21 +2618,37 @@ def _investigate_attention_tool(db, tenant: Tenant, args: dict) -> dict:
             f"• {p.get('name')} ({', '.join(p.get('vendors') or []) or 'unknown vendor'}) "
             f"[{units} unit(s)]: {p.get('why')}{extra}{money} → {p.get('next_step')}"
         )
-    brief = "\n".join(lines) if lines else (
-        "No arrays currently need attention"
-        + (f" for vendor={vendor}" if vendor else "")
-        + (f" matching '{name_q}'" if name_q else "")
-        + "."
-    )
+    clock = _fleet_clock_context()
+    night = clock.get("solar_state") == "night"
     if lines:
         brief = (
             f"ATTENTION TOTALS: {total_found} array(s), ~{total_units} unit(s) "
             f"(14-day health + live dark/low). List every array below — do not drop sites.\n"
-            + brief
+            + "\n".join(lines)
         )
+        if night:
+            brief = (
+                f"FLEET CLOCK: {clock.get('fleet_local_now')} — NIGHT at the sites. "
+                "Live power is expected to be ~0; flags below are multi-day health / "
+                "multi-day data issues, not 'not producing right now'.\n"
+                + brief
+            )
+    else:
+        brief = (
+            "No arrays currently need attention"
+            + (f" for vendor={vendor}" if vendor else "")
+            + (f" matching '{name_q}'" if name_q else "")
+            + "."
+        )
+        if night:
+            brief = (
+                f"FLEET CLOCK: {clock.get('fleet_local_now')} — NIGHT at the sites. "
+                "Zero live power is normal sleep. " + brief
+            )
 
     recoverable_usd_month = round(fleet_lost_kwh * rate / _LOSS_WINDOW_DAYS * 30.0, 2)
     return {
+        "clock": clock,
         "count": total_found,
         "returned": len(problems),
         "attention_unit_count": total_units,
@@ -2534,6 +2664,8 @@ def _investigate_attention_tool(db, tenant: Tenant, args: dict) -> dict:
             **summary,
             "attention": total_found,
             "attention_units_total": total_units,
+            "solar_state": clock.get("solar_state"),
+            "fleet_local_now": clock.get("fleet_local_now"),
         },
         "vendor_filter": vendor,
         "problems": problems,
@@ -2545,7 +2677,9 @@ def _investigate_attention_tool(db, tenant: Tenant, args: dict) -> dict:
             "each — then 'and N more — want the full list?' rather than pasting all N "
             "(unless the total is ≤3 or they asked for all). Bold at most the headline "
             "number. Do not ask for IDs. If count is 0, say the fleet looks clear in one "
-            "line and offer to open Inverters for a double-check."
+            "line (and if clock.solar_state is night, say they're asleep overnight) and "
+            "offer to open Inverters for a double-check. NEVER invent a live-power outage "
+            "at night."
         ),
     }
 
@@ -2757,7 +2891,17 @@ def _array_detail_tool(db, tenant: Tenant, args: dict) -> dict:
     row["reminder"] = match.get("reminder")
     row["portfolio_name"] = match.get("portfolio_name")
     row["origin_links"] = match.get("origin_links")
-    return {"array": row, "needs_attention": row["needs_attention"], "why": row["why"]}
+    clock = _fleet_clock_context()
+    return {
+        "clock": clock,
+        "array": row,
+        "needs_attention": row["needs_attention"],
+        "why": row["why"],
+        "note": (
+            "Read is_daylight / solar_state on the array and clock.solar_state. "
+            "At night, zero live power is normal sleep — not an outage."
+        ),
+    }
 
 
 # ── Free-mind data plane (tenant-scoped read-only reasoning) ─────────────────
@@ -6991,6 +7135,21 @@ def _agent_turn(
 
     system = PERSONA + "\n\nTenant memory:\n" + json.dumps(t_mem)[:2000]
     system += "\n\nGlobal behavior tips:\n" + json.dumps(g_mem)[:1200]
+    # Fleet clock every turn — without this she invents night-time outages.
+    try:
+        _clock = _fleet_clock_context()
+        system += (
+            "\n\nFLEET CLOCK (GROUND TRUTH — array local time / sun-up; trust this over "
+            "your own sense of 'now'):\n"
+            + json.dumps(_clock, default=str)
+        )
+        if _clock.get("solar_state") == "night":
+            system += (
+                "\nIt is NIGHT at the fleet. Zero live power is normal. Do not say "
+                "arrays are down/dead/offline because they aren't producing right now."
+            )
+    except Exception as _ce:
+        log.info("fleet clock inject skipped: %s", _ce)
     if context:
         # Prefer fleet_attention_snapshot (client live view) — keep it intact
         snap = None

@@ -1,9 +1,13 @@
 """EA fleet tools must match Spreadsheet NEED ATTENTION (14-day + live overlays)."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from api.energy_agent import (
     _array_needs_attention,
     _column_live_anomalies,
+    _fleet_clock_context,
+    _source_needs_attention,
     _summarize_column,
     _ui_live_verdict,
 )
@@ -75,3 +79,76 @@ def test_summarize_includes_live_and_needs_attention():
     assert row["needs_attention"] is True
     assert row["live_dark_count"] >= 1
     assert "dark" in row["why"].lower() or "low" in row["why"].lower()
+
+
+def test_night_source_stale_is_not_attention():
+    """Overnight feed quiet must not look like an outage (UI _feedBehind parity)."""
+    col = {
+        "array_name": "Tannery Brook",
+        "vendor": "sma",
+        "is_daylight": False,
+        "current_power_w": 0,
+        "produced_today_kwh": 120.0,
+        "alert": {"level": "ok", "count": 0, "status": "ok", "headline": "All clear"},
+        "source_status": {"state": "stale", "age_hours": 8.0},
+        "inverters": [_inv("1", 0), _inv("2", 0)],
+    }
+    assert _source_needs_attention(col) is False
+    assert _array_needs_attention(col) is False
+    row = _summarize_column(col)
+    assert row["needs_attention"] is False
+    assert row["solar_state"] == "night"
+    assert "night" in row["why"].lower() or "sleep" in row["why"].lower() or "sun" in row["why"].lower()
+
+
+def test_night_multi_day_source_silence_still_flags():
+    col = {
+        "array_name": "Tannery Brook",
+        "vendor": "sma",
+        "is_daylight": False,
+        "alert": {"level": "ok", "count": 0, "status": "ok", "headline": "All clear"},
+        "source_status": {"state": "stale", "age_hours": 48.0},
+        "inverters": [_inv("1", 0)],
+    }
+    assert _source_needs_attention(col) is True
+    assert _array_needs_attention(col) is True
+
+
+def test_night_14d_dead_still_attention():
+    col = {
+        "array_name": "Chester",
+        "vendor": "solaredge",
+        "is_daylight": False,
+        "alert": {"level": "critical", "count": 1, "status": "dead", "headline": "1 dead"},
+        "source_status": {"state": "ok", "age_hours": 0.2},
+        "inverters": [_inv("1", 0, status="dead")],
+    }
+    assert _array_needs_attention(col) is True
+
+
+def test_daylight_source_stale_is_attention():
+    col = {
+        "array_name": "Waterford",
+        "vendor": "fronius",
+        "is_daylight": True,
+        "alert": {"level": "ok", "count": 0, "status": "ok", "headline": "All clear"},
+        "source_status": {"state": "stale", "age_hours": 8.0},
+        "inverters": [_inv("1", 5000)],
+    }
+    assert _source_needs_attention(col) is True
+    assert _array_needs_attention(col) is True
+
+
+def test_fleet_clock_context_has_timezone_and_solar_state():
+    # Fixed winter night UTC → Eastern evening/night
+    night_utc = datetime(2026, 1, 15, 5, 0, 0, tzinfo=timezone.utc)  # midnight EST
+    clock = _fleet_clock_context(when=night_utc)
+    assert clock["fleet_timezone"] == "America/New_York"
+    assert "fleet_local_now" in clock
+    assert clock["solar_state"] in ("night", "daylight")
+    assert clock["solar_state"] == "night"
+    assert "night" in clock["rule"].lower() or "zero live power" in clock["rule"].lower()
+
+    day_utc = datetime(2026, 6, 15, 17, 0, 0, tzinfo=timezone.utc)  # ~1pm EDT
+    day_clock = _fleet_clock_context(when=day_utc)
+    assert day_clock["solar_state"] == "daylight"

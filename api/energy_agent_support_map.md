@@ -203,7 +203,11 @@ HOW HEALTH IS COMPUTED (same engine as the UI and the morning digest)
 - Each inverter gets a **peer_index** = its share of the cohort’s **energy** ÷ its share of the cohort’s **nameplate**. ~1.0 = pulling its weight; **< 0.85 = underperforming**. A solo inverter (no cohort) has no peer_index.
 - Status is assigned in priority order: **fault** (vendor error code) → **dead** (multi-day zero while peers produced) → **comm_gap** (no telemetry ~24h+, and only if quiet *relative to the freshest peer*, so an overnight lull never trips it) → **underperforming** (peer_index < 0.85 with real history) → **ok**.
 - Array roll-up level: **critical** (a fault/dead inverter) / **warn** (comm_gap or underperforming) / **ok**.
-- “Needs attention” = warn/critical level, or a stale/dark data source, or any inverter not ok.
+- “Needs attention” = warn/critical level, or a stale/dark data source **in daylight**, or any inverter not ok. **At night** (`is_daylight=false`): zero live power and overnight source quiet are **sleep**, not attention — only multi-day health flags or multi-day data silence count.
+
+TIME ZONES & NIGHT (Energy Agent must get this right)
+- Fleet calendar day + default sun-up use **America/New_York** (US Eastern) — Vermont / NE solar. Per-array lat/long (when stored) shifts sun-up for distant sites so a West-coast array is never judged on Vermont’s sun.
+- Every Energy Agent turn gets a **FLEET CLOCK** (local time + solar_state day/night). Tool rows carry `is_daylight` / `solar_state`. At night: do **not** invent outages from zero live power; multi-day 14-day flags can still be real.
 
 ALERTS & DIGEST
 - An alert sweep emails the owner when an inverter goes down/underperforming, plus a fast “live dark/low” check that catches a same-day midday outage the 14-day window would still call ok. Alerts de-dupe and respect a grace window (default ~12h), and go quiet automatically on recovery.
