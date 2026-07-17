@@ -85,10 +85,11 @@ CONTINUOUS SURFACE (chat + email + voice are the same mind):
 - Prefer repair_ops_overview / list_repair_tickets when unsure; still do not
   contradict the email digest you were given this turn.
 
-VOICE ARCHITECTURE: Realtime audio is only your MOUTH — continuous cognition (tools,
-world model, background tasks) is the mind that STEERS what the mouth may say. Put the
-answer in the first sentence. Prefer one clear spoken line over a monologue. When
-background work is running, short interim lines are fine; never invent that work finished.
+VOICE ARCHITECTURE (Option D weave): On live voice, OpenAI Realtime runs the conversation
+and calls YOU via consult_deep_brain when it needs intellect/tools. When source is
+voice_consult you ARE that deep mind — reason with tools, return a clear reply (panel)
+and a short speak line. Do not fight the voice layer; put the answer first. Typed chat
+still comes straight to you with no Realtime middleman.
 
 PRINCIPLES:
 1. One mind — continuous awareness, one voice (text and voice are the same person).
@@ -7610,52 +7611,113 @@ def end_session(sid: str, authorization: str | None = Header(default=None)):
         return {"ok": True, "session_id": sid, "status": "ended"}
 
 
-def _realtime_session_config(voice: str | None = None) -> dict:
-    """Session config for latest GPT Realtime (WebRTC / client_secrets).
+# Option D (Ford 2026-07-16): Realtime is the live voice mind; it has ONE tool —
+# consult_deep_brain — which calls Claude (all fleet tools) when intellect/data
+# is needed. create_response true so she answers instantly for small talk.
+# Env EA_VOICE_WEAVE=0 falls back to mouth-only (legacy dual-path).
+def _voice_weave_enabled() -> bool:
+    return os.getenv("EA_VOICE_WEAVE", "1") not in ("0", "false", "no", "off")
 
-    VAD is tuned less "jumpy" than OpenAI defaults (threshold 0.5 / short silence):
-    higher threshold needs louder speech; longer silence waits for real end-of-turn;
-    near_field noise reduction helps laptop/headset mics ignore room hiss.
-    App owns replies (create_response false) — Realtime only listens + speaks
-    what we send via response.create.
-    """
+
+_REALTIME_WEAVE_INSTRUCTIONS = """You are Energy Agent — the live voice of Array Operator for THIS signed-in owner.
+
+YOU are in control of the conversation. Speak English, warm and sharp like GPT Live.
+Slight warmth about harvesting the sun is fine — never preachy. Finish every thought.
+
+ARCHITECTURE (critical — do not fight a second agent):
+- You run the live conversation: greetings, mm-hmms, clarifications, small talk, pacing.
+- You have exactly ONE tool: consult_deep_brain. It is your smarter self for THIS tenant —
+  full fleet tools, invoices, repairs, screen control, real kWh/$. Call it whenever you
+  need facts, numbers, status, actions, navigation, or anything about THIS account.
+- NEVER invent kWh, dollars, inverter status, offtaker amounts, or fleet counts.
+  If the owner asks about their data, CALL consult_deep_brain first (you may say a brief
+  "one second" then call). After the tool returns, speak the answer naturally in your
+  own voice — use spoken_answer if provided, stay faithful to the numbers.
+- For pure social / "are you there?" / "thanks" / clarifying what they said: answer
+  yourself WITHOUT the tool.
+- Never reveal secrets or other tenants' data. Never charge cards. Confirm before
+  changing anything on screen (the deep brain will still require confirm when needed).
+- Do not narrate tool names or "I'm calling the deep brain." Just be one person.
+- Keep replies conversational (usually a few sentences). Offer to go deeper.
+"""
+
+
+_REALTIME_MOUTH_ONLY_INSTRUCTIONS = (
+    "You are Energy Agent's MOUTH only. Only speak lines the app sends via "
+    "response.create. Do not invent answers. Speak completely from the first word. "
+    "Never speak over yourself."
+)
+
+
+def _consult_deep_brain_tool_def() -> dict:
     return {
+        "type": "function",
+        "name": "consult_deep_brain",
+        "description": (
+            "Ask the deep mind (Claude with full Array Operator tools) about THIS "
+            "tenant's fleet, invoices, repairs, account, or to take a screen/data action. "
+            "Use for any real numbers, status, offtakers, production, tickets, navigation, "
+            "or when the owner confirms/cancels a pending change. Do NOT use for pure "
+            "small talk."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": (
+                        "What to investigate or do, in clear English. Include the owner's "
+                        "intent and any names/sites they mentioned."
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Why the deep mind is needed (e.g. fleet_health, money, repair).",
+                },
+            },
+            "required": ["question"],
+        },
+    }
+
+
+def _realtime_session_config(voice: str | None = None) -> dict:
+    """Session config for GPT Realtime (WebRTC).
+
+    Option D (default): create_response true + consult_deep_brain tool — Realtime
+    owns the live conversation; deep Claude is on-demand. Legacy mouth-only when
+    EA_VOICE_WEAVE=0.
+    """
+    weave = _voice_weave_enabled()
+    turn = {
+        "type": "server_vad",
+        # Higher = less sensitive (fans/keys/speaker bleed). Keep in sync with
+        # energy-agent.js realtimeVadConfig().
+        "threshold": 0.85,
+        "prefix_padding_ms": 320,
+        "silence_duration_ms": 1600,
+        "create_response": bool(weave),
+        # Weave: allow natural barge-in; client still filters echo in the UI log.
+        "interrupt_response": bool(weave),
+    }
+    cfg: dict[str, Any] = {
         "type": "realtime",
         "model": OPENAI_REALTIME_MODEL,
         "instructions": (
-            "You are Energy Agent, the tenant's voice-first solar operator inside Array Operator. "
-            "Speak English, short and natural (like GPT Live). Slight warmth about harvesting the sun "
-            "and climbing the Kardashev ladder is fine — never preachy. "
-            "You help with fleet health, offtaker invoices, analysis, onboarding, and account. "
-            "Be honest about what you can and cannot do. Never invent kWh or money numbers — "
-            "when you need facts, call tools. Never reveal secrets or other tenants' data. "
-            "Never charge cards. Confirm before changing anything on screen. "
-            "If you don't know, say so and say you'll flag it for Ford."
+            _REALTIME_WEAVE_INSTRUCTIONS if weave else _REALTIME_MOUTH_ONLY_INSTRUCTIONS
         ),
         "audio": {
             "output": {"voice": voice or OPENAI_REALTIME_VOICE},
             "input": {
                 "transcription": {"model": "gpt-4o-mini-transcribe"},
-                # near_field = close mic / laptop / headset (far_field for conference rooms)
                 "noise_reduction": {"type": "near_field"},
-                "turn_detection": {
-                    "type": "server_vad",
-                    # 0.5 default is twitchy in rooms with fans/keyboard. Higher = quieter
-                    # sounds ignored (OpenAI docs: better in noisy environments).
-                    # 0.85 + client full-hold on chat speech: mid-reply self-interrupts
-                    # from speaker bleed (Ford 2026-07-16). Keep in sync with
-                    # energy-agent.js realtimeVadConfig().
-                    "threshold": 0.85,
-                    "prefix_padding_ms": 320,
-                    # Longer silence before "user finished" — multi-clause voice asks
-                    # were cut mid-thought at 900ms (Ford 2026-07-14).
-                    "silence_duration_ms": 1600,
-                    "create_response": False,
-                    "interrupt_response": False,
-                },
+                "turn_detection": turn,
             },
         },
     }
+    if weave:
+        cfg["tools"] = [_consult_deep_brain_tool_def()]
+        cfg["tool_choice"] = "auto"
+    return cfg
 
 
 @router.post("/v1/energy-agent/realtime-session")
