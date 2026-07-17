@@ -54,6 +54,42 @@ test("invertersFrom extracts inverter commDevices, skipping non-inverters", () =
   assert.equal(inv[1].status, "offline");
 });
 
+test("isInverterDevice rejects the data-logger/detector, keeps real inverters", () => {
+  // Bruce's Londonderry case: the FlexOM gateway/logger (hex serial, no model) must
+  // NOT count as an inverter, however the vendor labels it.
+  const gw = { sn: "00009e021902bb00", commDevices: [] };
+  // named detector kinds — rejected regardless of assetType
+  assert.equal(C.isInverterDevice({ assetTypeName: "Detector", sn: "00009e021902bb00" }, gw), false);
+  assert.equal(C.isInverterDevice({ assetTypeName: "Collector", sn: "X" }, gw), false);
+  assert.equal(C.isInverterDevice({ assetTypeName: "DataLogger", sn: "X" }, gw), false);
+  assert.equal(C.isInverterDevice({ assetTypeName: "Meter", assetType: 2, sn: "X" }, gw), false); // name beats assetType===2
+  // gateway by asset-type int
+  assert.equal(C.isInverterDevice({ assetType: 1, sn: "X" }, gw), false);
+  // the logger echoed as a commDevice under its own gateway (serial == gateway serial)
+  assert.equal(C.isInverterDevice({ sn: "00009e021902bb00", assetType: 2 }, gw), false);
+  // real inverters still pass — by name and by the assetType===2 fallback
+  assert.equal(C.isInverterDevice({ assetTypeName: "Inverter", sn: "0001013791738041" }, gw), true);
+  assert.equal(C.isInverterDevice({ assetType: 2, sn: "0001013791737108" }, gw), true);
+});
+
+test("invertersFrom excludes the logger/detector but keeps the 4 real inverters", () => {
+  // Faithful to the live shape: 1 gateway whose commDevices include the logger
+  // itself (echoed) plus the real inverters.
+  const j = { data: { id: "S1", gwDevices: [{
+    sn: "00009e021902bb00",
+    commDevices: [
+      { assetTypeName: "Detector", sn: "00009e021902bb00", statusName: "Normal" },   // the "detector"
+      { assetTypeName: "Inverter", sn: "0001013791738041", model: "SCA50KTL-DO/US-480", currentPower: "51000", eToday: 98.6, statusName: "Normal" },
+      { assetTypeName: "Inverter", sn: "0001013791737108", model: "SCA50KTL-DO/US-480", currentPower: "51000", eToday: 105.6, statusName: "Normal" },
+      { assetTypeName: "Inverter", sn: "0001013791738043", model: "SCA50KTL-DO/US-480", currentPower: "51000", eToday: 101.3, statusName: "Normal" },
+      { assetTypeName: "Inverter", sn: "0001014081838033", model: "SC36KTL-DO/US-480", currentPower: "35000", eToday: 73.5, statusName: "Normal" },
+    ],
+  }] } };
+  const inv = C.invertersFrom(j);
+  assert.equal(inv.length, 4);
+  assert.ok(!inv.some((i) => i.serial === "00009e021902bb00"));
+});
+
 test("invertersFrom drops a device with no serial/alias/id", () => {
   const j = devJson([{ assetTypeName: "Inverter", currentPower: "100", statusName: "Normal" }]);
   assert.equal(C.invertersFrom(j).length, 0);
