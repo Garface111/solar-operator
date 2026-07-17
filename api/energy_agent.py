@@ -5701,25 +5701,65 @@ def _ea_bearer(tenant: Tenant) -> str:
     return "Bearer " + mint_session_for_tenant(tenant.id)
 
 
-def _gen_client_dict(db, c) -> dict:
-    """Roster row + array/login rollup for one client (read shape the agent sees)."""
+# Tool results are truncated to 8000 chars before the model sees them (the
+# _agent_turn loop). Embedding every array in the roster blew past that, so the
+# model saw a CUT-OFF json and confabulated the tail — invented a client "Karen
+# Hardt" in place of a real one whose row was severed (Ford 2026-07-16). So the
+# LIST is compact (rows only) and the DETAIL caps its array list; nothing the
+# model reads is ever silently truncated.
+_GEN_LIST_CAP = 25          # roster rows per list_gen_clients call
+_GEN_ARRAYS_CAP = 30        # arrays shown in one get_gen_client
+
+
+def _gen_login_summary(c):
+    parts = []
+    if c.gmp_email or c.gmp_username:
+        parts.append("GMP " + (c.gmp_email or c.gmp_username))
+    if c.vec_email or c.vec_username:
+        parts.append("VEC " + (c.vec_email or c.vec_username))
+    return "; ".join(parts) or None
+
+
+def _gen_client_row(db, c) -> dict:
+    """Compact roster row — NO per-array detail, so a full roster fits the
+    8000-char tool-result cap and the model never sees a truncated list."""
+    n = db.execute(
+        select(func.count()).select_from(Array).where(
+            Array.client_id == c.id, Array.deleted_at.is_(None))
+    ).scalar() or 0
+    return {
+        "id": c.id, "name": c.name,
+        "contact_email": c.contact_email,
+        "report_frequency": c.report_frequency or "quarterly (default)",
+        "auto_send": bool(getattr(c, "auto_send", False)),
+        "active": bool(getattr(c, "active", True)),
+        "array_count": int(n),
+        "logins": _gen_login_summary(c),
+        "last_delivered_at": (c.last_delivered_at.isoformat()
+                              if getattr(c, "last_delivered_at", None) else None),
+    }
+
+
+def _gen_client_detail(db, c) -> dict:
+    """Full detail for ONE client — arrays (capped) + logins. Bounded so even a
+    42-array client stays under the tool-result cap."""
     arrs = db.execute(
         select(Array).where(Array.client_id == c.id, Array.deleted_at.is_(None))
+        .order_by(Array.name)
     ).scalars().all()
-    arr_ids = [a.id for a in arrs]
-    accts = []
+    total_arr = len(arrs)
+    shown = arrs[:_GEN_ARRAYS_CAP]
+    arr_ids = [a.id for a in shown]
+    acct_by_arr: dict = {}
     if arr_ids:
         from .models import UtilityAccount
-        accts = db.execute(
+        for u in db.execute(
             select(UtilityAccount).where(
                 UtilityAccount.array_id.in_(arr_ids),
-                UtilityAccount.deleted_at.is_(None),
-            )
-        ).scalars().all()
-    acct_by_arr: dict = {}
-    for u in accts:
-        acct_by_arr.setdefault(u.array_id, []).append(u)
-    return {
+                UtilityAccount.deleted_at.is_(None))
+        ).scalars().all():
+            acct_by_arr.setdefault(u.array_id, []).append(u)
+    d = {
         "id": c.id,
         "name": c.name,
         "contact_email": c.contact_email,
@@ -5729,7 +5769,6 @@ def _gen_client_dict(db, c) -> dict:
         "active": bool(getattr(c, "active", True)),
         "default_fuel_type": getattr(c, "default_fuel_type", "solar"),
         "notes": getattr(c, "notes", None),
-        # How LOGINS are organized under this client (the autopop binding).
         "logins": {
             "gmp_email": c.gmp_email, "gmp_username": c.gmp_username,
             "gmp_autopopulate": bool(getattr(c, "gmp_autopopulate", False)),
@@ -5738,8 +5777,7 @@ def _gen_client_dict(db, c) -> dict:
         },
         "last_delivered_at": (c.last_delivered_at.isoformat()
                               if getattr(c, "last_delivered_at", None) else None),
-        "array_count": len(arrs),
-        # How ARRAYS are organized under this client (+ their NEPOOL-GIS ids).
+        "array_count": total_arr,
         "arrays": [
             {
                 "id": a.id, "name": a.name,
@@ -5752,9 +5790,13 @@ def _gen_client_dict(db, c) -> dict:
                     for u in acct_by_arr.get(a.id, [])
                 ],
             }
-            for a in arrs
+            for a in shown
         ],
     }
+    if total_arr > len(shown):
+        d["arrays_truncated"] = True
+        d["arrays_note"] = f"Showing {len(shown)} of {total_arr} arrays."
+    return d
 
 
 def _resolve_gen_client(db, tid: str, args: dict):
@@ -5801,20 +5843,28 @@ def _list_gen_clients_tool(db, tenant: Tenant, args: dict) -> dict:
                             "This is the NEPOOL/REC generation-workbook roster (Invoices → "
                             "Generation reports), separate from offtaker invoices. I can "
                             "create one with create_gen_client.")}
-    out = [_gen_client_dict(db, c) for c in rows]
-    return {"count": len(out), "clients": out,
-            "instruction_for_agent": (
-                "This is the Generation-Reports client roster (NEPOOL/REC workbooks), NOT "
-                "offtaker invoices. Each client owns arrays (with NEPOOL-GIS ids) and logins. "
-                "Edit with patch_gen_client / patch_gen_array, create with create_gen_client."
-            )}
+    total = len(rows)
+    shown = rows[:_GEN_LIST_CAP]
+    out = [_gen_client_row(db, c) for c in shown]
+    result = {"count": total, "shown": len(out), "clients": out,
+              "instruction_for_agent": (
+                  "This is the Generation-Reports client roster (NEPOOL/REC workbooks), NOT "
+                  "offtaker invoices. Report ONLY these clients — do not invent, rename, or "
+                  "add any. array_count is exact. For a client's arrays + NEPOOL ids, call "
+                  "get_gen_client(client_name). Edit with patch_gen_client / patch_gen_array."
+              )}
+    if total > len(out):
+        result["truncated"] = True
+        result["note"] = (f"Showing the first {len(out)} of {total} clients (kept compact so "
+                          "nothing is cut off). Ask about a specific client by name for detail.")
+    return result
 
 
 def _get_gen_client_tool(db, tenant: Tenant, args: dict) -> dict:
     c, err = _resolve_gen_client(db, tenant.id, args)
     if err:
         return err
-    return {"client": _gen_client_dict(db, c)}
+    return {"client": _gen_client_detail(db, c)}
 
 
 def _create_gen_client_tool(db, tenant: Tenant, args: dict) -> dict:
@@ -5892,7 +5942,7 @@ def _patch_gen_client_tool(db, tenant: Tenant, args: dict, user_text: str = "") 
         return {"error": ("nothing to change — pass name, contact_email, cc_emails, "
                           "report_frequency, gmp_email/gmp_username, vec_email/vec_username, "
                           "active, notes, and/or auto_send"),
-                "client": _gen_client_dict(db, c)}
+                "client": _gen_client_detail(db, c)}
     try:
         body = ClientUpdate(**fields)
     except Exception as e:
@@ -5904,7 +5954,7 @@ def _patch_gen_client_tool(db, tenant: Tenant, args: dict, user_text: str = "") 
     db.expire_all()  # handler committed on its own session; drop our stale cache
     fresh, _ = _resolve_gen_client(db, tenant.id, {"client_id": c.id})
     return {"ok": True, "updated": sorted(fields.keys()),
-            "client": _gen_client_dict(db, fresh) if fresh else (res or {}).get("client"),
+            "client": _gen_client_detail(db, fresh) if fresh else (res or {}).get("client"),
             "message": f"Updated “{c.name}”: {', '.join(sorted(fields.keys()))}.",
             "ui": {"type": "ui_refresh", "surface": "generation_reports"}}
 
