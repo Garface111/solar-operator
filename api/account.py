@@ -2237,9 +2237,9 @@ def _billing_summary_kwh(t: Tenant) -> dict:
     from .models import GenReportCharge
     with SessionLocal() as db2:
         offtaker_count = billable_offtaker_count(db2, t.id)
-        # Generation reports ($15/client/quarter, metered): count the billable OUTPUT
-        # events (first send OR download per client-quarter) recorded this billing
-        # period so the card can show "N ×$15". Read-only — see the return block.
+        # Generation reports ($15 per ARRAY per quarter, metered): count the billable
+        # OUTPUT events (first send OR download per ARRAY-quarter) recorded this
+        # billing period so the bill can show "N arrays reported × $15". Read-only.
         # (Building/previewing is free; only a real output writes a GenReportCharge.)
         genreports_charges = int(db2.execute(
             select(func.count()).select_from(GenReportCharge).where(
@@ -2271,6 +2271,8 @@ def _billing_summary_kwh(t: Tenant) -> dict:
         nameplate_kw=float(nameplate_kw or 0),
         offtaker_count=int(offtaker_count or 0),
         ai_pro=ai_pro,
+        # Metered usage already accrued this period: reported ARRAYS × $15.
+        genreport_array_quarters=genreports_charges,
         include_monitoring=True,
         include_invoicing=True,
     )

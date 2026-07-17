@@ -29,6 +29,7 @@ from .pricing_ao_nameplate import (
     FULL_UNIT_CENTS as NAMEPLATE_FULL_CENTS,
     compute_monthly_cents as nameplate_monthly_cents,
 )
+from .pricing_ao_genreports import PRICE_CENTS as GENREPORT_ARRAY_CENTS
 
 
 def _collection_fee_info() -> dict:
@@ -102,6 +103,7 @@ def build_unified_bill(
     nameplate_kw: float = 0.0,
     offtaker_count: int = 0,
     ai_pro: bool = False,
+    genreport_array_quarters: int = 0,
     include_monitoring: Optional[bool] = None,
     include_invoicing: Optional[bool] = None,
     always_show_product_lines: bool = True,
@@ -169,6 +171,36 @@ def build_unified_bill(
         ),
     })
 
+    # ── Generation reports (THE FOLD, Jul 2026) — METERED, $15 per ARRAY per
+    # quarter, charged on the first real output (send or download) covering that
+    # array, then unlimited that quarter. Unlike the two lines above (recurring
+    # subscriptions), this is USAGE already accrued this billing period, so the
+    # quantity is a COUNT OF REPORTED ARRAYS, not a roster size. Building,
+    # previewing and auto-propagating the fleet is free — a $0 line here means the
+    # operator hasn't reported anything this period, not that the feature is off.
+    gr = int(genreport_array_quarters or 0)
+    gr_total = float(gr * GENREPORT_ARRAY_CENTS)
+    if gr:
+        total += gr_total
+    lines.append({
+        "id": "generation_reports",
+        "kind": "Generation reports",
+        "basis": "array_quarters",
+        "quantity": gr,
+        "unit_label": "arrays reported",
+        "unit_cents": float(GENREPORT_ARRAY_CENTS),
+        "full_unit_cents": float(GENREPORT_ARRAY_CENTS),
+        "amount_cents": round(gr_total, 2),
+        "billed": bool(gr),
+        "included_in_monthly_total": bool(gr),
+        "metered": True,
+        "desc": (
+            f"${GENREPORT_ARRAY_CENTS / 100:.0f} per array, once per quarter — charged "
+            "the first time you report an array (send its report or download the "
+            "workbook), then unlimited that quarter. Building and previewing are free."
+        ),
+    })
+
     ai_line = {
         "id": "ai_pro",
         "kind": "Energy Agent Pro",
@@ -222,7 +254,9 @@ def build_unified_bill(
         "collection_fee": collection,
         "model_note": (
             "Regular plan: fleet monitoring (kW nameplate) + offtaker invoices "
-            f"(${OFFTAKER_FULL_CENTS / 100:.0f}/offtaker). "
+            f"(${OFFTAKER_FULL_CENTS / 100:.0f}/offtaker). Generation reports are "
+            f"${GENREPORT_ARRAY_CENTS / 100:.0f} per array, once per quarter — only "
+            "for arrays you actually report; building and previewing are free. "
             f"Energy Agent Pro is ${AI_PRO_MONTHLY_USD:.0f}/mo unlimited AI "
             f"(free tier keeps a ${AI_FREE_WEEKLY_BUDGET_USD:.2f}/week sample). "
             f"When offtakers pay online we keep {collection['fee_percent']:g}% "
