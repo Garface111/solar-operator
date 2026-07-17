@@ -365,6 +365,11 @@ export interface ClientRow {
    *  bill landed. Drives the "Last checked" column so a monthly-billing meter
    *  doesn't look stale between bills. */
   last_checked_at?: string | null;
+  /** THE FOLD: when TRUE this client's generation report auto-sends each period
+   *  — and is the operator's opt-in to the $15/client/quarter charge (the meter
+   *  fires on the first real output). Default false; the operator flips it per
+   *  client in the roster. Manual send/download still work regardless. */
+  auto_send?: boolean;
 }
 
 // ─── account ───────────────────────────────────────────────────────────────
@@ -965,6 +970,8 @@ export interface ClientCreateInput {
   vec_email?: string | null;
   vec_username?: string | null;
   vec_autopopulate?: boolean;
+  /** THE FOLD: per-client auto-send enrollment (patchable via updateClient). */
+  auto_send?: boolean;
 }
 
 export async function createClient(

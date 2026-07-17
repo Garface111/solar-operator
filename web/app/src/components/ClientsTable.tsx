@@ -598,7 +598,7 @@ export function ClientsTable({
             <th scope="col" className="w-16 py-2.5 pr-3 text-right">Arrays</th>
             <th scope="col" className="w-16 py-2.5 pr-3 text-right">Accts</th>
             <th scope="col" className="w-28 py-2.5 pr-3 text-left">Last checked</th>
-            <th scope="col" className="w-20 py-2.5 pr-3 text-left">Delivery</th>
+            <th scope="col" className="w-28 py-2.5 pr-3 text-left">Delivery</th>
             <th scope="col" className="w-24 py-2.5 pr-3 text-right">Actions</th>
           </tr>
         </thead>
@@ -686,6 +686,31 @@ function ClientTableRow({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [mergeModalOpen, setMergeModalOpen] = useState(false);
+  const [savingAutoSend, setSavingAutoSend] = useState(false);
+
+  // Per-client auto-send toggle (THE FOLD): flipping it on enrolls this client
+  // in automatic per-period delivery AND is the operator's opt-in to the
+  // $15/client/quarter meter (which fires on the first real output). Off by
+  // default; manual send/download always work regardless.
+  async function handleAutoSend(e: React.MouseEvent) {
+    e.stopPropagation();
+    if (savingAutoSend) return;
+    const next = !client.auto_send;
+    setSavingAutoSend(true);
+    try {
+      const updated = await updateClient(client.id, { auto_send: next });
+      onChange(updated);
+      toast.success(
+        next
+          ? `Auto-send on for ${client.name} — reports ship automatically ($15/quarter, billed on the first output).`
+          : `Auto-send off for ${client.name}.`,
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Couldn't update auto-send");
+    } finally {
+      setSavingAutoSend(false);
+    }
+  }
 
   const delivery = deliveryStatus(client);
   const captureIso = lastCheckedIso(client);
@@ -905,24 +930,43 @@ function ClientTableRow({
           )}
         </td>
 
-        {/* Delivery badge */}
-        <td className="w-20 py-2.5 pr-3">
-          {delivery ? (
-            <span
+        {/* Delivery badge + per-client auto-send toggle */}
+        <td className="w-28 py-2.5 pr-3">
+          <div className="flex flex-col items-start gap-1">
+            {delivery && (
+              <span
+                className={[
+                  "inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium",
+                  delivery.kind === "ok"
+                    ? "bg-emerald-50 text-emerald-600"
+                    : "bg-red-50 text-red-700",
+                ].join(" ")}
+                title={delivery.label}
+              >
+                {delivery.kind === "ok" ? "✓" : "✕"}{" "}
+                {delivery.kind === "ok" ? "OK" : "Bounced"}
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={handleAutoSend}
+              disabled={savingAutoSend}
+              title={
+                client.auto_send
+                  ? "Auto-send ON — this client's report ships each period. $15/quarter, billed on the first output (send or download)."
+                  : "Turn ON auto-send so this client's report ships automatically each period ($15/quarter, billed on the first output)."
+              }
               className={[
-                "inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium",
-                delivery.kind === "ok"
-                  ? "bg-emerald-50 text-emerald-600"
-                  : "bg-red-50 text-red-700",
+                "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold transition-colors disabled:opacity-50",
+                client.auto_send
+                  ? "bg-primary-600 text-white hover:bg-primary-700"
+                  : "border border-cream-border text-zinc-500 hover:border-primary-400 hover:text-primary-600",
               ].join(" ")}
-              title={delivery.label}
             >
-              {delivery.kind === "ok" ? "✓" : "✕"}{" "}
-              {delivery.kind === "ok" ? "OK" : "Bounced"}
-            </span>
-          ) : (
-            <span className="text-zinc-300">—</span>
-          )}
+              <span aria-hidden>{client.auto_send ? "◉" : "○"}</span>
+              Auto-send
+            </button>
+          </div>
         </td>
 
         {/* Row actions */}
