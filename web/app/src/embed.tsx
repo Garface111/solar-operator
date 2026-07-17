@@ -99,27 +99,43 @@ function EmbedShell() {
 
   return (
     <div className="min-h-[24rem] font-sans text-zinc-900">
-      <nav
-        role="tablist"
-        aria-label="Generation reports sections"
-        className="mb-4 inline-flex items-center gap-1 rounded-full border border-cream-border bg-white/70 p-1"
-      >
-        {SECTIONS.map((s) => (
-          <NavLink
-            key={s.to}
-            to={s.to}
-            role="tab"
-            className={({ isActive }) =>
-              "rounded-full px-3.5 py-1.5 text-sm font-medium transition-colors " +
-              (isActive
-                ? "bg-primary-700 text-white shadow-sm"
-                : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900")
-            }
-          >
-            {s.label}
-          </NavLink>
-        ))}
-      </nav>
+      {/* One header row: title + one-line what-it-does on the left, the
+          Clients/Reports switch on the right. The AO shell's own "Generation
+          reports" title band is hidden for this sub-view (reports.js), so this
+          is the single header — no duplicate title, and the section switch
+          lives up here instead of floating above the table. */}
+      <header className="mb-4 flex flex-wrap items-center justify-between gap-x-4 gap-y-2">
+        <div className="min-w-0">
+          <h1 className="text-xl font-semibold tracking-tight text-zinc-900">
+            Generation reports
+          </h1>
+          <p className="mt-0.5 text-sm text-zinc-500">
+            Quarterly NEPOOL-GIS workbooks, built from each client&rsquo;s utility
+            bills and emailed automatically.
+          </p>
+        </div>
+        <nav
+          role="tablist"
+          aria-label="Generation reports sections"
+          className="inline-flex shrink-0 items-center gap-1 rounded-full border border-cream-border bg-white/70 p-1"
+        >
+          {SECTIONS.map((s) => (
+            <NavLink
+              key={s.to}
+              to={s.to}
+              role="tab"
+              className={({ isActive }) =>
+                "rounded-full px-4 py-1.5 text-sm font-medium transition-colors " +
+                (isActive
+                  ? "bg-primary-700 text-white shadow-sm"
+                  : "text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900")
+              }
+            >
+              {s.label}
+            </NavLink>
+          ))}
+        </nav>
+      </header>
       <SetupProgress />
       <Outlet context={ctx} />
     </div>
