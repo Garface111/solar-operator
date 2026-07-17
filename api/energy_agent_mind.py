@@ -1245,6 +1245,15 @@ def _propose_ui_worker(db, tenant_id: str, payload: dict) -> dict:
             f"[Proactive mind — prepared for your fleet's UX]\n{composed}"
         )[:5000]
 
+    # Don't file vague/non-actionable UI proposals into the customer's build
+    # queue (Ford 2026-07-17). The proactive path was the main source of
+    # "primarily about unspecified" clutter — hold it unless it names a real change.
+    from .feature_suggestions import is_actionable_suggestion
+    _ok, _why = is_actionable_suggestion(composed)
+    if not _ok:
+        log.info("mind propose_ui skipped (not actionable: %s) tenant=%s", _why, tenant_id)
+        return {"ok": False, "skipped": True, "reason": f"not actionable ({_why})"}
+
     try:
         from .feature_suggestions import FeatureSuggestion
 

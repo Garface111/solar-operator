@@ -1111,6 +1111,12 @@ def act_stage_feature(
     text = (text or "").strip()[:5000]
     if not text:
         return {"ok": False, "denied": True, "denied_reason": "empty text"}
+    # Sovereign "UX friction cluster" notes ("review mind metrics…") aren't
+    # buildable changes — keep them out of the customer build queue (Ford 2026-07-17).
+    from .feature_suggestions import is_actionable_suggestion
+    _ok, _why = is_actionable_suggestion(text)
+    if not _ok:
+        return {"ok": False, "denied": True, "denied_reason": f"not actionable: {_why}"}
     from .feature_suggestions import FeatureSuggestion
     fs = FeatureSuggestion(
         text=f"[Sovereign] {text}",

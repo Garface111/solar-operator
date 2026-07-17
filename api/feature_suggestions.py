@@ -41,6 +41,81 @@ ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 VALID_STATUSES = ("new", "reviewed", "building", "shipped")
 
 
+# ── Actionability gate (Ford 2026-07-17) ────────────────────────────────────
+# The Energy Agent's mind/sovereign and the Improve box were filing questions,
+# spoken-chatter fragments, and internal control text ("Call escalate_to_ford
+# now") as build tickets — the customer then saw "Working on your change" for
+# something they never asked to build. This gate strips the "[tag]" markup the
+# mind/sovereign prepend, then requires the CORE ask to name an actual UI change.
+# Conservative on purpose: it only rejects high-confidence non-requests, so a
+# real "add / move / separate / make X bigger" ask still passes.
+_CONTROL_ARTIFACTS = (
+    "escalate_to_ford", "call escalate", "site improvement #", "site improve #",
+)
+_QUESTION_STARTS = (
+    "what ", "what's", "whats", "why ", "how ", "when ", "where ", "who ",
+    "which ", "is ", "are ", "should ", "shall ", "can i", "could ", "do i",
+    "does ", "did ", "will ", "would i",
+)
+_CHANGE_SIGNALS = (
+    "add ", "remove", "delete", "move ", "rename", "replace", "swap", "reorder",
+    "sort ", "group ", "align", "resize", "shrink", "enlarge", "hide ", "show ",
+    "split", "separate", "combine", "merge ", "fix ", "change", "put ", "place ",
+    "highlight", "tint", "collapse", "expand", "enable", "disable", "toggle",
+    "default to", "relabel", "color", "colour", "bigger", "smaller", "larger",
+    "wider", "taller", "shorter", "bold", "instead of", "should be", "should show",
+    "would be nice", "can you", "could you", "make it", "make the", "i want",
+    "i'd like", "i would like", "let me", "please add", "please make",
+    "please move", "put the", "move the", "turn the", "give me", "get rid of",
+    "declutter", "reposition", "restyle", "rework", "redesign",
+)
+_UI_NOUNS = (
+    "button", "tab", "row", "column", "chart", "graph", "icon", "panel", "card",
+    "menu", "field", "header", "footer", "list", "table", "badge", "chip",
+    "block", "dropdown", "modal", "popup", "banner", "tile", "legend", "tooltip",
+    "spoken", "reply", "widget", "sidebar", "slider", "checkbox", "form",
+    "dialog", "tab bar", "nav", "avatar", "thumbnail", "placeholder",
+)
+
+
+def _strip_suggestion_markup(text: str) -> str:
+    """Drop the leading '[tag]' lines and 'Site improve:'/'[Sovereign]' prefixes
+    so the gate judges the real ask, not the framing the mind/sovereign added."""
+    out = []
+    for raw in (text or "").splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        if s.startswith("[") and s.endswith("]"):
+            continue  # a whole tag line, e.g. "[Proactive mind — …]"
+        s = re.sub(r"^\[[^\]]*\]\s*", "", s)  # a leading inline [tag]
+        s = re.sub(
+            r"^(site improve[d]?|improve site|feature request|\[sovereign\])\s*:?\s*",
+            "", s, flags=re.I,
+        )
+        if s:
+            out.append(s)
+    return " ".join(out).strip()
+
+
+def is_actionable_suggestion(text: str) -> tuple[bool, str]:
+    """(ok, reason). True when `text` describes a real UI change worth building.
+    Rejects questions, observations/chatter, and internal control artifacts."""
+    core = _strip_suggestion_markup(text)
+    low = core.lower()
+    if len(core) < 12:
+        return False, "too short to build from"
+    if any(a in low for a in _CONTROL_ARTIFACTS):
+        return False, "internal control text, not a change request"
+    has_change = any(sig in low for sig in _CHANGE_SIGNALS)
+    has_ui = any(n in low for n in _UI_NOUNS)
+    if not (has_change or has_ui):
+        looks_q = low.rstrip(" .!").endswith("?") or low.startswith(_QUESTION_STARTS)
+        return False, ("looks like a question, not a change" if looks_q
+                       else "no concrete change described")
+    return True, "ok"
+
+
 def _now() -> datetime:
     return datetime.utcnow()
 
@@ -153,6 +228,17 @@ def submit_suggestion(body: SuggestionIn, authorization: str | None = Header(def
     if not text:
         raise HTTPException(400, "Empty suggestion")
     text = text[:5000]
+    # Don't open a "building your change" journey for a question, an observation,
+    # or stray control text — answer it in chat instead of filing a ticket.
+    ok, _why = is_actionable_suggestion(text)
+    if not ok:
+        return {
+            "ok": False,
+            "not_actionable": True,
+            "detail": "That reads like a question or a note, not a site change. "
+                      "Ask me directly and I'll answer — or, for a change, tell me "
+                      "what to add, move, or adjust.",
+        }
     email = (body.email or "").strip() or None
     tenant_id = None
     product = "array_operator"
