@@ -8232,10 +8232,42 @@ def _agent_turn(
             "Analysis, Invoices, Repairs, Account). Never invent buttons or steps that "
             "are not in the product map. Be concrete and sequential."
         )
+    # Capability is not evidence, and evidence is not a vibe. The agent was
+    # denying it could send email while actively sending it, then flipping the
+    # moment the owner pushed back — guessing in both directions rather than
+    # checking (Ford 2026-07-16).
+    system += (
+        "\n\nWHAT YOU CAN DO vs WHAT ACTUALLY HAPPENED — never confuse these.\n"
+        "If a tool is in your list, you CAN do that thing: say so plainly. You send repair "
+        "email (send_repair_checkin) and you do it routinely — never say 'I can't send "
+        "emails' or hedge about it. Not knowing whether a message LANDED is not the same as "
+        "not being able to SEND it; never let uncertainty about an outcome shrink into "
+        "uncertainty about a capability.\n"
+        "When the question is what actually happened, CHECK — don't introspect: "
+        "check_email_delivery for whether mail was delivered or bounced, repair_ops_overview "
+        "/ list_repair_tickets for what you've already sent and logged. Check before you "
+        "claim, in EITHER direction.\n"
+        "And do not fold just because the owner pushes back. If they assert something about "
+        "how you work or what you did, and you can check it, check it — then answer. "
+        "Agreeing to be agreeable is just a lie that sounds polite."
+    )
     if voice_active:
         # ONE mind, two outputs it authors itself (Ford 2026-07-16, Option B):
         # the panel text (full) + a [SPOKEN] line YOU speak aloud. Same reasoning
         # pass, so the spoken words carry the tools you just called and your plan.
+        if not bool((context or {}).get("voice_weave")):
+            # Ground it in the LIVE wiring. Its docs described the reverted Option D
+            # weave, so it explained voice as "the mouthpiece's own surface model" —
+            # a second mind that does not exist (Ford 2026-07-16).
+            system += (
+                "\n\nHOW YOUR VOICE ACTUALLY WORKS RIGHT NOW: you are the ONLY mind. The "
+                "voice model is a MOUTH — it reads your [SPOKEN] line verbatim and has no "
+                "tools, no fleet data, and no opinions of its own. It is not consulting you "
+                "and it has no 'surface understanding' that could differ from yours. So if "
+                "the spoken answer was vague or wrong, that was YOUR line — own it, don't "
+                "blame a voice layer. If the voice ever says something you did not write, "
+                "that is a bug worth flagging, not another agent's view."
+            )
         system += (
             "\n\nYOU WILL BE HEARD (voice is live). Produce your answer in TWO parts:\n"
             "1) Your normal text answer for the on-screen panel — clear and complete "
