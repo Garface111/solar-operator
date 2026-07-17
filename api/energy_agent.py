@@ -66,7 +66,16 @@ COST_PER_1K_INPUT = float(os.getenv("EA_COST_PER_1K_IN", "0.003"))
 COST_PER_1K_OUTPUT = float(os.getenv("EA_COST_PER_1K_OUT", "0.015"))
 COST_PER_MIN_VOICE = float(os.getenv("EA_COST_PER_MIN_VOICE", "0.06"))
 # Fewer LLM round-trips = snappier voice/chat (was 10; most asks need 1–3).
-MAX_TOOL_ROUNDS = 6
+# Per-turn tool-call rounds. Ford 2026-07-16: "give it infinite tool step limits" —
+# the old cap of 6 made the agent quit a normal multi-subsystem answer with "tell
+# me the next single step you want", dumping its own job on the owner. The real
+# ceiling is the weekly $ budget (unlimited on Pro/comped), re-checked each round;
+# a genuine same-step-repeating loop is the only other stop. Default 100 is
+# effectively unbounded for real work; set EA_MAX_TOOL_ROUNDS=0 for truly no cap.
+try:
+    MAX_TOOL_ROUNDS = int(os.getenv("EA_MAX_TOOL_ROUNDS", "100") or 100)
+except (TypeError, ValueError):
+    MAX_TOOL_ROUNDS = 100
 FORD_ESCALATE_TO = os.getenv("FORD_ALERT_EMAIL", "")  # notify uses default if empty
 
 PERSONA = """You are Energy Agent — the tenant's operating intelligence inside Array Operator.
@@ -8924,7 +8933,23 @@ def _agent_turn(
     # give them the larger budget (not just source=voice turns).
     llm_max_tokens = voice_max if voice_active else default_max
 
-    for _round in range(MAX_TOOL_ROUNDS):
+    _round = 0
+    _call_counts: dict = {}
+    _unbounded = MAX_TOOL_ROUNDS <= 0
+    while _unbounded or _round < MAX_TOOL_ROUNDS:
+        _round += 1
+        # The weekly $ budget is the real ceiling (unlimited on Pro/comped). Re-check
+        # it on a long turn so a free-tier owner can't overrun the weekly cap in a
+        # single runaway turn — a real economic limit, NOT a thrift throttle.
+        if _round > 1 and _round % 6 == 0:
+            try:
+                if not _check_budget(db, tenant.id).get("ok"):
+                    final_text = final_text or (
+                        "You've used up this week's Energy Agent budget — it resets weekly, "
+                        "or upgrade to Pro for unlimited.")
+                    break
+            except Exception:
+                pass
         # Release the pooled DB connection before the (long, blocking) LLM HTTP
         # call — holding a txn across vendor HTTP is the documented whole-API
         # meltdown class. Tools re-acquire a connection lazily afterwards.
@@ -8950,6 +8975,8 @@ def _agent_turn(
                 targs = json.loads(fn.get("arguments") or "{}")
             except Exception:
                 targs = {}
+            _sig = (tname + "|" + json.dumps(targs, sort_keys=True, default=str))[:240]
+            _call_counts[_sig] = _call_counts.get(_sig, 0) + 1
             # Live "thinking out loud" — narrate what we're about to do BEFORE it
             # runs, so the voice can speak it in real time (grounded in the real
             # tool call, so it can't invent). Callback must never break the turn.
@@ -8994,10 +9021,19 @@ def _agent_turn(
                 "tool_call_id": tc.get("id") or tname,
                 "content": json.dumps(out)[:8000],
             })
-        else:
-            continue
+        # Stuck-loop guard: the same exact tool+args many times is spinning, not
+        # progress — the ONLY early stop besides the budget (never a thrift cap).
+        if max(_call_counts.values(), default=0) >= 8:
+            final_text = final_text or (
+                "I caught myself repeating the same step, so I stopped to avoid a loop. "
+                "Here's where I got to — tell me if you'd like me to keep going.")
+            break
     else:
-        final_text = final_text or "I hit my tool-step limit — tell me the next single step you want."
+        # Reached only when bounded and the (high) ceiling is exhausted — real work
+        # never gets here; a safety backstop, not a hand-off of the agent's job.
+        final_text = final_text or (
+            "That turned into an unusually long chain of steps and I paused to stay safe. "
+            "Here's what I have so far — want me to keep going?")
 
     if not final_text:
         final_text = (msg.get("content") or "").strip() or (
