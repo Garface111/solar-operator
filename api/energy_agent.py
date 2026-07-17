@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, File, Form, Header, HTTPException, Request, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import DateTime, Float, Integer, String, Text, func, select
 from sqlalchemy.orm import Mapped, mapped_column
@@ -7075,6 +7075,69 @@ def _make_spoken(reply: str, *, voice_active: bool) -> str:
     return _spoken_line(reply)
 
 
+# ── live "thinking out loud" narration (Ford 2026-07-16) ──────────────────────
+# Map the deep brain's REAL tool calls → short first-person phrases the voice
+# speaks while it works, so the wait is filled with genuine, grounded thinking
+# (never invented — each phrase is derived from a tool that's actually running).
+_NAV_TAB_NAMES = {
+    "#dashboard": "Fleet Triage", "#arrays": "Inverters", "#analysis": "Analysis",
+    "#trends": "Trends", "#resources": "Resources", "#reports": "Invoices",
+    "#ops": "Repairs", "#account": "Account",
+}
+
+
+def _narrate_tool(name: str, args: dict) -> str | None:
+    n = (name or "").strip()
+    a = args or {}
+    if n in ("tenant_census",):
+        return "Let me get a read on your whole fleet."
+    if n in ("fleet_overview",):
+        return "Checking how your arrays are doing right now."
+    if n in ("investigate_attention",):
+        return "Let me see what needs attention across the fleet."
+    if n in ("array_detail",):
+        nm = (a.get("array_name") or a.get("name") or "").strip()
+        return f"Taking a closer look at {nm}." if nm else "Taking a closer look at that site."
+    if n in ("production_forecast",):
+        return "Comparing your output against what the weather should've given you."
+    if n in ("query_tenant",):
+        return "Digging into your numbers."
+    if n in ("fleet_trends_summary",):
+        return "Looking at your production trend."
+    if n in ("list_recent_invoices",):
+        return "Pulling up your recent invoices."
+    if n in ("get_billing_rates", "get_offtaker", "list_offtakers"):
+        return "Checking your offtaker rates."
+    if n in ("account_summary",):
+        return "Checking your account."
+    if n in ("setup_status",):
+        return "Let me see where your setup stands."
+    if n in ("refresh_capture",):
+        return "Kicking off a fresh data pull."
+    if n in ("repair_ops_overview", "list_service_contacts", "list_repair_tickets"):
+        return "Checking on your repairs."
+    if n in ("get_billing_rates",):
+        return "Checking your rates."
+    if n in ("product_map",):
+        topic = str(a.get("topic") or "").lower()
+        if topic.startswith("surface_"):
+            tab = topic.replace("surface_", "").replace("_", " ").title()
+            return f"Getting the {tab} layout straight so I can walk you through it."
+        return "Let me get the details right."
+    if n in ("ui_navigate",):
+        h = str(a.get("hash") or a.get("tab") or "").lower()
+        if not h.startswith("#"):
+            h = "#" + h
+        tab = _NAV_TAB_NAMES.get(h)
+        return f"Opening {tab} for you." if tab else None
+    if n in ("ui_tour",):
+        return "Let me set up the walkthrough."
+    if n in ("web_search", "web_fetch"):
+        return "Looking that up."
+    # Granular / internal tools (ui_highlight, memory, escalate, confirm…): silent.
+    return None
+
+
 def _agent_turn(
     db,
     tenant: Tenant,
@@ -7083,6 +7146,7 @@ def _agent_turn(
     context: dict | None,
     attachment_ids: list[str] | None = None,
     source: str = "text",
+    on_event=None,
 ) -> dict:
     budget = _check_budget(db, tenant.id)
     if not budget["ok"]:
@@ -7330,6 +7394,16 @@ def _agent_turn(
                 targs = json.loads(fn.get("arguments") or "{}")
             except Exception:
                 targs = {}
+            # Live "thinking out loud" — narrate what we're about to do BEFORE it
+            # runs, so the voice can speak it in real time (grounded in the real
+            # tool call, so it can't invent). Callback must never break the turn.
+            if on_event is not None:
+                phrase = _narrate_tool(tname, targs)
+                if phrase:
+                    try:
+                        on_event({"type": "thinking", "text": phrase, "tool": tname})
+                    except Exception:
+                        pass
             out = _run_tool(tname, targs, tenant, session, db, user_text=user_text)
             tool_trace.append({"name": tname, "args": targs, "result": out})
 
@@ -7944,6 +8018,81 @@ async def chat_upload(
         db.add(row)
         db.commit()
         return {"ok": True, "asset": _ea_serialize_asset(row)}
+
+
+@router.post("/v1/energy-agent/voice-consult-stream")
+def voice_consult_stream(body: ChatIn, authorization: str | None = Header(default=None)):
+    """Option D + live narration: the voice weave's deep-brain consult, STREAMED.
+    Emits newline-delimited JSON while Claude works:
+      {"type":"thinking","text":"Checking your fleet…"}   ← spoken live by GPT
+      ...
+      {"type":"answer","spoken":"…","panel":"…","ui_commands":[…],"pending":…}
+    The thinking lines are grounded in the brain's real tool calls (never
+    invented), so the wait is filled with genuine thinking-out-loud. The final
+    answer is Claude's tool-grounded [SPOKEN] line."""
+    import queue as _queue
+    import threading as _threading
+
+    t = _auth(authorization)
+    msg = (body.message or "").strip() or "Help with what the owner just asked."
+    sid = body.session_id
+    ctx = dict(body.context or {})
+    ctx["voice_weave"] = True
+    ctx["voice_active"] = True
+
+    q: "_queue.Queue" = _queue.Queue()
+    _SENTINEL = object()
+
+    def _worker():
+        last = {"text": None}
+        emitted = {"n": 0}
+
+        def _on_event(ev):
+            # Dedup consecutive identical phrases + cap the chatter.
+            if ev.get("type") == "thinking":
+                txt = (ev.get("text") or "").strip()
+                if not txt or txt == last["text"] or emitted["n"] >= 6:
+                    return
+                last["text"] = txt
+                emitted["n"] += 1
+            q.put(ev)
+
+        try:
+            with SessionLocal() as db:
+                _ea_ensure_asset_table(db)
+                s = _get_session(db, sid, t.id)
+                if body.context is not None:
+                    s.context_json = json.dumps(ctx)
+                out = _agent_turn(
+                    db, t, s, msg, ctx,
+                    source="voice_consult", on_event=_on_event,
+                )
+                db.commit()
+            q.put({
+                "type": "answer",
+                "spoken": out.get("speak") or "",
+                "panel": out.get("reply") or "",
+                "ui_commands": out.get("ui_commands") or [],
+                "pending": out.get("pending"),
+                "budget": out.get("budget"),
+            })
+        except Exception as e:  # noqa: BLE001
+            log.warning("voice_consult_stream worker failed: %s", e)
+            q.put({"type": "answer", "spoken": "Sorry — try that once more?",
+                   "panel": "", "ui_commands": [], "error": str(e)[:200]})
+        finally:
+            q.put(_SENTINEL)
+
+    _threading.Thread(target=_worker, daemon=True).start()
+
+    def _gen():
+        while True:
+            item = q.get()
+            if item is _SENTINEL:
+                break
+            yield json.dumps(item, default=str) + "\n"
+
+    return StreamingResponse(_gen(), media_type="application/x-ndjson")
 
 
 @router.post("/v1/energy-agent/chat")
