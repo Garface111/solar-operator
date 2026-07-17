@@ -1512,6 +1512,20 @@ def main():
             added.append("repair_tickets.email_refs")
             print("  + repair_tickets.email_refs")
 
+        # 2026-07-17 Per-ticket check-in cadence (hours). Null → tenant default.
+        if not column_exists(conn, "repair_tickets", "checkin_interval_hours"):
+            conn.execute(text(
+                "ALTER TABLE repair_tickets ADD COLUMN checkin_interval_hours INTEGER NULL"
+            ))
+            added.append("repair_tickets.checkin_interval_hours")
+            print("  + repair_tickets.checkin_interval_hours")
+
+        # agent_documents comes free via create_all (new table)
+        if inspect(conn).has_table("agent_documents"):
+            print("  ✓ table agent_documents")
+        else:
+            print("  · table agent_documents will create_all on next boot")
+
     print("=== Migration complete ===")
 
 

@@ -301,6 +301,7 @@ def serialize_ticket(
         "next_checkin_at": _iso(t.next_checkin_at),
         "last_checkin_at": _iso(t.last_checkin_at),
         "checkin_count": t.checkin_count or 0,
+        "checkin_interval_hours": getattr(t, "checkin_interval_hours", None),
         "scheduled_for": _iso(t.scheduled_for),
         "tech_note": t.tech_note,
         "opened_at": _iso(t.opened_at),
@@ -552,11 +553,21 @@ def effective_checkin_mode_for(tenant: Tenant, contact) -> str:
     return mode
 
 
-def checkin_interval_hours(tenant: Tenant) -> int:
-    try:
-        h = int(tenant.repair_checkin_hours or 48)
-    except (TypeError, ValueError):
-        h = 48
+def checkin_interval_hours(tenant: Tenant, ticket: RepairTicket | None = None) -> int:
+    """Hours between auto follow-ups. Per-ticket override wins over tenant default."""
+    h = None
+    if ticket is not None:
+        raw = getattr(ticket, "checkin_interval_hours", None)
+        if raw is not None:
+            try:
+                h = int(raw)
+            except (TypeError, ValueError):
+                h = None
+    if h is None:
+        try:
+            h = int(tenant.repair_checkin_hours or 48)
+        except (TypeError, ValueError):
+            h = 48
     return max(6, min(168 * 2, h))  # 6h .. 14d
 
 
@@ -876,7 +887,7 @@ def _schedule_next_checkin(
     up after a prior send, on the configured interval.
     """
     mode = effective_checkin_mode_for(tenant, contact)
-    hours = checkin_interval_hours(tenant)
+    hours = checkin_interval_hours(tenant, ticket)
     if mode in ("off", "manual") or first:
         # No auto fire on create — wait for explicit Approve & send
         ticket.next_checkin_at = None
@@ -948,7 +959,7 @@ def send_checkin(
         ).scalars().first()
         if last and last.created_at:
             age_h = (now() - last.created_at).total_seconds() / 3600.0
-            min_h = max(6, checkin_interval_hours(tenant) * 0.5)
+            min_h = max(6, checkin_interval_hours(tenant, ticket) * 0.5)
             if age_h < min_h:
                 ticket.next_checkin_at = now() + timedelta(hours=max(1, min_h - age_h))
                 db.flush()
@@ -1072,7 +1083,7 @@ def send_checkin(
                 f"When they reply to Energy Agent, it continues here."
                 + (
                     f" Follow-ups to {who} now go out automatically on your "
-                    f"{checkin_interval_hours(tenant)}h cadence — no more approve clicks "
+                    f"{checkin_interval_hours(tenant, ticket)}h cadence — no more approve clicks "
                     "for this contact (tell me to stop anytime)."
                     if trust_armed else ""
                 )
@@ -1201,6 +1212,8 @@ def update_ticket(
     scheduled_for=None,
     description: str | None = None,
     clear_scheduled: bool = False,
+    checkin_interval_hours: int | None = None,
+    clear_checkin_interval: bool = False,
 ) -> RepairTicket:
     if status is not None:
         status = status.strip().lower()
@@ -1241,6 +1254,19 @@ def update_ticket(
         if ticket.status in ("open", "waiting_reply"):
             ticket.status = "scheduled"
 
+    if clear_checkin_interval:
+        ticket.checkin_interval_hours = None
+    elif checkin_interval_hours is not None:
+        try:
+            h = int(checkin_interval_hours)
+        except (TypeError, ValueError):
+            raise ValueError("checkin_interval_hours must be an integer (hours)")
+        ticket.checkin_interval_hours = max(6, min(168 * 2, h))
+        # If auto follow-ups already armed, re-schedule from last send / now
+        contact = get_contact(db, tenant.id, ticket.contact_id) if ticket.contact_id else None
+        if ticket.status in ACTIVE_TICKET_STATUSES and (ticket.checkin_count or 0) > 0:
+            _schedule_next_checkin(tenant, ticket, first=False, contact=contact)
+
     db.flush()
     return ticket
 
@@ -1262,6 +1288,75 @@ def list_tickets(
     if array_id:
         q = q.where(RepairTicket.array_id == array_id)
     q = q.order_by(RepairTicket.opened_at.desc()).limit(max(1, min(300, limit)))
+    return list(db.execute(q).scalars().all())
+
+
+def search_tickets(
+    db,
+    tenant_id: str,
+    *,
+    array_name: str | None = None,
+    array_id: int | None = None,
+    keyword: str | None = None,
+    date_from=None,
+    date_to=None,
+    status: str | None = None,
+    active_only: bool = False,
+    include_history: bool = True,
+    limit: int = 50,
+) -> list[RepairTicket]:
+    """Search repair tickets by site name, date range, keyword, status.
+
+    Includes closed/historical cases by default (unlike list_tickets active_only).
+    Keyword matches title, description, tech_note, site_name, inv_name, serial,
+    vendor, fail_type, and recent check-in bodies.
+    """
+    from sqlalchemy import or_
+
+    q = select(RepairTicket).where(RepairTicket.tenant_id == tenant_id)
+    if active_only and not include_history:
+        q = q.where(RepairTicket.status.in_(ACTIVE_TICKET_STATUSES))
+    elif status:
+        q = q.where(RepairTicket.status == status.strip().lower())
+    if array_id:
+        q = q.where(RepairTicket.array_id == int(array_id))
+    if array_name:
+        needle = f"%{(array_name or '').strip()}%"
+        q = q.where(or_(
+            RepairTicket.site_name.ilike(needle),
+            RepairTicket.title.ilike(needle),
+        ))
+    if date_from is not None:
+        q = q.where(RepairTicket.opened_at >= date_from)
+    if date_to is not None:
+        q = q.where(RepairTicket.opened_at <= date_to)
+    if keyword:
+        kw = f"%{(keyword or '').strip()}%"
+        # Also pull ticket ids whose check-ins match
+        checkin_ids = db.execute(
+            select(RepairCheckIn.ticket_id).where(
+                RepairCheckIn.tenant_id == tenant_id,
+                or_(
+                    RepairCheckIn.body.ilike(kw),
+                    RepairCheckIn.subject.ilike(kw),
+                ),
+            ).distinct()
+        ).scalars().all()
+        text_clause = or_(
+            RepairTicket.title.ilike(kw),
+            RepairTicket.description.ilike(kw),
+            RepairTicket.tech_note.ilike(kw),
+            RepairTicket.site_name.ilike(kw),
+            RepairTicket.inv_name.ilike(kw),
+            RepairTicket.serial.ilike(kw),
+            RepairTicket.vendor.ilike(kw),
+            RepairTicket.fail_type.ilike(kw),
+        )
+        if checkin_ids:
+            q = q.where(or_(text_clause, RepairTicket.id.in_(list(checkin_ids))))
+        else:
+            q = q.where(text_clause)
+    q = q.order_by(RepairTicket.opened_at.desc()).limit(max(1, min(200, int(limit or 50))))
     return list(db.execute(q).scalars().all())
 
 
@@ -2914,7 +3009,7 @@ def process_due(db, tenant: Tenant) -> int:
             log.warning(
                 "auto repair check-in failed ticket=%s: %s", ticket.id, exc,
             )
-            ticket.next_checkin_at = now() + timedelta(hours=checkin_interval_hours(tenant))
+            ticket.next_checkin_at = now() + timedelta(hours=checkin_interval_hours(tenant, ticket))
     db.commit()
     return sent
 
