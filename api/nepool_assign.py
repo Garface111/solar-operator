@@ -21,7 +21,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException, Query, UploadFile, File
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import joinedload
 
 from .db import SessionLocal
@@ -140,14 +140,26 @@ def _best_match(
 def nepool_stats(authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
     with SessionLocal() as db:
+        # Only arrays that will actually SHIP in a report need a NEPOOL-GIS ID —
+        # i.e. arrays under an ACTIVE, live client. Post-fold an Array Operator
+        # tenant can carry many arrays under retired capture-artifact clients
+        # (or unassigned); counting those inflated the "N arrays need a NEPOOL
+        # ID" nudge (Ford's demo_100: 54 tenant arrays vs ~7 report-client
+        # arrays). In the standalone NEPOOL flow every array is under an active
+        # client, so this join is behavior-neutral there.
         missing = db.execute(
-            select(Array).where(
+            select(func.count(Array.id))
+            .select_from(Array)
+            .join(Client, Client.id == Array.client_id)
+            .where(
                 Array.tenant_id == t.id,
                 Array.deleted_at.is_(None),
                 Array.nepool_gis_id.is_(None),
+                Client.active.is_(True),
+                Client.deleted_at.is_(None),
             )
-        ).scalars().all()
-    return {"arrays_missing_nepool": len(missing)}
+        ).scalar() or 0
+    return {"arrays_missing_nepool": int(missing)}
 
 
 @router.post("/v1/account/nepool/preview")
