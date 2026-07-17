@@ -2,7 +2,13 @@ import { useEffect, useState, useMemo } from "react";
 import { Modal } from "../ui/Modal";
 import { Button } from "../ui/Button";
 import { useToast } from "../ui/Toast";
-import { requestUtilityAddition, getProviders } from "../lib/api";
+import {
+  requestUtilityAddition,
+  getProviders,
+  getPortalAccess,
+  createClient,
+  type PortalAccessUnassigned,
+} from "../lib/api";
 import {
   useExtensionStatus,
   type ExtensionStatus,
@@ -40,6 +46,181 @@ interface Props {
 }
 
 const GMP_FRIENDLY = "Green Mountain Power";
+
+// Utility logins we can turn straight into a client (createClient carries a
+// {gmp,vec}_username + autopopulate that attaches the login's captured bills to
+// the new client). Inverter logins (fronius/chint) and co-op logins aren't
+// utility-bill sources for a NEPOOL client, so they're not offered here —
+// they're managed in the credential vault ("Add more logins" below).
+const ATTACHABLE: Record<string, { label: string; field: "gmp" | "vec" }> = {
+  gmp: { label: "Green Mountain Power", field: "gmp" },
+  vec: { label: "Vermont Electric Coop", field: "vec" },
+};
+
+/**
+ * LinkedLoginsPicker — the primary Add-Client path (Ford 2026-07-16):
+ * pick a utility login you've ALREADY linked (from GET /v1/portal-access
+ * unassigned_logins, i.e. saved logins no client claims yet) and spin up a
+ * client from it — no re-signing into a portal. Plus a big button that opens
+ * the Master-account credential vault to add more logins.
+ */
+function LinkedLoginsPicker({
+  onCreated,
+  onAddMore,
+}: {
+  onCreated: () => void;
+  onAddMore: () => void;
+}) {
+  const toast = useToast();
+  const [logins, setLogins] = useState<PortalAccessUnassigned[] | null>(null);
+  const [openFor, setOpenFor] = useState<string | null>(null);
+  const [name, setName] = useState("");
+  const [creating, setCreating] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    getPortalAccess()
+      .then((p) => {
+        if (cancelled) return;
+        setLogins(p.unassigned_logins.filter((l) => ATTACHABLE[l.provider]));
+      })
+      .catch(() => {
+        if (!cancelled) setLogins([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  async function create(login: PortalAccessUnassigned) {
+    const nm = name.trim();
+    if (!nm) {
+      toast.show("Name the client first.", "info");
+      return;
+    }
+    setCreating(true);
+    try {
+      const input =
+        login.provider === "gmp"
+          ? { name: nm, gmp_username: login.username, gmp_autopopulate: true }
+          : { name: nm, vec_username: login.username, vec_autopopulate: true };
+      await createClient(input);
+      toast.success(
+        `Added ${nm} — pulling ${ATTACHABLE[login.provider].label} data now.`,
+      );
+      setOpenFor(null);
+      setName("");
+      onCreated();
+    } catch (e) {
+      toast.show(
+        e instanceof Error ? e.message : "Couldn't create that client.",
+        "error",
+      );
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <p className="text-sm font-semibold text-zinc-900">
+          Add from a login you&apos;ve already linked
+        </p>
+        <p className="mt-0.5 text-xs text-zinc-500">
+          Pick a saved utility login and we&apos;ll create the client from it —
+          no need to sign in again.
+        </p>
+      </div>
+
+      {logins === null ? (
+        <div className="rounded-xl border border-cream-border px-4 py-3 text-sm text-zinc-500">
+          Loading your linked logins&hellip;
+        </div>
+      ) : logins.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-cream-border px-4 py-3 text-sm text-zinc-600">
+          No unassigned utility logins yet. Add one below, then it&apos;ll show
+          up here to attach to a client.
+        </div>
+      ) : (
+        <ul className="space-y-2">
+          {logins.map((l) => {
+            const meta = ATTACHABLE[l.provider];
+            const isOpen = openFor === l.username + ":" + l.provider;
+            return (
+              <li
+                key={l.provider + ":" + l.username}
+                className="rounded-xl border border-cream-border bg-white p-3 shadow-sm"
+              >
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-semibold text-zinc-900">
+                      {l.username}
+                    </p>
+                    <p className="text-xs text-zinc-500">
+                      {meta.label}
+                      {l.status === "automated" ? " · syncing automatically" : ""}
+                    </p>
+                  </div>
+                  {!isOpen && (
+                    <Button
+                      onClick={() => {
+                        setOpenFor(l.username + ":" + l.provider);
+                        setName("");
+                      }}
+                      className="shrink-0 px-3 py-1.5 text-xs"
+                    >
+                      Use this login →
+                    </Button>
+                  )}
+                </div>
+                {isOpen && (
+                  <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+                    <input
+                      autoFocus
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") void create(l);
+                      }}
+                      placeholder="Client name (e.g. Town of Glover)"
+                      className="min-w-0 flex-1 rounded-lg border border-cream-border px-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-primary-400 focus:outline-none focus:ring-2 focus:ring-primary-500/30"
+                    />
+                    <div className="flex gap-2">
+                      <Button
+                        onClick={() => void create(l)}
+                        disabled={creating || !name.trim()}
+                        className="px-3 py-2 text-sm"
+                      >
+                        {creating ? "Creating…" : "Create client"}
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        onClick={() => setOpenFor(null)}
+                        className="px-3 py-2 text-sm"
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+
+      <button
+        type="button"
+        onClick={onAddMore}
+        className="flex w-full items-center justify-center gap-2 rounded-xl bg-primary-600 px-4 py-3 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+      >
+        <span aria-hidden className="text-base leading-none">＋</span>
+        Add more logins to the utility accounts
+      </button>
+    </div>
+  );
+}
 
 /**
  * AddClientByLoginModal — the "click a portal, sign in, done" flow.
@@ -285,6 +466,39 @@ export function AddClientByLoginModal({
       }
     >
       <div className="space-y-4">
+        {/* PRIMARY path (Ford 2026-07-16): reuse a login you've already linked,
+            + a big button to add more logins. The connect-a-new-portal picker
+            is demoted below the divider. */}
+        <LinkedLoginsPicker
+          onCreated={() => {
+            void onCaptured();
+            onClose();
+          }}
+          onAddMore={() => {
+            onClose();
+            const w = window as { __aoOpenCredentialVault?: (focus?: boolean) => void };
+            if (typeof w.__aoOpenCredentialVault === "function") {
+              w.__aoOpenCredentialVault(true);
+            } else {
+              // Fallback: route the host to the Master account tab where the
+              // credential vault lives.
+              try {
+                window.location.hash = "#account";
+              } catch {
+                /* ignore */
+              }
+            }
+          }}
+        />
+
+        <div className="flex items-center gap-3 pt-1">
+          <span className="h-px flex-1 bg-cream-border" />
+          <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+            or connect a new portal
+          </span>
+          <span className="h-px flex-1 bg-cream-border" />
+        </div>
+
         {cloudMode ? (
           <p className="text-sm text-zinc-600">
             Pick a portal to open, or{" "}

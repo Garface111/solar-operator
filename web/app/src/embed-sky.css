@@ -37,9 +37,13 @@
    is the same selector (html/body/:root collapse to #so-genrep), later in the
    bundle -> wins. */
 body {
-  background-color: rgba(255, 255, 255, 0.58);
-  backdrop-filter: blur(20px) saturate(1.5);
-  -webkit-backdrop-filter: blur(20px) saturate(1.5);
+  /* IMPORTANT: no backdrop-filter here. It (like transform/filter) makes
+     #so-genrep a CONTAINING BLOCK for position:fixed descendants, which
+     trapped every fixed modal/menu/toast (Add Client, template studio…)
+     INSIDE the embed box → they clipped instead of covering the viewport.
+     Ford hit this on Add Client (2026-07-16). A high-opacity translucent
+     white gives the frosted-sheet contrast without the blur side-effect. */
+  background-color: rgba(255, 255, 255, 0.72);
   border-radius: 20px;
   padding: 14px;
   box-shadow: 0 10px 34px -12px rgba(20, 60, 120, 0.22);
