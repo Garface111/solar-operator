@@ -610,6 +610,29 @@ def auth_verify(req: AuthVerify):
     return {"ok": True, "session_token": session_token, "expires_in": ttl}
 
 
+@router.get("/v1/dev/auto-login")
+def dev_auto_login(key: str = ""):
+    """PREPROD-ONLY convenience: mint a session for a configured sandbox tenant
+    so an allowlisted computer lands logged-in on the private preview — no login
+    friction. Mirrors /v1/demo/enter (a direct _sign_session), but gated so it
+    can ONLY run where deliberately armed.
+
+    Disabled (404) unless BOTH DEV_AUTOLOGIN_KEY and DEV_AUTOLOGIN_TENANT_ID are
+    set — which only the staging service has. Production sets neither, so this
+    endpoint does not exist there. The key is required and constant-time checked;
+    the preview site (behind the IP-allowlist + beta gate) carries it. Data is a
+    throwaway seeded demo tenant, so a leaked key past the gate only reaches the
+    sandbox."""
+    want = os.getenv("DEV_AUTOLOGIN_KEY", "")
+    tid = os.getenv("DEV_AUTOLOGIN_TENANT_ID", "")
+    if not want or not tid:
+        raise HTTPException(404, "Not found")
+    if not hmac.compare_digest(key or "", want):
+        raise HTTPException(403, "Forbidden")
+    session_token = _sign_session(tid, ttl_seconds=SESSION_TTL_SECONDS)
+    return {"ok": True, "session_token": session_token, "expires_in": SESSION_TTL_SECONDS}
+
+
 # ─── shared read-only demo magic-link ────────────────────────────────────
 
 # Fixed id of the single shared demo tenant seeded by scripts/seed_demo_tenant.py.
