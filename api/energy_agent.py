@@ -56,6 +56,17 @@ XAI_MODEL = os.getenv("ENERGY_AGENT_MODEL", "grok-4.5")
 # Latest OpenAI Realtime voice model (docs 2026: gpt-realtime-2.1)
 OPENAI_REALTIME_MODEL = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2.1")
 OPENAI_REALTIME_VOICE = os.getenv("OPENAI_REALTIME_VOICE", "marin")
+# Bias the Realtime speech-to-text toward product vocabulary so it transcribes
+# the product's own terms instead of phonetic neighbors — "Array Operator" was
+# being heard as "ray operator" (Ford 2026-07-17). Mirrors EA_STT_PROMPT in the
+# frontend session.update; both configs carry it.
+_STT_VOCAB_PROMPT = (
+    "Array Operator is a solar fleet platform; its AI is the Energy Agent. "
+    "Expect these terms: Array Operator, Energy Agent, offtaker, offtakers, "
+    "NEPOOL, REC, RECs, generation report, net metering, solar credit, kWh, "
+    "kW nameplate, inverter, array, fleet, specific yield, SolarEdge, Fronius, "
+    "Chint, SMA, Enphase, Locus, GMP, Green Mountain Power, VEC, SmartHub."
+)
 # Free-tier weekly sample for thinking + voice (Pro = unlimited via tenant.ai_pro).
 # Default $2.50 so owners can try the agent without upgrading.
 WEEKLY_BUDGET_USD = float(os.getenv("ENERGY_AGENT_WEEKLY_BUDGET_USD", "2.5"))
@@ -9673,7 +9684,7 @@ def _realtime_session_config(voice: str | None = None) -> dict:
         "audio": {
             "output": {"voice": voice or OPENAI_REALTIME_VOICE},
             "input": {
-                "transcription": {"model": "gpt-4o-mini-transcribe"},
+                "transcription": {"model": "gpt-4o-mini-transcribe", "prompt": _STT_VOCAB_PROMPT},
                 "noise_reduction": {"type": "near_field"},
                 "turn_detection": turn,
             },
