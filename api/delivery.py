@@ -59,6 +59,121 @@ def _recipients_for_client(client: Client, tenant: Tenant,
     return addrs
 
 
+# Report sends that are PREVIEWS / internal test sends — never a billable output.
+# Everything else (scheduled auto-sends "sched-*", self-serve "send now", "resend")
+# is a real client send.
+_NON_BILLABLE_TRIGGERS = {"sample", "ops"}
+
+
+def _report_quarter(reference_date) -> tuple[int, int, str]:
+    """The (year, quarter, "<year>-Q<quarter>") this report/output covers — the
+    headline rolling quarter (last complete quarter relative to the reference)."""
+    from .writers.gmcs_writer import _rolling_quarters, default_reporting_reference_date
+    ref = reference_date if reference_date is not None \
+        else default_reporting_reference_date(date.today())
+    y, q = _rolling_quarters(ref)[-1]
+    return y, q, f"{y}-Q{q}"
+
+
+def record_genreport_output(tenant_id: str, client_id: int, *,
+                            reference_date=None, first_source: str = "download",
+                            require_data: bool = True) -> bool:
+    """Record the $15 billable OUTPUT for one (client, calendar quarter) — THE FOLD.
+
+    Ford's model: building + previewing is free; the $15 fires on the FIRST real
+    OUTPUT for a (client, quarter) — a report SEND or a DOWNLOAD of the deliverable —
+    then unlimited. IDEMPOTENT per (tenant, client, quarter): the DB unique constraint
+    makes any later output for the SAME quarter a no-op (insert-or-ignore, catching the
+    IntegrityError like the capture upsert); a DIFFERENT quarter is a fresh $15.
+
+    Only records for a REAL client (live, active, this tenant) WITH report data for
+    the quarter (require_data), in a reports-world, non-demo tenant. Returns True iff a
+    NEW ledger row was written. INERT money-wise (just a ledger row; Stripe push is a
+    separate, price-gated job). Never raises — a billing-ledger hiccup must not fail
+    (or unsend) the actual output.
+    """
+    try:
+        from sqlalchemy.exc import IntegrityError
+        from .models import GenReportCharge
+        from .pricing_ao_genreports import PRICE_CENTS
+        from .report_eligibility import tenant_in_reports_world
+        from .writers.gmcs_writer import report_has_data
+
+        _y, _q, quarter = _report_quarter(reference_date)
+        with SessionLocal() as db:
+            tenant = db.get(Tenant, tenant_id)
+            # Only bill reports-world, non-demo tenants for generation reports.
+            if tenant is None or getattr(tenant, "is_demo", False):
+                return False
+            if not tenant_in_reports_world(tenant):
+                return False
+            client = db.get(Client, client_id)
+            if (client is None or client.tenant_id != tenant_id
+                    or not client.active or client.deleted_at is not None):
+                return False
+            if require_data and not report_has_data(
+                    client_id, reference_date=reference_date):
+                return False   # empty / preview output — nothing extracted, no charge
+            # Idempotency (fast path): skip if this client+quarter is already billed.
+            already = db.execute(
+                select(GenReportCharge.id).where(
+                    GenReportCharge.tenant_id == tenant_id,
+                    GenReportCharge.client_id == client_id,
+                    GenReportCharge.quarter == quarter,
+                ).limit(1)
+            ).first()
+            if already:
+                return False
+            db.add(GenReportCharge(
+                tenant_id=tenant_id, client_id=client_id, quarter=quarter,
+                amount_cents=PRICE_CENTS, first_source=first_source,
+            ))
+            try:
+                db.commit()
+                return True
+            except IntegrityError:
+                # A concurrent output inserted the same (tenant, client, quarter)
+                # first — the unique constraint held; treat as already charged.
+                db.rollback()
+                return False
+    except Exception:  # noqa: BLE001 — a billing-ledger failure must never break output
+        logger.warning("genreport output ledger write failed for client %s (%s)",
+                       client_id, tenant_id, exc_info=True)
+        return False
+
+
+def record_genreport_directory(tenant_id: str, *, reference_date=None,
+                               client_ids=None, first_source: str = "directory") -> int:
+    """Record a $15 OUTPUT for EACH of the tenant's active report clients that has
+    data for the quarter — the value an ALL-CLIENTS directory download extracts.
+
+    Downloading the directory delivers every client's sheet at once, so each client
+    with report data is a billable output for the quarter (idempotent per client —
+    a re-download charges nothing new). Optional `client_ids` scopes it to a subset
+    (e.g. a picker). Returns the count of NEW rows. Never raises.
+    """
+    try:
+        with SessionLocal() as db:
+            q = select(Client.id).where(
+                Client.tenant_id == tenant_id,
+                Client.active == True,  # noqa: E712
+                Client.deleted_at.is_(None),
+            )
+            if client_ids:
+                q = q.where(Client.id.in_(list(client_ids)))
+            cids = [r[0] for r in db.execute(q).all()]
+        n = 0
+        for cid in cids:
+            if record_genreport_output(tenant_id, cid, reference_date=reference_date,
+                                       first_source=first_source):
+                n += 1
+        return n
+    except Exception:  # noqa: BLE001 — a directory-billing hiccup must not fail download
+        logger.warning("genreport directory ledger write failed for tenant %s",
+                       tenant_id, exc_info=True)
+        return 0
+
+
 def deliver_for_client(client_id: int, *, year: Optional[int] = None,
                        override_to: Optional[str] = None,
                        triggered_by: str = "manual",
@@ -274,6 +389,15 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
             if t:
                 t.last_delivery_at = now()
             db.commit()
+
+    # Metered billing ($15/client/quarter): a report actually went out for this
+    # client, so record the billable OUTPUT for the quarter the workbook covers
+    # (email_ref — same quarter as the filename/body). Idempotent per client+quarter
+    # (a send is free if a download already billed the quarter, and vice-versa), and
+    # inert until the metered price is minted; previews/ops sends never charge.
+    if sent and triggered_by not in _NON_BILLABLE_TRIGGERS:
+        record_genreport_output(
+            tenant_id, client_id, reference_date=email_ref, first_source="send")
 
     return {
         "ok": True,

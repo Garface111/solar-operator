@@ -371,6 +371,9 @@ class ClientUpdate(BaseModel):
     contact_email: Optional[EmailStr] = None
     cc_emails: Optional[str] = None
     report_frequency: Optional[str] = None
+    # Per-client auto-send enrollment (THE FOLD): True enrolls this client in the
+    # scheduled auto-send (and the $15/quarter on first output). Default off.
+    auto_send: Optional[bool] = None
     active: Optional[bool] = None
     notes: Optional[str] = None
     gmp_email: Optional[EmailStr] = None
@@ -388,6 +391,9 @@ def _client_to_dict(c: Client, array_count: int = 0, last_checked_at=None) -> di
         "contact_email": c.contact_email,
         "cc_emails": c.cc_emails,
         "report_frequency": c.report_frequency,
+        # Per-client auto-send enrollment (THE FOLD) — drives the roster's auto-send
+        # toggle. Only enrolled clients are auto-sent (and auto-charged $15/quarter).
+        "auto_send": bool(c.auto_send),
         "active": c.active,
         "array_count": array_count,
         "last_delivery_at": _iso_utc(c.last_delivery_at),
@@ -888,6 +894,7 @@ def account_me(authorization: Optional[str] = Header(default=None)):
         all_set = _compute_all_set(db, t.id)
         from .report_eligibility import tenant_in_reports_world
         from .stripe_helpers import ao_plan_features
+        from .pricing_ao_genreports import PRICE_CENTS as _GENREPORTS_PRICE_CENTS
         _plan_features = ao_plan_features(t.product, getattr(t, "billing_plan", None))
         return {
             "tenant_id": t.id,
@@ -910,6 +917,12 @@ def account_me(authorization: Optional[str] = Header(default=None)):
             # the Tenant.generation_reports marker. AO's Invoices tab shows the
             # "Generation reports" pill off this (report_eligibility module).
             "generation_reports": tenant_in_reports_world(t),
+            # Generation reports bill $15 per client per report SENT (metered — see
+            # api/pricing_ao_genreports.py + the GenReportCharge ledger). Read-only
+            # unit price so the Invoices → Generation reports UI can show "$15/report".
+            # Building + previewing is free; only a send charges. Inert until
+            # STRIPE_AO_GENREPORTS_PRICE_ID is minted (see jobs/genreports_usage.py).
+            "generation_reports_price_cents": _GENREPORTS_PRICE_CENTS,
             # Energy Agent Pro ($50/mo unlimited AI). Free tier keeps a weekly sample.
             "ai_pro": bool(getattr(t, "ai_pro", False)),
             "plan": t.plan,
@@ -1137,6 +1150,11 @@ def download_directory_report(
             pass
         raise HTTPException(422, str(e)) from e
     label = re.sub(r"[^A-Za-z0-9]+", "-", quarter) if quarter else "latest"
+    # Metered billing ($15/client/quarter): the all-clients NEPOOL-GIS directory
+    # delivers every client's sheet at once — record a billable OUTPUT for each
+    # client with data for the quarter. Idempotent per client; inert until price mints.
+    from .delivery import record_genreport_directory
+    record_genreport_directory(t.id, reference_date=reference_date)
     return FileResponse(
         path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1175,6 +1193,10 @@ def download_generation_directory(
         shutil.rmtree(tmpdir, ignore_errors=True)
         logger.exception("download_generation_directory failed for tenant=%s", t.id)
         raise HTTPException(500, f"Couldn't build the generation directory: {e}")
+    # Metered billing: the all-clients generation directory is a billable OUTPUT for
+    # each client with data for the quarter. Idempotent; inert until the price mints.
+    from .delivery import record_genreport_directory
+    record_genreport_directory(t.id, reference_date=_quarter_to_reference_date(qy, qq))
     return FileResponse(
         str(out_path),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1231,6 +1253,13 @@ def account_fleet_report(fmt: str = Query("xlsx", pattern="^(xlsx|pdf)$"),
     from .reports.fleet_report import build_fleet_report, report_filename
     blob = build_fleet_report(t, fmt)
     fname = report_filename(t, fmt)
+    # Metered billing ($15/client/quarter): the all-clients fleet directory extracts
+    # value for every client — record a billable OUTPUT for each client with data
+    # this quarter. Idempotent per client; the reports-world/demo guard in
+    # record_genreport_directory means a pure-monitoring AO tenant is never charged.
+    # Inert until the metered price mints.
+    from .delivery import record_genreport_directory
+    record_genreport_directory(t.id, reference_date=None)
     media = ("application/pdf" if fmt == "pdf"
              else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     return StreamingResponse(
@@ -2203,9 +2232,22 @@ def _billing_summary_kwh(t: Tenant) -> dict:
     # per-offtaker INVOICING plan when billing_plan='invoicing', else the per-kWh
     # MONITORING meter (the AO default).
     from . import pricing_ao_invoicing as inv_pricing
+    from . import pricing_ao_genreports as genrep_pricing
     from .stripe_helpers import is_ao_invoicing, billable_offtaker_count
+    from .models import GenReportCharge
     with SessionLocal() as db2:
         offtaker_count = billable_offtaker_count(db2, t.id)
+        # Generation reports ($15/client/quarter, metered): count the billable OUTPUT
+        # events (first send OR download per client-quarter) recorded this billing
+        # period so the card can show "N ×$15". Read-only — see the return block.
+        # (Building/previewing is free; only a real output writes a GenReportCharge.)
+        genreports_charges = int(db2.execute(
+            select(func.count()).select_from(GenReportCharge).where(
+                GenReportCharge.tenant_id == t.id,
+                GenReportCharge.created_at >= datetime.combine(
+                    period_start, datetime.min.time()),
+            )
+        ).scalar() or 0)
     invoicing_total_cents = inv_pricing.compute_monthly_cents(offtaker_count)
     # Which AO line(s) the chosen plan bills: 'both' bills the per-kWh meter AND the
     # per-offtaker invoicing line, so the displayed total must SUM them (showing only
@@ -2259,6 +2301,16 @@ def _billing_summary_kwh(t: Tenant) -> dict:
         "invoicing_blended_cents_per_offtaker": inv_pricing.blended_unit_cents(offtaker_count),
         "invoicing_setup_cents": inv_pricing.SETUP_CENTS,
         "invoicing_total_cents": invoicing_total_cents,
+        # ── Generation reports ($15/client/quarter, METERED) block — read-only ──
+        # The folded NEPOOL/REC reporting line, billed on the FIRST output (send or
+        # download) per client-quarter. `generation_reports_charges_period` = billable
+        # output events recorded this billing period; ×$15 = period-to-date. NOT summed
+        # into total_cents/unified here — the metered line is inert until
+        # STRIPE_AO_GENREPORTS_PRICE_ID is minted, so folding it into the shown "next
+        # charge" would misstate the bill.
+        "generation_reports_price_cents": genrep_pricing.PRICE_CENTS,
+        "generation_reports_charges_period": genreports_charges,
+        "generation_reports_total_cents": genreports_charges * genrep_pricing.PRICE_CENTS,
         # The active plan's total — 'both' sums monitoring + invoicing (+ AI Pro if on).
         "total_cents": total_with_ai,
         # ── Unified Account Billing section (single source for UI) ──
@@ -3454,7 +3506,7 @@ def update_client(client_id: int, body: ClientUpdate,
         # touched — the standard PATCH semantic. report_frequency=null coerces
         # to "quarterly" (inherit option removed Jun 6 2026).
         for field in ("contact_email", "cc_emails", "active", "notes",
-                      "gmp_autopopulate", "vec_autopopulate"):
+                      "gmp_autopopulate", "vec_autopopulate", "auto_send"):
             if field in body.model_fields_set:
                 setattr(c, field, getattr(body, field))
         if "report_frequency" in body.model_fields_set:
@@ -3696,6 +3748,12 @@ def download_client_report(
             500,
             f"Couldn't build the report for {client_name}: {e}",
         )
+    # Metered billing ($15/client/quarter): downloading a client's deliverable
+    # workbook is a billable OUTPUT for that (client, quarter). Idempotent — free if
+    # the quarter was already billed by a send/download; inert until the price mints.
+    from .delivery import record_genreport_output
+    record_genreport_output(t.id, client_id, reference_date=reference_date,
+                            first_source="download")
     return FileResponse(
         str(out_path),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -3743,6 +3801,12 @@ def download_generation(
         shutil.rmtree(tmpdir, ignore_errors=True)
         logger.exception("download_generation failed for client_id=%s", client_id)
         raise HTTPException(500, f"Couldn't build the generation export: {e}")
+    # Metered billing: a per-client deliverable download is a billable OUTPUT for
+    # this (client, quarter). Idempotent; inert until the metered price mints.
+    from .delivery import record_genreport_output
+    record_genreport_output(t.id, client_id,
+                            reference_date=_quarter_to_reference_date(qy, qq),
+                            first_source="download")
     return FileResponse(
         str(out_path),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
