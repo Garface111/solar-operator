@@ -7708,7 +7708,10 @@ def end_session(sid: str, authorization: str | None = Header(default=None)):
 # is needed. create_response true so she answers instantly for small talk.
 # Env EA_VOICE_WEAVE=0 falls back to mouth-only (legacy dual-path).
 def _voice_weave_enabled() -> bool:
-    return os.getenv("EA_VOICE_WEAVE", "1") not in ("0", "false", "no", "off")
+    # DEFAULT OFF (2026-07-16): the weave leaked GPT instruction-recitations +
+    # blocked audio; reverted to reliable mouth-only. Must match the frontend
+    # VOICE_WEAVE default (also off). Set EA_VOICE_WEAVE=1 to re-enable both.
+    return os.getenv("EA_VOICE_WEAVE", "0") in ("1", "true", "yes", "on")
 
 
 _REALTIME_WEAVE_INSTRUCTIONS = """You are Energy Agent — the live voice of Array Operator for THIS signed-in owner.
