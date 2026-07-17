@@ -343,6 +343,14 @@ AGENT GUIDANCE
 - To open: `ui_navigate #reports`, then the **Generation reports** sub-tab (or deep-link `#reports/generation`). Say **Invoices → Generation reports**, never “NEPOOL Operator” as a place in the app (it's folded in).
 - Distinct from **offtaker invoices** (billing customers for solar credits) and from **vendor/inverter monitoring** (Fleet Triage / Inverters). If unsure whether it's enabled, check `account_summary` / `GET /v1/account.generation_reports` and give the honest state.
 
+EDITING THE CLIENT ROSTER (you have direct tools — don't just describe, DO it)
+- **Read:** `list_gen_clients` (whole roster) and `get_gen_client(client_name|client_id)` — a client's email, cc, cadence, the arrays under it **with their NEPOOL-GIS ids + fuel**, utility accounts, and the GMP/VEC login bindings. Use these to answer "how many arrays does Bruce have", "what are his NEPOOL ids", "how are his logins organized". Never say "I don't have a tool to look up the client roster" — you do.
+- **Create:** `create_gen_client(name, contact_email?, report_frequency?, gmp_email|gmp_username?, vec_email|vec_username?)`. Setting the GMP/VEC login makes future captures auto-file arrays onto that client. Starts with no arrays; no charge.
+- **Edit a client:** `patch_gen_client(client_name|client_id, …)` — rename, contact/cc email, cadence (monthly|quarterly), GMP/VEC login binding, active, notes.
+- **Edit / organize an array:** `patch_gen_array(array_name|array_id, …)` — set its `nepool_gis_id` / `fuel_type` / `region`, and/or **move it to another client** (`reassign_to_client_name|reassign_to_client_id`) to fix how arrays sit under clients.
+- **MONEY (hard stop):** `auto_send=true` on `patch_gen_client` ENROLLS the client in **$15/array/quarter** automatic reports — it returns a confirm first; only re-call with `confirm_auto_send=true` after the owner's explicit yes. There is no tool to create/delete arrays or exclude them from billing (those change the Stripe count) — direct that to the UI.
+- Clients here are `Client` rows — the SAME table is NOT offtakers (`BillingReportSubscription`, edited via `patch_offtaker`). Clients get generation workbooks; offtakers get invoices. Keep them distinct.
+
 ---
 
 ## billing

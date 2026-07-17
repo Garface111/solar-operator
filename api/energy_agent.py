@@ -1783,6 +1783,124 @@ TOOL_DEFS = [
     {
         "type": "function",
         "function": {
+            "name": "list_gen_clients",
+            "description": (
+                "List the Generation-Reports CLIENT roster (Invoices → Generation reports): "
+                "the NEPOOL/REC generation-workbook customers. Each client owns arrays (with "
+                "NEPOOL-GIS ids) and logins. This is SEPARATE from offtaker invoices "
+                "(list_offtakers). Use when the owner asks about their generation-report "
+                "clients, 'my clients', Bruce/GMCS, how many arrays a client has, etc."
+            ),
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_gen_client",
+            "description": (
+                "Full detail for one Generation-Reports client by name or id: contact + cc "
+                "emails, report cadence, auto-send, the arrays under it (with NEPOOL-GIS ids, "
+                "fuel, utility accounts), and the GMP/VEC login bindings that auto-file "
+                "captures. Use to answer 'how many arrays does Bruce have', 'what's this "
+                "client's email/NEPOOL ids', 'how are the logins organized'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "client_id": {"type": "integer"},
+                    "client_name": {"type": "string", "description": "Client name (partial ok) when id unknown"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_gen_client",
+            "description": (
+                "Create a NEW Generation-Reports client (a generation-workbook customer). "
+                "Optionally set contact/cc email, cadence (monthly|quarterly), and the "
+                "GMP/VEC login (email or username) so future captures auto-file arrays here. "
+                "The client starts with no arrays. Does NOT enroll auto-send or charge anything."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "contact_email": {"type": "string"},
+                    "cc_emails": {"type": "string", "description": "Comma-separated additional recipients"},
+                    "report_frequency": {"type": "string", "enum": ["monthly", "quarterly"]},
+                    "gmp_email": {"type": "string", "description": "GMP login email to bind captures to this client"},
+                    "gmp_username": {"type": "string"},
+                    "vec_email": {"type": "string", "description": "VEC / SmartHub login email"},
+                    "vec_username": {"type": "string"},
+                    "notes": {"type": "string"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "patch_gen_client",
+            "description": (
+                "Edit a Generation-Reports client (by name or id): rename, change contact/cc "
+                "email, cadence, GMP/VEC login binding, active flag, notes. Identify by "
+                "client_id or client_name. auto_send=true ENROLLS the client in $15/array/"
+                "quarter automatic reports — that's a billing decision, so it returns a "
+                "confirm first unless confirm_auto_send=true. Everything else applies directly."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "client_id": {"type": "integer"},
+                    "client_name": {"type": "string"},
+                    "name": {"type": "string", "description": "New name for the client (rename)"},
+                    "contact_email": {"type": "string"},
+                    "cc_emails": {"type": "string"},
+                    "report_frequency": {"type": "string", "enum": ["monthly", "quarterly"]},
+                    "gmp_email": {"type": "string"},
+                    "gmp_username": {"type": "string"},
+                    "vec_email": {"type": "string"},
+                    "vec_username": {"type": "string"},
+                    "active": {"type": "boolean"},
+                    "notes": {"type": "string"},
+                    "auto_send": {"type": "boolean", "description": "Enroll (true) / unenroll (false) automatic quarterly reports. Enabling bills $15/array/quarter."},
+                    "confirm_auto_send": {"type": "boolean", "description": "Set true to confirm the auto_send=true billing enrollment."},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "patch_gen_array",
+            "description": (
+                "Edit one array in the Generation-Reports world, or move it between clients. "
+                "Set its NEPOOL-GIS id, fuel_type, or region; and/or reassign it to a "
+                "different client (reassign_to_client_id | reassign_to_client_name) to fix how "
+                "arrays are organized under clients. Identify the array by array_id or "
+                "array_name. Does NOT create/delete arrays and never changes billing."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "array_id": {"type": "integer"},
+                    "array_name": {"type": "string"},
+                    "nepool_gis_id": {"type": "string", "description": "NEPOOL-GIS id (e.g. '53984'). Pass empty to clear."},
+                    "fuel_type": {"type": "string", "description": "solar | wind | hydro | digester | storage"},
+                    "region": {"type": "string"},
+                    "reassign_to_client_id": {"type": "integer", "description": "Move this array under a different client"},
+                    "reassign_to_client_name": {"type": "string"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "check_email_delivery",
             "description": (
                 "Check whether email you sent actually landed — Resend's own delivery receipts "
@@ -5397,6 +5515,9 @@ SKILL_REGISTRY: dict[str, dict] = {
                          "tools": {"list_offtakers", "get_offtaker", "patch_offtaker",
                                    "get_billing_rates", "set_billing_rates",
                                    "list_recent_invoices", "send_pipeline", "billing_portal_link"}},
+    "generation_reports": {"label": "Generation-report clients", "default_on": True,
+                           "tools": {"list_gen_clients", "get_gen_client", "create_gen_client",
+                                     "patch_gen_client", "patch_gen_array"}},
     "repairs": {"label": "Repair coordination", "default_on": True,
                 "tools": {"repair_ops_overview", "list_service_contacts", "upsert_service_contact",
                           "assign_service_contact", "open_repair_ticket", "update_repair_ticket",
@@ -5559,6 +5680,331 @@ def _request_capability_tool(db, tenant: Tenant, args: dict) -> dict:
     }
 
 
+# ── Generation Reports client roster (folded in from NEPOOL Operator) ─────────
+# The agent can already EDIT offtakers (BillingReportSubscription). This gives it
+# the same reach over the Generation-Reports CLIENT roster — a different table
+# (`Client`): a NEPOOL/REC agent has many clients, each owns arrays (Array.client_id)
+# carrying nepool_gis_id / fuel_type, and reports go out per client. Ford, 2026-07-16:
+# "just like it can edit offtakers, let it edit the generation-reports details —
+# client name/email/nepool ids and how arrays/logins are organized under clients,
+# make new clients, and have all this accessible."
+#
+# Every write REUSES the real HTTP handlers (create_client / update_client /
+# update_array / sandbox_array_reassign) via a minted bearer, so validation,
+# dedup and side-effects match the UI exactly. The Stripe-touching paths
+# (create_array / delete / the `excluded` flag → reconcile_subscription_quantity)
+# are deliberately NOT exposed — MONEY stays a hard stop. auto_send=True is a
+# $15/array/quarter enrollment, so enabling it is gated behind an explicit confirm.
+
+def _ea_bearer(tenant: Tenant) -> str:
+    from .account import mint_session_for_tenant
+    return "Bearer " + mint_session_for_tenant(tenant.id)
+
+
+def _gen_client_dict(db, c) -> dict:
+    """Roster row + array/login rollup for one client (read shape the agent sees)."""
+    arrs = db.execute(
+        select(Array).where(Array.client_id == c.id, Array.deleted_at.is_(None))
+    ).scalars().all()
+    arr_ids = [a.id for a in arrs]
+    accts = []
+    if arr_ids:
+        from .models import UtilityAccount
+        accts = db.execute(
+            select(UtilityAccount).where(
+                UtilityAccount.array_id.in_(arr_ids),
+                UtilityAccount.deleted_at.is_(None),
+            )
+        ).scalars().all()
+    acct_by_arr: dict = {}
+    for u in accts:
+        acct_by_arr.setdefault(u.array_id, []).append(u)
+    return {
+        "id": c.id,
+        "name": c.name,
+        "contact_email": c.contact_email,
+        "cc_emails": c.cc_emails,
+        "report_frequency": c.report_frequency or "quarterly (default)",
+        "auto_send": bool(getattr(c, "auto_send", False)),
+        "active": bool(getattr(c, "active", True)),
+        "default_fuel_type": getattr(c, "default_fuel_type", "solar"),
+        "notes": getattr(c, "notes", None),
+        # How LOGINS are organized under this client (the autopop binding).
+        "logins": {
+            "gmp_email": c.gmp_email, "gmp_username": c.gmp_username,
+            "gmp_autopopulate": bool(getattr(c, "gmp_autopopulate", False)),
+            "vec_email": c.vec_email, "vec_username": c.vec_username,
+            "vec_autopopulate": bool(getattr(c, "vec_autopopulate", False)),
+        },
+        "last_delivered_at": (c.last_delivered_at.isoformat()
+                              if getattr(c, "last_delivered_at", None) else None),
+        "array_count": len(arrs),
+        # How ARRAYS are organized under this client (+ their NEPOOL-GIS ids).
+        "arrays": [
+            {
+                "id": a.id, "name": a.name,
+                "nepool_gis_id": getattr(a, "nepool_gis_id", None),
+                "fuel_type": getattr(a, "fuel_type", None),
+                "region": getattr(a, "region", None),
+                "excluded": bool(getattr(a, "excluded", False)),
+                "utility_accounts": [
+                    {"id": u.id, "provider": u.provider, "account_number": u.account_number}
+                    for u in acct_by_arr.get(a.id, [])
+                ],
+            }
+            for a in arrs
+        ],
+    }
+
+
+def _resolve_gen_client(db, tid: str, args: dict):
+    """Find a Client by id or (partial, exact-preferred) name. Returns
+    (client, error_dict). Scoped to the tenant, live rows only."""
+    cid = args.get("client_id")
+    if cid is not None:
+        try:
+            cid = int(cid)
+        except (TypeError, ValueError):
+            return None, {"error": f"invalid client_id: {cid}"}
+        c = db.get(Client, cid)
+        if c is None or c.tenant_id != tid or getattr(c, "deleted_at", None):
+            return None, {"error": f"client #{cid} not found in your account"}
+        return c, None
+    name_q = (args.get("client_name") or args.get("name") or "").strip()
+    if not name_q:
+        return None, {"error": "pass client_id or client_name"}
+    rows = db.execute(
+        select(Client).where(Client.tenant_id == tid, Client.deleted_at.is_(None))
+    ).scalars().all()
+    ql = name_q.lower()
+    exact = [c for c in rows if (c.name or "").lower() == ql]
+    if len(exact) == 1:
+        return exact[0], None
+    partial = [c for c in rows if ql in (c.name or "").lower()]
+    if not partial:
+        return None, {"error": f"no generation-reports client matching '{name_q}'",
+                      "hint": "call list_gen_clients to see the roster"}
+    if len(partial) > 1:
+        return None, {"error": f"multiple clients match '{name_q}' — pass client_id",
+                      "matches": [{"id": c.id, "name": c.name} for c in partial[:12]]}
+    return partial[0], None
+
+
+def _list_gen_clients_tool(db, tenant: Tenant, args: dict) -> dict:
+    rows = db.execute(
+        select(Client).where(Client.tenant_id == tenant.id, Client.deleted_at.is_(None))
+        .order_by(Client.name)
+    ).scalars().all()
+    if not rows:
+        return {"clients": [], "count": 0,
+                "message": ("No Generation-Reports clients on this account yet. "
+                            "This is the NEPOOL/REC generation-workbook roster (Invoices → "
+                            "Generation reports), separate from offtaker invoices. I can "
+                            "create one with create_gen_client.")}
+    out = [_gen_client_dict(db, c) for c in rows]
+    return {"count": len(out), "clients": out,
+            "instruction_for_agent": (
+                "This is the Generation-Reports client roster (NEPOOL/REC workbooks), NOT "
+                "offtaker invoices. Each client owns arrays (with NEPOOL-GIS ids) and logins. "
+                "Edit with patch_gen_client / patch_gen_array, create with create_gen_client."
+            )}
+
+
+def _get_gen_client_tool(db, tenant: Tenant, args: dict) -> dict:
+    c, err = _resolve_gen_client(db, tenant.id, args)
+    if err:
+        return err
+    return {"client": _gen_client_dict(db, c)}
+
+
+def _create_gen_client_tool(db, tenant: Tenant, args: dict) -> dict:
+    name = (args.get("name") or args.get("client_name") or "").strip()
+    if not name:
+        return {"error": "name is required to create a client"}
+    from .account import ClientCreate, create_client
+    freq = (args.get("report_frequency") or "").strip().lower() or None
+    if freq and freq not in ("monthly", "quarterly"):
+        return {"error": "report_frequency must be 'monthly' or 'quarterly'"}
+    fields = {"name": name}
+    for k in ("contact_email", "cc_emails", "notes",
+              "gmp_email", "gmp_username", "vec_email", "vec_username"):
+        if args.get(k) is not None:
+            fields[k] = str(args[k]).strip() or None
+    if freq:
+        fields["report_frequency"] = freq
+    try:
+        body = ClientCreate(**fields)
+    except Exception as e:  # pydantic validation (e.g. bad email)
+        return {"error": f"invalid field: {str(e)[:160]}"}
+    try:
+        res = create_client(body=body, authorization=_ea_bearer(tenant))
+    except HTTPException as he:
+        return _gen_http_err(he, "create client")
+    cli = (res or {}).get("client") or res
+    return {"ok": True, "created": True, "client": cli,
+            "message": f"Created generation-reports client “{name}”.",
+            "instruction_for_agent": (
+                "Created. It has no arrays yet — arrays attach via capture (a matching "
+                "GMP/VEC login) or you can move an existing array onto it with patch_gen_array "
+                "(reassign_to_client_id). Set gmp_email/username so future captures auto-file here."
+            )}
+
+
+def _patch_gen_client_tool(db, tenant: Tenant, args: dict, user_text: str = "") -> dict:
+    c, err = _resolve_gen_client(db, tenant.id, args)
+    if err:
+        return err
+    from .account import ClientUpdate, update_client
+
+    # MONEY GATE: auto_send=True enrolls this client in $15/array/quarter billing.
+    # Enabling it is a spending decision → confirm explicitly. Disabling is free.
+    if args.get("auto_send") is True and not bool(args.get("confirm_auto_send")):
+        n_arr = db.execute(
+            select(func.count()).select_from(Array).where(
+                Array.client_id == c.id, Array.deleted_at.is_(None),
+                Array.excluded.is_(False))
+        ).scalar() or 0
+        return {"status": "needs_confirm", "money": True,
+                "message": (
+                    f"Turning on auto-send for “{c.name}” enrolls it in automatic quarterly "
+                    f"reports, billed $15 per array per quarter (~{int(n_arr)} array(s) here). "
+                    "Want me to enable it? Re-call with confirm_auto_send=true."),
+                "instruction_for_agent": "This is a billing enrollment — do NOT enable without the owner's explicit yes."}
+
+    fields: dict = {}
+    if args.get("name") is not None:
+        fields["name"] = str(args["name"]).strip()
+    for k in ("contact_email", "cc_emails", "notes",
+              "gmp_email", "gmp_username", "vec_email", "vec_username"):
+        if k in args and args[k] is not None:
+            fields[k] = str(args[k]).strip() or None
+    for k in ("active", "gmp_autopopulate", "vec_autopopulate"):
+        if args.get(k) is not None:
+            fields[k] = bool(args[k])
+    if args.get("auto_send") is not None:
+        fields["auto_send"] = bool(args["auto_send"])
+    if args.get("report_frequency") is not None:
+        freq = str(args["report_frequency"]).strip().lower()
+        if freq not in ("monthly", "quarterly"):
+            return {"error": "report_frequency must be 'monthly' or 'quarterly'"}
+        fields["report_frequency"] = freq
+    if not fields:
+        return {"error": ("nothing to change — pass name, contact_email, cc_emails, "
+                          "report_frequency, gmp_email/gmp_username, vec_email/vec_username, "
+                          "active, notes, and/or auto_send"),
+                "client": _gen_client_dict(db, c)}
+    try:
+        body = ClientUpdate(**fields)
+    except Exception as e:
+        return {"error": f"invalid field: {str(e)[:160]}"}
+    try:
+        res = update_client(client_id=c.id, body=body, authorization=_ea_bearer(tenant))
+    except HTTPException as he:
+        return _gen_http_err(he, "update client")
+    db.expire_all()  # handler committed on its own session; drop our stale cache
+    fresh, _ = _resolve_gen_client(db, tenant.id, {"client_id": c.id})
+    return {"ok": True, "updated": sorted(fields.keys()),
+            "client": _gen_client_dict(db, fresh) if fresh else (res or {}).get("client"),
+            "message": f"Updated “{c.name}”: {', '.join(sorted(fields.keys()))}.",
+            "ui": {"type": "ui_refresh", "surface": "generation_reports"}}
+
+
+def _patch_gen_array_tool(db, tenant: Tenant, args: dict, user_text: str = "") -> dict:
+    """Edit an array's NEPOOL-GIS id / fuel / region, and/or move it to another client."""
+    aid = args.get("array_id")
+    arr = None
+    if aid is not None:
+        try:
+            aid = int(aid)
+        except (TypeError, ValueError):
+            return {"error": f"invalid array_id: {aid}"}
+        arr = db.get(Array, aid)
+        if arr is None or arr.tenant_id != tenant.id or getattr(arr, "deleted_at", None):
+            return {"error": f"array #{aid} not found in your account"}
+    else:
+        aname = (args.get("array_name") or "").strip()
+        if not aname:
+            return {"error": "pass array_id or array_name"}
+        rows = db.execute(
+            select(Array).where(Array.tenant_id == tenant.id, Array.deleted_at.is_(None))
+        ).scalars().all()
+        m = [a for a in rows if (a.name or "").lower() == aname.lower()] or \
+            [a for a in rows if aname.lower() in (a.name or "").lower()]
+        if not m:
+            return {"error": f"no array matching '{aname}'"}
+        if len(m) > 1:
+            return {"error": f"multiple arrays match '{aname}' — pass array_id",
+                    "matches": [{"id": a.id, "name": a.name} for a in m[:12]]}
+        arr = m[0]
+
+    did = []
+    # 1) Field edits (nepool_gis_id / fuel_type / region) via update_array.
+    field_args: dict = {}
+    if "nepool_gis_id" in args and args["nepool_gis_id"] is not None:
+        field_args["nepool_gis_id"] = str(args["nepool_gis_id"]).strip() or None
+    if args.get("fuel_type") is not None:
+        field_args["fuel_type"] = str(args["fuel_type"]).strip().lower()
+    if args.get("region") is not None:
+        field_args["region"] = str(args["region"]).strip() or None
+    if field_args:
+        if arr.client_id is None:
+            return {"error": ("this array isn't under a client yet — assign it first with "
+                              "reassign_to_client_id, then set its NEPOOL id")}
+        from .account import ArrayUpdate, update_array
+        try:
+            res = update_array(client_id=arr.client_id, array_id=arr.id,
+                               body=ArrayUpdate(**field_args), authorization=_ea_bearer(tenant))
+        except HTTPException as he:
+            return _gen_http_err(he, "update array")
+        did += list(field_args.keys())
+
+    # 2) Reassign to a different client via the sandbox endpoint (no Stripe impact).
+    tgt = args.get("reassign_to_client_id")
+    tgt_name = (args.get("reassign_to_client_name") or "").strip()
+    if tgt is not None or tgt_name:
+        target, terr = _resolve_gen_client(
+            db, tenant.id,
+            {"client_id": tgt} if tgt is not None else {"client_name": tgt_name})
+        if terr:
+            return {"error": "reassign target: " + str(terr.get("error")), **{k: v for k, v in terr.items() if k == "matches"}}
+        from .sandbox import ArrayReassignBody, sandbox_array_reassign
+        try:
+            sandbox_array_reassign(body=ArrayReassignBody(array_id=arr.id, client_id=target.id),
+                                   authorization=_ea_bearer(tenant))
+        except HTTPException as he:
+            return _gen_http_err(he, "reassign array")
+        did.append(f"moved to client “{target.name}”")
+
+    if not did:
+        return {"error": ("nothing to change — pass nepool_gis_id, fuel_type, region, "
+                          "and/or reassign_to_client_id | reassign_to_client_name")}
+    db.expire_all()
+    fresh = db.get(Array, arr.id)
+    return {"ok": True, "array_id": arr.id, "did": did,
+            "array": {"id": fresh.id, "name": fresh.name,
+                      "nepool_gis_id": getattr(fresh, "nepool_gis_id", None),
+                      "fuel_type": getattr(fresh, "fuel_type", None),
+                      "client_id": fresh.client_id},
+            "message": f"Updated array “{arr.name}”: {', '.join(did)}.",
+            "ui": {"type": "ui_refresh", "surface": "generation_reports"}}
+
+
+def _gen_http_err(he: "HTTPException", what: str) -> dict:
+    """Turn a reused-handler HTTPException into an honest agent-facing error."""
+    d = he.detail
+    if isinstance(d, dict):
+        code = d.get("error")
+        if code == "demo-read-only":
+            return {"error": "This is a demo account — sign up to edit clients for real.", "demo": True}
+        if code == "paused_no_card":
+            return {"error": "The account is paused for a missing payment method — add a card to resume edits."}
+        if code == "login-already-claimed":
+            return {"error": "That GMP/VEC login is already on another client.",
+                    "existing_client_id": d.get("existing_client_id")}
+        return {"error": d.get("message") or f"could not {what}", "detail": d}
+    return {"error": f"could not {what}: {str(d)[:200]}"}
+
+
 def _run_tool(
     name: str,
     args: dict,
@@ -5594,6 +6040,16 @@ def _run_tool(
         return _request_capability_tool(db, tenant, args)
     if name == "check_email_delivery":
         return _check_email_delivery_tool(db, tenant, args)
+    if name == "list_gen_clients":
+        return _list_gen_clients_tool(db, tenant, args)
+    if name == "get_gen_client":
+        return _get_gen_client_tool(db, tenant, args)
+    if name == "create_gen_client":
+        return _create_gen_client_tool(db, tenant, args)
+    if name == "patch_gen_client":
+        return _patch_gen_client_tool(db, tenant, args, user_text=user_text)
+    if name == "patch_gen_array":
+        return _patch_gen_array_tool(db, tenant, args, user_text=user_text)
 
     if name == "tenant_census":
         return _tenant_census_tool(db, tenant, args)
