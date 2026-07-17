@@ -131,9 +131,7 @@ class ChintVendor:
         out = []
         for gw in (devices.get("gwDevices") or []):
             for dvc in (gw.get("commDevices") or []):
-                is_inv = (dvc.get("assetTypeName") == "Inverter"
-                          or dvc.get("assetType") == 2)
-                if not is_inv:
+                if not _is_inverter_device(dvc, gw):
                     continue
                 serial = str(dvc.get("sn") or dvc.get("assetAlias") or dvc.get("id") or "").strip()
                 if not serial:
@@ -162,6 +160,48 @@ class ChintVendor:
             if len(name) == 8 and val is not None:    # 'YYYYMMDD'
                 out.append({"date": f"{name[:4]}-{name[4:6]}-{name[6:8]}", "kwh": val})
         return out
+
+
+# A Chint gateway hangs several device KINDS off itself: the inverters (what we
+# want) but ALSO the data-logger/collector itself, environmental "detectors",
+# revenue meters, and string/combiner monitors. Only the inverters produce — the
+# rest never make power, so if one slips into the inverter list it reads "quiet"
+# forever and pollutes the unit count, peer analysis, and the alert sweep (it gets
+# flagged as a dead inverter). Bruce's Londonderry 186 is the case that forced this:
+# its FlexOM FG4C logger (hex serial 00009e021902bb00, no model, no power) was
+# slipping in via the `assetType == 2` fallback. Doc: docs/knowledge/
+# chint-portal-api-contract.md — "1 gateway (assetType 1) → 4 inverters"; the gateway
+# is the "detector" Ford flagged. Recognize an inverter POSITIVELY and reject every
+# known non-inverter kind, robust to whichever field the vendor (mis)populates.
+_CHINT_NON_INVERTER_RE = re.compile(
+    r"gateway|collector|logger|detector|meter|sensor|environment|weather|combiner"
+    r"|module|dongle|\bdtu\b|\bemu\b", re.I)
+
+
+def _is_inverter_device(dvc: dict, gw: dict | None = None) -> bool:
+    if not isinstance(dvc, dict):
+        return False
+    type_name = str(dvc.get("assetTypeName") or "").strip()
+    # 1) Explicit non-inverter kind by name — beats any assetType fallback below.
+    if _CHINT_NON_INVERTER_RE.search(type_name):
+        return False
+    # 2) Chint asset-type ints (verified in the portal contract): 1 = Gateway.
+    if dvc.get("assetType") == 1:
+        return False
+    # 3) A logger sometimes echoes itself as a commDevice under its OWN gateway — a
+    #    commDevice whose serial equals the parent gateway's serial IS the gateway.
+    sn = str(dvc.get("sn") or "").strip()
+    gw_sn = str((gw or {}).get("sn") or (gw or {}).get("deviceSn")
+                or (gw or {}).get("gatewaySn") or "").strip()
+    if sn and gw_sn and sn == gw_sn:
+        return False
+    # 4) Positive identification: named "Inverter", or the assetType==2 fallback
+    #    (used only when the vendor left assetTypeName blank).
+    if type_name.lower() == "inverter":
+        return True
+    if dvc.get("assetType") == 2:
+        return True
+    return False
 
 
 def _num(v):

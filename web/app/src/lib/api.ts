@@ -365,6 +365,11 @@ export interface ClientRow {
    *  bill landed. Drives the "Last checked" column so a monthly-billing meter
    *  doesn't look stale between bills. */
   last_checked_at?: string | null;
+  /** THE FOLD: when TRUE this client's generation report auto-sends each period
+   *  — and is the operator's opt-in to the $15/client/quarter charge (the meter
+   *  fires on the first real output). Default false; the operator flips it per
+   *  client in the roster. Manual send/download still work regardless. */
+  auto_send?: boolean;
 }
 
 // ─── account ───────────────────────────────────────────────────────────────
@@ -965,6 +970,8 @@ export interface ClientCreateInput {
   vec_email?: string | null;
   vec_username?: string | null;
   vec_autopopulate?: boolean;
+  /** THE FOLD: per-client auto-send enrollment (patchable via updateClient). */
+  auto_send?: boolean;
 }
 
 export async function createClient(
@@ -974,6 +981,25 @@ export async function createClient(
     body: input,
   });
   return res.client;
+}
+
+export interface AutoSendAllResult {
+  ok: boolean;
+  auto_send: boolean;
+  clients: number;
+  arrays: number;
+  price_cents_per_array: number;
+  estimated_quarterly_cents: number;
+}
+
+/** Turn generation-report auto-send on (or off) for EVERY active client — the
+ *  one deliberate "turn my account on" action. Enabling also enrolls the tenant
+ *  in the reports world; each reported array then bills $15 once per quarter. */
+export async function setAutoSendAll(enabled: boolean): Promise<AutoSendAllResult> {
+  return request<AutoSendAllResult>("/v1/account/clients/auto-send-all", {
+    method: "POST",
+    body: { enabled },
+  });
 }
 
 export async function updateClient(

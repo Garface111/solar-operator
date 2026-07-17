@@ -66,7 +66,16 @@ COST_PER_1K_INPUT = float(os.getenv("EA_COST_PER_1K_IN", "0.003"))
 COST_PER_1K_OUTPUT = float(os.getenv("EA_COST_PER_1K_OUT", "0.015"))
 COST_PER_MIN_VOICE = float(os.getenv("EA_COST_PER_MIN_VOICE", "0.06"))
 # Fewer LLM round-trips = snappier voice/chat (was 10; most asks need 1–3).
-MAX_TOOL_ROUNDS = 6
+# Per-turn tool-call rounds. Ford 2026-07-16: "give it infinite tool step limits" —
+# the old cap of 6 made the agent quit a normal multi-subsystem answer with "tell
+# me the next single step you want", dumping its own job on the owner. The real
+# ceiling is the weekly $ budget (unlimited on Pro/comped), re-checked each round;
+# a genuine same-step-repeating loop is the only other stop. Default 100 is
+# effectively unbounded for real work; set EA_MAX_TOOL_ROUNDS=0 for truly no cap.
+try:
+    MAX_TOOL_ROUNDS = int(os.getenv("EA_MAX_TOOL_ROUNDS", "100") or 100)
+except (TypeError, ValueError):
+    MAX_TOOL_ROUNDS = 100
 FORD_ESCALATE_TO = os.getenv("FORD_ALERT_EMAIL", "")  # notify uses default if empty
 
 PERSONA = """You are Energy Agent — the tenant's operating intelligence inside Array Operator.
@@ -553,6 +562,28 @@ class EaCostLedger(Base):
     amount_usd: Mapped[float] = mapped_column(Float, default=0.0)
     reason: Mapped[str] = mapped_column(String(64), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
+
+
+class EaEmailDelivery(Base):
+    """What Resend told us actually happened to an email we sent.
+
+    Resend webhooks already report email.delivered / email.bounced /
+    email.complained for EVERY message, but the handler only stamped Client
+    rows (offtakers) — so an event for a repair tech or the owner matched
+    nothing and was discarded. The agent then had no way to answer "did that
+    email land?" and guessed, contradicting itself (Ford 2026-07-16: it denied
+    sending emails it had just sent). This keeps the receipt.
+
+    Not tenant-scoped at write time (a webhook carries no tenant): the read
+    tool scopes by the tenant's OWN known recipients instead."""
+    __tablename__ = "ea_email_delivery"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    to_email: Mapped[str] = mapped_column(String(200), index=True)
+    event: Mapped[str] = mapped_column(String(24), index=True)  # delivered|bounced|complained
+    subject: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(200), nullable=True)  # bounce reason
+    resend_email_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
 
 
 class EaReminder(Base):
@@ -1755,6 +1786,145 @@ TOOL_DEFS = [
             "parameters": {
                 "type": "object",
                 "properties": {"reminder_id": {"type": "string"}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_gen_clients",
+            "description": (
+                "List the Generation-Reports CLIENT roster (Invoices → Generation reports): "
+                "the NEPOOL/REC generation-workbook customers. Each client owns arrays (with "
+                "NEPOOL-GIS ids) and logins. This is SEPARATE from offtaker invoices "
+                "(list_offtakers). Use when the owner asks about their generation-report "
+                "clients, 'my clients', Bruce/GMCS, how many arrays a client has, etc."
+            ),
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_gen_client",
+            "description": (
+                "Full detail for one Generation-Reports client by name or id: contact + cc "
+                "emails, report cadence, auto-send, the arrays under it (with NEPOOL-GIS ids, "
+                "fuel, utility accounts), and the GMP/VEC login bindings that auto-file "
+                "captures. Use to answer 'how many arrays does Bruce have', 'what's this "
+                "client's email/NEPOOL ids', 'how are the logins organized'."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "client_id": {"type": "integer"},
+                    "client_name": {"type": "string", "description": "Client name (partial ok) when id unknown"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_gen_client",
+            "description": (
+                "Create a NEW Generation-Reports client (a generation-workbook customer). "
+                "Optionally set contact/cc email, cadence (monthly|quarterly), and the "
+                "GMP/VEC login (email or username) so future captures auto-file arrays here. "
+                "The client starts with no arrays. Does NOT enroll auto-send or charge anything."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "contact_email": {"type": "string"},
+                    "cc_emails": {"type": "string", "description": "Comma-separated additional recipients"},
+                    "report_frequency": {"type": "string", "enum": ["monthly", "quarterly"]},
+                    "gmp_email": {"type": "string", "description": "GMP login email to bind captures to this client"},
+                    "gmp_username": {"type": "string"},
+                    "vec_email": {"type": "string", "description": "VEC / SmartHub login email"},
+                    "vec_username": {"type": "string"},
+                    "notes": {"type": "string"},
+                },
+                "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "patch_gen_client",
+            "description": (
+                "Edit a Generation-Reports client (by name or id): rename, change contact/cc "
+                "email, cadence, GMP/VEC login binding, active flag, notes. Identify by "
+                "client_id or client_name. auto_send=true ENROLLS the client in $15/array/"
+                "quarter automatic reports — that's a billing decision, so it returns a "
+                "confirm first unless confirm_auto_send=true. Everything else applies directly."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "client_id": {"type": "integer"},
+                    "client_name": {"type": "string"},
+                    "name": {"type": "string", "description": "New name for the client (rename)"},
+                    "contact_email": {"type": "string"},
+                    "cc_emails": {"type": "string"},
+                    "report_frequency": {"type": "string", "enum": ["monthly", "quarterly"]},
+                    "gmp_email": {"type": "string"},
+                    "gmp_username": {"type": "string"},
+                    "vec_email": {"type": "string"},
+                    "vec_username": {"type": "string"},
+                    "active": {"type": "boolean"},
+                    "notes": {"type": "string"},
+                    "auto_send": {"type": "boolean", "description": "Enroll (true) / unenroll (false) automatic quarterly reports. Enabling bills $15/array/quarter."},
+                    "confirm_auto_send": {"type": "boolean", "description": "Set true to confirm the auto_send=true billing enrollment."},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "patch_gen_array",
+            "description": (
+                "Edit one array in the Generation-Reports world, or move it between clients. "
+                "Set its NEPOOL-GIS id, fuel_type, or region; and/or reassign it to a "
+                "different client (reassign_to_client_id | reassign_to_client_name) to fix how "
+                "arrays are organized under clients. Identify the array by array_id or "
+                "array_name. Does NOT create/delete arrays and never changes billing."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "array_id": {"type": "integer"},
+                    "array_name": {"type": "string"},
+                    "nepool_gis_id": {"type": "string", "description": "NEPOOL-GIS id (e.g. '53984'). Pass empty to clear."},
+                    "fuel_type": {"type": "string", "description": "solar | wind | hydro | digester | storage"},
+                    "region": {"type": "string"},
+                    "reassign_to_client_id": {"type": "integer", "description": "Move this array under a different client"},
+                    "reassign_to_client_name": {"type": "string"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_email_delivery",
+            "description": (
+                "Check whether email you sent actually landed — Resend's own delivery receipts "
+                "(delivered / bounced / complained) for this account's contacts. Use whenever the "
+                "owner asks 'did that email send/arrive?', 'did Rex get it?', or you are about to "
+                "claim something did or didn't go out. This is EVIDENCE — check it instead of "
+                "guessing. Omit recipient for everything recent; pass a name or address to narrow. "
+                "IMPORTANT: no receipt does NOT mean not delivered — say you have no receipt."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "recipient": {"type": "string", "description": "Name or email (e.g. 'Rex'). Omit for all."},
+                    "days": {"type": "integer", "description": "Look-back window, default 7, max 90"},
+                },
             },
         },
     },
@@ -5354,11 +5524,15 @@ SKILL_REGISTRY: dict[str, dict] = {
                          "tools": {"list_offtakers", "get_offtaker", "patch_offtaker",
                                    "get_billing_rates", "set_billing_rates",
                                    "list_recent_invoices", "send_pipeline", "billing_portal_link"}},
+    "generation_reports": {"label": "Generation-report clients", "default_on": True,
+                           "tools": {"list_gen_clients", "get_gen_client", "create_gen_client",
+                                     "patch_gen_client", "patch_gen_array"}},
     "repairs": {"label": "Repair coordination", "default_on": True,
                 "tools": {"repair_ops_overview", "list_service_contacts", "upsert_service_contact",
                           "assign_service_contact", "open_repair_ticket", "update_repair_ticket",
                           "draft_repair_checkin", "send_repair_checkin", "log_repair_note",
-                          "log_repair_phone_note", "list_repair_tickets"}},
+                          "log_repair_phone_note", "list_repair_tickets",
+                          "check_email_delivery"}},
     "reminders": {"label": "Reminders & watches", "default_on": True, "self_activatable": True,
                   "tools": {"create_reminder", "list_reminders", "cancel_reminder"}},
     "capture_and_setup": {"label": "Data capture & setup", "default_on": True,
@@ -5515,6 +5689,381 @@ def _request_capability_tool(db, tenant: Tenant, args: dict) -> dict:
     }
 
 
+# ── Generation Reports client roster (folded in from NEPOOL Operator) ─────────
+# The agent can already EDIT offtakers (BillingReportSubscription). This gives it
+# the same reach over the Generation-Reports CLIENT roster — a different table
+# (`Client`): a NEPOOL/REC agent has many clients, each owns arrays (Array.client_id)
+# carrying nepool_gis_id / fuel_type, and reports go out per client. Ford, 2026-07-16:
+# "just like it can edit offtakers, let it edit the generation-reports details —
+# client name/email/nepool ids and how arrays/logins are organized under clients,
+# make new clients, and have all this accessible."
+#
+# Every write REUSES the real HTTP handlers (create_client / update_client /
+# update_array / sandbox_array_reassign) via a minted bearer, so validation,
+# dedup and side-effects match the UI exactly. The Stripe-touching paths
+# (create_array / delete / the `excluded` flag → reconcile_subscription_quantity)
+# are deliberately NOT exposed — MONEY stays a hard stop. auto_send=True is a
+# $15/array/quarter enrollment, so enabling it is gated behind an explicit confirm.
+
+def _ea_bearer(tenant: Tenant) -> str:
+    from .account import mint_session_for_tenant
+    return "Bearer " + mint_session_for_tenant(tenant.id)
+
+
+# Tool results are truncated to 8000 chars before the model sees them (the
+# _agent_turn loop). Embedding every array in the roster blew past that, so the
+# model saw a CUT-OFF json and confabulated the tail — invented a client "Karen
+# Hardt" in place of a real one whose row was severed (Ford 2026-07-16). So the
+# LIST is compact (rows only) and the DETAIL caps its array list; nothing the
+# model reads is ever silently truncated.
+_GEN_LIST_CAP = 25          # roster rows per list_gen_clients call
+_GEN_ARRAYS_CAP = 30        # arrays shown in one get_gen_client
+
+
+def _gen_login_summary(c):
+    parts = []
+    if c.gmp_email or c.gmp_username:
+        parts.append("GMP " + (c.gmp_email or c.gmp_username))
+    if c.vec_email or c.vec_username:
+        parts.append("VEC " + (c.vec_email or c.vec_username))
+    return "; ".join(parts) or None
+
+
+def _gen_client_row(db, c) -> dict:
+    """Compact roster row — NO per-array detail, so a full roster fits the
+    8000-char tool-result cap and the model never sees a truncated list."""
+    n = db.execute(
+        select(func.count()).select_from(Array).where(
+            Array.client_id == c.id, Array.deleted_at.is_(None))
+    ).scalar() or 0
+    return {
+        "id": c.id, "name": c.name,
+        "contact_email": c.contact_email,
+        "report_frequency": c.report_frequency or "quarterly (default)",
+        "auto_send": bool(getattr(c, "auto_send", False)),
+        "active": bool(getattr(c, "active", True)),
+        "array_count": int(n),
+        "logins": _gen_login_summary(c),
+        "last_delivered_at": (c.last_delivered_at.isoformat()
+                              if getattr(c, "last_delivered_at", None) else None),
+    }
+
+
+def _gen_client_detail(db, c) -> dict:
+    """Full detail for ONE client — arrays (capped) + logins. Bounded so even a
+    42-array client stays under the tool-result cap."""
+    arrs = db.execute(
+        select(Array).where(Array.client_id == c.id, Array.deleted_at.is_(None))
+        .order_by(Array.name)
+    ).scalars().all()
+    total_arr = len(arrs)
+    shown = arrs[:_GEN_ARRAYS_CAP]
+    arr_ids = [a.id for a in shown]
+    acct_by_arr: dict = {}
+    if arr_ids:
+        from .models import UtilityAccount
+        for u in db.execute(
+            select(UtilityAccount).where(
+                UtilityAccount.array_id.in_(arr_ids),
+                UtilityAccount.deleted_at.is_(None))
+        ).scalars().all():
+            acct_by_arr.setdefault(u.array_id, []).append(u)
+    d = {
+        "id": c.id,
+        "name": c.name,
+        "contact_email": c.contact_email,
+        "cc_emails": c.cc_emails,
+        "report_frequency": c.report_frequency or "quarterly (default)",
+        "auto_send": bool(getattr(c, "auto_send", False)),
+        "active": bool(getattr(c, "active", True)),
+        "default_fuel_type": getattr(c, "default_fuel_type", "solar"),
+        "notes": getattr(c, "notes", None),
+        "logins": {
+            "gmp_email": c.gmp_email, "gmp_username": c.gmp_username,
+            "gmp_autopopulate": bool(getattr(c, "gmp_autopopulate", False)),
+            "vec_email": c.vec_email, "vec_username": c.vec_username,
+            "vec_autopopulate": bool(getattr(c, "vec_autopopulate", False)),
+        },
+        "last_delivered_at": (c.last_delivered_at.isoformat()
+                              if getattr(c, "last_delivered_at", None) else None),
+        "array_count": total_arr,
+        "arrays": [
+            {
+                "id": a.id, "name": a.name,
+                "nepool_gis_id": getattr(a, "nepool_gis_id", None),
+                "fuel_type": getattr(a, "fuel_type", None),
+                "region": getattr(a, "region", None),
+                "excluded": bool(getattr(a, "excluded", False)),
+                "utility_accounts": [
+                    {"id": u.id, "provider": u.provider, "account_number": u.account_number}
+                    for u in acct_by_arr.get(a.id, [])
+                ],
+            }
+            for a in shown
+        ],
+    }
+    if total_arr > len(shown):
+        d["arrays_truncated"] = True
+        d["arrays_note"] = f"Showing {len(shown)} of {total_arr} arrays."
+    return d
+
+
+def _resolve_gen_client(db, tid: str, args: dict):
+    """Find a Client by id or (partial, exact-preferred) name. Returns
+    (client, error_dict). Scoped to the tenant, live rows only."""
+    cid = args.get("client_id")
+    if cid is not None:
+        try:
+            cid = int(cid)
+        except (TypeError, ValueError):
+            return None, {"error": f"invalid client_id: {cid}"}
+        c = db.get(Client, cid)
+        if c is None or c.tenant_id != tid or getattr(c, "deleted_at", None):
+            return None, {"error": f"client #{cid} not found in your account"}
+        return c, None
+    name_q = (args.get("client_name") or args.get("name") or "").strip()
+    if not name_q:
+        return None, {"error": "pass client_id or client_name"}
+    rows = db.execute(
+        select(Client).where(Client.tenant_id == tid, Client.deleted_at.is_(None))
+    ).scalars().all()
+    ql = name_q.lower()
+    exact = [c for c in rows if (c.name or "").lower() == ql]
+    if len(exact) == 1:
+        return exact[0], None
+    partial = [c for c in rows if ql in (c.name or "").lower()]
+    if not partial:
+        return None, {"error": f"no generation-reports client matching '{name_q}'",
+                      "hint": "call list_gen_clients to see the roster"}
+    if len(partial) > 1:
+        return None, {"error": f"multiple clients match '{name_q}' — pass client_id",
+                      "matches": [{"id": c.id, "name": c.name} for c in partial[:12]]}
+    return partial[0], None
+
+
+def _list_gen_clients_tool(db, tenant: Tenant, args: dict) -> dict:
+    rows = db.execute(
+        select(Client).where(Client.tenant_id == tenant.id, Client.deleted_at.is_(None))
+        .order_by(Client.name)
+    ).scalars().all()
+    if not rows:
+        return {"clients": [], "count": 0,
+                "message": ("No Generation-Reports clients on this account yet. "
+                            "This is the NEPOOL/REC generation-workbook roster (Invoices → "
+                            "Generation reports), separate from offtaker invoices. I can "
+                            "create one with create_gen_client.")}
+    total = len(rows)
+    shown = rows[:_GEN_LIST_CAP]
+    out = [_gen_client_row(db, c) for c in shown]
+    result = {"count": total, "shown": len(out), "clients": out,
+              "instruction_for_agent": (
+                  "This is the Generation-Reports client roster (NEPOOL/REC workbooks), NOT "
+                  "offtaker invoices. Report ONLY these clients — do not invent, rename, or "
+                  "add any. array_count is exact. For a client's arrays + NEPOOL ids, call "
+                  "get_gen_client(client_name). Edit with patch_gen_client / patch_gen_array."
+              )}
+    if total > len(out):
+        result["truncated"] = True
+        result["note"] = (f"Showing the first {len(out)} of {total} clients (kept compact so "
+                          "nothing is cut off). Ask about a specific client by name for detail.")
+    return result
+
+
+def _get_gen_client_tool(db, tenant: Tenant, args: dict) -> dict:
+    c, err = _resolve_gen_client(db, tenant.id, args)
+    if err:
+        return err
+    return {"client": _gen_client_detail(db, c)}
+
+
+def _create_gen_client_tool(db, tenant: Tenant, args: dict) -> dict:
+    name = (args.get("name") or args.get("client_name") or "").strip()
+    if not name:
+        return {"error": "name is required to create a client"}
+    from .account import ClientCreate, create_client
+    freq = (args.get("report_frequency") or "").strip().lower() or None
+    if freq and freq not in ("monthly", "quarterly"):
+        return {"error": "report_frequency must be 'monthly' or 'quarterly'"}
+    fields = {"name": name}
+    for k in ("contact_email", "cc_emails", "notes",
+              "gmp_email", "gmp_username", "vec_email", "vec_username"):
+        if args.get(k) is not None:
+            fields[k] = str(args[k]).strip() or None
+    if freq:
+        fields["report_frequency"] = freq
+    try:
+        body = ClientCreate(**fields)
+    except Exception as e:  # pydantic validation (e.g. bad email)
+        return {"error": f"invalid field: {str(e)[:160]}"}
+    try:
+        res = create_client(body=body, authorization=_ea_bearer(tenant))
+    except HTTPException as he:
+        return _gen_http_err(he, "create client")
+    cli = (res or {}).get("client") or res
+    return {"ok": True, "created": True, "client": cli,
+            "message": f"Created generation-reports client “{name}”.",
+            "instruction_for_agent": (
+                "Created. It has no arrays yet — arrays attach via capture (a matching "
+                "GMP/VEC login) or you can move an existing array onto it with patch_gen_array "
+                "(reassign_to_client_id). Set gmp_email/username so future captures auto-file here."
+            )}
+
+
+def _patch_gen_client_tool(db, tenant: Tenant, args: dict, user_text: str = "") -> dict:
+    c, err = _resolve_gen_client(db, tenant.id, args)
+    if err:
+        return err
+    from .account import ClientUpdate, update_client
+
+    # MONEY GATE: auto_send=True enrolls this client in $15/array/quarter billing.
+    # Enabling it is a spending decision → confirm explicitly. Disabling is free.
+    if args.get("auto_send") is True and not bool(args.get("confirm_auto_send")):
+        n_arr = db.execute(
+            select(func.count()).select_from(Array).where(
+                Array.client_id == c.id, Array.deleted_at.is_(None),
+                Array.excluded.is_(False))
+        ).scalar() or 0
+        return {"status": "needs_confirm", "money": True,
+                "message": (
+                    f"Turning on auto-send for “{c.name}” enrolls it in automatic quarterly "
+                    f"reports, billed $15 per array per quarter (~{int(n_arr)} array(s) here). "
+                    "Want me to enable it? Re-call with confirm_auto_send=true."),
+                "instruction_for_agent": "This is a billing enrollment — do NOT enable without the owner's explicit yes."}
+
+    fields: dict = {}
+    if args.get("name") is not None:
+        fields["name"] = str(args["name"]).strip()
+    for k in ("contact_email", "cc_emails", "notes",
+              "gmp_email", "gmp_username", "vec_email", "vec_username"):
+        if k in args and args[k] is not None:
+            fields[k] = str(args[k]).strip() or None
+    for k in ("active", "gmp_autopopulate", "vec_autopopulate"):
+        if args.get(k) is not None:
+            fields[k] = bool(args[k])
+    if args.get("auto_send") is not None:
+        fields["auto_send"] = bool(args["auto_send"])
+    if args.get("report_frequency") is not None:
+        freq = str(args["report_frequency"]).strip().lower()
+        if freq not in ("monthly", "quarterly"):
+            return {"error": "report_frequency must be 'monthly' or 'quarterly'"}
+        fields["report_frequency"] = freq
+    if not fields:
+        return {"error": ("nothing to change — pass name, contact_email, cc_emails, "
+                          "report_frequency, gmp_email/gmp_username, vec_email/vec_username, "
+                          "active, notes, and/or auto_send"),
+                "client": _gen_client_detail(db, c)}
+    try:
+        body = ClientUpdate(**fields)
+    except Exception as e:
+        return {"error": f"invalid field: {str(e)[:160]}"}
+    try:
+        res = update_client(client_id=c.id, body=body, authorization=_ea_bearer(tenant))
+    except HTTPException as he:
+        return _gen_http_err(he, "update client")
+    db.expire_all()  # handler committed on its own session; drop our stale cache
+    fresh, _ = _resolve_gen_client(db, tenant.id, {"client_id": c.id})
+    return {"ok": True, "updated": sorted(fields.keys()),
+            "client": _gen_client_detail(db, fresh) if fresh else (res or {}).get("client"),
+            "message": f"Updated “{c.name}”: {', '.join(sorted(fields.keys()))}.",
+            "ui": {"type": "ui_refresh", "surface": "generation_reports"}}
+
+
+def _patch_gen_array_tool(db, tenant: Tenant, args: dict, user_text: str = "") -> dict:
+    """Edit an array's NEPOOL-GIS id / fuel / region, and/or move it to another client."""
+    aid = args.get("array_id")
+    arr = None
+    if aid is not None:
+        try:
+            aid = int(aid)
+        except (TypeError, ValueError):
+            return {"error": f"invalid array_id: {aid}"}
+        arr = db.get(Array, aid)
+        if arr is None or arr.tenant_id != tenant.id or getattr(arr, "deleted_at", None):
+            return {"error": f"array #{aid} not found in your account"}
+    else:
+        aname = (args.get("array_name") or "").strip()
+        if not aname:
+            return {"error": "pass array_id or array_name"}
+        rows = db.execute(
+            select(Array).where(Array.tenant_id == tenant.id, Array.deleted_at.is_(None))
+        ).scalars().all()
+        m = [a for a in rows if (a.name or "").lower() == aname.lower()] or \
+            [a for a in rows if aname.lower() in (a.name or "").lower()]
+        if not m:
+            return {"error": f"no array matching '{aname}'"}
+        if len(m) > 1:
+            return {"error": f"multiple arrays match '{aname}' — pass array_id",
+                    "matches": [{"id": a.id, "name": a.name} for a in m[:12]]}
+        arr = m[0]
+
+    did = []
+    # 1) Field edits (nepool_gis_id / fuel_type / region) via update_array.
+    field_args: dict = {}
+    if "nepool_gis_id" in args and args["nepool_gis_id"] is not None:
+        field_args["nepool_gis_id"] = str(args["nepool_gis_id"]).strip() or None
+    if args.get("fuel_type") is not None:
+        field_args["fuel_type"] = str(args["fuel_type"]).strip().lower()
+    if args.get("region") is not None:
+        field_args["region"] = str(args["region"]).strip() or None
+    if field_args:
+        if arr.client_id is None:
+            return {"error": ("this array isn't under a client yet — assign it first with "
+                              "reassign_to_client_id, then set its NEPOOL id")}
+        from .account import ArrayUpdate, update_array
+        try:
+            res = update_array(client_id=arr.client_id, array_id=arr.id,
+                               body=ArrayUpdate(**field_args), authorization=_ea_bearer(tenant))
+        except HTTPException as he:
+            return _gen_http_err(he, "update array")
+        did += list(field_args.keys())
+
+    # 2) Reassign to a different client via the sandbox endpoint (no Stripe impact).
+    tgt = args.get("reassign_to_client_id")
+    tgt_name = (args.get("reassign_to_client_name") or "").strip()
+    if tgt is not None or tgt_name:
+        target, terr = _resolve_gen_client(
+            db, tenant.id,
+            {"client_id": tgt} if tgt is not None else {"client_name": tgt_name})
+        if terr:
+            return {"error": "reassign target: " + str(terr.get("error")), **{k: v for k, v in terr.items() if k == "matches"}}
+        from .sandbox import ArrayReassignBody, sandbox_array_reassign
+        try:
+            sandbox_array_reassign(body=ArrayReassignBody(array_id=arr.id, client_id=target.id),
+                                   authorization=_ea_bearer(tenant))
+        except HTTPException as he:
+            return _gen_http_err(he, "reassign array")
+        did.append(f"moved to client “{target.name}”")
+
+    if not did:
+        return {"error": ("nothing to change — pass nepool_gis_id, fuel_type, region, "
+                          "and/or reassign_to_client_id | reassign_to_client_name")}
+    db.expire_all()
+    fresh = db.get(Array, arr.id)
+    return {"ok": True, "array_id": arr.id, "did": did,
+            "array": {"id": fresh.id, "name": fresh.name,
+                      "nepool_gis_id": getattr(fresh, "nepool_gis_id", None),
+                      "fuel_type": getattr(fresh, "fuel_type", None),
+                      "client_id": fresh.client_id},
+            "message": f"Updated array “{arr.name}”: {', '.join(did)}.",
+            "ui": {"type": "ui_refresh", "surface": "generation_reports"}}
+
+
+def _gen_http_err(he: "HTTPException", what: str) -> dict:
+    """Turn a reused-handler HTTPException into an honest agent-facing error."""
+    d = he.detail
+    if isinstance(d, dict):
+        code = d.get("error")
+        if code == "demo-read-only":
+            return {"error": "This is a demo account — sign up to edit clients for real.", "demo": True}
+        if code == "paused_no_card":
+            return {"error": "The account is paused for a missing payment method — add a card to resume edits."}
+        if code == "login-already-claimed":
+            return {"error": "That GMP/VEC login is already on another client.",
+                    "existing_client_id": d.get("existing_client_id")}
+        return {"error": d.get("message") or f"could not {what}", "detail": d}
+    return {"error": f"could not {what}: {str(d)[:200]}"}
+
+
 def _run_tool(
     name: str,
     args: dict,
@@ -5548,6 +6097,18 @@ def _run_tool(
         return _list_skills_tool(db, tenant, args)
     if name == "request_capability":
         return _request_capability_tool(db, tenant, args)
+    if name == "check_email_delivery":
+        return _check_email_delivery_tool(db, tenant, args)
+    if name == "list_gen_clients":
+        return _list_gen_clients_tool(db, tenant, args)
+    if name == "get_gen_client":
+        return _get_gen_client_tool(db, tenant, args)
+    if name == "create_gen_client":
+        return _create_gen_client_tool(db, tenant, args)
+    if name == "patch_gen_client":
+        return _patch_gen_client_tool(db, tenant, args, user_text=user_text)
+    if name == "patch_gen_array":
+        return _patch_gen_array_tool(db, tenant, args, user_text=user_text)
 
     if name == "tenant_census":
         return _tenant_census_tool(db, tenant, args)
@@ -6384,7 +6945,9 @@ def _run_tool(
             "wec": ("Washington Electric Co-op (SmartHub)", "https://washingtonelectric.smarthub.coop/"),
         }
         try:
-            from .models import Array, Inverter, UtilityAccount
+            # NB: Array is module-level — importing it here would make it local to
+            # the whole of _run_tool and UnboundLocalError every earlier use.
+            from .models import Inverter, UtilityAccount
             tid = tenant.id
             vendors = set()
             for v, in db.execute(
@@ -7550,6 +8113,159 @@ def _ea_ensure_asset_table(db=None) -> None:
         log.exception("ea_chat_assets table create failed")
 
 
+def _ea_ensure_email_delivery_table(db=None) -> None:
+    try:
+        if db is not None:
+            bind = db.get_bind()
+        else:
+            from .db import engine
+            bind = engine
+        Base.metadata.create_all(bind=bind, tables=[EaEmailDelivery.__table__])
+    except Exception:
+        log.exception("ea_email_delivery table create failed")
+
+
+def _tenant_known_emails(db, tenant_id: str) -> dict[str, list[str]]:
+    """Every address this tenant legitimately mails → who it is (possibly several).
+
+    The read scope for delivery receipts. Receipts are stored unscoped (a
+    webhook carries no tenant), so the tenant's own recipient set is what keeps
+    one operator from reading another's mail status.
+
+    One address can be more than one person — an operator is often their own
+    first repair contact, so the owner and a tech share an inbox. Keep every
+    label: collapsing to the first one hid a real contact behind "you (account
+    owner)" and made "did Rex get it?" answer "no such contact" (2026-07-16).
+    """
+    known: dict[str, list[str]] = {}
+
+    def _add(addr, who):
+        a = (addr or "").strip().lower()
+        if not a:
+            return
+        labels = known.setdefault(a, [])
+        if who not in labels:
+            labels.append(who)
+
+    t = db.get(Tenant, tenant_id)
+    if t is not None:
+        _add(getattr(t, "contact_email", None), "you (account owner)")
+    try:
+        from .models import ServiceContact
+        for c in db.execute(
+            select(ServiceContact).where(ServiceContact.tenant_id == tenant_id)
+        ).scalars().all():
+            _add(c.email, f"{c.name} (repair contact)")
+    except Exception:
+        log.exception("known emails: service contacts lookup failed")
+    try:
+        for c in db.execute(
+            select(Client).where(Client.tenant_id == tenant_id)
+        ).scalars().all():
+            _add(c.contact_email, f"{getattr(c, 'name', 'client')} (offtaker)")
+    except Exception:
+        log.exception("known emails: clients lookup failed")
+    return known
+
+
+def _check_email_delivery_tool(db, tenant: Tenant, args: dict) -> dict:
+    """Did an email we sent actually land? Answers from Resend's own receipts.
+
+    Honest by construction: "no receipt" and "not delivered" are different
+    answers, and this must never collapse them — receipts only exist for mail
+    sent after this shipped, and only if Resend's webhook is wired.
+    """
+    _ea_ensure_email_delivery_table(db)
+    known = _tenant_known_emails(db, tenant.id)
+    if not known:
+        return {"ok": True, "found": 0,
+                "message": "No contacts on this account yet, so there's no mail to check."}
+
+    who = (args.get("recipient") or "").strip().lower()
+    try:
+        days = int(args.get("days") or 7)
+    except (TypeError, ValueError):
+        days = 7
+    days = max(1, min(days, 90))
+    since = _now() - timedelta(days=days)
+
+    def _who(addr: str) -> str:
+        return ", ".join(known.get(addr) or []) or addr
+
+    targets = list(known.keys())
+    if who:
+        # Accept an address or a name ("Rex") — resolve against this tenant only.
+        hits = [e for e in known if e == who] or \
+               [e for e in known
+                if who in e or any(who in lbl.lower() for lbl in known[e])]
+        if not hits:
+            return {"ok": False, "found": 0,
+                    "message": f"No contact matching '{args.get('recipient')}' on this account.",
+                    "known_contacts": sorted(_who(e) for e in known)}
+        targets = hits
+
+    rows = db.execute(
+        select(EaEmailDelivery)
+        .where(EaEmailDelivery.to_email.in_(targets),
+               EaEmailDelivery.created_at >= since)
+        .order_by(EaEmailDelivery.created_at.desc())
+        .limit(40)
+    ).scalars().all()
+
+    out = [{
+        "to": r.to_email,
+        "who": _who(r.to_email),
+        "status": r.event,
+        "at": r.created_at.isoformat() if r.created_at else None,
+        "subject": r.subject,
+        "reason": r.reason,
+    } for r in rows]
+
+    bounced = [r for r in out if r["status"] in ("bounced", "complained")]
+    if not out:
+        # An empty result is silence, not bad news. The agent read found=0 as
+        # "either the emails aren't reaching him" (Ford 2026-07-16) — inventing a
+        # delivery failure out of no data, the very thing this tool exists to
+        # stop. Receipts only exist for mail sent since recording was added, so
+        # found=0 is the NORMAL answer for older sends. Say that here, next to
+        # the data, because a rule further up the prompt did not hold.
+        return {
+            "ok": True,
+            "found": 0,
+            "window_days": days,
+            "receipts": [],
+            "bounced_count": 0,
+            "means": "NO INFORMATION — this is not evidence of a delivery problem.",
+            "why_empty": (
+                "Delivery receipts are only recorded for mail sent since receipt recording "
+                "was added to this system, and only once Resend reports the event. Anything "
+                "sent before that has no receipt by design."
+            ),
+            "instruction_for_agent": (
+                "You have NO delivery information for this window — that is NOT evidence of "
+                "failure. Do NOT say the mail 'isn't reaching' them, 'didn't send', or might "
+                "have bounced, and do NOT offer it as a possible explanation for silence. Say "
+                "plainly that you don't have delivery receipts for that window. The ONLY "
+                "evidence of a delivery problem is a 'bounced' or 'complained' receipt. You "
+                "DID send the mail — the repair check-in log shows it — and the absence of a "
+                "receipt says nothing at all about whether it landed."
+            ),
+        }
+    return {
+        "ok": True,
+        "found": len(out),
+        "window_days": days,
+        "receipts": out,
+        "bounced_count": len(bounced),
+        "instruction_for_agent": (
+            "These are Resend's own delivery receipts — real evidence, not a guess. "
+            "A 'delivered' receipt means it reached their mail server: say so with "
+            "confidence. A 'bounced'/'complained' receipt IS actionable — name the address "
+            "and the reason. Never infer anything from receipts you do not have."
+        ),
+    }
+
+
 def _ea_load_assets(db, tenant_id: str, asset_ids: list[str] | None) -> list[EaChatAsset]:
     if not asset_ids:
         return []
@@ -7801,24 +8517,52 @@ def _spoken_line(reply: str) -> str:
 # above is shown on the panel, the [SPOKEN] line is what the voice speaks. Same
 # mind, so the spoken words carry the tools it just called and its actual plan.
 _SPOKEN_MARKER_RE = re.compile(r"(?is)\n?[ \t]*\[\s*spoken\s*\][ \t:]*")
+_PANEL_MARKER_RE = re.compile(r"(?is)\n?[ \t]*\[\s*panel\s*\][ \t:]*")
+
+
+def _clean_markers(s: str) -> str:
+    """Strip stray [SPOKEN]/[PANEL] markers so neither leaks onto the panel."""
+    out = _SPOKEN_MARKER_RE.sub(" ", s or "")
+    out = _PANEL_MARKER_RE.sub(" ", out)
+    return out.strip()
 
 
 def _split_spoken(text: str) -> tuple[str, str | None]:
-    """Return (panel_text, spoken_line|None). Splits on the LAST [SPOKEN] marker
-    the brain authored. Falls back to (text, None) when the model didn't emit one
-    — the caller then speaks the brain's own lead sentence (still no Haiku)."""
+    """Return (panel_text, spoken_line|None).
+
+    SPEAK-FIRST (Ford 2026-07-16): `[SPOKEN] … [PANEL] …`. The spoken answer is
+    authored FIRST so it is the artifact the model spends its reasoning on, and
+    the panel elaborates underneath. Appending the spoken line last made it the
+    tail of a completion already optimised for reading — structurally an
+    afterthought, which is exactly what it sounded like ("a half-assed version
+    of the real response").
+
+    Still parses the LEGACY shape (`panel … [SPOKEN]` last) — the model will
+    sometimes drift back to it, and a mis-parse would either read the whole
+    panel aloud or print the spoken line as the answer.
+    """
     t = text or ""
     matches = list(_SPOKEN_MARKER_RE.finditer(t))
     if not matches:
         return t.strip(), None
+
+    first = matches[0]
+    panel_m = _PANEL_MARKER_RE.search(t, first.end())
+    if panel_m:
+        # Speak-first: spoken between [SPOKEN] and [PANEL], panel after.
+        spoken = _plain_for_speech(t[first.end():panel_m.start()])
+        panel = _clean_markers(t[panel_m.end():])
+        if not spoken:
+            return (panel or t.strip()), None
+        return (panel or spoken), spoken
+
+    # Legacy (or speak-first with no [PANEL]): last marker splits panel/spoken.
     m = matches[-1]
-    panel = t[: m.start()].strip()
+    panel = _clean_markers(t[: m.start()])
     spoken = _plain_for_speech(t[m.end():])
-    # Strip any stray earlier markers from the panel text (defensive).
-    panel = _SPOKEN_MARKER_RE.sub(" ", panel).strip()
     if not spoken:
         return panel or t.strip(), None
-    # If the model put everything after the marker (no panel text), show it too.
+    # Model put everything after the marker (no panel text) — show it too.
     return (panel or spoken), spoken
 
 
@@ -8061,25 +8805,65 @@ def _agent_turn(
             "Analysis, Invoices, Repairs, Account). Never invent buttons or steps that "
             "are not in the product map. Be concrete and sequential."
         )
+    # Capability is not evidence, and evidence is not a vibe. The agent was
+    # denying it could send email while actively sending it, then flipping the
+    # moment the owner pushed back — guessing in both directions rather than
+    # checking (Ford 2026-07-16).
+    system += (
+        "\n\nWHAT YOU CAN DO vs WHAT ACTUALLY HAPPENED — never confuse these.\n"
+        "If a tool is in your list, you CAN do that thing: say so plainly. You send repair "
+        "email (send_repair_checkin) and you do it routinely — never say 'I can't send "
+        "emails' or hedge about it. Not knowing whether a message LANDED is not the same as "
+        "not being able to SEND it; never let uncertainty about an outcome shrink into "
+        "uncertainty about a capability.\n"
+        "When the question is what actually happened, CHECK — don't introspect: "
+        "check_email_delivery for whether mail was delivered or bounced, repair_ops_overview "
+        "/ list_repair_tickets for what you've already sent and logged. Check before you "
+        "claim, in EITHER direction.\n"
+        "And do not fold just because the owner pushes back. If they assert something about "
+        "how you work or what you did, and you can check it, check it — then answer. "
+        "Agreeing to be agreeable is just a lie that sounds polite."
+    )
     if voice_active:
         # ONE mind, two outputs it authors itself (Ford 2026-07-16, Option B):
         # the panel text (full) + a [SPOKEN] line YOU speak aloud. Same reasoning
         # pass, so the spoken words carry the tools you just called and your plan.
+        if not bool((context or {}).get("voice_weave")):
+            # Ground it in the LIVE wiring. Its docs described the reverted Option D
+            # weave, so it explained voice as "the mouthpiece's own surface model" —
+            # a second mind that does not exist (Ford 2026-07-16).
+            system += (
+                "\n\nHOW YOUR VOICE ACTUALLY WORKS RIGHT NOW: you are the ONLY mind. The "
+                "voice model is a MOUTH — it reads your [SPOKEN] line verbatim and has no "
+                "tools, no fleet data, and no opinions of its own. It is not consulting you "
+                "and it has no 'surface understanding' that could differ from yours. So if "
+                "the spoken answer was vague or wrong, that was YOUR line — own it, don't "
+                "blame a voice layer. If the voice ever says something you did not write, "
+                "that is a bug worth flagging, not another agent's view."
+            )
         system += (
-            "\n\nYOU WILL BE HEARD (voice is live). Produce your answer in TWO parts:\n"
-            "1) Your normal text answer for the on-screen panel — clear and complete "
-            "(the owner may be reading it).\n"
-            "2) Then a final line that starts EXACTLY with `[SPOKEN]` — the words your "
-            "voice actually says out loud. Everything above `[SPOKEN]` is shown on screen; "
-            "the `[SPOKEN]` line is NOT shown, only spoken.\n"
-            "The [SPOKEN] line: human and complete — your answer plus where you're headed — "
-            "said like a sharp colleague, not read like a report. You KNOW what you just "
-            "did (the tools you called, your plan) — let that intelligence show. "
-            "Usually 2–4 full sentences (enough to finish the thought out loud); go longer "
-            "only if it genuinely needs it. FINISH every thought — never trail off mid-idea. "
-            "Offer to go deeper if there's more. Put NO markdown / bullets / headings / '#' "
-            "in it. If your whole answer is one short line, the [SPOKEN] line can just be "
-            "that line, phrased for the ear."
+            "\n\nYOU WILL BE HEARD (voice is live). SPEAK FIRST — the spoken answer IS your "
+            "answer, not a summary of one. Write it before anything else and spend your "
+            "reasoning THERE: it is what the owner actually experiences.\n"
+            "1) Begin your reply with `[SPOKEN]` and then the words your voice says out "
+            "loud. Say the real conclusion — what you found, what you did, what you're "
+            "doing next — the way a sharp colleague talks, not the way a report reads. You "
+            "KNOW what you just did (the tools you called, your plan): let that show. "
+            "Keep it to about 2–4 sentences (~60 words): the conclusion and the one thing "
+            "that matters — NOT the whole briefing read aloud. If you are reaching for a "
+            "third or fourth supporting fact, that detail belongs in [PANEL], not in the "
+            "ear; the spoken answer should be markedly SHORTER than the panel. Go longer "
+            "only if the owner asked to be walked through something. FINISH every thought — "
+            "never trail off. Offer to go deeper if there's more. NO markdown, bullets, "
+            "headings or '#'.\n"
+            "2) Then a line that is EXACTLY `[PANEL]`, and under it the on-screen version — "
+            "the numbers, structure and detail backing up what you just said (the owner may "
+            "be reading it). The panel EXPANDS the spoken answer and must never contradict "
+            "it.\n"
+            "Never write the panel first and squeeze a spoken line out of it — that "
+            "compression is what made the voice sound half a step behind your own thinking. "
+            "Lead with the thought, then evidence it. If the answer is genuinely one line, "
+            "`[SPOKEN]` can be the whole answer and the panel may simply restate it."
         )
     else:
         system += (
@@ -8149,7 +8933,23 @@ def _agent_turn(
     # give them the larger budget (not just source=voice turns).
     llm_max_tokens = voice_max if voice_active else default_max
 
-    for _round in range(MAX_TOOL_ROUNDS):
+    _round = 0
+    _call_counts: dict = {}
+    _unbounded = MAX_TOOL_ROUNDS <= 0
+    while _unbounded or _round < MAX_TOOL_ROUNDS:
+        _round += 1
+        # The weekly $ budget is the real ceiling (unlimited on Pro/comped). Re-check
+        # it on a long turn so a free-tier owner can't overrun the weekly cap in a
+        # single runaway turn — a real economic limit, NOT a thrift throttle.
+        if _round > 1 and _round % 6 == 0:
+            try:
+                if not _check_budget(db, tenant.id).get("ok"):
+                    final_text = final_text or (
+                        "You've used up this week's Energy Agent budget — it resets weekly, "
+                        "or upgrade to Pro for unlimited.")
+                    break
+            except Exception:
+                pass
         # Release the pooled DB connection before the (long, blocking) LLM HTTP
         # call — holding a txn across vendor HTTP is the documented whole-API
         # meltdown class. Tools re-acquire a connection lazily afterwards.
@@ -8175,6 +8975,8 @@ def _agent_turn(
                 targs = json.loads(fn.get("arguments") or "{}")
             except Exception:
                 targs = {}
+            _sig = (tname + "|" + json.dumps(targs, sort_keys=True, default=str))[:240]
+            _call_counts[_sig] = _call_counts.get(_sig, 0) + 1
             # Live "thinking out loud" — narrate what we're about to do BEFORE it
             # runs, so the voice can speak it in real time (grounded in the real
             # tool call, so it can't invent). Callback must never break the turn.
@@ -8219,10 +9021,19 @@ def _agent_turn(
                 "tool_call_id": tc.get("id") or tname,
                 "content": json.dumps(out)[:8000],
             })
-        else:
-            continue
+        # Stuck-loop guard: the same exact tool+args many times is spinning, not
+        # progress — the ONLY early stop besides the budget (never a thrift cap).
+        if max(_call_counts.values(), default=0) >= 8:
+            final_text = final_text or (
+                "I caught myself repeating the same step, so I stopped to avoid a loop. "
+                "Here's where I got to — tell me if you'd like me to keep going.")
+            break
     else:
-        final_text = final_text or "I hit my tool-step limit — tell me the next single step you want."
+        # Reached only when bounded and the (high) ceiling is exhausted — real work
+        # never gets here; a safety backstop, not a hand-off of the agent's job.
+        final_text = final_text or (
+            "That turned into an unusually long chain of steps and I paused to stay safe. "
+            "Here's what I have so far — want me to keep going?")
 
     if not final_text:
         final_text = (msg.get("content") or "").strip() or (
@@ -8872,6 +9683,57 @@ def voice_consult_stream(body: ChatIn, authorization: str | None = Header(defaul
     def _gen():
         while True:
             item = q.get()
+            if item is _SENTINEL:
+                break
+            yield json.dumps(item, default=str) + "\n"
+
+    return StreamingResponse(_gen(), media_type="application/x-ndjson")
+
+
+@router.post("/v1/energy-agent/chat-stream")
+def chat_stream(body: ChatIn, authorization: str | None = Header(default=None)):
+    """Same brain as /chat, streamed transport.
+
+    Owner chat reaches the API through the Netlify proxy (_redirects: /v1/* →
+    Railway), which abandons a blocking upstream at ~26s and returns a bare
+    504. A heavy turn (up to MAX_TOOL_ROUNDS sequential Claude rounds) runs
+    well past that, so the finished answer was thrown away after the model had
+    already done the work — Ford, 2026-07-16: the voice (which streams) spoke a
+    full answer while the text came back "HTTP 504". Streaming makes first byte
+    immediate and heartbeats the connection, so long turns survive the proxy.
+
+    NDJSON body: {"type":"ping"}… then {"type":"done","payload":{…}} — payload
+    is exactly what /chat returns.
+    """
+    import queue as _queue
+    import threading as _threading
+
+    _auth(authorization)  # surface a real 401 before the stream opens
+
+    q: "_queue.Queue" = _queue.Queue()
+    _SENTINEL = object()
+
+    def _worker():
+        try:
+            q.put({"type": "done", "payload": chat(body, authorization=authorization)})
+        except HTTPException as he:
+            q.put({"type": "error", "status": he.status_code, "detail": he.detail})
+        except Exception as e:  # noqa: BLE001
+            log.exception("chat_stream worker failed")
+            q.put({"type": "error", "status": 500, "detail": str(e)[:300]})
+        finally:
+            q.put(_SENTINEL)
+
+    _threading.Thread(target=_worker, daemon=True).start()
+
+    def _gen():
+        yield json.dumps({"type": "ping"}) + "\n"
+        while True:
+            try:
+                item = q.get(timeout=5)
+            except _queue.Empty:
+                yield json.dumps({"type": "ping"}) + "\n"
+                continue
             if item is _SENTINEL:
                 break
             yield json.dumps(item, default=str) + "\n"

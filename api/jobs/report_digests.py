@@ -279,6 +279,13 @@ def run_presend_reviews() -> dict:
                 .join(Tenant, Client.tenant_id == Tenant.id)
                 .where(Client.active == True)  # noqa: E712
                 .where(Client.deleted_at.is_(None))
+                # Preview EXACTLY what will auto-send: the scheduler
+                # (_deliver_clients_with_frequency) only ships clients enrolled
+                # with auto_send=True, so a review listing anything else would
+                # promise sends that never happen (and, post-fold, name clients
+                # the operator never enrolled — the auto-propagated capture
+                # artifacts). THE FOLD, Jul 2026.
+                .where(Client.auto_send == True)  # noqa: E712
                 .where(or_(
                     Client.report_frequency == cadence,
                     (Client.report_frequency.is_(None)) & (Tenant.report_frequency == cadence),

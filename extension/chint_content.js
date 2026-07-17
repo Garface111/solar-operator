@@ -313,14 +313,44 @@
     if (/off|disconnect|standby|stop/.test(s)) return "offline";
     return (powerW || 0) > 0 ? "producing" : "idle";
   }
+  // A Chint gateway hangs several device KINDS off itself: the inverters (what we
+  // want) but ALSO the data-logger/collector itself, environmental "detectors",
+  // revenue meters, and string/combiner monitors. Only the inverters produce — the
+  // rest never make power, so if one slips into the inverter list it reads "quiet"
+  // forever and pollutes the unit count, peer analysis, and the alert sweep (it
+  // gets flagged as a dead inverter). Bruce's Londonderry 186 is the case that
+  // forced this: its FlexOM FG4C logger (hex serial 00009e021902bb00, no model, no
+  // power) was slipping in via the `assetType === 2` fallback. Doc:
+  // docs/knowledge/chint-portal-api-contract.md — "1 gateway (assetType 1) → 4
+  // inverters"; the gateway is the "detector" Ford flagged. We recognize an inverter
+  // POSITIVELY and reject every known non-inverter kind, robust to whichever field
+  // the vendor happens to (mis)populate.
+  const CHINT_NON_INVERTER_RE = /gateway|collector|logger|detector|meter|sensor|environment|weather|combiner|module|dongle|\bdtu\b|\bemu\b/i;
+  function isInverterDevice(dvc, gw) {
+    if (!dvc || typeof dvc !== "object") return false;
+    const typeName = String(dvc.assetTypeName || "").trim();
+    // 1) Explicit non-inverter kind by name — beats any assetType fallback below.
+    if (CHINT_NON_INVERTER_RE.test(typeName)) return false;
+    // 2) Chint asset-type ints (verified in the portal contract): 1 = Gateway.
+    if (Number(dvc.assetType) === 1) return false;
+    // 3) A logger sometimes echoes itself as a commDevice under its OWN gateway — a
+    //    commDevice whose serial equals the parent gateway's serial IS the gateway.
+    const sn = String(dvc.sn || "").trim();
+    const gwSn = gw ? String(gw.sn || gw.deviceSn || gw.gatewaySn || "").trim() : "";
+    if (sn && gwSn && sn === gwSn) return false;
+    // 4) Positive identification: named "Inverter", or the assetType===2 fallback
+    //    (used only when the vendor left assetTypeName blank).
+    if (typeName.toLowerCase() === "inverter") return true;
+    if (Number(dvc.assetType) === 2) return true;
+    return false;
+  }
   function invertersFrom(devJson) {
     const out = [];
     const gws = (devJson && devJson.data && Array.isArray(devJson.data.gwDevices)) ? devJson.data.gwDevices : [];
     for (const gw of gws) {
       const comm = Array.isArray(gw.commDevices) ? gw.commDevices : [];
       for (const dvc of comm) {
-        const isInv = dvc.assetTypeName === "Inverter" || dvc.assetType === 2;
-        if (!isInv) continue;
+        if (!isInverterDevice(dvc, gw)) continue;
         const serial = String(dvc.sn || dvc.assetAlias || dvc.id || "").trim();
         if (!serial) continue;
         const powerW = num(dvc.currentPower);
@@ -551,7 +581,7 @@
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
       dailyFromChart, siteIdFromSearch, weekTrendDaily, mergeDaily,
-      num, kwFromStr, parsePowerToW, mapStatus, invertersFrom, countInverters,
+      num, kwFromStr, parsePowerToW, mapStatus, isInverterDevice, invertersFrom, countInverters,
       findLocation, applyLocation, _soValidLatLng,
       computeWalkComplete, shouldEmit,
     };

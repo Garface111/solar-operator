@@ -136,6 +136,18 @@ def _ao_invoicing_setup_price_id() -> str:
     return os.getenv("STRIPE_AO_INVOICING_SETUP_PRICE_ID", "")
 
 
+def ao_genreports_price_id() -> str:
+    """Resolve the AO per-client GENERATION-REPORTS (licensed, FLAT $15/client)
+    price id from env at call time (so tests can monkeypatch).
+
+    Blank until Ford mints the price + sets STRIPE_AO_GENREPORTS_PRICE_ID. While
+    blank NO generation-reports line is ever added (see ao_genreports_item) and we
+    NEVER fall back to another price — so the whole plan is inert and no one is
+    billed for it. This is the fold's ($15/client) meter for the NEPOOL/REC
+    generation-reports capability (api/pricing_ao_genreports.py)."""
+    return os.getenv("STRIPE_AO_GENREPORTS_PRICE_ID", "")
+
+
 # Legacy plan labels (monitoring / invoicing / both) — retired Jul 2026.
 # Array Operator is ONE regular product: nameplate kW + offtaker count.
 # AI Pro is the only paid add-on. billing_plan is ignored for AO billing.
@@ -194,6 +206,32 @@ def billable_offtaker_count(db, tenant_id: str) -> int:
             BillingReportSubscription.deleted_at.is_(None),
         )
     ).scalar() or 0)
+
+
+def ao_genreports_metered_item(tenant) -> dict | None:
+    """The Stripe subscription line for AO GENERATION REPORTS, or None.
+
+    Generation reports bill METERED, per successful client SEND ($15/client/report —
+    api/pricing_ao_genreports.py + the GenReportCharge ledger written in
+    api/delivery.py), NOT as a licensed per-client quantity. So the subscription just
+    carries a quantity-less METERED line; a separate job
+    (api/jobs/genreports_usage.py) pushes one usage unit per recorded billable send.
+
+    Returns {"price": <id>} ONLY when the tenant is in the reports world (and not a
+    demo) AND STRIPE_AO_GENREPORTS_PRICE_ID is set. GUARD: when the price id is unset
+    we return None and add NO line — we NEVER fall back to another price. So until
+    Ford mints the metered price + sets the env var this is completely inert and no
+    one is billed. (A metered line with zero reported usage bills $0 regardless.)
+    """
+    price_id = ao_genreports_price_id()
+    if not price_id:
+        return None
+    from .report_eligibility import tenant_in_reports_world
+    if getattr(tenant, "is_demo", False):
+        return None
+    if not tenant_in_reports_world(tenant):
+        return None
+    return {"price": price_id}   # metered — Stripe rejects a quantity here
 
 
 def billable_array_count(db, tenant_id: str) -> int:
@@ -298,6 +336,11 @@ def create_subscription_for_tenant(tenant_id: str) -> dict:
         billing_plan = getattr(t, "billing_plan", None)
         # Build the monitoring line (per-kW nameplate) while the session is open.
         monitoring_item = ao_monitoring_item(db, t.id)
+        # Build the generation-reports METERED line ($15/client/report, billed per
+        # successful send via the GenReportCharge ledger + jobs/genreports_usage.py).
+        # None unless the tenant is in the reports world AND STRIPE_AO_GENREPORTS_PRICE_ID
+        # is set — inert (no line) otherwise. A metered line at zero usage bills $0.
+        genreports_item = ao_genreports_metered_item(t)
 
     ao = is_array_operator(product)
     # AO regular product: ALWAYS nameplate capacity + offtaker count (no plan split).
@@ -326,6 +369,14 @@ def create_subscription_for_tenant(tenant_id: str) -> dict:
             inv_setup = _ao_invoicing_setup_price_id()
             if inv_setup:
                 add_invoice_items.append({"price": inv_setup, "quantity": 1})
+        # Generation-reports METERED line — the folded NEPOOL/REC reporting
+        # capability, billed $15 per successful client send (jobs/genreports_usage.py
+        # pushes usage). Independent of the monitoring/offtaker lines (keyed on the
+        # generation_reports marker), so it rides on top: added whenever
+        # ao_genreports_metered_item resolved a line above. Fully inert until
+        # STRIPE_AO_GENREPORTS_PRICE_ID is set (item is None).
+        if genreports_item:
+            items.append(genreports_item)
         if not items and monitoring_item:
             # No offtakers yet and no nameplate — still need a line; monitoring covers it.
             items.append(monitoring_item)
@@ -374,6 +425,8 @@ def create_subscription_for_tenant(tenant_id: str) -> dict:
             _parts.append(f"per-kW nameplate qty {monitoring_item['quantity']}")
         if int(offtaker_count or 0) > 0:
             _parts.append(f"per-offtaker qty {int(offtaker_count)}")
+        if genreports_item:
+            _parts.append("per-send genreports (metered)")
         meter = " + ".join(_parts) or "per-kW nameplate"
     else:
         meter = f"per-array qty {quantity}"

@@ -264,6 +264,75 @@ def report_has_data(client_id: int, *, quarters: int = 6,
     return False
 
 
+def reported_array_ids(client_id: int, *, quarters: int = 6,
+                       reference_date: Optional[date] = None) -> list[int]:
+    """The array ids that would ACTUALLY RENDER in this client's workbook.
+
+    The per-array counterpart of `report_has_data`: same window, same two
+    sources (DailyGeneration + Bill kWh via calendar-day attribution), same
+    filters the builder applies — the client's arrays minus `excluded`
+    (operator force-hide) minus soft-deleted, then minus the non-producing
+    ones (an array whose every month in the window is zero gets no sheet, so
+    it is not "reported").
+
+    This is the BILLING unit for generation reports ($15 per array per quarter
+    — THE FOLD, Ford Jul 2026): we bill exactly the arrays the operator
+    actually reports, never an array that renders no sheet. Read-only.
+    """
+    ref = reference_date if reference_date is not None \
+        else default_reporting_reference_date(date.today())
+    qlist = _rolling_quarters(ref, count=quarters)
+    qmonths = set()
+    for (qy, qq) in qlist:
+        for (my, mm) in _quarter_months(qy, qq):
+            qmonths.add((my, mm))
+    start_year, start_q = qlist[0]
+    report_start = date(start_year, (start_q - 1) * 3 + 1, 1)
+    end_year, end_q = qlist[-1]
+    end_month = end_q * 3
+    report_end = (date(end_year, 12, 31) if end_month == 12
+                  else date(end_year, end_month + 1, 1) - timedelta(days=1))
+
+    out: list[int] = []
+    with SessionLocal() as db:
+        client = db.get(Client, client_id)
+        if client is None:
+            return out
+        arrays = db.execute(
+            select(Array).where(
+                Array.client_id == client.id,
+                Array.excluded.is_(False),
+                Array.deleted_at.is_(None),
+            )
+        ).scalars().all()
+        for arr in arrays:
+            # 1) DailyGeneration — any non-zero month in the window.
+            dg = _daily_generation_by_month(db, arr.id, report_start, report_end)
+            if any(v > 0 for v in dg.values()):
+                out.append(arr.id)
+                continue
+            # 2) Bill kWh — attributed across calendar days, months in-window.
+            accounts = db.execute(
+                select(UtilityAccount).where(UtilityAccount.array_id == arr.id)
+            ).scalars().all()
+            account_ids = [a.id for a in accounts]
+            if not account_ids:
+                continue
+            bills = db.execute(
+                select(Bill).where(Bill.account_id.in_(account_ids))
+            ).scalars().all()
+            for b in bills:
+                hit = False
+                for (yy, mm), kwh in distribute_kwh_by_calendar_day(b).items():
+                    if (yy, mm) in qmonths and kwh > 0:
+                        out.append(arr.id)
+                        hit = True
+                        break
+                if hit:
+                    break
+    return out
+
+
 # ── main builder ─────────────────────────────────────────────────────
 def build_workbook(tenant_id: Optional[str] = None,
                    year: Optional[int] = None,

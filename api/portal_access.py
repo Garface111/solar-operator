@@ -175,6 +175,7 @@ def portal_access(authorization: Optional[str] = Header(default=None)):
                     "login_username": None, "status": "no_portal_identity",
                     "last_ok_at": None, "last_sync_at": None,
                     "enabled": None, "fails": 0,
+                    "auto_send": bool(c.auto_send),
                 })
                 continue
             for provider, ident, login, last_sync in identities:
@@ -189,6 +190,7 @@ def portal_access(authorization: Optional[str] = Header(default=None)):
                     "last_sync_at": last_sync.isoformat() if last_sync else None,
                     "enabled": bool(login.enabled) if login else None,
                     "fails": (login.fails or 0) if login else 0,
+                    "auto_send": bool(c.auto_send),
                 })
         unassigned = [{
             "provider": r.provider, "username": r.username,

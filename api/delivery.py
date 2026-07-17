@@ -59,6 +59,159 @@ def _recipients_for_client(client: Client, tenant: Tenant,
     return addrs
 
 
+# Report sends that are PREVIEWS / internal test sends — never a billable output.
+# Everything else (scheduled auto-sends "sched-*", self-serve "send now", "resend")
+# is a real client send.
+_NON_BILLABLE_TRIGGERS = {"sample", "ops"}
+
+
+def _report_quarter(reference_date) -> tuple[int, int, str]:
+    """The (year, quarter, "<year>-Q<quarter>") this report/output covers — the
+    headline rolling quarter (last complete quarter relative to the reference)."""
+    from .writers.gmcs_writer import _rolling_quarters, default_reporting_reference_date
+    ref = reference_date if reference_date is not None \
+        else default_reporting_reference_date(date.today())
+    y, q = _rolling_quarters(ref)[-1]
+    return y, q, f"{y}-Q{q}"
+
+
+def record_genreport_output(tenant_id: str, client_id: int, *,
+                            reference_date=None, first_source: str = "download",
+                            require_data: bool = True) -> int:
+    """Record the $15 billable OUTPUT for each ARRAY this client reports — THE FOLD.
+
+    Ford's model: building + previewing is free; the $15 fires on the FIRST real
+    OUTPUT — a report SEND or a DOWNLOAD of the deliverable — then unlimited that
+    quarter. The UNIT IS THE ARRAY, not the client (Ford 2026-07-16): one output of a
+    5-array client = 5 rows = $75.
+
+    We bill exactly the arrays that RENDER in the workbook (gmcs_writer.
+    reported_array_ids: non-excluded, non-deleted, actually producing in the window) —
+    so an empty/preview output bills nothing, and a force-hidden or non-producing array
+    is never charged. IDEMPOTENT per (tenant, array, quarter): the DB unique constraint
+    makes any later output covering the same array+quarter a no-op (insert-or-ignore,
+    catching the IntegrityError like the capture upsert); a DIFFERENT quarter is fresh.
+
+    Only records for a REAL client (live, active, this tenant) in a reports-world,
+    non-demo tenant. Returns the COUNT of NEW ledger rows (0 = nothing newly billable;
+    still falsy, so existing truthiness call sites keep working). INERT money-wise
+    (just ledger rows; the Stripe push is a separate, price-gated job). Never raises —
+    a billing-ledger hiccup must not fail (or unsend) the actual output.
+
+    `require_data` is retained for call-site compatibility: array-level producing-ness
+    is now inherent to reported_array_ids, so this is always effectively enforced.
+    """
+    try:
+        from sqlalchemy.exc import IntegrityError
+        from .models import GenReportCharge
+        from .pricing_ao_genreports import PRICE_CENTS
+        from .writers.gmcs_writer import reported_array_ids
+
+        _y, _q, quarter = _report_quarter(reference_date)
+        with SessionLocal() as db:
+            tenant = db.get(Tenant, tenant_id)
+            # Never bill the shared demo tenant or a dead account. NOTE: we do NOT
+            # require tenant.generation_reports here — generation reports are
+            # enabled for EVERY operator (Ford, Jul 2026), and TAKING A REAL OUTPUT
+            # *is* the engagement that bills. Gating on the marker would mean an
+            # operator who never explicitly enrolled could report all quarter for
+            # free. Enrollment instead FOLLOWS the output (auto-enroll below).
+            if tenant is None or getattr(tenant, "is_demo", False):
+                return 0
+            if not (tenant.active
+                    or getattr(tenant, "subscription_status", None)
+                    in ("comped", "trialing")):
+                return 0
+            client = db.get(Client, client_id)
+            if (client is None or client.tenant_id != tenant_id
+                    or not client.active or client.deleted_at is not None):
+                return 0
+
+        # The arrays that actually render in this client's workbook = the billing
+        # units. Empty (no producing arrays / preview) → nothing extracted, no charge.
+        array_ids = reported_array_ids(client_id, reference_date=reference_date)
+        if not array_ids:
+            return 0
+
+        new_rows = 0
+        for arr_id in array_ids:
+            with SessionLocal() as db:
+                # Idempotency (fast path): already billed this array+quarter?
+                already = db.execute(
+                    select(GenReportCharge.id).where(
+                        GenReportCharge.tenant_id == tenant_id,
+                        GenReportCharge.array_id == arr_id,
+                        GenReportCharge.quarter == quarter,
+                    ).limit(1)
+                ).first()
+                if already:
+                    continue
+                db.add(GenReportCharge(
+                    tenant_id=tenant_id, array_id=arr_id, client_id=client_id,
+                    quarter=quarter, amount_cents=PRICE_CENTS,
+                    first_source=first_source,
+                ))
+                try:
+                    db.commit()
+                    new_rows += 1
+                except IntegrityError:
+                    # A concurrent output inserted the same (tenant, array, quarter)
+                    # first — the unique constraint held; treat as already charged.
+                    db.rollback()
+
+        # AUTO-ENROLL on first real engagement: an operator who has actually
+        # reported an array IS a generation-reports customer, so turn their
+        # reports world on (scheduled sends for the clients they enrol, digests,
+        # the operator directory). Enrollment follows the output rather than
+        # gating it — see the note above. Idempotent + never fatal.
+        if new_rows:
+            try:
+                with SessionLocal() as db:
+                    t = db.get(Tenant, tenant_id)
+                    if t is not None and not getattr(t, "generation_reports", False):
+                        t.generation_reports = True
+                        db.commit()
+            except Exception:  # noqa: BLE001
+                logger.warning("genreport auto-enroll failed for %s", tenant_id,
+                               exc_info=True)
+        return new_rows
+    except Exception:  # noqa: BLE001 — a billing-ledger failure must never break output
+        logger.warning("genreport output ledger write failed for client %s (%s)",
+                       client_id, tenant_id, exc_info=True)
+        return 0
+
+
+def record_genreport_directory(tenant_id: str, *, reference_date=None,
+                               client_ids=None, first_source: str = "directory") -> int:
+    """Record a $15 OUTPUT for EVERY ARRAY the tenant's active report clients report
+    this quarter — the value an ALL-CLIENTS directory download extracts.
+
+    Downloading the directory delivers every client's arrays at once, so each reported
+    array is a billable output for the quarter (idempotent per array — a re-download
+    charges nothing new). Optional `client_ids` scopes it to a subset (e.g. a picker).
+    Returns the count of NEW ARRAY rows. Never raises.
+    """
+    try:
+        with SessionLocal() as db:
+            q = select(Client.id).where(
+                Client.tenant_id == tenant_id,
+                Client.active == True,  # noqa: E712
+                Client.deleted_at.is_(None),
+            )
+            if client_ids:
+                q = q.where(Client.id.in_(list(client_ids)))
+            cids = [r[0] for r in db.execute(q).all()]
+        n = 0
+        for cid in cids:
+            n += record_genreport_output(tenant_id, cid, reference_date=reference_date,
+                                         first_source=first_source)
+        return n
+    except Exception:  # noqa: BLE001 — a directory-billing hiccup must not fail download
+        logger.warning("genreport directory ledger write failed for tenant %s",
+                       tenant_id, exc_info=True)
+        return 0
+
+
 def deliver_for_client(client_id: int, *, year: Optional[int] = None,
                        override_to: Optional[str] = None,
                        triggered_by: str = "manual",
@@ -274,6 +427,15 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
             if t:
                 t.last_delivery_at = now()
             db.commit()
+
+    # Metered billing ($15/client/quarter): a report actually went out for this
+    # client, so record the billable OUTPUT for the quarter the workbook covers
+    # (email_ref — same quarter as the filename/body). Idempotent per client+quarter
+    # (a send is free if a download already billed the quarter, and vice-versa), and
+    # inert until the metered price is minted; previews/ops sends never charge.
+    if sent and triggered_by not in _NON_BILLABLE_TRIGGERS:
+        record_genreport_output(
+            tenant_id, client_id, reference_date=email_ref, first_source="send")
 
     return {
         "ok": True,

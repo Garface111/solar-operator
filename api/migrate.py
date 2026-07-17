@@ -38,6 +38,13 @@ def column_exists(conn, table: str, column: str) -> bool:
     return column in cols
 
 
+def table_exists(conn, table: str) -> bool:
+    """True iff the table is really there. Unlike column_exists/index_exists (which
+    report 'present' on a missing table so their ADD-guards skip), this answers the
+    literal question — callers that DROP or reshape must never act on a phantom."""
+    return inspect(conn).has_table(table)
+
+
 def index_exists(conn, table: str, index: str) -> bool:
     insp = inspect(conn)
     try:
@@ -241,6 +248,51 @@ def main():
             if not column_exists(conn, table, col):
                 conn.execute(text(sql))
                 print(f"  + {table}.{col}")
+
+        # THE FOLD (Jul 2026): per-client AUTO-SEND enrollment. The scheduled auto-
+        # send (scheduler._deliver_clients_with_frequency) now only fires for clients
+        # with auto_send=True, so the auto-propagated capture-artifact clients
+        # (default False) never auto-send — and so never auto-CHARGE the $15/quarter.
+        # BACKFILL legacy NEPOOL clients to True so their EXISTING auto-sends keep
+        # running: NEPOOL tenants have no capture-created sibling clients, so this
+        # can't accidentally enable an artifact. Migrated Array Operator reports
+        # tenants start False and enroll their real clients deliberately. Idempotent
+        # (the backfill only runs the once, when the column is first added).
+        if not column_exists(conn, "clients", "auto_send"):
+            conn.execute(text(
+                "ALTER TABLE clients ADD COLUMN auto_send BOOLEAN DEFAULT FALSE NOT NULL"))
+            print("  + clients.auto_send")
+            # Backfill TRUE for every client on a tenant already in the
+            # generation-reports world — NEPOOL tenants AND the migrated Array
+            # Operator reports tenants (generation_reports=TRUE, e.g. Bruce's
+            # GMCS / Norwich). THE FOLD retired their capture-artifact clients
+            # (soft-deleted) during migration, so their remaining ACTIVE clients
+            # are real report clients whose existing auto-sends must keep running.
+            # New signups + auto-propagated artifact clients on non-reports-world
+            # tenants stay FALSE and enroll deliberately via the per-client toggle.
+            conn.execute(text(
+                "UPDATE clients SET auto_send = TRUE WHERE tenant_id IN "
+                "(SELECT id FROM tenants WHERE product IS NULL "
+                " OR product <> 'array_operator' OR generation_reports = TRUE)"))
+            print("  ↪ clients.auto_send backfilled TRUE for reports-world clients")
+
+        # THE FOLD (Ford 2026-07-16): the generation-reports billing UNIT is the
+        # ARRAY, not the client — "$15 per array per quarter". The first shape of
+        # gen_report_charges keyed (tenant_id, client_id, quarter); the real key is
+        # (tenant_id, array_id, quarter). The table shipped INERT (no Stripe price
+        # was ever minted, so it can hold only un-billed rows) — so if it's still
+        # array_id-less we DROP it and let create_all rebuild the correct shape.
+        # Guarded on emptiness: never destroy rows that were somehow billed.
+        if (table_exists(conn, "gen_report_charges")
+                and not column_exists(conn, "gen_report_charges", "array_id")):
+            n = conn.execute(text("SELECT COUNT(*) FROM gen_report_charges")).scalar() or 0
+            if n:
+                print(f"  ! gen_report_charges has {n} legacy client-keyed row(s) — "
+                      "NOT dropping; reshape by hand (nothing should have billed).")
+            else:
+                conn.execute(text("DROP TABLE gen_report_charges"))
+                print("  - gen_report_charges (empty, client-keyed) → create_all "
+                      "rebuilds it array-keyed")
 
         # Backfill defaults for existing rows so the columns are never NULL
         # where the model declares a default.
