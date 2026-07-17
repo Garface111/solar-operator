@@ -7,7 +7,7 @@ Coding agents editing the product still load skill **`solar-operator-energyagent
 When product behavior changes, update **this file** (regenerate with the **product-map-cartographer** agent, or edit by hand).
 
 Topics = `## heading` ids below. Call `product_map(topic=<id>)` before explaining that area.
-Available topics: `tabs · system · fleet · capture · vendors · analysis · health · offtakers · billing · plans · onboarding · resources · status · agent · api · datamodel · glossary · security · tools · surface · product_spine · surface_*`.
+Available topics: `tabs · system · fleet · capture · vendors · analysis · health · offtakers · generation_reports · billing · plans · onboarding · resources · status · agent · api · datamodel · glossary · security · tools · surface · product_spine · surface_*`.
 
 **Page-level understanding** (macro / meso / micro): `product_map(topic=surface)` or
 `surface_invoices` / `surface_inverters` / `surface_fleet_triage` / `surface_analysis` /
@@ -25,7 +25,7 @@ TOP NAV — use EXACTLY these labels when speaking to the owner (hashes are inte
 | Fleet Triage | `#dashboard` | Attention / fleet overview (NOT “Dashboard”) |
 | Inverters | `#arrays` | Live inverter canvas; **Sandbox** (spatial fleet tree) + **Spreadsheet** sub-views (NOT “Arrays”). This is the default landing tab. |
 | Analysis | `#analysis` | Fleet NOC: production vs expected, sites, health, hardware. **Trends / through-time is a sub-view** (`#trends`), NOT a separate top tab |
-| Invoices | `#reports` | Offtaker solar-credit invoices (NOT “Reports”) |
+| Invoices | `#reports` | Offtaker solar-credit invoices (NOT “Reports”). Sub-tabs: Offtakers · Bill audit · Invoice Trends · **Generation reports** (NEPOOL/REC generation workbooks to clients — `#reports/generation`, see `generation_reports`). |
 | Repairs | `#ops` | **Chat-first O&M automation.** Energy Agent opens with a staged prompt (not auto-sent). Setup (O&M contact + which arrays they cover) happens **in chat** via tools. After setup: panel shows what the agent is working on (open cases) or a calm empty state. Pipeline: detect fault → draft outreach → coordinate → verify recovery → close. Multiple cases in parallel. |
 | Account | `#account` | Profile, plan/card, Auto-refresh vault (was “Master Account”; use **Account**) |
 
@@ -309,6 +309,42 @@ OFFTAKER INVOICE GENERATOR — START TO FINISH. UI: **Invoices** (`#reports`). E
 
 ---
 
+## generation_reports
+
+NEPOOL / REC GENERATION REPORTING — folded in from **NEPOOL Operator** (2026-07-16).
+
+WHAT IT IS
+- Automated **NEPOOL-GIS / REC generation reports**: per-client generation **workbooks** (GMCS format — **one sheet per producing array**, columns Quarter · Generation (MWh) · Reporting Amount · **RECs**, where a REC = **floor of the MWh**), built from the fleet's **utility-measured** generation and emailed to each client on a cadence. This is the compliance/reporting side — a NEPOOL reporting consultant / stamping agent (the operator) files generation for the solar operators they serve so NEPOOL-GIS awards them RECs (1 REC per MWh).
+- The reported window is the **6 rolling complete quarters ending ~2 quarters back** — NEPOOL-GIS issues RECs about two quarters AFTER generation, so the in-progress and just-finished quarter aren't reported yet (don't tell an owner this quarter's RECs are ready). V2 generalized it beyond solar to any REC fuel (wind/hydro/etc.) via `Array.fuel_type`; solar uses the byte-pinned GMCS writer.
+- It ORIGINATED as its own product (nepooloperator.com) and was folded into Array Operator so it's one product. The AO surface is a **chrome-less React embed** (`/genrep/embed.js` on the AO origin — the NEPOOL Operator app's `build:embed` bundle) that reuses the same `so_session` + `/v1` API (no separate login). Its screens: **Clients** (table + canvas), **Reports** (cadence, an AI email-template studio, **Send now**, a **[SAMPLE]** test-send to yourself, send history), and **Verify accuracy** (workbook diff).
+
+WHERE THE OWNER FINDS IT
+- A **“Generation reports” sub-tab under the Invoices tab** (`#reports` → segment **Generation reports**, hash `#reports/generation`), alongside Offtakers · Bill audit · Invoice Trends. NOT a separate top-nav tab.
+- The pill is always visible (AO demo philosophy: every capability shows). The embed only MOUNTS when the account's reports world is live (`GET /v1/account` → `generation_reports: true`), otherwise an honest state.
+
+CUSTOMER MODEL — CLIENTS, not offtakers (do not confuse)
+- Generation reports are sent to the operator's **CLIENTS** (the solar operators whose arrays they report on, e.g. Green Mountain Solar). Each client has arrays, a **report cadence** (weekly / monthly / **quarterly** default), and workbook history.
+- **Offtakers** (see `offtakers`) are a DIFFERENT concept — they're who the operator *invoices* for solar credits. Clients receive generation reports; offtakers receive invoices. Both live under the Invoices tab; keep them distinct.
+
+ELIGIBILITY / STATE (honest — most AO accounts are NOT enabled yet)
+- Gated on the **explicit `Tenant.generation_reports` marker** (`report_eligibility.tenant_in_reports_world`, `api/report_eligibility.py`). Legacy/NEPOOL tenants: always in. AO tenants: only when the fold **migration** (`scripts/migrate_nepool_tenant.py`) flips the marker. The marker is explicit ON PURPOSE — data-presence inference (“has clients + cadence”) is unsafe because the AO capture path auto-creates a Client per utility login (47 real AO tenants already have capture-created clients), so inference would have mailed workbooks to dozens of accounts.
+- **Today it is FALSE for every AO tenant until the fold migration runs (behavior-neutral).** So a signed-in AO owner sees the pill but gets: *“Generation reports aren't set up for this account yet — they automate NEPOOL/REC reporting… ask us to enable them.”* Anonymous demo shows the door + explainer, never fabricated NEPOOL data. Never tell an owner it's active when `generation_reports` isn't true — offer to have Ford enable it for their fleet.
+
+THE PIPELINE (once enabled)
+- Scheduled sends by each client's cadence (`Tenant.report_frequency`, default **quarterly**, per-client override; ~09:00 UTC batches). **Pre-send review** email to the operator 2 days before a batch (exactly what will send, to whom) + **delivery receipt** after (Resend-confirmed delivered / bounced / awaiting-confirmation) — `api/jobs/report_digests.py`, logged in `ReportDelivery`. Plus on-demand from the dashboard: Send now (all or a picked subset), a [SAMPLE] to yourself.
+- Operator **directory downloads** (all clients at once, emailed only to the operator): the **NEPOOL-GIS REC directory** (`/v1/account/directory-report.xlsx` — RECs/MWh per array per quarter, GMCS form for bulk upload) and a raw **generation directory** (`/generation-directory.xlsx` — utility kWh per project × month). Both gated on `generation_reports` + having report clients.
+
+DATA
+- Built from **utility-measured** generation — `DailyGeneration` (used exclusively for a month when present, no bill mixing) and the GMP 15-min interval overlay (`GmpDailyGeneration`), the authoritative **NEPOOL-truth series**. It deliberately EXCLUDES inverter/vendor telemetry and bill-prorate estimates from the REC basis (telemetry feeds monitoring; utility reads feed RECs). Array carries `nepool_gis_id` (e.g. "Chester (53984)"), `fuel_type`, `excluded`.
+- The fold's `--carry-generation` re-points both series from the source array to its claimed AO twin so the workbook stays byte-identical (never recomputed).
+
+AGENT GUIDANCE
+- Route here for: NEPOOL / NEPOOL-GIS / REC reporting, “generation reports / workbooks to my clients”, quarterly generation reporting, report cadence, “did my clients' reports go out”.
+- To open: `ui_navigate #reports`, then the **Generation reports** sub-tab (or deep-link `#reports/generation`). Say **Invoices → Generation reports**, never “NEPOOL Operator” as a place in the app (it's folded in).
+- Distinct from **offtaker invoices** (billing customers for solar credits) and from **vendor/inverter monitoring** (Fleet Triage / Inverters). If unsure whether it's enabled, check `account_summary` / `GET /v1/account.generation_reports` and give the honest state.
+
+---
+
 ## billing
 
 OPERATOR BILLING (Array Operator → the owner) — **unified Account → Billing section**
@@ -500,6 +536,7 @@ WHEN TO CALL WHAT
 | Tab names / where do I click | `product_map(topic=tabs)` |
 | How is health / attention computed? | `product_map(topic=health)` + health tools |
 | Invoice generator model | `product_map(topic=offtakers)` |
+| NEPOOL/REC generation reports · workbooks to clients · report cadence | `product_map(topic=generation_reports)` — Invoices → Generation reports (`#reports/generation`) |
 | Bulk import offtakers / roster spreadsheet | `product_map(topic=offtakers)` §7 — navigate `#reports`, highlight `#rbBulkImport`, or `/?setup=offtakers#reports` |
 | Plans / what’s locked / pricing tiers | `product_map(topic=plans)` |
 | Signup / connect / capture fork | `product_map(topic=onboarding)` |

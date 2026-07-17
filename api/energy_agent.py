@@ -1077,7 +1077,8 @@ TOOL_DEFS = [
                         "type": "string",
                         "description": (
                             "Domain: tabs | system | fleet | capture | vendors | analysis | "
-                            "health | offtakers | billing | plans | onboarding | resources | "
+                            "health | offtakers | generation_reports | billing | plans | "
+                            "onboarding | resources | "
                             "status | agent | api | datamodel | glossary | security | tools. "
                             "Surface mental model (macro/meso/micro): surface | product_spine | "
                             "surface_invoices | surface_inverters | surface_fleet_triage | "
