@@ -8879,6 +8879,57 @@ def voice_consult_stream(body: ChatIn, authorization: str | None = Header(defaul
     return StreamingResponse(_gen(), media_type="application/x-ndjson")
 
 
+@router.post("/v1/energy-agent/chat-stream")
+def chat_stream(body: ChatIn, authorization: str | None = Header(default=None)):
+    """Same brain as /chat, streamed transport.
+
+    Owner chat reaches the API through the Netlify proxy (_redirects: /v1/* →
+    Railway), which abandons a blocking upstream at ~26s and returns a bare
+    504. A heavy turn (up to MAX_TOOL_ROUNDS sequential Claude rounds) runs
+    well past that, so the finished answer was thrown away after the model had
+    already done the work — Ford, 2026-07-16: the voice (which streams) spoke a
+    full answer while the text came back "HTTP 504". Streaming makes first byte
+    immediate and heartbeats the connection, so long turns survive the proxy.
+
+    NDJSON body: {"type":"ping"}… then {"type":"done","payload":{…}} — payload
+    is exactly what /chat returns.
+    """
+    import queue as _queue
+    import threading as _threading
+
+    _auth(authorization)  # surface a real 401 before the stream opens
+
+    q: "_queue.Queue" = _queue.Queue()
+    _SENTINEL = object()
+
+    def _worker():
+        try:
+            q.put({"type": "done", "payload": chat(body, authorization=authorization)})
+        except HTTPException as he:
+            q.put({"type": "error", "status": he.status_code, "detail": he.detail})
+        except Exception as e:  # noqa: BLE001
+            log.exception("chat_stream worker failed")
+            q.put({"type": "error", "status": 500, "detail": str(e)[:300]})
+        finally:
+            q.put(_SENTINEL)
+
+    _threading.Thread(target=_worker, daemon=True).start()
+
+    def _gen():
+        yield json.dumps({"type": "ping"}) + "\n"
+        while True:
+            try:
+                item = q.get(timeout=5)
+            except _queue.Empty:
+                yield json.dumps({"type": "ping"}) + "\n"
+                continue
+            if item is _SENTINEL:
+                break
+            yield json.dumps(item, default=str) + "\n"
+
+    return StreamingResponse(_gen(), media_type="application/x-ndjson")
+
+
 @router.post("/v1/energy-agent/chat")
 def chat(body: ChatIn, authorization: str | None = Header(default=None)):
     t = _auth(authorization)
