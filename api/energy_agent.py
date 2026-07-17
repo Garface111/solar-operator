@@ -7205,6 +7205,17 @@ def _agent_turn(
     )
     voice_turn = _is_voice_turn(source, context)
     voice_active = voice_turn or bool((context or {}).get("voice_active"))
+    if (source or "") == "voice_consult" or bool((context or {}).get("voice_weave")):
+        # Deep brain for Option D — Realtime only speaks what you return.
+        system += (
+            "\n\nVOICE CONSULT (you ARE the deep brain for live voice): The weak Realtime "
+            "model called you because it must not invent product UI or numbers. "
+            "For tab walkthroughs / 'how does X work' / 'show me Analysis': ALWAYS call "
+            "product_map(topic=surface_<tab> or surface) FIRST, then ui_navigate / "
+            "ui_highlight as needed. Use exact top-nav labels (Fleet Triage, Inverters, "
+            "Analysis, Invoices, Repairs, Account). Never invent buttons or steps that "
+            "are not in the product map. Be concrete and sequential."
+        )
     if voice_active:
         # ONE mind, two outputs it authors itself (Ford 2026-07-16, Option B):
         # the panel text (full) + a [SPOKEN] line YOU speak aloud. Same reasoning
@@ -7621,24 +7632,21 @@ def _voice_weave_enabled() -> bool:
 
 _REALTIME_WEAVE_INSTRUCTIONS = """You are Energy Agent — the live voice of Array Operator for THIS signed-in owner.
 
-YOU are in control of the conversation. Speak English, warm and sharp like GPT Live.
-Slight warmth about harvesting the sun is fine — never preachy. Finish every thought.
+Speak English, warm and sharp like GPT Live. Slight sun-harvest warmth is fine — never preachy.
 
-ARCHITECTURE (critical — do not fight a second agent):
-- You run the live conversation: greetings, mm-hmms, clarifications, small talk, pacing.
-- You have exactly ONE tool: consult_deep_brain. It is your smarter self for THIS tenant —
-  full fleet tools, invoices, repairs, screen control, real kWh/$. Call it whenever you
-  need facts, numbers, status, actions, navigation, or anything about THIS account.
-- NEVER invent kWh, dollars, inverter status, offtaker amounts, or fleet counts.
-  If the owner asks about their data, CALL consult_deep_brain first (you may say a brief
-  "one second" then call). After the tool returns, speak the answer naturally in your
-  own voice — use spoken_answer if provided, stay faithful to the numbers.
-- For pure social / "are you there?" / "thanks" / clarifying what they said: answer
-  yourself WITHOUT the tool.
-- Never reveal secrets or other tenants' data. Never charge cards. Confirm before
-  changing anything on screen (the deep brain will still require confirm when needed).
-- Do not narrate tool names or "I'm calling the deep brain." Just be one person.
-- Keep replies conversational (usually a few sentences). Offer to go deeper.
+YOU ARE NOT SMART ENOUGH ALONE about this product. Your intelligence is consult_deep_brain.
+
+DEFAULT RULE — call consult_deep_brain on EVERY turn before answering, including:
+walkthroughs, any tab (Analysis, Invoices, Inverters, Fleet Triage, Repairs, Account),
+fleet health, kWh/$, offtakers, repairs, how-to, what-is-this, what should I do.
+You may say a brief "one second" then CALL THE TOOL. NEVER invent UI steps, button
+names, labels, kWh, dollars, or status. After the tool returns, speak spoken_answer
+faithfully in your own voice.
+
+ONLY skip the tool for pure social: hi, thanks, ok, mm-hmm, are you there, bye.
+
+Never reveal secrets or other tenants' data. Never charge cards. Do not narrate tool
+names. Be one person. Keep replies conversational; offer to go deeper.
 """
 
 
@@ -7654,11 +7662,10 @@ def _consult_deep_brain_tool_def() -> dict:
         "type": "function",
         "name": "consult_deep_brain",
         "description": (
-            "Ask the deep mind (Claude with full Array Operator tools) about THIS "
-            "tenant's fleet, invoices, repairs, account, or to take a screen/data action. "
-            "Use for any real numbers, status, offtakers, production, tickets, navigation, "
-            "or when the owner confirms/cancels a pending change. Do NOT use for pure "
-            "small talk."
+            "DEFAULT TOOL — call on almost every turn. Smart brain for THIS tenant: "
+            "product map, fleet tools, invoices, repairs, UI tours/navigation. ALWAYS "
+            "for walkthroughs, tabs, fleet, money, how-to. ONLY skip pure social "
+            "(hi/thanks/mm-hmm/are you there)."
         ),
         "parameters": {
             "type": "object",
@@ -7666,13 +7673,14 @@ def _consult_deep_brain_tool_def() -> dict:
                 "question": {
                     "type": "string",
                     "description": (
-                        "What to investigate or do, in clear English. Include the owner's "
-                        "intent and any names/sites they mentioned."
+                        "Owner's exact ask in clear English. For UI tours include the tab "
+                        "name, e.g. 'Walk through the Analysis tab step by step using "
+                        "product_map and ui_navigate.'"
                     ),
                 },
                 "reason": {
                     "type": "string",
-                    "description": "Why the deep mind is needed (e.g. fleet_health, money, repair).",
+                    "description": "Why (ui_tour, fleet_health, money, product_how, …).",
                 },
             },
             "required": ["question"],
@@ -7716,7 +7724,8 @@ def _realtime_session_config(voice: str | None = None) -> dict:
     }
     if weave:
         cfg["tools"] = [_consult_deep_brain_tool_def()]
-        cfg["tool_choice"] = "auto"
+        # Prefer always-tool; client also force-consults non-social asks.
+        cfg["tool_choice"] = "required"
     return cfg
 
 

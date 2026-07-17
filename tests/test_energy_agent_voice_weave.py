@@ -19,7 +19,9 @@ def test_realtime_config_weave_has_tool_and_create_response(monkeypatch):
     assert turn["interrupt_response"] is True
     assert cfg["tools"][0]["name"] == "consult_deep_brain"
     assert "consult_deep_brain" in cfg["instructions"]
-    assert cfg["tool_choice"] == "auto"
+    # Force tool use so the weak Realtime model cannot freestyle product facts
+    assert cfg["tool_choice"] == "required"
+    assert "EVERY turn" in cfg["instructions"] or "every turn" in cfg["instructions"].lower()
 
 
 def test_realtime_config_legacy_mouth_only(monkeypatch):
