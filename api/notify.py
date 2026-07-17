@@ -44,6 +44,28 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
     back to the platform From for an unverified domain.
     cc / bcc add carbon-copy recipients (e.g. the operator BCC'd on every
     offtaker invoice so they always see what the customer received)."""
+    # ── Non-prod safety valve (staging/preview) ───────────────────────────
+    # The backend infers "prod" from Railway env vars, which a staging deploy
+    # also has — so the code cannot tell staging from prod on its own. These
+    # two switches make a staging deploy safe to exercise real email flows
+    # WITHOUT ever reaching a customer. Prod sets neither → total no-op there.
+    #   EMAIL_DRY_RUN=1     → never send; log the intended email and report ok.
+    #   EMAIL_SINK_TO=addr  → send for real but redirect EVERY recipient
+    #                         (to/cc/bcc) to `addr`, so the operator sees exactly
+    #                         what would have gone out while no customer does.
+    if os.getenv("EMAIL_DRY_RUN", "").strip().lower() in ("1", "true", "yes", "on"):
+        logger.warning("EMAIL_DRY_RUN set — NOT sending. to=%s subject=%s", to, subject)
+        logger.info("EMAIL(dry) → to=%s subject=%s\n%s", to, subject, text or html[:500])
+        return True
+    _sink = os.getenv("EMAIL_SINK_TO", "").strip()
+    if _sink:
+        logger.warning(
+            "EMAIL_SINK_TO active — redirecting recipients to %s "
+            "(orig to=%s cc=%s bcc=%s) subject=%s", _sink, to, cc, bcc, subject)
+        subject = f"[STAGING → {to}] {subject}"
+        to = _sink
+        cc = None
+        bcc = None
     if not RESEND_API_KEY:
         logger.warning("RESEND_API_KEY not set — logging email instead of sending.")
         logger.info("EMAIL → to=%s subject=%s\n%s", to, subject, text or html[:500])
