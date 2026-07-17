@@ -108,9 +108,17 @@ function LinkedLoginsPicker({
         login.provider === "gmp"
           ? { name: nm, gmp_username: login.username, gmp_autopopulate: true }
           : { name: nm, vec_username: login.username, vec_autopopulate: true };
-      await createClient(input);
+      const created = await createClient(input);
+      // Honest copy (Ford 2026-07-16): creating a client from an already-linked
+      // login does NOT synchronously pull bills — the arrays attach when that
+      // login next syncs (the /v1/sync autopop matches this client by its
+      // username and fills it in). Only claim data has arrived if the server
+      // actually returned arrays; otherwise say plainly what happens next.
+      const n = created?.array_count || 0;
       toast.success(
-        `Added ${nm} — pulling ${ATTACHABLE[login.provider].label} data now.`,
+        n > 0
+          ? `Added ${nm} — ${n} array${n === 1 ? "" : "s"} attached.`
+          : `Added ${nm}. Its arrays will fill in automatically the next time ${ATTACHABLE[login.provider].label} syncs this login — no need to re-enter anything.`,
       );
       setOpenFor(null);
       setName("");
@@ -292,7 +300,8 @@ function CloudAddLoginForm({
         consent: true,
       });
       toast.success(
-        `Connected ${util.label} — creating the client and pulling its bills now.`,
+        `Connected ${util.label}. We'll pull this login's bills on the next sync ` +
+          `and its arrays will appear automatically — no need to re-enter anything.`,
       );
       onCreated();
     } catch (e) {
