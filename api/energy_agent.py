@@ -7972,24 +7972,52 @@ def _spoken_line(reply: str) -> str:
 # above is shown on the panel, the [SPOKEN] line is what the voice speaks. Same
 # mind, so the spoken words carry the tools it just called and its actual plan.
 _SPOKEN_MARKER_RE = re.compile(r"(?is)\n?[ \t]*\[\s*spoken\s*\][ \t:]*")
+_PANEL_MARKER_RE = re.compile(r"(?is)\n?[ \t]*\[\s*panel\s*\][ \t:]*")
+
+
+def _clean_markers(s: str) -> str:
+    """Strip stray [SPOKEN]/[PANEL] markers so neither leaks onto the panel."""
+    out = _SPOKEN_MARKER_RE.sub(" ", s or "")
+    out = _PANEL_MARKER_RE.sub(" ", out)
+    return out.strip()
 
 
 def _split_spoken(text: str) -> tuple[str, str | None]:
-    """Return (panel_text, spoken_line|None). Splits on the LAST [SPOKEN] marker
-    the brain authored. Falls back to (text, None) when the model didn't emit one
-    — the caller then speaks the brain's own lead sentence (still no Haiku)."""
+    """Return (panel_text, spoken_line|None).
+
+    SPEAK-FIRST (Ford 2026-07-16): `[SPOKEN] … [PANEL] …`. The spoken answer is
+    authored FIRST so it is the artifact the model spends its reasoning on, and
+    the panel elaborates underneath. Appending the spoken line last made it the
+    tail of a completion already optimised for reading — structurally an
+    afterthought, which is exactly what it sounded like ("a half-assed version
+    of the real response").
+
+    Still parses the LEGACY shape (`panel … [SPOKEN]` last) — the model will
+    sometimes drift back to it, and a mis-parse would either read the whole
+    panel aloud or print the spoken line as the answer.
+    """
     t = text or ""
     matches = list(_SPOKEN_MARKER_RE.finditer(t))
     if not matches:
         return t.strip(), None
+
+    first = matches[0]
+    panel_m = _PANEL_MARKER_RE.search(t, first.end())
+    if panel_m:
+        # Speak-first: spoken between [SPOKEN] and [PANEL], panel after.
+        spoken = _plain_for_speech(t[first.end():panel_m.start()])
+        panel = _clean_markers(t[panel_m.end():])
+        if not spoken:
+            return (panel or t.strip()), None
+        return (panel or spoken), spoken
+
+    # Legacy (or speak-first with no [PANEL]): last marker splits panel/spoken.
     m = matches[-1]
-    panel = t[: m.start()].strip()
+    panel = _clean_markers(t[: m.start()])
     spoken = _plain_for_speech(t[m.end():])
-    # Strip any stray earlier markers from the panel text (defensive).
-    panel = _SPOKEN_MARKER_RE.sub(" ", panel).strip()
     if not spoken:
         return panel or t.strip(), None
-    # If the model put everything after the marker (no panel text), show it too.
+    # Model put everything after the marker (no panel text) — show it too.
     return (panel or spoken), spoken
 
 
@@ -8269,20 +8297,24 @@ def _agent_turn(
                 "that is a bug worth flagging, not another agent's view."
             )
         system += (
-            "\n\nYOU WILL BE HEARD (voice is live). Produce your answer in TWO parts:\n"
-            "1) Your normal text answer for the on-screen panel — clear and complete "
-            "(the owner may be reading it).\n"
-            "2) Then a final line that starts EXACTLY with `[SPOKEN]` — the words your "
-            "voice actually says out loud. Everything above `[SPOKEN]` is shown on screen; "
-            "the `[SPOKEN]` line is NOT shown, only spoken.\n"
-            "The [SPOKEN] line: human and complete — your answer plus where you're headed — "
-            "said like a sharp colleague, not read like a report. You KNOW what you just "
-            "did (the tools you called, your plan) — let that intelligence show. "
-            "Usually 2–4 full sentences (enough to finish the thought out loud); go longer "
-            "only if it genuinely needs it. FINISH every thought — never trail off mid-idea. "
-            "Offer to go deeper if there's more. Put NO markdown / bullets / headings / '#' "
-            "in it. If your whole answer is one short line, the [SPOKEN] line can just be "
-            "that line, phrased for the ear."
+            "\n\nYOU WILL BE HEARD (voice is live). SPEAK FIRST — the spoken answer IS your "
+            "answer, not a summary of one. Write it before anything else and spend your "
+            "reasoning THERE: it is what the owner actually experiences.\n"
+            "1) Begin your reply with `[SPOKEN]` and then the words your voice says out "
+            "loud. Say the real conclusion — what you found, what you did, what you're "
+            "doing next — the way a sharp colleague talks, not the way a report reads. You "
+            "KNOW what you just did (the tools you called, your plan): let that show. "
+            "Usually 2–4 full sentences; longer only if it genuinely needs it. FINISH every "
+            "thought — never trail off. Offer to go deeper if there's more. NO markdown, "
+            "bullets, headings or '#'.\n"
+            "2) Then a line that is EXACTLY `[PANEL]`, and under it the on-screen version — "
+            "the numbers, structure and detail backing up what you just said (the owner may "
+            "be reading it). The panel EXPANDS the spoken answer and must never contradict "
+            "it.\n"
+            "Never write the panel first and squeeze a spoken line out of it — that "
+            "compression is what made the voice sound half a step behind your own thinking. "
+            "Lead with the thought, then evidence it. If the answer is genuinely one line, "
+            "`[SPOKEN]` can be the whole answer and the panel may simply restate it."
         )
     else:
         system += (
