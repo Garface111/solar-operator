@@ -980,4 +980,28 @@ def run_morning_digest() -> dict:
         )
     log.info("morning_digest: sent=%d skipped=%d errors=%d",
              len(sent), skipped, len(errors))
+
+    # Heartbeat: prove the job actually executed today. The watchdog
+    # (_run_morning_digest_watchdog, ~3h later) alerts if this date is missing,
+    # so a silently-missed noon trigger no longer goes unnoticed.
+    try:
+        import json as _json
+        from datetime import datetime as _dt, timezone as _tz
+        from ..models import KVFlag
+        now = _dt.now(_tz.utc)
+        payload = _json.dumps({
+            "date": now.strftime("%Y-%m-%d"),
+            "ran_at": now.isoformat(),
+            "sent": len(sent), "skipped": skipped, "errors": len(errors),
+        })
+        with SessionLocal() as hb:
+            row = hb.get(KVFlag, "morning_digest:last_run")
+            if row is None:
+                hb.add(KVFlag(key="morning_digest:last_run", value=payload))
+            else:
+                row.value = payload
+            hb.commit()
+    except Exception:
+        log.exception("morning_digest: heartbeat write failed (non-fatal)")
+
     return {"sent": sent, "skipped": skipped, "errors": errors}
