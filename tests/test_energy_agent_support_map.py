@@ -35,14 +35,15 @@ def test_product_map_tool_topic_and_all():
     assert "cloud" in one["map"].lower() or "store it with us" in one["map"].lower()
     assert one.get("source") == "energy_agent_support_map.md"
 
+    # "all" is a directory of topics + entry sections (not a full dump).
     all_ = _product_map_tool({"topic": "all"})
-    assert all_["topic"] == "all"
+    assert all_["topic"] == "directory"
     assert "topics" in all_
     assert "capture" in all_["topics"]
-    assert "offtakers" in all_["map"].lower() or "offtaker" in all_["map"].lower()
+    assert "system" in all_["map"].lower() or "tabs" in all_["map"].lower()
 
 
 def test_product_map_unknown_topic_lists_directory():
     out = _product_map_tool({"topic": "not_a_real_topic"})
-    assert out["topic"] == "all"
+    assert out["topic"] == "unknown"
     assert set(REQUIRED_TOPICS).issubset(set(out["topics"]))
