@@ -30,10 +30,11 @@ def column_exists(conn, table: str, column: str) -> bool:
         # Fresh/empty DB: the table doesn't exist yet. Some models are
         # registered only in the app process (app.py imports them and runs
         # create_all at the latest schema on startup), so this migrate process
-        # can't see them. A column backfill against a not-yet-existing table is
-        # a no-op — skip it instead of crashing the whole migration. (Prod
-        # always has the table, so behavior there is unchanged.)
-        return False
+        # can't see them. Every caller is `if not column_exists(): ALTER ADD
+        # COLUMN`, so report the column as ALREADY PRESENT to SKIP the ALTER —
+        # there is no table to alter, and the app builds it complete at boot.
+        # (Prod always has the table, so behavior there is unchanged.)
+        return True
     return column in cols
 
 
@@ -42,7 +43,9 @@ def index_exists(conn, table: str, index: str) -> bool:
     try:
         return any(i["name"] == index for i in insp.get_indexes(table))
     except NoSuchTableError:
-        return False
+        # Absent table (see column_exists): report the index as present so the
+        # `if not index_exists(): CREATE INDEX` guards skip; create_all builds it.
+        return True
 
 
 def main():
