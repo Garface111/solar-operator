@@ -7166,8 +7166,12 @@ def _agent_turn(
         }
 
     assets = _ea_load_assets(db, tenant.id, attachment_ids)
-    # Skip visual-fast path when attachments need real analysis
-    if not assets:
+    # Skip the visual-fix fast path when attachments need real analysis OR this is
+    # a VOICE consult — on voice we want the real tool loop (and live narration),
+    # and words like "look"/"see" in a spoken fleet question falsely tripped the
+    # UI-polish shortcut into an "I'll fix that" dead-end (Ford 2026-07-16).
+    _is_voice_consult = (source or "") == "voice_consult" or bool((context or {}).get("voice_weave"))
+    if not assets and not _is_voice_consult:
         # Visual polish: short ack + quiet pipeline (skip multi-tool design lectures)
         try:
             fast = _visual_fix_fast_path(db, tenant, session, user_text, context)
