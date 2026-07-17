@@ -417,6 +417,14 @@ class Client(Base):
     # Cadence override; falls back to tenant.report_frequency when null
     report_frequency: Mapped[str | None] = mapped_column(String(16), nullable=True)
     # weekly | monthly | quarterly | null (inherit)
+    # Per-client AUTO-SEND enrollment (THE FOLD, Jul 2026). The scheduled auto-send
+    # (scheduler._deliver_clients_with_frequency) ONLY sends clients with
+    # auto_send=True — so turning this on is the deliberate "enroll this client in
+    # automatic quarterly reports" act, and the auto-propagated capture-artifact
+    # clients (default False) never auto-send (and so never auto-CHARGE). Manual
+    # sends + downloads work regardless of this flag. Default False; migrate.py
+    # backfills legacy NEPOOL clients to True so their existing auto-sends continue.
+    auto_send: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     last_delivery_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -528,6 +536,51 @@ class ReportDelivery(Base):
 
     __table_args__ = (
         Index("ix_report_deliveries_tenant_pending", "tenant_id", "receipt_sent_at"),
+    )
+
+
+class GenReportCharge(Base):
+    """A billable generation-report OUTPUT event ($15/client/quarter — THE FOLD, Jul
+    2026). One row = the FIRST real output for a (tenant, client, calendar quarter),
+    then unlimited. The metered billing trigger.
+
+    Ford's model: building + previewing clients and their reports is FREE; auto-
+    propagating the whole fleet is free. The $15 fires on the FIRST real OUTPUT for a
+    (client, quarter) — where an "output" is a report SEND (auto or manual) OR a
+    DOWNLOAD of the deliverable workbook (per-client or all-clients directory). Every
+    subsequent send/download for that SAME (client, quarter) is free; a DIFFERENT
+    quarter is a fresh $15. IDEMPOTENT per (tenant_id, client_id, quarter): the unique
+    constraint IS the idempotency — a duplicate output insert-or-ignores (the
+    delivery/download layer catches the IntegrityError, mirroring the capture upsert
+    pattern).
+
+    INERT money-wise: writing a row never touches Stripe. A separate metered-usage
+    job (api/jobs/genreports_usage.py) sums each tenant's un-pushed rows and reports
+    them to Stripe as usage against the tenant's metered generation-reports
+    subscription item — and ONLY when STRIPE_AO_GENREPORTS_PRICE_ID is configured.
+    Until then these are just ledger rows; nobody is billed.
+    """
+    __tablename__ = "gen_report_charges"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    client_id: Mapped[int] = mapped_column(Integer, ForeignKey("clients.id"), index=True)
+    # The calendar quarter this output covered — the headline rolling quarter, e.g.
+    # "2026-Q1". THE idempotency axis: same quarter = same $15, repeat outputs free.
+    quarter: Mapped[str] = mapped_column(String(16), index=True)
+    amount_cents: Mapped[int] = mapped_column(Integer, default=1500)
+    # What the FIRST output for this (client, quarter) was: "send" (auto/manual email)
+    # | "download" (per-client workbook) | "directory" (all-clients directory).
+    first_source: Mapped[str] = mapped_column(String(16), default="send")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    # Stamped once this row has been pushed to Stripe as metered usage (the usage job
+    # sets it). NULL = not yet pushed → the job only sums NULL rows, so re-runs are
+    # idempotent and never double-bill.
+    pushed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "client_id", "quarter",
+                         name="uq_genreport_charge_quarter"),
+        Index("ix_genreport_charge_unpushed", "tenant_id", "pushed_at"),
     )
 
 

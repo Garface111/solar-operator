@@ -242,6 +242,24 @@ def main():
                 conn.execute(text(sql))
                 print(f"  + {table}.{col}")
 
+        # THE FOLD (Jul 2026): per-client AUTO-SEND enrollment. The scheduled auto-
+        # send (scheduler._deliver_clients_with_frequency) now only fires for clients
+        # with auto_send=True, so the auto-propagated capture-artifact clients
+        # (default False) never auto-send — and so never auto-CHARGE the $15/quarter.
+        # BACKFILL legacy NEPOOL clients to True so their EXISTING auto-sends keep
+        # running: NEPOOL tenants have no capture-created sibling clients, so this
+        # can't accidentally enable an artifact. Migrated Array Operator reports
+        # tenants start False and enroll their real clients deliberately. Idempotent
+        # (the backfill only runs the once, when the column is first added).
+        if not column_exists(conn, "clients", "auto_send"):
+            conn.execute(text(
+                "ALTER TABLE clients ADD COLUMN auto_send BOOLEAN DEFAULT FALSE NOT NULL"))
+            print("  + clients.auto_send")
+            conn.execute(text(
+                "UPDATE clients SET auto_send = TRUE WHERE tenant_id IN "
+                "(SELECT id FROM tenants WHERE product IS NULL OR product <> 'array_operator')"))
+            print("  ↪ clients.auto_send backfilled TRUE for legacy NEPOOL clients")
+
         # Backfill defaults for existing rows so the columns are never NULL
         # where the model declares a default.
         conn.execute(text(
