@@ -7056,13 +7056,14 @@ def _agent_turn(
             "2) Then a final line that starts EXACTLY with `[SPOKEN]` — the words your "
             "voice actually says out loud. Everything above `[SPOKEN]` is shown on screen; "
             "the `[SPOKEN]` line is NOT shown, only spoken.\n"
-            "The [SPOKEN] line: brief and human — your answer plus where you're headed — "
+            "The [SPOKEN] line: human and complete — your answer plus where you're headed — "
             "said like a sharp colleague, not read like a report. You KNOW what you just "
-            "did (the tools you called, your plan) — let that intelligence show, briefly. "
-            "Usually 1–3 sentences; go longer only if it genuinely needs it. FINISH your "
-            "thought (never trail off), offer to go deeper if there's more, and put NO "
-            "markdown / bullets / headings / '#' in it. If your whole answer is one short "
-            "line, the [SPOKEN] line can just be that line, phrased for the ear."
+            "did (the tools you called, your plan) — let that intelligence show. "
+            "Usually 2–4 full sentences (enough to finish the thought out loud); go longer "
+            "only if it genuinely needs it. FINISH every thought — never trail off mid-idea. "
+            "Offer to go deeper if there's more. Put NO markdown / bullets / headings / '#' "
+            "in it. If your whole answer is one short line, the [SPOKEN] line can just be "
+            "that line, phrased for the ear."
         )
     else:
         system += (
@@ -7482,12 +7483,14 @@ def _realtime_session_config(voice: str | None = None) -> dict:
                     "type": "server_vad",
                     # 0.5 default is twitchy in rooms with fans/keyboard. Higher = quieter
                     # sounds ignored (OpenAI docs: better in noisy environments).
-                    "threshold": 0.78,
+                    # 0.85 + client full-hold on chat speech: mid-reply self-interrupts
+                    # from speaker bleed (Ford 2026-07-16). Keep in sync with
+                    # energy-agent.js realtimeVadConfig().
+                    "threshold": 0.85,
                     "prefix_padding_ms": 320,
                     # Longer silence before "user finished" — multi-clause voice asks
-                    # were cut mid-thought at 900ms (Ford 2026-07-14). Keep in sync with
-                    # energy-agent.js realtimeVadConfig().
-                    "silence_duration_ms": 1400,
+                    # were cut mid-thought at 900ms (Ford 2026-07-14).
+                    "silence_duration_ms": 1600,
                     "create_response": False,
                     "interrupt_response": False,
                 },
