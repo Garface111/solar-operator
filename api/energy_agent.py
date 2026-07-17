@@ -4628,14 +4628,22 @@ def _reminder_fleet_state(db, tenant: Tenant) -> dict:
         name = col.get("array_name") or ""
         if name:
             name_to_aid[name.strip().lower()] = aid
-        needs = _array_needs_attention(col)
+        row = _summarize_column(col)
+        needs = bool(row.get("needs_attention"))
         if needs:
             attention.add(aid)
         dset = set()
+        # 14-day hard failure (dead / fault / comm_gap)
         for inv in col.get("inverters") or []:
             if (inv.get("status") or "ok").lower() in _DOWN_STATUSES:
                 iid = str(inv.get("sn") or inv.get("name") or inv.get("inverter_id"))
                 dset.add(f"{aid}:{iid}")
+        # Real-time outage: an inverter dark while its peers produce (daylight only,
+        # so night's "everything asleep" never counts as down).
+        if row.get("is_daylight"):
+            for la in row.get("live_anomalies") or []:
+                if (la.get("live") or "") == "dark":
+                    dset.add(f"{aid}:{la.get('name')}")
         if dset:
             down_by_array[aid] = dset
             down_ids |= dset
