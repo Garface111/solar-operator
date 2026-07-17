@@ -6430,7 +6430,9 @@ def _run_tool(
             "wec": ("Washington Electric Co-op (SmartHub)", "https://washingtonelectric.smarthub.coop/"),
         }
         try:
-            from .models import Array, Inverter, UtilityAccount
+            # NB: Array is module-level — importing it here would make it local to
+            # the whole of _run_tool and UnboundLocalError every earlier use.
+            from .models import Inverter, UtilityAccount
             tid = tenant.id
             vendors = set()
             for v, in db.execute(
