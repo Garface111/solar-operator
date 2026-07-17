@@ -11,7 +11,11 @@ cycle keeps data under the 5-minute SLA.
 """
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 import logging
+import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -25,6 +29,22 @@ TZ = ZoneInfo("America/New_York")
 # Non-inverter devices to exclude (they'd show as permanently-0kW phantoms).
 _NON_INVERTER = ("edmm", "data manager", "home manager", "energy meter",
                  "meter", "webconnect", "gateway", "cluster controller")
+
+
+def _token_fresh(tok: str, skew_s: int = 120) -> bool:
+    """True only if the Keycloak access_token's `exp` is at least skew_s in the
+    future. Decode-only (no signature check) — we read OUR OWN token's exp so the
+    harvester re-logs-in before it lapses. A missing/expired/malformed token reads
+    as stale. Without this a warm session with a PRESENT-but-EXPIRED token was
+    treated as "logged in", the fresh login was skipped, and the scrape then 401'd
+    on uiapi ("token expired") — the bug that froze SMA capture for hours."""
+    try:
+        payload = tok.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        exp = json.loads(base64.urlsafe_b64decode(payload)).get("exp")
+        return bool(exp) and (float(exp) - skew_s) > time.time()
+    except (IndexError, ValueError, TypeError, binascii.Error, json.JSONDecodeError):
+        return False
 
 
 class SMAVendor:
@@ -41,9 +61,12 @@ class SMAVendor:
 
     async def is_logged_in(self, page) -> bool:
         # Warm session: the SPA boots and drops access_token. Give it a moment.
+        # The token must be present AND NOT EXPIRED — a stale token here makes the
+        # engine skip the fresh login and the scrape then 401s on uiapi.
         import asyncio
         for _ in range(8):
-            if await self._token(page):
+            tok = await self._token(page)
+            if tok and _token_fresh(tok):
                 return True
             await asyncio.sleep(1.0)
         return False
