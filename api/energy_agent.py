@@ -56,6 +56,17 @@ XAI_MODEL = os.getenv("ENERGY_AGENT_MODEL", "grok-4.5")
 # Latest OpenAI Realtime voice model (docs 2026: gpt-realtime-2.1)
 OPENAI_REALTIME_MODEL = os.getenv("OPENAI_REALTIME_MODEL", "gpt-realtime-2.1")
 OPENAI_REALTIME_VOICE = os.getenv("OPENAI_REALTIME_VOICE", "marin")
+# Bias the Realtime speech-to-text toward product vocabulary so it transcribes
+# the product's own terms instead of phonetic neighbors — "Array Operator" was
+# being heard as "ray operator" (Ford 2026-07-17). Mirrors EA_STT_PROMPT in the
+# frontend session.update; both configs carry it.
+_STT_VOCAB_PROMPT = (
+    "Array Operator is a solar fleet platform; its AI is the Energy Agent. "
+    "Expect these terms: Array Operator, Energy Agent, offtaker, offtakers, "
+    "NEPOOL, REC, RECs, generation report, net metering, solar credit, kWh, "
+    "kW nameplate, inverter, array, fleet, specific yield, SolarEdge, Fronius, "
+    "Chint, SMA, Enphase, Locus, GMP, Green Mountain Power, VEC, SmartHub."
+)
 # Free-tier weekly sample for thinking + voice (Pro = unlimited via tenant.ai_pro).
 # Default $2.50 so owners can try the agent without upgrading.
 WEEKLY_BUDGET_USD = float(os.getenv("ENERGY_AGENT_WEEKLY_BUDGET_USD", "2.5"))
@@ -174,11 +185,23 @@ You have a FREE MIND over THIS TENANT'S live data (not a fixed FAQ):
   For "how is my fleet?" ALWAYS call investigate_attention (or fleet_overview with
   needs_attention_only) and report TOTALS + every attention array — not one example.
 - repair_ops_overview / list_service_contacts / list_repair_tickets = O&M healing.
+  search_repair_tickets = history by site / date range / keyword ("Chester in May").
+  update_repair_ticket(checkin_interval_hours=N) = recurring check-in cadence
+  (e.g. 72 = every 3 days until resolved; auto-sends need trusted contact / tenant auto).
+  save_document / list_documents = durable warranty/diagnostic/service-request artifacts
+  (PDF + optional ticket attach — don't leave important drafts only in chat).
 - MONEY QUESTIONS ("why is production low?" / "how much is this costing me?" /
   "what did we bill?"): production_forecast = weather-expected vs actual (cloudy week
-  vs real problem); investigate_attention now carries recoverable_usd_month (matches
-  the Fleet Triage tile); list_recent_invoices = drafted/sent offtaker dollars.
+  vs real problem); fleet_financial_health = fleet-wide $/mo at risk + cumulative by
+  array; investigate_attention carries recoverable_usd_month (matches the Fleet Triage
+  tile); list_recent_invoices = drafted/sent offtaker dollars.
   Lead with the dollars when they're ≥$1 — the owner runs a business.
+- capture_health_detail = WHY capture is stale (login_failed vs scrape_failed vs MFA
+  vs rate limit vs paused device) — call before guessing portal issues.
+- underperformer_history = steady-low (shading candidate) vs recent drop (fault).
+- LIVE UI: context may include live_ui_digest (visible cards/chips/table text) and
+  user_interrupted (owner barged mid-voice). Trust the digest for "what am I looking
+  at?"; on interrupt, abandon the old answer path immediately.
 
 CRITICAL — TIME ZONES + NIGHT (do not invent outages after dark):
   Every turn includes a FLEET CLOCK block (fleet-local time + sun-up/night). TRUST IT.
@@ -202,8 +225,9 @@ CRITICAL — SHADING / EXPECTED-LOW (a false "underperforming" you must catch):
   afternoon shade from a neighbour's tree, a chimney, a poor roof face. That is NOT a
   fault to chase, and flagging it "underperforming" forever trains the owner to ignore
   the flag. When investigate_attention / array_detail shows an "underperforming" unit
-  whose deficit is STEADY and long-standing (a consistent low peer_index, not a sudden
-  drop, and expected_low is still false), PROACTIVELY ask the owner something like:
+  whose deficit is STEADY and long-standing (call underperformer_history when unsure —
+  a consistent low peer_index, not a sudden drop, and expected_low is still false),
+  PROACTIVELY ask the owner something like:
   "Inverter 13 on Chester has run ~42% of its neighbours steadily — that even pattern
   usually means permanent shading (a tree, a chimney) rather than a fault. Is something
   shading that one? If so I'll mark it so it stops flagging — and I'll still alert you
@@ -1445,6 +1469,43 @@ TOOL_DEFS = [
     {
         "type": "function",
         "function": {
+            "name": "search_repair_tickets",
+            "description": (
+                "Search repair ticket HISTORY (open + closed) by array name, date range, "
+                "and/or keyword. Use for 'what happened with Chester in May?', old cases, "
+                "or reconstructing a thread. Prefer this over list_repair_tickets when the "
+                "owner asks about past work, a named site over time, or a keyword in notes."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "array_name": {"type": "string", "description": "Site name substring"},
+                    "array_id": {"type": "integer"},
+                    "keyword": {
+                        "type": "string",
+                        "description": "Match title, notes, tech replies, serial, vendor",
+                    },
+                    "date_from": {
+                        "type": "string",
+                        "description": "ISO date/datetime — tickets opened on or after",
+                    },
+                    "date_to": {
+                        "type": "string",
+                        "description": "ISO date/datetime — tickets opened on or before",
+                    },
+                    "status": {"type": "string", "description": "Optional exact status filter"},
+                    "active_only": {
+                        "type": "boolean",
+                        "description": "If true, only open/active statuses (default false)",
+                    },
+                    "limit": {"type": "integer", "description": "Max results 1-200, default 50"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "open_repair_ticket",
             "description": (
                 "Open a repair ticket for a down array/inverter and assign the ops contact. "
@@ -1472,7 +1533,10 @@ TOOL_DEFS = [
             "name": "update_repair_ticket",
             "description": (
                 "Update ticket status (open|waiting_reply|scheduled|in_progress|resolved|"
-                "cancelled), reassign contact, or set tech_note / scheduled_for."
+                "cancelled), reassign contact, set tech_note / scheduled_for, or set a "
+                "recurring check-in cadence via checkin_interval_hours (e.g. 72 = every 3 "
+                "days until resolved; requires trusted contact or tenant auto mode for "
+                "sends to actually fire)."
             ),
             "parameters": {
                 "type": "object",
@@ -1483,6 +1547,14 @@ TOOL_DEFS = [
                     "tech_note": {"type": "string"},
                     "description": {"type": "string"},
                     "scheduled_for": {"type": "string", "description": "ISO datetime"},
+                    "checkin_interval_hours": {
+                        "type": "integer",
+                        "description": (
+                            "Per-ticket follow-up cadence in hours (6–336). "
+                            "72 = every 3 days. Omit to leave; 0 clears override "
+                            "(back to tenant default)."
+                        ),
+                    },
                     "needs_confirm": {"type": "boolean", "default": True},
                     "reason": {"type": "string"},
                 },
@@ -1732,6 +1804,111 @@ TOOL_DEFS = [
     {
         "type": "function",
         "function": {
+            "name": "capture_health_detail",
+            "description": (
+                "WHY capture is stale or failing — per-vendor status, last success, last error, "
+                "diagnosis (login_failed vs scrape_failed vs rate limit vs MFA vs paused device). "
+                "Call when setup_status says data is stale, refresh_capture isn't enough, or the "
+                "owner asks why Solar.web / Chint / GMP isn't updating."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "provider": {
+                        "type": "string",
+                        "description": "Optional vendor filter (gmp, sma, fronius, chint, …)",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fleet_financial_health",
+            "description": (
+                "Fleet-wide money leaking RIGHT NOW: total $/mo at risk, per-array cumulative "
+                "loss estimate, recoverable if fixed. Same math as Fleet Triage Recoverable. "
+                "Use for 'how much are we losing?', business case for repairs, or ranking which "
+                "site to fix first by dollars."
+            ),
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "underperformer_history",
+            "description": (
+                "Historical production trend for underperformers: steady-low for months "
+                "(shading candidate → ask owner, then mark_inverter_expected_low) vs recent "
+                "drop (real fault). Returns steady_underperformer_candidate flags + weekly "
+                "timeline. Use before treating a low peer_index as a hardware emergency."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "array_name": {"type": "string"},
+                    "inverter_id": {"type": "integer"},
+                    "window_days": {
+                        "type": "integer",
+                        "description": "History window 30–365, default 180",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_document",
+            "description": (
+                "Save a durable artifact from chat — warranty claim draft, diagnostic note, "
+                "service request — optionally attach to a repair ticket and render PDF. "
+                "Use whenever you draft something the owner may need later (don't leave it "
+                "only in chat history)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string", "description": "Full document body"},
+                    "title": {"type": "string"},
+                    "type": {
+                        "type": "string",
+                        "description": "warranty_claim|diagnostic|service_request|note|other",
+                    },
+                    "ticket_id": {"type": "integer", "description": "Attach to this ticket"},
+                    "make_pdf": {
+                        "type": "boolean",
+                        "description": "Render PDF (default true)",
+                    },
+                    "format": {
+                        "type": "string",
+                        "description": "markdown|text|html (default markdown)",
+                    },
+                    "needs_confirm": {"type": "boolean", "default": False},
+                },
+                "required": ["content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_documents",
+            "description": "List saved Energy Agent documents (optionally for one ticket).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticket_id": {"type": "integer"},
+                    "limit": {"type": "integer"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "create_reminder",
             "description": (
                 "Set a REMINDER or a conditional WATCH the owner asked YOU to keep — YOU "
@@ -1786,6 +1963,28 @@ TOOL_DEFS = [
             "parameters": {
                 "type": "object",
                 "properties": {"reminder_id": {"type": "string"}},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "see_screen",
+            "description": (
+                "SEE the owner's actual screen — capture a real screenshot of what they're "
+                "looking at right now and analyze it with your vision. Use when they report a "
+                "UI problem ('this didn't work', 'the button's missing', 'it looks broken'), "
+                "ask what they're looking at, or you need to verify the rendered UI before "
+                "guiding them or proposing a change. The screenshot comes back on the NEXT "
+                "turn as an image you can see — so call this, tell them you're taking a look, "
+                "and read the image when it arrives. The owner grants screen access once (the "
+                "app asks); if they haven't, this prompts them."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reason": {"type": "string", "description": "What you're looking for (e.g. 'the improve-site markup UI')"},
+                },
             },
         },
     },
@@ -5531,12 +5730,17 @@ SKILL_REGISTRY: dict[str, dict] = {
                 "tools": {"repair_ops_overview", "list_service_contacts", "upsert_service_contact",
                           "assign_service_contact", "open_repair_ticket", "update_repair_ticket",
                           "draft_repair_checkin", "send_repair_checkin", "log_repair_note",
-                          "log_repair_phone_note", "list_repair_tickets",
+                          "log_repair_phone_note", "list_repair_tickets", "search_repair_tickets",
+                          "save_document", "list_documents",
                           "check_email_delivery"}},
     "reminders": {"label": "Reminders & watches", "default_on": True, "self_activatable": True,
                   "tools": {"create_reminder", "list_reminders", "cancel_reminder"}},
     "capture_and_setup": {"label": "Data capture & setup", "default_on": True,
-                          "tools": {"refresh_capture", "setup_status", "account_summary"}},
+                          "tools": {"refresh_capture", "setup_status", "account_summary",
+                                    "capture_health_detail"}},
+    "fleet_money": {"label": "Fleet financial impact", "default_on": True,
+                    "tools": {"fleet_financial_health", "underperformer_history",
+                              "investigate_attention", "fleet_overview"}},
     "product_help": {"label": "Product knowledge & UI", "default_on": True,
                      "tools": {"product_map", "ui_navigate", "ui_highlight", "ui_tour",
                                "ui_fill", "ui_click", "open_url"}},
@@ -5548,6 +5752,15 @@ SKILL_REGISTRY: dict[str, dict] = {
         "description": "Send SMS check-ins to techs (in addition to email). Off by default.",
         "default_on": False, "self_activatable": True,
         "tools": {"send_repair_sms"},
+    },
+    "screen_vision": {
+        "label": "See your screen (live screenshot vision)",
+        "description": "Let Energy Agent capture and SEE your actual screen to debug UI, guide "
+                       "you, or propose changes from what's really rendered. You grant screen "
+                       "access once in the browser (nothing is captured until you approve). "
+                       "On by default (request 60); the browser permission is the real gate.",
+        "default_on": True, "self_activatable": True,
+        "tools": {"see_screen"},
     },
     "custom_watches": {
         "label": "Free-form custom watches",
@@ -6064,6 +6277,47 @@ def _gen_http_err(he: "HTTPException", what: str) -> dict:
     return {"error": f"could not {what}: {str(d)[:200]}"}
 
 
+def _enrich_repair_tickets(db, tid: str, tickets, ro) -> dict:
+    """Attach email thread snippets so chat never invents silence."""
+    enriched = []
+    for t in tickets:
+        ser = ro.serialize_ticket(t)
+        try:
+            hist = ro._recent_checkins(db, t.id, limit=6)
+            email_hist = [c for c in hist if (c.channel or "") == "email"]
+            last_in = next(
+                (c for c in reversed(email_hist) if c.direction == "inbound"),
+                None,
+            )
+            last_out = next(
+                (c for c in reversed(email_hist) if c.direction == "outbound"),
+                None,
+            )
+            ser["last_inbound_at"] = ro._iso(last_in.created_at) if last_in else None
+            ser["last_inbound_preview"] = (last_in.body or "")[:280] if last_in else None
+            ser["last_outbound_at"] = ro._iso(last_out.created_at) if last_out else None
+            ser["email_thread"] = [
+                {
+                    "direction": c.direction,
+                    "via": c.via,
+                    "at": ro._iso(c.created_at),
+                    "preview": (c.body or "")[:200],
+                    "to_from": c.sent_to,
+                }
+                for c in email_hist[-4:]
+            ]
+        except Exception:
+            pass
+        enriched.append(ser)
+    return {
+        "ok": True,
+        "tickets": enriched,
+        "summary": ro.summarize_tickets(tickets),
+        "count": len(tickets),
+        "email_digest": ro.build_email_surface_digest(db, tid, limit=12),
+    }
+
+
 def _run_tool(
     name: str,
     args: dict,
@@ -6099,6 +6353,8 @@ def _run_tool(
         return _request_capability_tool(db, tenant, args)
     if name == "check_email_delivery":
         return _check_email_delivery_tool(db, tenant, args)
+    if name == "see_screen":
+        return _see_screen_tool(db, tenant, args)
     if name == "list_gen_clients":
         return _list_gen_clients_tool(db, tenant, args)
     if name == "get_gen_client":
@@ -6332,44 +6588,44 @@ def _run_tool(
             array_id=args.get("array_id"),
             active_only=bool(args.get("active_only", True)),
         )
-        # Attach last inbound/outbound email snippets so chat never invents silence
-        enriched = []
-        for t in tickets:
-            ser = ro.serialize_ticket(t)
+        return _enrich_repair_tickets(db, tid, tickets, ro)
+
+    if name == "search_repair_tickets":
+        from . import repair_ops as ro
+        from datetime import datetime as _dt
+
+        def _parse_dt(raw):
+            if not raw:
+                return None
+            s = str(raw).strip()
             try:
-                hist = ro._recent_checkins(db, t.id, limit=6)
-                email_hist = [c for c in hist if (c.channel or "") == "email"]
-                last_in = next(
-                    (c for c in reversed(email_hist) if c.direction == "inbound"),
-                    None,
-                )
-                last_out = next(
-                    (c for c in reversed(email_hist) if c.direction == "outbound"),
-                    None,
-                )
-                ser["last_inbound_at"] = ro._iso(last_in.created_at) if last_in else None
-                ser["last_inbound_preview"] = (last_in.body or "")[:280] if last_in else None
-                ser["last_outbound_at"] = ro._iso(last_out.created_at) if last_out else None
-                ser["email_thread"] = [
-                    {
-                        "direction": c.direction,
-                        "via": c.via,
-                        "at": ro._iso(c.created_at),
-                        "preview": (c.body or "")[:200],
-                        "to_from": c.sent_to,
-                    }
-                    for c in email_hist[-4:]
-                ]
+                if len(s) == 10 and s[4] == "-":
+                    return _dt.fromisoformat(s)
+                return _dt.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
             except Exception:
-                pass
-            enriched.append(ser)
-        return {
-            "ok": True,
-            "tickets": enriched,
-            "summary": ro.summarize_tickets(tickets),
-            "count": len(tickets),
-            "email_digest": ro.build_email_surface_digest(db, tid, limit=12),
+                return None
+
+        tickets = ro.search_tickets(
+            db, tid,
+            array_name=args.get("array_name"),
+            array_id=args.get("array_id"),
+            keyword=args.get("keyword"),
+            date_from=_parse_dt(args.get("date_from")),
+            date_to=_parse_dt(args.get("date_to")),
+            status=args.get("status"),
+            active_only=bool(args.get("active_only", False)),
+            include_history=not bool(args.get("active_only", False)),
+            limit=int(args.get("limit") or 50),
+        )
+        out = _enrich_repair_tickets(db, tid, tickets, ro)
+        out["search"] = {
+            "array_name": args.get("array_name"),
+            "keyword": args.get("keyword"),
+            "date_from": args.get("date_from"),
+            "date_to": args.get("date_to"),
+            "status": args.get("status"),
         }
+        return out
 
     if name == "open_repair_ticket":
         from . import repair_ops as ro
@@ -6427,6 +6683,7 @@ def _run_tool(
             "tech_note": args.get("tech_note"),
             "description": args.get("description"),
             "scheduled_for": args.get("scheduled_for"),
+            "checkin_interval_hours": args.get("checkin_interval_hours"),
         }
         if needs:
             return {
@@ -6450,6 +6707,15 @@ def _run_tool(
                 else:
                     from datetime import datetime
                     sched = datetime.fromisoformat(raw.replace("Z", "+00:00")).replace(tzinfo=None)
+            clear_interval = False
+            interval = payload.get("checkin_interval_hours")
+            if interval is not None:
+                try:
+                    if int(interval) == 0:
+                        clear_interval = True
+                        interval = None
+                except (TypeError, ValueError):
+                    pass
             ro.update_ticket(
                 db, t, ticket,
                 status=payload.get("status"),
@@ -6458,6 +6724,8 @@ def _run_tool(
                 description=payload.get("description"),
                 scheduled_for=sched,
                 clear_scheduled=clear_sched,
+                checkin_interval_hours=None if clear_interval else interval,
+                clear_checkin_interval=clear_interval,
             )
             db.commit()
             return {"ok": True, "ticket": ro.serialize_ticket(ticket)}
@@ -6906,6 +7174,41 @@ def _run_tool(
         return _list_reminders_tool(db, tenant, args)
     if name == "cancel_reminder":
         return _cancel_reminder_tool(db, tenant, args)
+
+    if name == "capture_health_detail":
+        from . import ea_ops_tools as eot
+        return eot.capture_health_detail(db, tenant, args=args)
+
+    if name == "fleet_financial_health":
+        from . import ea_ops_tools as eot
+        return eot.fleet_financial_health(db, tenant, args=args)
+
+    if name == "underperformer_history":
+        from . import ea_ops_tools as eot
+        return eot.underperformer_history(db, tenant, args=args)
+
+    if name == "save_document":
+        from . import ea_ops_tools as eot
+        needs = bool(args.get("needs_confirm", False))
+        if needs:
+            return {
+                "status": "pending_confirm",
+                "pending": {"tool": name, "args": args},
+                "message": "Save document — confirm.",
+                "needs_confirm": True,
+            }
+        out = eot.save_document(db, tenant, args=args)
+        if out.get("ok"):
+            db.commit()
+        return out
+
+    if name == "list_documents":
+        from . import ea_ops_tools as eot
+        return eot.list_documents(
+            db, tenant,
+            ticket_id=args.get("ticket_id"),
+            limit=int(args.get("limit") or 20),
+        )
 
     if name == "refresh_capture":
         needs = bool(args.get("needs_confirm", True))
@@ -7962,10 +8265,30 @@ def _usage_cost(usage: dict) -> float:
     return (pin / 1000.0) * COST_PER_1K_INPUT + (pout / 1000.0) * COST_PER_1K_OUTPUT
 
 
+# Only fire the auto-build fast path on an UNAMBIGUOUS visual COMPLAINT/FIX
+# request — never on a neutral mention or a QUESTION. The old regex matched the
+# bare word "button" (also chip/badge), so "what's the point of this button?"
+# auto-filed a build instead of being answered (Ford 2026-07-17). A UI noun now
+# must be paired with complaint/imperative sentiment; anything ambiguous falls
+# through to the LLM, which can answer (with screen vision) or propose a change.
 _VISUAL_FIX_RE = re.compile(
-    r"\b(color|colour|look(s|ing)?|ugly|pretty|style|styling|theme|contrast|"
-    r"button|chip|badge|doesn.?t look|does not look|fix the (color|colour|button)|"
-    r"hard to (read|see|scan))\b",
+    r"\b("
+    r"ugly|too (busy|cluttered|small|big|much|loud)|cluttered|overwhelming|"
+    r"looks? (bad|wrong|off|broken|ugly|cluttered|weird)|"
+    r"doesn.?t look (right|good|great)|does not look (right|good|great)|"
+    r"hard to (read|see|scan)|"
+    r"(fix|change|clean up|improve|redesign|tweak) (the |this )?(color|colour|button|chip|badge|"
+    r"card|banner|header|nav|footer|styling|style|layout|spacing|look|contrast|font|ui|design)|"
+    r"(color|colour|button|chip|badge|card|banner|header|nav|font|spacing|layout|contrast|style)"
+    r"[\w\s]{0,30}(is|are|looks|feels)? ?(bad|ugly|wrong|off|broken|cluttered|too (small|big))"
+    r")\b",
+    re.I,
+)
+# Question / explanation shapes — these are ASKS about the UI, never fix requests.
+_UI_QUESTION_RE = re.compile(
+    r"(^|\b)(what('?s| is| are| does| do| were)?|why|how|where|which|who|when|"
+    r"explain|describe|tell me|point of|purpose of|meant? for|what does .* do|"
+    r"do(es)? (it|this|that|the button) do)\b",
     re.I,
 )
 
@@ -7979,6 +8302,11 @@ def _visual_fix_fast_path(
     if not text or len(text) < 8:
         return None
     force = bool(ctx.get("visual_fix_fast") or ctx.get("prefer_short_reply"))
+    # A QUESTION about the UI ("what's the point of this button", "what does X
+    # do", "why is this here") is NOT a fix request — never auto-file a build;
+    # let the LLM answer it (with screen vision). Ford 2026-07-17.
+    if not force and _UI_QUESTION_RE.search(text):
+        return None
     if not force and not _VISUAL_FIX_RE.search(text):
         return None
     # Don't steal pure data asks that merely mention "look"
@@ -8111,6 +8439,30 @@ def _ea_ensure_asset_table(db=None) -> None:
         Base.metadata.create_all(bind=bind, tables=[EaChatAsset.__table__])
     except Exception:
         log.exception("ea_chat_assets table create failed")
+
+
+def _see_screen_tool(db, tenant: Tenant, args: dict) -> dict:
+    """Ask the browser to capture the owner's real screen. The frontend runs the
+    ui_command, screenshots the rendered page, uploads it as an image asset, and
+    re-invokes the turn WITH the image — which reaches Claude vision through the
+    normal attachment pipeline (_ea_user_content_multimodal). Request 60."""
+    reason = (args.get("reason") or "").strip()
+    return {
+        "status": "ui_command",
+        "command": {
+            "id": uuid.uuid4().hex[:12],
+            "type": "see_screen",
+            "reason": reason or "look at what's on screen",
+            "needs_confirm": False,
+        },
+        "message": "Capturing the screen — I'll look at it in a moment.",
+        "instruction_for_agent": (
+            "You asked to see the screen. Tell the owner in ONE short line that you're taking "
+            "a look, then STOP — the screenshot arrives on the next turn as an image you can "
+            "actually see. Don't guess at the UI now; wait for the image. If the app says "
+            "screen access isn't granted, ask the owner to click the eye button to allow it."
+        ),
+    }
 
 
 def _ea_ensure_email_delivery_table(db=None) -> None:
@@ -8611,7 +8963,15 @@ def _narrate_tool(name: str, args: dict) -> str | None:
         return "Let me see where your setup stands."
     if n in ("refresh_capture",):
         return "Kicking off a fresh data pull."
-    if n in ("repair_ops_overview", "list_service_contacts", "list_repair_tickets"):
+    if n in ("capture_health_detail",):
+        return "Checking why capture is stale."
+    if n in ("fleet_financial_health",):
+        return "Pricing what's at risk across the fleet."
+    if n in ("underperformer_history",):
+        return "Looking at the long-run underperformer pattern."
+    if n in ("save_document", "list_documents"):
+        return "Saving that as a durable document." if n == "save_document" else "Pulling up saved documents."
+    if n in ("repair_ops_overview", "list_service_contacts", "list_repair_tickets", "search_repair_tickets"):
         return "Checking on your repairs."
     if n in ("get_billing_rates",):
         return "Checking your rates."
@@ -8730,7 +9090,34 @@ def _agent_turn(
         if snap is not None:
             # Put snapshot outside the truncated dump so it never gets cut
             ctx_for_prompt = {k: v for k, v in ctx_for_prompt.items() if k != "fleet_attention_snapshot"}
+        # Prefer live DOM digest (what cards/tables show) — keep intact if present
+        live_dom = ctx_for_prompt.pop("live_ui_digest", None) if isinstance(ctx_for_prompt, dict) else None
+        user_interrupted = bool(
+            (context or {}).get("user_interrupted")
+            or (context or {}).get("voice_interrupted")
+            or (context or {}).get("barge_in")
+        )
         system += "\n\nUI context:\n" + json.dumps(ctx_for_prompt, default=str)[:2000]
+        if live_dom is not None:
+            system += (
+                "\n\nLIVE UI DIGEST (what is ON SCREEN right now — cards, chips, table rows; "
+                "trust this over a generic memory of the tab):\n"
+                + json.dumps(live_dom, default=str)[:5000]
+            )
+        if (context or {}).get("screen_vision_active"):
+            system += (
+                "\n\nYOU CAN SEE THE SCREEN: a LIVE SCREENSHOT of the owner's current screen is "
+                "ATTACHED to this message as an image. LOOK at it and answer from what you actually "
+                "see — the layout, buttons, colors, what is and isn't rendered. This is real vision, "
+                "not the text digest. Never say you can't see the screen, never OFFER to look, and "
+                "do NOT call see_screen — you already have the image. Diagnose from the pixels."
+            )
+        if user_interrupted:
+            system += (
+                "\n\nUSER INTERRUPTED: the owner barged in / stopped your previous voice or "
+                "in-flight answer mid-turn. Do NOT finish the old path. Acknowledge briefly "
+                "if needed, then answer ONLY their new question. Course-correct immediately."
+            )
         if snap is not None:
             system += (
                 "\n\nFLEET ATTENTION SNAPSHOT (GROUND TRUTH — same live view as Spreadsheet "
@@ -9387,7 +9774,7 @@ def _realtime_session_config(voice: str | None = None) -> dict:
         "audio": {
             "output": {"voice": voice or OPENAI_REALTIME_VOICE},
             "input": {
-                "transcription": {"model": "gpt-4o-mini-transcribe"},
+                "transcription": {"model": "gpt-4o-mini-transcribe", "prompt": _STT_VOCAB_PROMPT},
                 "noise_reduction": {"type": "near_field"},
                 "turn_detection": turn,
             },
@@ -9938,6 +10325,54 @@ def ui_result(body: UiResultIn, authorization: str | None = Header(default=None)
         ))
         db.commit()
         return {"ok": True}
+
+
+@router.get("/v1/energy-agent/documents")
+def list_agent_documents(
+    ticket_id: int | None = None,
+    limit: int = 20,
+    authorization: str | None = Header(default=None),
+):
+    """List durable artifacts saved via save_document."""
+    t = _auth(authorization)
+    from . import ea_ops_tools as eot
+    with SessionLocal() as db:
+        return eot.list_documents(db, t, ticket_id=ticket_id, limit=limit)
+
+
+@router.get("/v1/energy-agent/documents/{doc_id}")
+def get_agent_document(
+    doc_id: int,
+    authorization: str | None = Header(default=None),
+):
+    """Fetch one saved document (JSON body + pdf_path)."""
+    t = _auth(authorization)
+    from . import ea_ops_tools as eot
+    with SessionLocal() as db:
+        return eot.get_document(db, t, doc_id)
+
+
+@router.get("/v1/energy-agent/documents/{doc_id}/pdf")
+def get_agent_document_pdf(
+    doc_id: int,
+    authorization: str | None = Header(default=None),
+):
+    """Download the PDF for a saved document when available."""
+    from fastapi.responses import FileResponse
+    from fastapi import HTTPException
+    t = _auth(authorization)
+    from .models import AgentDocument
+    with SessionLocal() as db:
+        doc = db.get(AgentDocument, int(doc_id))
+        if doc is None or doc.tenant_id != t.id:
+            raise HTTPException(404, "document not found")
+        if not doc.pdf_path or not os.path.isfile(doc.pdf_path):
+            raise HTTPException(404, "PDF not available")
+        return FileResponse(
+            doc.pdf_path,
+            media_type="application/pdf",
+            filename=f"{(doc.title or 'document')[:60]}.pdf",
+        )
 
 
 @router.get("/v1/energy-agent/budget")

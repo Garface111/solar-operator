@@ -102,6 +102,15 @@ def post_merge_health() -> str:
 
 def ensure_clean_main():
     git("fetch", "origin", "main", check=False)
+    # COOPERATIVE GUARD (Ford 2026-07-17): check for uncommitted tracked edits
+    # BEFORE the destructive reset, not after — the old post-reset check was
+    # useless because reset --hard had already wiped the work. Refuse to reset
+    # over live interactive edits on the shared tree.
+    pre = git("status", "--porcelain", "--untracked-files=no", check=False).stdout.strip()
+    if pre:
+        raise RuntimeError(
+            f"working tree has uncommitted tracked edits ({len(pre.splitlines())} file(s)) "
+            "— refusing to reset over live work")
     git("checkout", "main")
     git("reset", "--hard", "origin/main", check=False)
     st = git("status", "--porcelain", "--untracked-files=no").stdout.strip()

@@ -2148,6 +2148,9 @@ class RepairTicket(Base):
     next_checkin_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     last_checkin_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     checkin_count: Mapped[int] = mapped_column(Integer, default=0)
+    # Per-ticket cadence override (hours). Null → use tenant.repair_checkin_hours.
+    # Set via update_repair_ticket(checkin_interval_hours=72) for "every 3 days until resolved".
+    checkin_interval_hours: Mapped[int | None] = mapped_column(Integer, nullable=True)
     scheduled_for: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     tech_note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -2190,4 +2193,30 @@ class RepairCheckIn(Base):
 
     __table_args__ = (
         Index("ix_repair_checkins_ticket", "ticket_id", "created_at"),
+    )
+
+
+class AgentDocument(Base):
+    """Durable artifact produced by Energy Agent (warranty claim draft, diagnostic
+    note, service request, etc.). Saved from chat via save_document; optional PDF
+    on disk under storage/agent_docs/. Attaches to a repair ticket when given.
+    """
+    __tablename__ = "agent_documents"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    ticket_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("repair_tickets.id"), nullable=True, index=True
+    )
+    # warranty_claim | diagnostic | service_request | note | other
+    doc_type: Mapped[str] = mapped_column(String(40), default="note")
+    title: Mapped[str] = mapped_column(String(240))
+    content: Mapped[str] = mapped_column(Text)
+    content_format: Mapped[str] = mapped_column(String(16), default="markdown")  # markdown|text|html
+    pdf_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_by: Mapped[str] = mapped_column(String(24), default="agent")  # agent|owner|system
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+    __table_args__ = (
+        Index("ix_agent_documents_tenant_created", "tenant_id", "created_at"),
     )

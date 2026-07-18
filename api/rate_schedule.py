@@ -40,6 +40,17 @@ from .rates import DEFAULT_RATE_USD_PER_KWH, get_energy_rate
 
 AGE_THRESHOLD_YEARS = 11   # ≤11 vs >11 — VT 10-yr adder expiry boundary (+1 grace)
 
+# Non-production tenants whose SEEDED bills carry invented rates (api/seed_demo.py
+# rigs GMP bills at 0.140–0.176 $/kWh) and must NEVER enter the cross-tenant
+# medians that price REAL invoices — _fleet_credit_rate (banked-month reference)
+# and derive_blended_rate_from_bills (the RateSchedule discount basis). Both of
+# these tenants carry is_demo=False — a known seed-hygiene gap (SHARED-BACKLOG
+# 2026-07-16, fold-backend) — so the usual Tenant.is_demo filter alone does NOT
+# catch them; we filter is_demo AND this explicit set (belt and suspenders). The
+# systemic fix (marking them is_demo=True) is Ford's call: it flips
+# ten_demo_realistic to read-only (see the Tenant.is_demo note in models.py).
+SYNTHETIC_TENANT_IDS = ("ten_demo_realistic", "ten_ford_demo_100")
+
 
 # ─── 1. Derivation from captured bills ──────────────────────────────────────
 
@@ -294,12 +305,18 @@ def derive_blended_rate_from_bills(
     empty / falls back). Median is used (robust to outliers) over the bills whose
     period_end lands in [effective_start, effective_end).
     """
-    from .models import Bill, UtilityAccount, Array
+    from .models import Bill, UtilityAccount, Array, Tenant
 
+    # Same demo/synthetic exclusion as _fleet_credit_rate: this median feeds the
+    # RateSchedule table (the discount basis), so seeded non-production bills must
+    # never enter it. See SYNTHETIC_TENANT_IDS.
     q = (select(Bill, Array.first_connect_date)
          .join(UtilityAccount, Bill.account_id == UtilityAccount.id)
+         .join(Tenant, UtilityAccount.tenant_id == Tenant.id)
          .join(Array, UtilityAccount.array_id == Array.id, isouter=True)
          .where(UtilityAccount.provider == utility,
+                Tenant.is_demo.is_(False),
+                UtilityAccount.tenant_id.notin_(SYNTHETIC_TENANT_IDS),
                 Bill.raw_json.isnot(None),
                 Bill.period_end >= effective_start))
     if effective_end is not None:
@@ -474,6 +491,17 @@ def _median(vals: list[float]) -> Optional[float]:
     return round(statistics.median(vals), 5) if vals else None
 
 
+# A single mis-parsed bill (e.g. a $2,000 credit read onto a 10 kWh line = $200/kWh)
+# would otherwise skew a small median. A real cashed VT net-metering credit rate
+# lives in this band — outside it is parse noise (or a banked ~$0 month that slipped
+# the credit>0 filter). Mirrors blended_rate_from_bill's own 0.05–0.50 guard.
+CREDIT_RATE_LO, CREDIT_RATE_HI = 0.05, 0.50
+
+
+def _sane_credit_rate(r: float) -> bool:
+    return CREDIT_RATE_LO < r < CREDIT_RATE_HI
+
+
 def _account_credit_rate(db, utility_account_id: int) -> Optional[float]:
     """Median net-metering credit rate ($/kWh) over an account's CASHED months
     (solar_credit_usd > 0). None when the account has never cashed a credit."""
@@ -484,19 +512,27 @@ def _account_credit_rate(db, utility_account_id: int) -> Optional[float]:
             Bill.solar_credit_usd.isnot(None), Bill.solar_credit_usd > 0,
             Bill.kwh_sent_to_grid.isnot(None), Bill.kwh_sent_to_grid > 0)
     ).all()
-    return _median([float(c) / float(k) for c, k in rows if k])
+    rates = [float(c) / float(k) for c, k in rows if k]
+    return _median([r for r in rates if _sane_credit_rate(r)])
 
 
 def _fleet_credit_rate(db, *, provider: str, age_bucket: str,
                        min_samples: int = 8) -> Optional[float]:
     """Median credit rate across the fleet's CASHED bills in this provider + age
-    cell (so a never-cashing account is valued like its peers). None if too few."""
-    from .models import Bill, UtilityAccount, Array
+    cell (so a never-cashing account is valued like its peers). None if too few.
+
+    Excludes non-production (demo/synthetic) tenants — their seeded bills carry
+    invented rates that would poison the reference median used to price REAL
+    banked-month offtaker invoices. See SYNTHETIC_TENANT_IDS."""
+    from .models import Bill, UtilityAccount, Array, Tenant
     q = (select(Bill.solar_credit_usd, Bill.kwh_sent_to_grid,
                 Array.first_connect_date, Bill.period_end)
          .join(UtilityAccount, Bill.account_id == UtilityAccount.id)
+         .join(Tenant, UtilityAccount.tenant_id == Tenant.id)
          .join(Array, UtilityAccount.array_id == Array.id, isouter=True)
          .where(UtilityAccount.provider == provider,
+                Tenant.is_demo.is_(False),
+                UtilityAccount.tenant_id.notin_(SYNTHETIC_TENANT_IDS),
                 Bill.solar_credit_usd.isnot(None), Bill.solar_credit_usd > 0,
                 Bill.kwh_sent_to_grid.isnot(None), Bill.kwh_sent_to_grid > 0)
          # DETERMINISM (found 2026-07-02): prod has >20k qualifying bills, and
@@ -512,7 +548,9 @@ def _fleet_credit_rate(db, *, provider: str, age_bucket: str,
         ped = pe.date() if isinstance(pe, datetime) else pe
         if array_age_bucket(fc, ped) != age_bucket:
             continue
-        rates.append(float(cu) / float(k))
+        r = float(cu) / float(k)
+        if _sane_credit_rate(r):
+            rates.append(r)
     return _median(rates) if len(rates) >= min_samples else None
 
 

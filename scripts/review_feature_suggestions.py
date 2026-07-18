@@ -679,6 +679,17 @@ def judge_one(s, review):
 
 def _prep_work_branch(branch):
     """Put AO_FRONTEND on a clean branch from origin/main for the implement agent."""
+    # COOPERATIVE GUARD (Ford 2026-07-17, repo-hostility cleanup): NEVER reset
+    # --hard over uncommitted TRACKED edits. This harness resets the SHARED
+    # working tree every ~2 min; doing so mid-edit wiped interactive work and even
+    # corrupted a commit (message shipped, content didn't). Untracked files are
+    # excluded, so build artifacts / scratch scripts don't block. If the tree is
+    # dirty with tracked edits, SKIP this cycle — the suggestion stays 'new' and
+    # retries when the tree is clean. Cooperate, don't steamroll.
+    rc, st = _run(["git", "status", "--porcelain", "--untracked-files=no"])
+    if not rc and st.strip():
+        return False, ("skip: working tree has uncommitted tracked edits "
+                       f"({len(st.splitlines())} file(s)) — not resetting over live work")
     rc, o = _run(["git", "fetch", "origin"])
     if rc:
         return False, f"git fetch failed: {o}"
