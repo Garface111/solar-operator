@@ -226,6 +226,29 @@ def test_unit_specific_zero_while_peers_produced():
     assert ep["evidence"]["peers_producing_days"] == 2
 
 
+def test_two_units_down_together_are_not_each_described_as_alone():
+    """Real prod case (Benson Site, inverters 15 + 16, both dark from 2026-07-09):
+    two units down at once is still unit-specific, but calling each of them "alone"
+    is a small avoidable lie — and "two units down" is a different service call."""
+    tid, _key, _aid, sub, peers = _healthy_site(peers=3)
+    days = _span(date(2026, 7, 8), date(2026, 7, 9))
+    _zero_out(tid, sub, days)
+    _zero_out(tid, peers[0], days)          # a sibling goes down over the same period
+
+    ep = _build(tid, sub)["episodes"][0]
+    assert ep["cause_kind"] == "unit"        # the rest of the site produced => still ours
+    assert "alone" not in ep["cause"]
+    assert "1 other unit" in ep["cause"]
+    assert ep["evidence"]["peers_also_down"] == 1
+
+    # ...while a genuinely solitary failure still says "alone".
+    tid2, _k2, _a2, sub2, _p2 = _healthy_site(peers=3)
+    _zero_out(tid2, sub2, days)
+    ep2 = _build(tid2, sub2)["episodes"][0]
+    assert "This inverter alone" in ep2["cause"]
+    assert ep2["evidence"]["peers_also_down"] == 0
+
+
 def test_absent_rows_are_no_data_not_an_outage_verdict():
     """Absent != zero. If the array sent nothing, production is UNKNOWN — we list
     the gap but must not claim the inverter was down."""

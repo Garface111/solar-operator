@@ -275,6 +275,12 @@ def _describe_episode(db, tenant, iv, array_name, run: list[date],
     peer_rows_present = any(peer_rows.get(d) for d in run)
     array_rows_present = self_rows_present or peer_rows_present
     peer_producing_days = [d for d in run if any(v > 0.0 for v in peer_rows.get(d, {}).values())]
+    # Peers that ALSO never produced across the whole episode. Real fleets take two
+    # units down at once (prod: Benson Site, inverters 15 and 16, both dark from
+    # 2026-07-09) — calling each of them "alone" would be a small, avoidable lie, and
+    # "two units down together" is a materially different service call than one.
+    co_down = [p.id for p in peers
+               if not any(peer_rows.get(d, {}).get(p.id, 0.0) > 0.0 for d in run)]
 
     vendor = (iv.vendor or "the vendor").title() if iv.vendor else "the vendor"
     where = f"“{array_name}”" if array_name else "this array"
@@ -302,15 +308,20 @@ def _describe_episode(db, tenant, iv, array_name, run: list[date],
                  f"comms failure, or a vendor feed gap, rather than at this unit.")
     elif peers and peer_producing_days:
         cause_kind = "unit"
+        alone = not co_down
+        who = ("This inverter alone" if alone
+               else f"This inverter — and {_plural(len(co_down), 'other unit')} at the same site —")
         if not self_rows_present:
-            cause = (f"This inverter alone went silent while its neighbours at {where} "
-                     f"kept reporting production — no data from this unit, real output "
-                     f"from the others. That is a fault on this unit or its comms, not "
-                     f"a site-wide problem.")
+            cause = (f"{who} went silent while the rest of {where} kept reporting "
+                     f"production — no data from {'this unit' if alone else 'these units'}, "
+                     f"real output from the others. That points at the "
+                     f"{'unit' if alone else 'units'} or {'its' if alone else 'their'} "
+                     f"comms, not a site-wide problem.")
         else:
-            cause = (f"This inverter alone stopped while its neighbours at {where} kept "
-                     f"producing — a tripped string, a failed inverter, or a deliberate "
-                     f"shutdown. It is specific to this unit.")
+            cause = (f"{who} stopped while the rest of {where} kept producing — a tripped "
+                     f"string, a failed inverter, or a deliberate shutdown. "
+                     + ("It is specific to this unit." if alone else
+                        "The site as a whole was fine, so this is not a utility outage."))
     elif not peers:
         cause_kind = "unknown"
         cause = ("This inverter reported zero, but it is the only unit on this array, "
@@ -341,6 +352,7 @@ def _describe_episode(db, tenant, iv, array_name, run: list[date],
             "self_rows_present": self_rows_present,
             "array_rows_present": array_rows_present,
             "peers_producing_days": len(peer_producing_days),
+            "peers_also_down": len(co_down),
             "peer_count": len(peers),
         },
         "ticket": _find_ticket(db, tenant, iv, started_on, last_day, ongoing),
