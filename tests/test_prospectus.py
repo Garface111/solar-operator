@@ -253,6 +253,17 @@ def test_endpoints_build_share_publish_revoke():
     lst = c.get("/v1/array-owners/prospectuses", headers=H).json()
     assert any(p["document_id"] == doc_id for p in lst["prospectuses"])
 
+    # Owner render (un-redacted preview/download) — auth required, real PDF.
+    owner_pdf = c.get(f"/v1/array-owners/prospectus/{doc_id}/document?format=pdf", headers=H)
+    assert owner_pdf.status_code == 200
+    assert owner_pdf.headers["content-type"] == "application/pdf"
+    assert owner_pdf.content[:4] == b"%PDF"
+    owner_html = c.get(f"/v1/array-owners/prospectus/{doc_id}/document?format=html", headers=H)
+    assert owner_html.status_code == 200
+    assert "Londonderry School" in owner_html.text   # owner view = un-redacted
+    # Auth is required.
+    assert c.get(f"/v1/array-owners/prospectus/{doc_id}/document").status_code in (401, 403)
+
     # Mint a share — DEFAULTS to unpublished + redacted.
     sh = c.post(f"/v1/array-owners/prospectus/{doc_id}/share", json={}, headers=H).json()["share"]
     assert sh["published"] is False and sh["redact_offtaker_pii"] is True

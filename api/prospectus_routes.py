@@ -159,6 +159,25 @@ def get_prospectus_ep(document_id: int,
                 "shares": [_share_dict(s) for s in shares]}
 
 
+@router.get("/v1/array-owners/prospectus/{document_id}/document")
+def owner_render_ep(document_id: int, format: str = Query(default="pdf"),
+                    authorization: str | None = Header(default=None)) -> Response:
+    """Owner-scoped render of a stored prospectus (full, un-redacted) as PDF or
+    HTML — the "download / preview before you share" path. Auth required; the SPA
+    fetches this with its Bearer header and blob-opens the result."""
+    tenant = _tenant(authorization)
+    with SessionLocal() as db:
+        doc = db.get(AgentDocument, document_id)
+        if doc is None or doc.tenant_id != tenant.id or doc.doc_type != "prospectus":
+            raise HTTPException(404, "Prospectus not found")
+        payload = _load_payload(doc)
+    if format == "pdf":
+        pdf = prospectus_mod.render_prospectus_pdf(payload)
+        return Response(content=pdf, media_type="application/pdf", headers={
+            "Content-Disposition": f'inline; filename="prospectus-{document_id}.pdf"'})
+    return HTMLResponse(prospectus_mod.render_prospectus_html(payload))
+
+
 # ─────────────────────────── share management ───────────────────────────────
 
 class ShareBody(BaseModel):
