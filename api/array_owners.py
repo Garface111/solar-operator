@@ -1784,6 +1784,30 @@ def set_expected_low_ep(inverter_id: int, body: ExpectedLowBody,
         }
 
 
+@router.get("/v1/array-owners/inverters/{inverter_id}/outages")
+def inverter_outages_ep(inverter_id: int,
+                        days: int = Query(default=180, ge=1, le=730),
+                        authorization: str | None = Header(default=None)) -> dict:
+    """The OUTAGE LOG for one inverter — every episode where it stopped producing,
+    when it started, and the specific vendor fault code (or, failing that, our
+    honestly-labelled best guess) for why.
+
+    Powers the "Outage log" section of the inverter detail overlay. Read-only.
+    404s for an inverter that is not this tenant's — indistinguishable from one that
+    does not exist, so an id from another tenant leaks nothing.
+
+    See api/inverter_outage_log.py for the cause-attribution ladder and the honesty
+    rules (night is never an outage; absent is not zero; estimates are labelled).
+    """
+    from . import inverter_outage_log
+    tenant = _tenant_from_bearer(authorization)
+    with SessionLocal() as db:
+        log_data = inverter_outage_log.build_outage_log(db, tenant, inverter_id, days=days)
+        if log_data is None:
+            raise HTTPException(404, "Inverter not found")
+        return log_data
+
+
 @router.get("/v1/array-owners/utility-accounts")
 def list_utility_accounts_ep(authorization: str | None = Header(default=None)) -> dict:
     """The tenant's captured GMP/utility accounts and which array each is linked
