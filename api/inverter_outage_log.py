@@ -220,9 +220,21 @@ def build_outage_log(db, tenant, inverter_id: int, days: int = DEFAULT_WINDOW_DA
     ]
 
     # ── contiguous grouping ───────────────────────────────────────────────────────
+    # Days group into an episode when they are consecutive AND rest on the same kind of
+    # evidence. That second condition is not fussiness — it is rule 2 applied at the
+    # episode level. Real prod case (Chester, ten_ford_demo_100): the array reported a
+    # genuine all-zero day on 2026-07-11 and then sent NOTHING from 07-12 onward. Grouped
+    # as one 7-day run it would claim "every inverter reported zero" for six days on which
+    # no inverter reported anything at all. Split, it tells the truth twice: the site read
+    # zero for a day, and we have had no data since — which correctly points a Fronius
+    # owner at their stalled capture rather than at a week-long site outage.
+    day_has_rows = {d: (d in self_rows or bool(peer_rows.get(d))) for d in all_days}
     runs: list[list[date]] = []
     for d in outage_days:
-        if runs and (d - runs[-1][-1]).days == 1:
+        prev = runs[-1][-1] if runs else None
+        same_run = (prev is not None and (d - prev).days == 1
+                    and day_has_rows[d] == day_has_rows[prev])
+        if same_run:
             runs[-1].append(d)
         else:
             runs.append([d])

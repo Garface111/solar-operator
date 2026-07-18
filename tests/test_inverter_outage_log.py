@@ -270,6 +270,32 @@ def test_absent_rows_are_no_data_not_an_outage_verdict():
     assert _build(tid2, sub2)["episodes"][0]["cause_kind"] == "site_wide"
 
 
+def test_a_zero_day_followed_by_a_feed_gap_splits_into_two_honest_episodes():
+    """Real prod case (Chester, ten_ford_demo_100): the array reported a true all-zero
+    day and then went silent. One merged episode would claim "every inverter reported
+    zero" across days on which nothing reported at all — so contiguous days only group
+    when they rest on the SAME evidence."""
+    tid, _key, _aid, sub, peers = _healthy_site()
+    zero_day = [date(2026, 7, 11)]
+    gap_days = _span(date(2026, 7, 12), WINDOW_END)
+    for i in [sub, *peers]:
+        _zero_out(tid, i, zero_day)                    # reported, and it was zero
+        _zero_out(tid, i, gap_days, delete=True)       # reported nothing at all
+
+    eps = _build(tid, sub)["episodes"]
+    assert len(eps) == 2, [(e["started_on"], e["days"], e["cause_kind"]) for e in eps]
+
+    gap, dark = eps                                    # newest first
+    assert gap["cause_kind"] == "no_data" and gap["ongoing"] is True
+    assert gap["started_on"] == "2026-07-12"
+    assert gap["days"] == len(gap_days)
+    assert dark["cause_kind"] == "site_wide"
+    assert dark["started_on"] == "2026-07-11" and dark["days"] == 1
+
+    # The summary still counts every offline day — splitting clarifies, it doesn't hide.
+    assert _build(tid, sub)["summary"]["outage_days"] == 1 + len(gap_days)
+
+
 def test_solo_inverter_zero_is_honestly_unknown():
     tid, _key, _aid, sub, _peers = _healthy_site(peers=0)
     _zero_out(tid, sub, _span(date(2026, 7, 8), date(2026, 7, 9)))
