@@ -9104,6 +9104,14 @@ def _agent_turn(
                 "trust this over a generic memory of the tab):\n"
                 + json.dumps(live_dom, default=str)[:5000]
             )
+        if (context or {}).get("screen_vision_active"):
+            system += (
+                "\n\nYOU CAN SEE THE SCREEN: a LIVE SCREENSHOT of the owner's current screen is "
+                "ATTACHED to this message as an image. LOOK at it and answer from what you actually "
+                "see — the layout, buttons, colors, what is and isn't rendered. This is real vision, "
+                "not the text digest. Never say you can't see the screen, never OFFER to look, and "
+                "do NOT call see_screen — you already have the image. Diagnose from the pixels."
+            )
         if user_interrupted:
             system += (
                 "\n\nUSER INTERRUPTED: the owner barged in / stopped your previous voice or "
