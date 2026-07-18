@@ -2341,7 +2341,11 @@ def execute_brain_actions(db, actions: list[dict], *, tick_id: str) -> list[dict
             )
         elif atype in ("credentials_list", "credential_inventory"):
             from .energy_agent_sovereign_ops import list_credential_inventory
-            res = list_credential_inventory(db, limit=int(raw.get("limit") or 40))
+            res = list_credential_inventory(
+                db,
+                limit=int(raw.get("limit") or 40),
+                tenant_id=raw.get("tenant_id"),
+            )
         elif atype in ("memory_set", "own_memory") and raw.get("key"):
             from .energy_agent_sovereign_ops import own_memory_write
             res = own_memory_write(

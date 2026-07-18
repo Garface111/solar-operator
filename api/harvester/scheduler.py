@@ -42,12 +42,23 @@ def _tenant_allowlist() -> set[str]:
 
 
 def _tenant_allowed(db, tenant_id: str, allow_real: bool, allowlist: set[str]) -> bool:
+    """Gate harvest by tenant lifecycle + real-customer switch.
+
+    ALWAYS refuses inactive tenants — cancelled customers must never be logged
+    into after churn (legal exposure, not just product hygiene). The real-
+    customer / demo / allowlist gates only apply among active tenants.
+    """
+    t = db.get(Tenant, tenant_id)
+    if t is None:
+        return False
+    # Hard stop: churned / purged / cancelled → never harvest.
+    if not bool(getattr(t, "active", False)):
+        return False
     if allow_real:
         return True
     if tenant_id in allowlist:
         return True
-    t = db.get(Tenant, tenant_id)
-    return bool(t and getattr(t, "is_demo", False))
+    return bool(getattr(t, "is_demo", False))
 
 
 # ── Lockout safety (the hard constraint: never lock a customer out of their own
@@ -76,27 +87,55 @@ def _is_due(c, _now) -> bool:
 
 
 def due_credentials() -> list[tuple[str, str, str]]:
-    """(tenant_id, provider, username_lc) for every credential due a harvest."""
+    """(tenant_id, provider, username_lc) for every credential due a harvest.
+
+    IMPORTANT: never SELECT secret_enc / session_state_enc here. EncryptedStr
+    decrypts on row-fetch, and a fleet-wide due-scan used to unwrap the entire
+    vault every tick (~2.8k full-vault decrypts/day) just to evaluate cadence.
+    Decrypt happens just-in-time inside the harvest job via load_creds().
+    """
     if not config.enabled():
         return []
+    from sqlalchemy.orm import load_only
+
     allow_real = config.allow_real_customers()
     allowlist = _tenant_allowlist()
     _now = now()
     out: list[tuple[str, str, str]] = []
     with SessionLocal() as db:
+        # Scheduling columns only + IS NOT NULL on secret (no decrypt).
+        # Join active tenants in SQL so inactive never even reach Python.
         rows = db.execute(
-            select(PortalCredential).where(
-                PortalCredential.cloud_capture_enabled.is_(True)
+            select(PortalCredential)
+            .join(Tenant, Tenant.id == PortalCredential.tenant_id)
+            .where(
+                PortalCredential.cloud_capture_enabled.is_(True),
+                PortalCredential.secret_enc.isnot(None),
+                Tenant.active.is_(True),
+            )
+            .options(
+                load_only(
+                    PortalCredential.id,
+                    PortalCredential.tenant_id,
+                    PortalCredential.provider,
+                    PortalCredential.username_lc,
+                    PortalCredential.harvest_fails,
+                    PortalCredential.last_harvest_at,
+                    PortalCredential.cloud_capture_enabled,
+                )
             )
         ).scalars().all()
+        # Cache allow decisions per tenant_id (demo/allowlist still need Tenant).
+        allowed_cache: dict[str, bool] = {}
         for c in rows:
-            if not c.secret_enc:
-                continue
             if not _is_due(c, _now):
                 continue
-            if not _tenant_allowed(db, c.tenant_id, allow_real, allowlist):
+            tid = c.tenant_id
+            if tid not in allowed_cache:
+                allowed_cache[tid] = _tenant_allowed(db, tid, allow_real, allowlist)
+            if not allowed_cache[tid]:
                 continue
-            out.append((c.tenant_id, c.provider, c.username_lc))
+            out.append((tid, c.provider, c.username_lc))
     return out
 
 

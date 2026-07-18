@@ -199,13 +199,22 @@ def _start_health_server():
 
 
 def _maybe_seed():
-    """One-time in-container credential bootstrap. If CC_SEED_USERNAME +
-    CC_SEED_PASSWORD are set, resolve the tenant (CC_SEED_TENANT, or by an array
-    name via CC_SEED_ARRAY_LIKE) and upsert an ENABLED Cloud Capture credential,
-    then continue into the loop. Idempotent; NEVER logs the password. Remove the
-    CC_SEED_* env vars after the first boot so the secret does not linger."""
+    """One-time in-container credential bootstrap — DISABLED by default (T2-8).
+
+    Requires CC_SEED_ALLOW=1 PLUS CC_SEED_USERNAME + CC_SEED_PASSWORD. After a
+    successful seed, operators must delete all CC_SEED_* vars immediately.
+    Leaving a portal password in Railway env is forbidden long-term.
+    """
     import logging
     log = logging.getLogger("harvester.seed")
+    if (os.environ.get("CC_SEED_ALLOW") or "").strip().lower() not in ("1", "true", "yes", "on"):
+        # If password is still present without allow flag, scream once — don't use it.
+        if os.environ.get("CC_SEED_PASSWORD"):
+            log.error(
+                "CC_SEED_PASSWORD is set but CC_SEED_ALLOW!=1 — refusing to seed. "
+                "Remove CC_SEED_PASSWORD from the service env now."
+            )
+        return
     user = os.environ.get("CC_SEED_USERNAME")
     pw = os.environ.get("CC_SEED_PASSWORD")
     if not (user and pw):
@@ -236,7 +245,7 @@ def _maybe_seed():
         log.info("seed: cloud-capture cred upserted (tenant=%s provider=%s) — "
                  "remove CC_SEED_* env now", tenant, provider)
     except Exception as exc:                          # never let a seed error kill the loop
-        log.warning("seed failed (continuing): %s", exc)
+        log.warning("seed failed (continuing): %s", type(exc).__name__)
 
 
 if __name__ == "__main__":

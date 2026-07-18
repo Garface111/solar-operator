@@ -631,6 +631,24 @@ async def client_error(request: Request):
     if not message and not stack:
         return {"ok": True, "ignored": "empty"}
 
+    # Redact token-bearing query strings before they leave the process (T2-9).
+    def _scrub_url(u: str) -> str:
+        low = u.lower()
+        for needle in ("token=", "session=", "access_token=", "code=", "key=", "magic="):
+            if needle in low:
+                # keep origin+path only
+                try:
+                    from urllib.parse import urlsplit, urlunsplit
+                    p = urlsplit(u)
+                    return urlunsplit((p.scheme, p.netloc, p.path, "", ""))
+                except Exception:
+                    return u.split("?")[0]
+        return u
+    url = _scrub_url(url)
+    # Drop stacks that embed bearer/session fragments
+    if any(x in stack.lower() for x in ("bearer ", "session_token", "so_session", "emchg_")):
+        stack = "[stack redacted — contained credential-like tokens]"
+
     log.warning("client_error[%s] %s | url=%s", source, message, url)
 
     # Forward to Sentry (no-op if unconfigured) with client context.
@@ -2019,7 +2037,9 @@ def admin_vendor_cred_encryption(mode: str = "dryrun", x_maint_key: str | None =
       apply         — encrypt plaintext rows under SO_CONFIG_KEY
       verify        — decrypt every connection + hit its vendor read-only (live check)
       decrypt       — report the ciphertext that WOULD be unwrapped (no writes)
-      decrypt-apply — unwrap ciphertext back to plaintext (rollback; needs the key)
+
+    ``decrypt-apply`` (fleet-wide plaintext rewrite) was REMOVED after rollout —
+    residual risk of leaving SO_MAINT_KEY set with a destructive mode live.
 
     Returns the report dict + the captured human-readable log.
     """
@@ -2041,18 +2061,24 @@ def admin_vendor_cred_encryption(mode: str = "dryrun", x_maint_key: str | None =
             rep = ev.process(engine, mode="encrypt", apply=False, out=out)
         elif m == "decrypt":
             rep = ev.process(engine, mode="decrypt", apply=False, out=out)
-        elif m == "decrypt-apply":
-            rep = ev.process(engine, mode="decrypt", apply=True, out=out)
+        elif m in ("decrypt-apply", "decrypt_apply"):
+            raise HTTPException(
+                410,
+                "decrypt-apply was removed after encryption rollout — "
+                "use scripts/encrypt_vendor_credentials.py offline if rollback is required",
+            )
         else:
-            raise HTTPException(400, "mode must be dryrun|apply|verify|decrypt|decrypt-apply")
+            raise HTTPException(400, "mode must be dryrun|apply|verify|decrypt")
     except HTTPException:
         raise
     except (Exception, SystemExit) as exc:  # noqa: BLE001 — the script raises SystemExit
         # when SO_CONFIG_KEY is unset; surface every failure in the body, don't 500-blind.
         return {"ok": False, "mode": m, "encryption_enabled": crypto.encryption_enabled(),
                 "error": f"{type(exc).__name__}: {exc}", "log": log}
+    # Never return per-row secret previews in the HTTP body.
+    safe_log = [ln for ln in log if " [" not in ln or "→" in ln or "MODE" in ln or "total" in ln]
     return {"ok": True, "mode": m, "encryption_enabled": crypto.encryption_enabled(),
-            "report": rep, "log": log}
+            "report": rep, "log": safe_log}
 
 
 @app.post("/admin/rate-schedule/refresh")

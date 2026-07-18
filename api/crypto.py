@@ -109,6 +109,19 @@ def encryption_enabled() -> bool:
     return _fernet() is not None
 
 
+def vault_decrypt_enabled() -> bool:
+    """Whether this process may decrypt Cloud Capture vault secrets.
+
+    Split-key posture (T1-1): public ``web`` encrypts on collect but must not hold
+    decrypt capability for portal passwords. Set ``SO_VAULT_DECRYPT=0`` on web;
+    only ``cloud-capture-harvester`` (and offline rotation tooling) sets it on
+    (default ON when unset, for backward-compatible single-process deploys).
+    Vendor API keys / utility JWTs still use :func:`decrypt_str` (shared key).
+    """
+    raw = (os.environ.get("SO_VAULT_DECRYPT") or "1").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
 def is_encrypted(value: Any) -> bool:
     """True if ``value`` is a stored ciphertext envelope (vs plaintext)."""
     return isinstance(value, str) and value.startswith(_PREFIX)
@@ -144,7 +157,30 @@ def decrypt_str(value: str) -> str:
             f"Restore the key to read them, or run the decrypt migration "
             f"(scripts/encrypt_vendor_credentials.py --decrypt) before removing it."
         )
-    return f.decrypt(value[len(_PREFIX):].encode("ascii")).decode("utf-8")
+    plain = f.decrypt(value[len(_PREFIX):].encode("ascii")).decode("utf-8")
+    # Detective control: volume + context without the secret itself.
+    try:
+        log.info("crypto_decrypt kind=shared envelope=SOENC1")
+    except Exception:
+        pass
+    return plain
+
+
+def decrypt_vault_str(value: str) -> str:
+    """Decrypt a Cloud Capture vault secret — refused when SO_VAULT_DECRYPT=0."""
+    if not is_encrypted(value):
+        return value
+    if not vault_decrypt_enabled():
+        raise RuntimeError(
+            "Vault decrypt is disabled in this process (SO_VAULT_DECRYPT=0). "
+            "Only the harvester role may unwrap portal passwords."
+        )
+    plain = decrypt_str(value)
+    try:
+        log.info("crypto_decrypt kind=vault envelope=SOENC1")
+    except Exception:
+        pass
+    return plain
 
 
 class EncryptedJSON(TypeDecorator):
@@ -202,3 +238,44 @@ class EncryptedStr(TypeDecorator):
         if not isinstance(value, str):
             return value
         return decrypt_str(value)
+
+
+class EncryptedVaultStr(TypeDecorator):
+    """Portal password column — encrypt everywhere; decrypt only when allowed.
+
+    Used for ``PortalCredential.secret_enc``. Public web can collect (encrypt)
+    without being able to unwrap the fleet vault if ``SO_VAULT_DECRYPT=0``.
+    """
+    impl = Text
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        return encrypt_str(str(value))
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            return value
+        return decrypt_vault_str(value)
+
+
+class EncryptedVaultJSON(TypeDecorator):
+    """Playwright session_state — same split-key posture as EncryptedVaultStr."""
+    impl = Text
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        payload = json.dumps(value, separators=(",", ":"), sort_keys=True)
+        return encrypt_str(payload)
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        if isinstance(value, (dict, list)):
+            return value
+        return json.loads(decrypt_vault_str(value))

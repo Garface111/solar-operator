@@ -9,7 +9,7 @@ around two rules:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from sqlalchemy import select
@@ -30,9 +30,10 @@ class Creds:
     tenant_id: str
     provider: str
     username: str
-    password: str            # plaintext, JIT — never log this
+    # plaintext, JIT — NEVER log / NEVER appear in repr (Sentry locals)
+    password: str = field(repr=False)
     login_host: str | None
-    session_state: dict | None
+    session_state: dict | None = field(repr=False, default=None)
 
 
 def crypto_ready() -> bool:
@@ -120,11 +121,56 @@ def save_session_state(db, cred: PortalCredential, storage_state: dict | None) -
 
 
 def list_all_meta(db, *, limit: int = 100, tenant_id: str | None = None) -> list[dict]:
-    """Fleet credential inventory for Sovereign/ops — metadata only, never secrets."""
-    q = select(PortalCredential).order_by(PortalCredential.updated_at.desc())
-    if tenant_id:
-        q = q.where(PortalCredential.tenant_id == tenant_id)
+    """Credential inventory for Sovereign/ops — metadata only, never secrets.
+
+    ``tenant_id`` is REQUIRED for fleet safety. Pass an explicit tenant to list;
+    fleet-wide inventory is refused here (callers that need cross-tenant ops must
+    use an admin path with a separate hard gate, not the desk).
+    """
+    if not tenant_id:
+        raise ValueError(
+            "list_all_meta requires tenant_id — fleet-wide credential inventory "
+            "is disabled (privilege-escalation guard)"
+        )
+    from sqlalchemy.orm import load_only
+
+    q = (
+        select(PortalCredential)
+        .where(PortalCredential.tenant_id == tenant_id)
+        .order_by(PortalCredential.updated_at.desc())
+        .options(
+            load_only(
+                PortalCredential.id,
+                PortalCredential.tenant_id,
+                PortalCredential.provider,
+                PortalCredential.username,
+                PortalCredential.username_lc,
+                PortalCredential.login_host,
+                PortalCredential.cloud_capture_enabled,
+                PortalCredential.last_harvest_at,
+                PortalCredential.last_harvest_ok,
+                PortalCredential.harvest_fails,
+                PortalCredential.updated_at,
+                # has_secret / has_session via IS NOT NULL expressions below —
+                # still need the columns deferred: use raw null checks without
+                # loading decrypted values via undefer of the encrypted cols.
+            )
+        )
+    )
     rows = db.execute(q.limit(limit)).scalars().all()
+    # Null-check encrypted columns without decrypting: issue a cheap companion
+    # query for flags only (avoids EncryptedStr.process_result_value).
+    ids = [r.id for r in rows]
+    flags: dict[int, tuple[bool, bool]] = {}
+    if ids:
+        from sqlalchemy import bindparam, text as sa_text
+        stmt = sa_text(
+            "SELECT id, (secret_enc IS NOT NULL), (session_state_enc IS NOT NULL) "
+            "FROM portal_credential WHERE id IN :ids"
+        ).bindparams(bindparam("ids", expanding=True))
+        flag_rows = db.execute(stmt, {"ids": ids}).fetchall()
+        for fr in flag_rows:
+            flags[int(fr[0])] = (bool(fr[1]), bool(fr[2]))
     return [
         {
             "id": r.id,
@@ -134,8 +180,8 @@ def list_all_meta(db, *, limit: int = 100, tenant_id: str | None = None) -> list
             "username_lc": r.username_lc,
             "login_host": r.login_host,
             "cloud_capture_enabled": bool(r.cloud_capture_enabled),
-            "has_secret": bool(r.secret_enc),
-            "has_session": bool(r.session_state_enc),
+            "has_secret": flags.get(r.id, (False, False))[0],
+            "has_session": flags.get(r.id, (False, False))[1],
             "last_harvest_at": r.last_harvest_at.isoformat() if r.last_harvest_at else None,
             "last_harvest_ok": r.last_harvest_ok,
             "harvest_fails": r.harvest_fails or 0,

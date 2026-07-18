@@ -25,7 +25,7 @@ answer" for the current 400-Bad-Request mystery.
 ```
 $ python scripts/test_webhook_signature.py
 === Stripe Webhook Self-Test ===
-Using STRIPE_WEBHOOK_SECRET prefix: whsec_TwEU...
+Using STRIPE_WEBHOOK_SECRET prefix: whsec_REDACTED...
 Target: https://web-production-49c83.up.railway.app/v1/stripe/webhook
 
 → POST with valid signature ...
@@ -37,7 +37,7 @@ Target: https://web-production-49c83.up.railway.app/v1/stripe/webhook
   Body: {"error": "Invalid signature"}
 
 → Tailing railway logs for matching event ...
-  [WARNING] webhook debug: secret=whsec_xx... sig=t=1717... len=512
+  [WARNING] webhook debug: secret=whsec_REDACTED... sig=t=1717... len=512
   [WARNING] SignatureVerificationError: No signatures found matching
             the expected signature for payload.
 

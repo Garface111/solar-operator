@@ -121,7 +121,7 @@ class SmartHubVendor:
                         "daily": daily,
                     })
             except Exception as exc:                 # noqa: BLE001
-                log.warning("smarthub generation skipped for %s: %s", acct_no, exc)
+                log.warning("smarthub generation skipped: %s", type(exc).__name__)
 
         requests: list[CaptureRequest] = []
 
@@ -181,7 +181,7 @@ class SmartHubVendor:
                 data = await r.json()
                 return data if isinstance(data, list) else (data.get("bills") or data.get("rows") or [])
         except Exception as exc:                     # noqa: BLE001
-            log.warning("overview failed for %s: %s", acct_no, exc)
+            log.warning("overview failed: %s", type(exc).__name__)
         return []
 
     async def _pdf(self, req, base: str, bill: dict) -> str | None:

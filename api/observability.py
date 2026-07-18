@@ -35,6 +35,8 @@ _SENSITIVE_KEYS = {
     "secret", "client_secret", "api_token", "apitoken", "x-admin-key",
     "x-seed-token", "x-maint-key", "so_config_key", "secret_enc",
     "session_state_enc", "raw_payload", "solaredge_api_key",
+    # Request bodies / dataclasses that embed passwords in repr()
+    "body", "creds", "credential", "credential_in", "password_hash",
 }
 
 
@@ -102,6 +104,9 @@ def init_sentry() -> bool:
             traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.0")),
             # We do our own scrubbing and never want request bodies by default.
             send_default_pii=False,
+            # Local vars are the landmine: CredentialIn body / Creds dataclass
+            # can embed password= in repr even when request PII is off.
+            include_local_variables=False,
             before_send=_before_send,
             integrations=[StarletteIntegration(), FastApiIntegration()],
         )

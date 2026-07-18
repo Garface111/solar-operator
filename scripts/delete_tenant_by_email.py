@@ -2,6 +2,9 @@
 
 Usage: railway ssh "cd /app && python -m scripts.delete_tenant_by_email <pattern>"
 Example: python -m scripts.delete_tenant_by_email ford.genereaux
+
+Hard-deletes Cloud Capture vault rows (portal_credential, harvest_run,
+portal_login_status) BEFORE the tenants row so FKs never block.
 """
 import sys
 from sqlalchemy import text
@@ -13,10 +16,35 @@ if len(sys.argv) < 2:
 
 pat = sys.argv[1].lower()
 
+# Child tables deleted per tenant, vault/sensitive first.
+_CHILD_DELETES = (
+    "harvest_run",
+    "portal_credential",
+    "portal_login_status",
+    "utility_sessions",
+    "bills",  # special: via utility_accounts subquery below
+    "utility_accounts",
+    "login_tokens",
+    "arrays",
+    "clients",
+    "tenant_templates",
+    "capture_events",
+    "daily_generation",
+    "inverter_daily",
+    "inverters",
+    "billing_report_subscriptions",
+    "delete_history",
+    "verification_checks",
+    "warranty_claims",
+)
+
 with SessionLocal() as db:
     bind = db.get_bind()
     rows = db.execute(
-        text("SELECT id, contact_email, name, active, created_at FROM tenants WHERE lower(contact_email) LIKE :p ORDER BY created_at DESC"),
+        text(
+            "SELECT id, contact_email, name, active, created_at FROM tenants "
+            "WHERE lower(contact_email) LIKE :p ORDER BY created_at DESC"
+        ),
         {"p": f"%{pat}%"},
     ).all()
     if not rows:
@@ -26,21 +54,26 @@ with SessionLocal() as db:
     for r in rows:
         print(f"  {r.id} | {r.contact_email} | {r.name} | active={r.active} | {r.created_at}")
     ids = [r.id for r in rows]
-    # Cascade-delete via per-table DELETE in dependency order (FKs are not
-    # declared ON DELETE CASCADE at the schema level).
     with bind.begin() as conn:
-        # Find arrays + utility_accounts owned by these tenants for nested deletes
         for tid in ids:
-            conn.execute(text("DELETE FROM bills WHERE account_id IN (SELECT id FROM utility_accounts WHERE tenant_id = :t)"), {"t": tid})
-            conn.execute(text("DELETE FROM utility_accounts WHERE tenant_id = :t"), {"t": tid})
-            conn.execute(text("DELETE FROM utility_sessions WHERE tenant_id = :t"), {"t": tid})
-            conn.execute(text("DELETE FROM login_tokens WHERE tenant_id = :t"), {"t": tid})
-            conn.execute(text("DELETE FROM arrays WHERE tenant_id = :t"), {"t": tid})
-            conn.execute(text("DELETE FROM clients WHERE tenant_id = :t"), {"t": tid})
-            # tenant_templates if present (best effort — table may not exist on older deploys)
-            try:
-                conn.execute(text("DELETE FROM tenant_templates WHERE tenant_id = :t"), {"t": tid})
-            except Exception:
-                pass
+            # bills hang off utility_accounts
+            conn.execute(
+                text(
+                    "DELETE FROM bills WHERE account_id IN "
+                    "(SELECT id FROM utility_accounts WHERE tenant_id = :t)"
+                ),
+                {"t": tid},
+            )
+            for table in _CHILD_DELETES:
+                if table == "bills":
+                    continue  # already handled
+                try:
+                    conn.execute(
+                        text(f"DELETE FROM {table} WHERE tenant_id = :t"),
+                        {"t": tid},
+                    )
+                except Exception as e:
+                    # table may not exist on older deploys
+                    print(f"  skip {table}: {type(e).__name__}")
             conn.execute(text("DELETE FROM tenants WHERE id = :t"), {"t": tid})
-    print(f"\nDeleted {len(ids)} tenant(s) and all dependent rows.")
+    print(f"\nDeleted {len(ids)} tenant(s) and dependent rows (incl. portal_credential).")

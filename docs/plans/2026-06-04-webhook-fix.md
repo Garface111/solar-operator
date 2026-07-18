@@ -5,7 +5,7 @@ Production Railway logs show `POST /v1/stripe/webhook → 400 Bad Request`
 on every Stripe event delivery, as of 2026-06-05.
 
 Last action taken: orchestrator set
-`STRIPE_WEBHOOK_SECRET=whsec_TwEU3WJpr6X37PXngm15uNukr6pzCAAv`
+`STRIPE_WEBHOOK_SECRET=whsec_REDACTED`
 via `railway variables --set`. Railway reports the variable IS set.
 Still 400s.
 

@@ -452,6 +452,12 @@ def _process_subscription_deleted(sub: dict) -> dict:
         # subscription instead of short-circuiting on `already_active` in
         # create_subscription_for_tenant.
         t.stripe_subscription_id = None
+        # LEGAL: cancelled customer → hard-delete Cloud Capture vault (no more
+        # unattended logins into their utility accounts after the relationship ends).
+        from .vault_lifecycle import teardown_cloud_capture_for_tenant
+        teardown_cloud_capture_for_tenant(
+            db, t.id, reason="stripe.customer.subscription.deleted",
+        )
         db.commit()
         tid, email = t.id, t.contact_email
         name = t.operator_name or t.company_name or t.name

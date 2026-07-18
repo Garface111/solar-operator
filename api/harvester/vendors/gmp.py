@@ -104,7 +104,7 @@ class GMPVendor:
                         "daily": daily,
                     })
                 except Exception as exc:                 # one bad account never aborts the rest
-                    log.warning("gmp account %s skipped: %s", acct_no, exc)
+                    log.warning("gmp account skipped: %s", type(exc).__name__)
                     continue
 
             if gen_accounts:

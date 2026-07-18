@@ -318,6 +318,17 @@ class UpdateEmail(BaseModel):
     email: EmailStr
 
 
+class ConfirmEmailChange(BaseModel):
+    token: str
+
+
+class DeleteAccountIn(BaseModel):
+    """GDPR-style account deletion. confirm must equal DELETE (case-sensitive)."""
+    confirm: str
+    # Optional free-text reason (ops only; never required)
+    reason: str | None = None
+
+
 class UpdateName(BaseModel):
     name: str
 
@@ -1271,13 +1282,32 @@ def account_fleet_report(fmt: str = Query("xlsx", pattern="^(xlsx|pdf)$"),
 # ─── account mutations ──────────────────────────────────────────────────
 
 @router.post("/v1/account/email")
-def update_email(body: UpdateEmail, authorization: Optional[str] = Header(default=None)):
+def update_email(
+    body: UpdateEmail,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """Request an email change — does NOT apply until the new address confirms.
+
+    Sends a single-use confirmation link to the NEW email. Closes the
+    privilege-escalation path where any paying tenant could reassign
+    contact_email to a Sovereign-allowlisted address without proof of ownership.
+    """
     t = tenant_from_session(authorization)
     require_not_demo(t)
     require_active_subscription(t)
     new_email = body.email.lower().strip()
+    old_email = (t.contact_email or "").lower().strip()
+    if new_email == old_email:
+        return {"ok": True, "email": new_email, "pending": False, "unchanged": True}
+
+    ratelimit.enforce(
+        request, "email_change", max_hits=5, window_s=3600,
+        key_extra=t.id,
+        message="Too many email-change requests — try again later.",
+    )
+
     with SessionLocal() as db:
-        # Refuse if email is taken by another active tenant
         clash = db.execute(
             select(Tenant).where(
                 Tenant.contact_email == new_email,
@@ -1286,24 +1316,264 @@ def update_email(body: UpdateEmail, authorization: Optional[str] = Header(defaul
         ).scalars().first()
         if clash:
             raise HTTPException(409, "That email is already in use on another account")
-        t = db.get(Tenant, t.id)
-        t.contact_email = new_email
+
+        token = secrets.token_urlsafe(32)
+        expires = datetime.utcnow() + timedelta(hours=2)
+        # purpose marker encoded in email field prefix is fragile; store purpose
+        # via a dedicated LoginToken row where email=new and we verify tenant_id.
+        # Reuse LoginToken: email = new address; tenant_id = requester.
+        # A parallel confirm endpoint applies only after token proves inbox access.
+        db.add(LoginToken(
+            token=f"emchg_{token}",
+            tenant_id=t.id,
+            email=new_email,
+            expires_at=expires,
+            persist_session=False,
+        ))
         db.commit()
+        product = t.product
+        tenant_name = t.operator_name or t.company_name or t.name
 
-    # Mirror change to Stripe so receipts go to the right address
-    if t.stripe_customer_id:
+    brand = branding.brand_name(product)
+    # Confirm link lands on accounts SPA which POSTs the token to /v1/account/email/confirm
+    base = branding.accounts_base_url(product) if hasattr(branding, "accounts_base_url") else None
+    if not base:
+        # Fallback: magic-link host style
         try:
-            stripe.Customer.modify(t.stripe_customer_id, email=new_email)
-        except Exception as e:
-            logger.warning("Failed to sync email to Stripe: %s", e)
+            link = branding.magic_link_url(product, f"emchg_{token}").replace(
+                "/login?", "/accounts?email_confirm="
+            ).replace("token=", "email_confirm=")
+            # Prefer explicit query param form
+            from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
+            # Build a clean confirm URL using brand site + path
+            link = None
+        except Exception:
+            link = None
+    # Stable confirm URL the SPA can handle (or user can curl)
+    try:
+        site = branding.public_site_url(product) if hasattr(branding, "public_site_url") else None
+    except Exception:
+        site = None
+    if not site:
+        site = "https://arrayoperator.com" if (product or "") == "array_operator" else "https://nepooloperator.com"
+    confirm_url = f"{site.rstrip('/')}/accounts?email_confirm=emchg_{token}"
 
-    return {"ok": True, "email": new_email}
+    body_html = (
+        f"<p>Confirm your new email address for <strong>{brand}</strong>.</p>"
+        f"<p>If you did not request this change, ignore this message — "
+        f"your account email will stay <code>{old_email}</code>.</p>"
+        f'<p style="font-size:12px;word-break:break-all;margin-top:20px;opacity:.6;">'
+        f"Or paste this link:<br>{confirm_url}</p>"
+    )
+    html = render_email_skin(
+        preheader=f"Confirm your new {brand} email — expires in 2 hours.",
+        intro_line=f"Email change for {tenant_name or 'your account'}",
+        body_html=body_html,
+        cta={"label": "Confirm new email", "url": confirm_url},
+        footer_line="This link proves you own the new address. It expires in 2 hours.",
+        product=product,
+    )
+    text = render_email_skin_text(
+        intro_line=f"Email change for {tenant_name or 'your account'}",
+        body_text=f"Confirm your new email (expires in 2 hours):\n\n{confirm_url}",
+        cta={"label": "Confirm new email", "url": confirm_url},
+        product=product,
+    )
+    sent = _send_via_resend(
+        to=new_email,
+        subject=f"Confirm your new {brand} email",
+        html=html,
+        text=text,
+        product=product,
+    )
+    if not sent:
+        logger.error("email_change_confirm_send_failed tenant=%s", t.id)
+
+    # Notify the OLD address so account takeover is visible.
+    if old_email and old_email != new_email:
+        try:
+            notify_html = render_email_skin(
+                preheader="Email change requested on your account",
+                intro_line="Email change requested",
+                body_html=(
+                    f"<p>Someone requested changing the login email on your "
+                    f"<strong>{brand}</strong> account to a new address.</p>"
+                    f"<p>If this wasn't you, sign in and contact support immediately. "
+                    f"No change takes effect until the new address confirms.</p>"
+                ),
+                footer_line="You received this because you own this account.",
+                product=product,
+            )
+            _send_via_resend(
+                to=old_email,
+                subject=f"{brand}: email change requested",
+                html=notify_html,
+                text="An email change was requested on your account. "
+                     "It will not apply until the new address confirms.",
+                product=product,
+            )
+        except Exception:
+            logger.exception("email_change old-address notify failed tenant=%s", t.id)
+
+    return {
+        "ok": True,
+        "pending": True,
+        "email": old_email,
+        "pending_email": new_email,
+        "message": "Confirmation sent to the new address. Email is unchanged until confirmed.",
+    }
+
+
+@router.post("/v1/account/email/confirm")
+def confirm_email_change(body: ConfirmEmailChange):
+    """Apply a pending email change after the new inbox proves ownership."""
+    raw = (body.token or "").strip()
+    if not raw.startswith("emchg_"):
+        # Accept bare token too
+        token = f"emchg_{raw}" if raw and not raw.startswith("emchg_") else raw
+    else:
+        token = raw
+    if not token:
+        raise HTTPException(400, "token required")
+
+    with SessionLocal() as db:
+        row = db.execute(
+            select(LoginToken).where(LoginToken.token == token)
+        ).scalars().first()
+        if not row:
+            raise HTTPException(401, "Invalid or expired confirmation link")
+        if row.used_at is not None:
+            raise HTTPException(401, "This confirmation link was already used")
+        if row.expires_at < datetime.utcnow():
+            raise HTTPException(401, "Confirmation link expired — request a new one")
+
+        new_email = (row.email or "").lower().strip()
+        tid = row.tenant_id
+        t = db.get(Tenant, tid)
+        if not t or not t.active:
+            raise HTTPException(400, "Account is not active")
+
+        clash = db.execute(
+            select(Tenant).where(
+                Tenant.contact_email == new_email,
+                Tenant.id != tid,
+            )
+        ).scalars().first()
+        if clash:
+            raise HTTPException(409, "That email is already in use on another account")
+
+        old_email = t.contact_email
+        t.contact_email = new_email
+        # Invalidate all sessions — email ownership changed
+        bump_session_epoch(db, t)
+        row.used_at = datetime.utcnow()
+        db.commit()
+        stripe_cus = t.stripe_customer_id
+        product = t.product
+
+    if stripe_cus:
+        try:
+            stripe.Customer.modify(stripe_cus, email=new_email)
+        except Exception as e:
+            logger.warning("Failed to sync confirmed email to Stripe: %s", e)
+
+    return {
+        "ok": True,
+        "email": new_email,
+        "previous_email": old_email,
+        "product": product,
+        "message": "Email updated. Sign in again with the new address.",
+    }
+
+
+@router.post("/v1/account/delete")
+def delete_account(
+    body: DeleteAccountIn,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """Hard-delete Cloud Capture vault + sensitive sessions and deactivate account.
+
+    Irreversible for vault secrets. Requires confirm == 'DELETE'.
+    """
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    if (body.confirm or "").strip() != "DELETE":
+        raise HTTPException(
+            400,
+            "To delete your account, set confirm to the exact string DELETE",
+        )
+    ratelimit.enforce(
+        request, "account_delete", max_hits=3, window_s=3600,
+        key_extra=t.id,
+        message="Too many delete attempts — try again later.",
+    )
+
+    with SessionLocal() as db:
+        tenant = db.get(Tenant, t.id)
+        if not tenant:
+            raise HTTPException(404, "Account not found")
+
+        from .vault_lifecycle import purge_tenant_sensitive_data
+        purge = purge_tenant_sensitive_data(
+            db, tenant.id, reason=body.reason or "customer_account_delete",
+        )
+
+        # Cancel Stripe subscription if present (best-effort; never blocks wipe).
+        sub_id = tenant.stripe_subscription_id
+        if sub_id and STRIPE_SECRET_KEY:
+            try:
+                stripe.Subscription.cancel(sub_id)
+            except Exception:
+                logger.exception("account_delete stripe cancel failed tenant=%s", tenant.id)
+
+        tenant.active = False
+        tenant.subscription_status = "deleted"
+        tenant.stripe_subscription_id = None
+        tenant.stripe_payment_method_id = None
+        # Anonymize contact so the email can re-signup; keep id for FK orphans.
+        old_email = tenant.contact_email
+        tenant.contact_email = f"deleted+{tenant.id[:12]}@invalid.local"
+        tenant.gmp_email = None
+        tenant.gmp_username = None
+        if hasattr(tenant, "password_hash"):
+            try:
+                tenant.password_hash = None
+            except Exception:
+                pass
+        bump_session_epoch(db, tenant)
+        # Burn outstanding magic links
+        for lt in db.execute(
+            select(LoginToken).where(
+                LoginToken.tenant_id == tenant.id,
+                LoginToken.used_at.is_(None),
+            )
+        ).scalars().all():
+            lt.used_at = datetime.utcnow()
+        db.commit()
+        tid = tenant.id
+
+    try:
+        send_internal_alert(
+            f"Account deleted: {tid}",
+            f"Tenant {tid} (was {old_email}) self-deleted. vault={purge.get('counts')}",
+        )
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "deleted": True,
+        "tenant_id": tid,
+        "vault": purge.get("counts"),
+        "message": "Account deactivated and stored portal credentials permanently deleted.",
+    }
 
 
 @router.post("/v1/account/request-utility")
 def request_utility(
     body: UtilityRequest,
-    authorization: Optional[str] = Header(default=None),
+    authorization: str | None = Header(default=None),
 ):
     """Operator-submitted "Don't see your utility?" request.
 

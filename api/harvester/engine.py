@@ -30,6 +30,25 @@ from .vendors import module_for
 log = logging.getLogger("harvester.engine")
 
 
+def _sanitize_harvest_error(exc: BaseException) -> str:
+    """Strip Playwright selector dumps / page HTML from exception text.
+
+    HarvestRun.detail is surfaced to Energy Agent tools (external LLM). Keep
+    type + short message only — never authenticated portal markup.
+    """
+    name = type(exc).__name__
+    msg = str(exc) or ""
+    # Drop huge HTML / call log blocks Playwright embeds.
+    for marker in ("Call log:", "<html", "<!DOCTYPE", "Locator.", "waiting for"):
+        idx = msg.find(marker)
+        if idx > 0:
+            msg = msg[:idx]
+    msg = " ".join(msg.split())  # collapse whitespace
+    if len(msg) > 180:
+        msg = msg[:180] + "…"
+    return f"{name}: {msg}" if msg else name
+
+
 class HarvestOutcome:
     def __init__(self, provider, username_lc, status, rows=0, fresh=False, detail=""):
         self.provider = provider
@@ -211,7 +230,7 @@ class BrowserFarm:
                                   detail=result.summary)
 
         except Exception as exc:                       # noqa: BLE001 — record & continue
-            log.warning("harvest error %s/%s: %s", provider, tenant_id, exc)
+            log.warning("harvest error %s/%s: %s", provider, tenant_id, type(exc).__name__)
             if page is not None:
                 shot = await self._screenshot(page, tenant_id, provider, "error")
             try:
@@ -219,11 +238,13 @@ class BrowserFarm:
                     storage_state = await context.storage_state()
             except Exception:
                 pass
+            # Sanitize Playwright/page markup before it leaves the box (EA tools / LLM).
+            safe_detail = _sanitize_harvest_error(exc)
             self._persist(tenant_id, provider, username_lc,
                           storage_state=storage_state, ok=False, status="scrape_failed",
                           started_at=started, fresh=fresh,
-                          rows=0, error=str(exc)[:500], shot=shot)
-            return HarvestOutcome(provider, username_lc, "scrape_failed", detail=str(exc)[:200])
+                          rows=0, error=safe_detail, shot=shot)
+            return HarvestOutcome(provider, username_lc, "scrape_failed", detail=safe_detail[:200])
         finally:
             if context is not None:
                 try:
@@ -233,11 +254,20 @@ class BrowserFarm:
 
     @staticmethod
     async def _screenshot(page, tenant_id, provider, tag) -> str | None:
-        """Save a failure screenshot for debugging a broken selector/flow."""
+        """Failure screenshots are DISABLED on disk (T2-2).
+
+        Unencrypted PNGs under /tmp previously captured authenticated portal
+        pages (account numbers, service address). Login failures still surface
+        via HarvestRun.detail (sanitized). Set CLOUD_CAPTURE_SCREENSHOTS=1 to
+        re-enable local debug shots on a non-prod box only.
+        """
+        if (os.environ.get("CLOUD_CAPTURE_SCREENSHOTS") or "").strip() not in (
+            "1", "true", "yes", "on",
+        ):
+            return None
         try:
             d = config.screenshot_dir()
             os.makedirs(d, exist_ok=True)
-            # No timestamp fn available in some sandboxes; use a stable-ish name.
             ref = os.path.join(d, f"{provider}_{tenant_id}_{tag}.png")
             await page.screenshot(path=ref, full_page=False)
             return ref

@@ -158,6 +158,10 @@ def stripe_cancel_subscription(
         )
         if not at_period_end:
             t.active = False
+            from .vault_lifecycle import teardown_cloud_capture_for_tenant
+            teardown_cloud_capture_for_tenant(
+                db, tenant_id, reason="stripe_cancel_immediate",
+            )
         db.flush()
         res = {
             "ok": True,
@@ -333,6 +337,9 @@ def tenant_soft_delete(db, *, tenant_id: str, reason: str = "") -> dict:
         return _deny("tenant not found")
     t.active = False
     t.subscription_status = "canceled"
+    # LEGAL: soft-delete still tears down Cloud Capture vault secrets.
+    from .vault_lifecycle import teardown_cloud_capture_for_tenant
+    teardown_cloud_capture_for_tenant(db, tenant_id, reason="tenant_soft_delete")
     db.flush()
     res = {"ok": True, "tenant_id": tenant_id, "mode": "soft", "reason": reason[:500]}
     _audit_note(db, capability="act.hard_delete", title=f"soft-delete tenant {tenant_id}", body=res)

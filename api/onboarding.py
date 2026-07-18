@@ -922,6 +922,11 @@ def cancel_trial(authorization: Optional[str] = Header(default=None)):
             tenant.subscription_status = "cancelled"
             tenant.trial_ends_at = None
             tenant.stripe_payment_method_id = None
+            # LEGAL: stop harvesting + hard-delete vault secrets on churn.
+            from .vault_lifecycle import teardown_cloud_capture_for_tenant
+            teardown_cloud_capture_for_tenant(
+                db, tenant.id, reason="cancel_trial",
+            )
             db.commit()
 
     send_internal_alert(

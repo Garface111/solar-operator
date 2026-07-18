@@ -55,6 +55,20 @@ _DESK_EMAILS = frozenset({
     "ford@dysonswarmtechnologies.com",
 })
 
+# Desk auth is bound to TENANT IDs, not editable contact_email (T0-2).
+# contact_email alone was privilege-escalation: POST /v1/account/email could
+# reassign any paying tenant onto an allowlisted address and unlock the desk.
+# Override / extend via SOVEREIGN_DESK_TENANT_IDS=ten_a,ten_b
+_DEFAULT_DESK_TENANT_IDS = frozenset({
+    # Ford's live Array Operator product tenants (prod inventory Jul 2026).
+    "ten_aaad29f08dbe9943",
+    "ten_96581f48dacb59de",
+    "ten_a70ed047581893ed",
+    "ten_15f560725b02d4b0",
+    "ten_d85bbd8e9f9c5b27",
+    "ten_a554c8e7a08f8cfa",  # demo AO tenant used for hands-on QA
+})
+
 # Attachment limits
 _MAX_UPLOAD_BYTES = int(os.getenv("SOVEREIGN_DESK_MAX_UPLOAD", str(8 * 1024 * 1024)))
 _MAX_TEXT_EXTRACT = 120_000
@@ -134,6 +148,15 @@ def desk_emails() -> set[str]:
     return out
 
 
+def desk_tenant_ids() -> set[str]:
+    """Tenant IDs authorized for the Sovereign desk (fail-closed)."""
+    out = set(_DEFAULT_DESK_TENANT_IDS)
+    extra = (os.getenv("SOVEREIGN_DESK_TENANT_IDS") or "").strip()
+    if extra:
+        out |= {t.strip() for t in extra.split(",") if t.strip()}
+    return out
+
+
 def desk_offload_enabled() -> bool:
     """When true, web never runs the desk brain — only enqueues Ford's message.
 
@@ -170,12 +193,15 @@ def _auth_ford(authorization: str | None):
     # require_not_demo returns None (raises on demo) — do NOT assign its return value
     t = tenant_from_session(authorization)
     require_not_demo(t)
-    email = (getattr(t, "contact_email", None) or "").strip().lower()
-    # Also accept operator identity variants Ford uses
-    if email not in desk_emails():
-        # Secondary: login token emails for this tenant (if any) — skip heavy lookup for now
+    # PRIMARY gate: tenant_id allowlist (not editable contact_email).
+    tid = (getattr(t, "id", None) or "").strip()
+    if tid not in desk_tenant_ids():
         raise HTTPException(403, "Sovereign desk is only for the developer account")
+    # Secondary hygiene: still prefer known Ford emails when set, but never
+    # authorize on email alone (that was the escalation path).
+    email = (getattr(t, "contact_email", None) or "").strip().lower()
     return t, email
+
 
 def ensure_tables(db=None) -> None:
     try:
@@ -2719,7 +2745,8 @@ class OpsActionIn(BaseModel):
 def desk_ops_summary(authorization: str | None = Header(default=None)):
     """Queues + authority snapshot for the desk UI."""
     t, email = _auth_ford(authorization)
-    del t, email
+    desk_tenant_id = t.id
+    del email
     with SessionLocal() as db:
         from .energy_agent_sovereign_ops import (
             ops_summary, list_features, list_utilities, list_escalations, list_jobs,
@@ -2746,7 +2773,10 @@ def desk_ops_summary(authorization: str | None = Header(default=None)):
             "escalations_needs_ford": list_escalations(db, status="needs_ford", limit=20),
             "jobs_queued": list_jobs(db, status="queued", limit=15),
             "jobs_failed": list_jobs(db, status="failed", limit=10),
-            "credentials": list_credential_inventory(db, limit=40),
+            # Tenant-scoped only — never fleet-wide inventory on the desk.
+            "credentials": list_credential_inventory(
+                db, limit=40, tenant_id=desk_tenant_id,
+            ),
             "goals": [
                 {"id": g.id, "title": g.title, "priority": g.priority, "status": g.status}
                 for g in goals
@@ -2863,10 +2893,16 @@ def desk_ops_action(body: OpsActionIn, authorization: str | None = Header(defaul
         elif action in ("escalation_sweep",):
             out = auto_resolve_needs_ford(db, limit=int(p.get("limit") or 8))
         elif action in ("credentials", "credential_inventory"):
-            out = list_credential_inventory(db)
+            out = list_credential_inventory(
+                db,
+                limit=int(p.get("limit") or 40),
+                tenant_id=(p.get("tenant_id") or t.id),
+            )
         elif action in ("credentials_stage", "stage_harvest"):
             out = stage_credential_harvest(
-                db, tenant_id=p.get("tenant_id"), provider=p.get("provider"),
+                db,
+                tenant_id=p.get("tenant_id") or t.id,
+                provider=p.get("provider"),
                 username_lc=p.get("username_lc"),
             )
         elif action in ("utility_cred_stage", "stage_utility_credentials"):

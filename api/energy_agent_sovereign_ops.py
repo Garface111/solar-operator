@@ -37,18 +37,18 @@ def _flag(name: str, default: str = "0") -> bool:
 
 
 def ops_enabled() -> bool:
-    """Full ops authority. Default ON after Ford's thorough authorization."""
-    return _flag("SOVEREIGN_ENABLED", "1") and _flag("SOVEREIGN_OPS_AUTHORITY", "1")
+    """Full ops authority. Default OFF (fail closed) — set SOVEREIGN_OPS_AUTHORITY=1."""
+    return _flag("SOVEREIGN_ENABLED", "1") and _flag("SOVEREIGN_OPS_AUTHORITY", "0")
 
 
 def credentials_unlocked() -> bool:
-    """Operational credential vault access (use/rearm/enable/harvest). Default ON."""
-    return ops_enabled() and _flag("SOVEREIGN_CREDENTIALS_UNLOCKED", "1")
+    """Operational credential vault access (use/rearm/enable/harvest). Default OFF."""
+    return ops_enabled() and _flag("SOVEREIGN_CREDENTIALS_UNLOCKED", "0")
 
 
 def portal_signoff_enabled() -> bool:
-    """Portal production sign-off authority. Default ON after Ford grant."""
-    return ops_enabled() and _flag("SOVEREIGN_PORTAL_SIGN_OFF", "1")
+    """Portal production sign-off authority. Default OFF (fail closed)."""
+    return ops_enabled() and _flag("SOVEREIGN_PORTAL_SIGN_OFF", "0")
 
 
 # ── Features ────────────────────────────────────────────────────────────────
@@ -787,11 +787,11 @@ def reprioritize_goals(db, updates: list[dict]) -> dict:
 
 
 # ── Credentials (unlocked operational use) ──────────────────────────────────
-def list_credential_inventory(db, *, limit: int = 100) -> dict:
+def list_credential_inventory(db, *, limit: int = 100, tenant_id: str | None = None) -> dict:
     """Metadata inventory — never return decrypted passwords to desk/chat.
 
-    With SOVEREIGN_CREDENTIALS_UNLOCKED, includes full fleet meta + portal roster
-    so Sovereign can rearm/sign-off/harvest without Ford per-login babysitting.
+    Requires tenant_id (T0-2). Fleet-wide inventory is deliberately refused so a
+    compromised desk session cannot enumerate every utility username in the fleet.
     """
     if not ops_enabled():
         return {"ok": False, "denied": True, "denied_reason": "ops authority off"}
@@ -800,8 +800,14 @@ def list_credential_inventory(db, *, limit: int = 100) -> dict:
         "credentials": [],
         "portal_status": [],
         "unlocked": unlocked,
-        "note": "passwords never exposed via API; unlocked=use/rearm/enable/harvest",
+        "tenant_id": tenant_id,
+        "note": "passwords never exposed via API; unlocked=use/rearm/enable/harvest; tenant-scoped only",
     }
+    if not tenant_id:
+        out["ok"] = False
+        out["denied"] = True
+        out["denied_reason"] = "tenant_id required (fleet-wide inventory disabled)"
+        return out
     try:
         from .harvester import credentials as cc
         from .harvester import config as hcfg
@@ -810,11 +816,13 @@ def list_credential_inventory(db, *, limit: int = 100) -> dict:
         out["cloud_capture_collect"] = bool(hcfg.collection_enabled())
         out["cloud_capture_real_customers"] = bool(hcfg.allow_real_customers())
         if hasattr(cc, "list_all_meta"):
-            out["credentials"] = cc.list_all_meta(db, limit=limit)
+            out["credentials"] = cc.list_all_meta(db, limit=limit, tenant_id=tenant_id)
         else:
             from .models import PortalCredential
             rows = db.execute(
-                select(PortalCredential).limit(limit)
+                select(PortalCredential)
+                .where(PortalCredential.tenant_id == tenant_id)
+                .limit(limit)
             ).scalars().all()
             out["credentials"] = [
                 {
@@ -834,7 +842,10 @@ def list_credential_inventory(db, *, limit: int = 100) -> dict:
     try:
         from .models import PortalLoginStatus
         rows = db.execute(
-            select(PortalLoginStatus).order_by(PortalLoginStatus.reported_at.desc()).limit(limit)
+            select(PortalLoginStatus)
+            .where(PortalLoginStatus.tenant_id == tenant_id)
+            .order_by(PortalLoginStatus.reported_at.desc())
+            .limit(limit)
         ).scalars().all()
         out["portal_status"] = [
             {
@@ -862,15 +873,25 @@ def stage_credential_harvest(
     username_lc: str | None = None,
     enable: bool = True,
 ) -> dict:
-    """Stage + re-arm harvest. Unlocked path enables cloud capture and clears fails."""
+    """Stage + re-arm harvest. Unlocked path enables cloud capture and clears fails.
+
+    Requires tenant_id — fleet-wide rearm is refused (blast-radius guard).
+    """
     if not ops_enabled():
         return {"ok": False, "denied": True, "denied_reason": "ops authority off"}
     if not credentials_unlocked():
         return {"ok": False, "denied": True, "denied_reason": "credentials locked"}
+    if not (tenant_id or "").strip():
+        return {
+            "ok": False,
+            "denied": True,
+            "denied_reason": "tenant_id required (fleet-wide rearm disabled)",
+        }
     from .energy_agent_sovereign import memory_set, write_note
     from .harvester import credentials as cc
 
-    key = f"harvest_stage:{provider or 'all'}:{tenant_id or 'fleet'}"
+    tenant_id = str(tenant_id).strip()
+    key = f"harvest_stage:{provider or 'all'}:{tenant_id}"
     memory_set(
         db, key,
         json.dumps({
@@ -890,7 +911,7 @@ def stage_credential_harvest(
         provider="ops",
     )
     try:
-        if tenant_id and provider:
+        if provider:
             res = cc.rearm(
                 db, tenant_id, provider, username_lc, enable=enable if enable else None,
             )

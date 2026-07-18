@@ -74,7 +74,7 @@ utility logins into a 50-step feedback loop. CSS animations live in
 ### 6. Webhook signing secret fixed
 Stripe webhook on Railway was rejecting events with 400 (Invalid
 signature). Ford gave me the correct secret and I set it via
-`railway variables --set STRIPE_WEBHOOK_SECRET=whsec_TwEU3WJpr6X37PXngm15uNukr6pzCAAv`.
+`railway variables --set STRIPE_WEBHOOK_SECRET=whsec_REDACTED`.
 Railway redeploying as of last message — verify with
 `railway logs --json | grep stripe.*webhook | tail -5`. Should be
 200s now, not 400s.

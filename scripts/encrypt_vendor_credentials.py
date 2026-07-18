@@ -128,8 +128,8 @@ def process(engine, *, mode: str = "encrypt", apply: bool = False, out=print) ->
                     continue
                 new_val = transform(val)
                 changed += 1
-                preview = (val[:18] + "…") if len(val) > 19 else val
-                out(f"  {verb}  {table}.{col} id={rid}  [{preview}]")
+                # Never print secret previews (short secrets would print in full).
+                out(f"  {verb}  {table}.{col} id={rid}  [len={len(val)} encrypted={crypto.is_encrypted(val)}]")
                 if apply:
                     conn.execute(
                         text(f"UPDATE {table} SET {col} = :v WHERE {idcol} = :i"),

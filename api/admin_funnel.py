@@ -20,8 +20,14 @@ router = APIRouter()
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
 
 
-def _check(key_header: str | None, key_query: str | None) -> None:
-    key = key_header or key_query
+def _check(key_header: str | None, key_query: str | None = None) -> None:
+    """Admin auth via X-Admin-Key header ONLY (query ?key= rejected — lands in logs)."""
+    if key_query:
+        raise HTTPException(
+            400,
+            "Pass the admin key via X-Admin-Key header only (query ?key= is disabled)",
+        )
+    key = key_header
     if not ADMIN_API_KEY:
         raise HTTPException(503, "Admin API not configured (set ADMIN_API_KEY)")
     if not hmac.compare_digest(key or "", ADMIN_API_KEY):

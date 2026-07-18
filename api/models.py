@@ -20,7 +20,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 # transparent TypeDecorators: pure pass-through when SO_CONFIG_KEY is unset
 # (storage byte-identical to the old plaintext columns), Fernet-encrypted when
 # it is set. See api/crypto.py for the full design + rollout runbook.
-from .crypto import EncryptedJSON, EncryptedStr
+from .crypto import EncryptedJSON, EncryptedStr, EncryptedVaultJSON, EncryptedVaultStr
 
 
 class Base(DeclarativeBase):
@@ -1970,13 +1970,15 @@ class PortalCredential(Base):
     client-side-BYOK posture, made per-login and only when the owner explicitly
     opts a login into Cloud Capture. Mitigations:
 
-      * ``secret_enc`` is Fernet-encrypted at rest (EncryptedStr, keyed on
+      * ``secret_enc`` is Fernet-encrypted at rest (EncryptedVaultStr, keyed on
         SO_CONFIG_KEY) — a DB dump yields ciphertext, not passwords. Cloud
         Capture therefore REQUIRES SO_CONFIG_KEY to be set (the harvester
-        refuses to run credential collection without it).
+        refuses to run credential collection without it). Public web may set
+        SO_VAULT_DECRYPT=0 so it can encrypt-on-collect but cannot unwrap.
       * The plaintext is decrypted just-in-time in the harvester worker only,
-        is NEVER logged, and is NEVER returned by any API (no read endpoint
-        serves ``secret_enc``).
+        is NEVER logged, and is NEVER returned by any **tenant-facing** read
+        endpoint (no customer API serves ``secret_enc``; maintenance tooling
+        is separate and disabled by default).
       * ``session_state_enc`` persists the Playwright storage_state (cookies /
         localStorage) so the farm logs in RARELY — reusing a warm session like a
         human who stays signed in — which is both gentler on the portal and the
@@ -1996,11 +1998,11 @@ class PortalCredential(Base):
     # The password, encrypted at rest. Pass-through plaintext ONLY when
     # SO_CONFIG_KEY is unset — which the harvester treats as "Cloud Capture
     # disabled" so we never persist a bare password by accident.
-    secret_enc: Mapped[str | None] = mapped_column(EncryptedStr, nullable=True)
+    secret_enc: Mapped[str | None] = mapped_column(EncryptedVaultStr, nullable=True)
     # Opt-in gate. False = collected but not yet activated for server-side pull.
     cloud_capture_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     # Persisted Playwright storage_state ({cookies, origins}), encrypted at rest.
-    session_state_enc: Mapped[dict | None] = mapped_column(EncryptedJSON, nullable=True)
+    session_state_enc: Mapped[dict | None] = mapped_column(EncryptedVaultJSON, nullable=True)
     session_state_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # For SmartHub co-ops: the specific portal host (e.g. vec.smarthub.coop) so
     # the harvester navigates to the right co-op without re-deriving it.

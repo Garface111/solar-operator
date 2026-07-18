@@ -51,12 +51,11 @@ scheduler = BackgroundScheduler(
 def scheduler_enabled() -> bool:
     """Whether this process should own APScheduler + Sovereign ticks.
 
-    RUN_SCHEDULER defaults to **on** (1/true/yes/on) so a single-process
-    deploy keeps working until ops split roles:
-      - web:    RUN_SCHEDULER=0
-      - worker: RUN_SCHEDULER=1  (or unset — default on)
+    RUN_SCHEDULER defaults to **OFF** (fail-safe for public web). Explicitly set
+    RUN_SCHEDULER=1 on the worker. A cleared env var must NOT silently collapse
+    the web/worker split back to a single process that runs harvest schedules.
     """
-    v = (os.environ.get("RUN_SCHEDULER") or "1").strip().lower()
+    v = (os.environ.get("RUN_SCHEDULER") or "0").strip().lower()
     return v in ("1", "true", "yes", "on")
 
 
