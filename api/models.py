@@ -695,6 +695,16 @@ class Array(Base):
     # implicit NEPOOL-GIS registry that solar has always used.
     cert_registry: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
+    # REC Desk (Marketplace) — who holds the renewable attributes for this array.
+    # unknown | owner_retained | assigned_to_utility | counterparty | split
+    # Default unknown: we never assume the owner can sell RECs (many NM/SMART/REG
+    # programs assign attributes to the utility in exchange for a rate adjustor).
+    rec_ownership: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, default="unknown", server_default="unknown")
+    rec_ownership_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Independent Verifier / REC agent who files generation into the registry.
+    rec_verifier_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
     tenant: Mapped[Tenant] = relationship(back_populates="arrays")
     client: Mapped["Client | None"] = relationship(back_populates="arrays")
     accounts: Mapped[list["UtilityAccount"]] = relationship(back_populates="array")
@@ -2254,10 +2264,16 @@ class ExchangeDemand(Base):
     source: Mapped[str] = mapped_column(
         String(32), default="operator_waitlist",
         server_default="operator_waitlist", nullable=False)
-    # new | qualified | matched | dead
+    # new | suggested | drafted | utility_pending | live | dead | qualified | matched
     status: Mapped[str] = mapped_column(
         String(24), default="new", server_default="new", nullable=False)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Suggested host array from match suggestions (operator may override on draft).
+    suggested_array_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("arrays.id"), nullable=True, index=True)
+    # When "Draft offtaker" succeeds, the BillingReportSubscription.id created.
+    linked_subscription_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("billing_report_subscriptions.id"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
 
     __table_args__ = (

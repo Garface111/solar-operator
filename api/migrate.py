@@ -1526,6 +1526,34 @@ def main():
         else:
             print("  · table agent_documents will create_all on next boot")
 
+        # 2026-07-18 Marketplace expand — REC Desk fields on arrays + exchange
+        # demand links (lead → offtaker draft). Additive / nullable.
+        for col, ddl in (
+            ("rec_ownership",
+             "ALTER TABLE arrays ADD COLUMN rec_ownership VARCHAR(32) DEFAULT 'unknown'"),
+            ("rec_ownership_note",
+             "ALTER TABLE arrays ADD COLUMN rec_ownership_note TEXT"),
+            ("rec_verifier_name",
+             "ALTER TABLE arrays ADD COLUMN rec_verifier_name VARCHAR(200)"),
+        ):
+            if not column_exists(conn, "arrays", col):
+                conn.execute(text(ddl))
+                added.append(f"arrays.{col}")
+                print(f"  + arrays.{col}")
+        if inspect(conn).has_table("exchange_demand"):
+            for col, ddl in (
+                ("suggested_array_id",
+                 "ALTER TABLE exchange_demand ADD COLUMN suggested_array_id INTEGER"),
+                ("linked_subscription_id",
+                 "ALTER TABLE exchange_demand ADD COLUMN linked_subscription_id INTEGER"),
+            ):
+                if not column_exists(conn, "exchange_demand", col):
+                    conn.execute(text(ddl))
+                    added.append(f"exchange_demand.{col}")
+                    print(f"  + exchange_demand.{col}")
+        else:
+            print("  · table exchange_demand will create_all on next boot")
+
     print("=== Migration complete ===")
 
 
