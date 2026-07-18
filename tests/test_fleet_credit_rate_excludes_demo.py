@@ -15,8 +15,8 @@ import secrets
 from api.db import SessionLocal
 from api.models import Tenant, Array, UtilityAccount, Bill
 from api.rate_schedule import (
-    _fleet_credit_rate, array_age_bucket, SYNTHETIC_TENANT_IDS,
-    derive_blended_rate_from_bills,
+    _fleet_credit_rate, _account_credit_rate, array_age_bucket,
+    SYNTHETIC_TENANT_IDS, derive_blended_rate_from_bills,
 )
 
 # Unique provider so ONLY this test's bills match the fleet query — isolates the
@@ -142,3 +142,33 @@ def test_derive_blended_excludes_demo_and_synthetic():
     assert dr is not None, "real tenant alone has 8 samples"
     assert abs(dr.rate - 0.30) < 1e-6, f"demo/synthetic leaked into blended rate: {dr.rate}"
     assert dr.sample_size == 8, f"only the 8 real bills should count, got {dr.sample_size}"
+
+
+def test_credit_rate_sanity_band_drops_garbage_observations():
+    # One sane cashed bill (0.30) + one mis-parsed garbage bill ($5,000 on 1000
+    # kWh = $5/kWh). The garbage must be dropped, not medianed in — else the
+    # account "history" rate is a fabricated 2.65.
+    tid = "ten_sane_" + secrets.token_hex(3)
+    with SessionLocal() as db:
+        db.add(Tenant(id=tid, tenant_key=secrets.token_hex(8), name=tid,
+                      contact_email=f"{tid}@e.com", active=True,
+                      product="array_operator"))
+        db.flush()
+        a = Array(tenant_id=tid, name="a", region="VT",
+                  first_connect_date=FIRST_CONNECT)
+        db.add(a); db.flush()
+        acct = UtilityAccount(tenant_id=tid, array_id=a.id,
+                              provider="zzz_sane_" + secrets.token_hex(2),
+                              account_number="A" + secrets.token_hex(3))
+        db.add(acct); db.flush()
+        db.add(Bill(tenant_id=tid, account_id=acct.id,
+                    period_start=datetime(2025, 5, 1), period_end=datetime(2025, 5, 28),
+                    kwh_generated=1000, kwh_sent_to_grid=1000.0,
+                    solar_credit_usd=300.0))   # 0.30 — sane
+        db.add(Bill(tenant_id=tid, account_id=acct.id,
+                    period_start=datetime(2025, 6, 1), period_end=datetime(2025, 6, 28),
+                    kwh_generated=1000, kwh_sent_to_grid=1000.0,
+                    solar_credit_usd=5000.0))  # 5.0/kWh — parse garbage
+        db.commit()
+        rate = _account_credit_rate(db, acct.id)
+    assert rate is not None and abs(rate - 0.30) < 1e-6, f"garbage leaked: {rate}"

@@ -491,6 +491,17 @@ def _median(vals: list[float]) -> Optional[float]:
     return round(statistics.median(vals), 5) if vals else None
 
 
+# A single mis-parsed bill (e.g. a $2,000 credit read onto a 10 kWh line = $200/kWh)
+# would otherwise skew a small median. A real cashed VT net-metering credit rate
+# lives in this band — outside it is parse noise (or a banked ~$0 month that slipped
+# the credit>0 filter). Mirrors blended_rate_from_bill's own 0.05–0.50 guard.
+CREDIT_RATE_LO, CREDIT_RATE_HI = 0.05, 0.50
+
+
+def _sane_credit_rate(r: float) -> bool:
+    return CREDIT_RATE_LO < r < CREDIT_RATE_HI
+
+
 def _account_credit_rate(db, utility_account_id: int) -> Optional[float]:
     """Median net-metering credit rate ($/kWh) over an account's CASHED months
     (solar_credit_usd > 0). None when the account has never cashed a credit."""
@@ -501,7 +512,8 @@ def _account_credit_rate(db, utility_account_id: int) -> Optional[float]:
             Bill.solar_credit_usd.isnot(None), Bill.solar_credit_usd > 0,
             Bill.kwh_sent_to_grid.isnot(None), Bill.kwh_sent_to_grid > 0)
     ).all()
-    return _median([float(c) / float(k) for c, k in rows if k])
+    rates = [float(c) / float(k) for c, k in rows if k]
+    return _median([r for r in rates if _sane_credit_rate(r)])
 
 
 def _fleet_credit_rate(db, *, provider: str, age_bucket: str,
@@ -536,7 +548,9 @@ def _fleet_credit_rate(db, *, provider: str, age_bucket: str,
         ped = pe.date() if isinstance(pe, datetime) else pe
         if array_age_bucket(fc, ped) != age_bucket:
             continue
-        rates.append(float(cu) / float(k))
+        r = float(cu) / float(k)
+        if _sane_credit_rate(r):
+            rates.append(r)
     return _median(rates) if len(rates) >= min_samples else None
 
 
