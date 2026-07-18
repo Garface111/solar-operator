@@ -1659,6 +1659,14 @@ class BillingReportSubscription(Base):
     # show on the invoice; only the total becomes this number. NULL = use the
     # calculated amount.
     budget_amount_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Offtaker invoice delivery truth (Resend). last_sent_at = we handed the mail
+    # to Resend; these reflect what Resend reports actually happened to the
+    # offtaker inbox (api/resend_webhook.py). last_resend_email_id is stamped on
+    # successful send so webhooks can match precisely by id, not just email.
+    last_resend_email_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_bounced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_bounce_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)

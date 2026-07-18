@@ -28,6 +28,15 @@ EXTENSION_INSTALL_URL = os.getenv(
 )
 
 
+def last_resend_id() -> str | None:
+    """Resend email id from the most recent successful `_send_via_resend` call.
+
+    None on failure, dry-run, or when no real send has run yet. Callers that
+    need delivery-truth (offtaker invoices) read this immediately after send.
+    """
+    return getattr(_send_via_resend, "_last_id", None)
+
+
 def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
                      attachments: list[dict] | None = None,
                      cc: list[str] | str | None = None,
@@ -40,11 +49,17 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
     """Returns True on success, False otherwise. Uses the official Resend
     SDK so we play nice with their Cloudflare bot rules.
 
+    On success also sets `_send_via_resend._last_id` to the Resend email id
+    (or None on fail / dry-run). Keep return type bool for all existing callers;
+    use `last_resend_id()` when the id is needed.
+
     from_addr overrides the platform default From header (V2 "send as me").
     reply_to sets a Reply-To so replies still reach a tenant even when we fell
     back to the platform From for an unverified domain.
     cc / bcc add carbon-copy recipients (e.g. the operator BCC'd on every
     offtaker invoice so they always see what the customer received)."""
+    # Reset so a prior success never leaks into a later fail/dry-run caller.
+    _send_via_resend._last_id = None
     # ── Non-prod safety valve (staging/preview) ───────────────────────────
     # The backend infers "prod" from Railway env vars, which a staging deploy
     # also has — so the code cannot tell staging from prod on its own. These
@@ -57,6 +72,7 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
     if os.getenv("EMAIL_DRY_RUN", "").strip().lower() in ("1", "true", "yes", "on"):
         logger.warning("EMAIL_DRY_RUN set — NOT sending. to=%s subject=%s", to, subject)
         logger.info("EMAIL(dry) → to=%s subject=%s\n%s", to, subject, text or html[:500])
+        # Dry-run: report ok to callers but never fake a Resend id.
         return True
     _sink = os.getenv("EMAIL_SINK_TO", "").strip()
     if _sink:
@@ -108,6 +124,7 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
         # result is a dict like {"id": "xxx"}
         if result and result.get("id"):
             _send_via_resend._last_error = None
+            _send_via_resend._last_id = result.get("id")
             return True
         (logger.error if log_failures else logger.warning)(
             "Resend returned unexpected response: %s", result)
@@ -118,6 +135,11 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
             "Resend send failed: %s: %s", type(e).__name__, e)
         _send_via_resend._last_error = f"{type(e).__name__}: {e}"
         return False
+
+
+# Module-level defaults so getattr/last_resend_id work before first send.
+_send_via_resend._last_id = None  # type: ignore[attr-defined]
+_send_via_resend._last_error = None  # type: ignore[attr-defined]
 
 
 def send_workbook_email(to: str, subject: str, html: str, text: str,

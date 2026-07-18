@@ -21,7 +21,10 @@ on the next cron tick.
 
 So the AO arm keys on the EXPLICIT ``Tenant.generation_reports`` marker that
 ``scripts/migrate_nepool_tenant.py`` flips when it moves a NEPOOL tenant's
-reports world onto its AO sibling:
+reports world onto its AO sibling, or that an AO operator flips themselves via
+``POST /v1/account/generation-reports/enable`` (desk-only — does not set any
+client's ``auto_send`` or create charges; contrast
+``POST /v1/account/clients/auto-send-all`` which enrolls every client):
 
   * product != "array_operator"  -> in the reports world (legacy NEPOOL
                                     behavior, unchanged)

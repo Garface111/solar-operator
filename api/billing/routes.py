@@ -135,6 +135,16 @@ def _sub_dict(s: BillingReportSubscription, pricing_ctx=None) -> dict:
         "invoice_number_start": getattr(s, "invoice_number_start", None),
         "invoice_number_next": getattr(s, "invoice_number_next", None),
         "budget_amount_usd": getattr(s, "budget_amount_usd", None),
+        # Resend delivery truth (webhook + send stamp). Distinct from last_sent_at
+        # (mailer accept): delivered/bounced come only from Resend events.
+        "last_resend_email_id": getattr(s, "last_resend_email_id", None),
+        "last_delivered_at": (
+            s.last_delivered_at.isoformat()
+            if getattr(s, "last_delivered_at", None) else None),
+        "last_bounced_at": (
+            s.last_bounced_at.isoformat()
+            if getattr(s, "last_bounced_at", None) else None),
+        "last_bounce_reason": getattr(s, "last_bounce_reason", None),
         # A trimmed preview of the parsed workbook for the UI card.
         "preview": (s.parsed_map or {}).get("computed_invoice") if s.parsed_map else None,
     }

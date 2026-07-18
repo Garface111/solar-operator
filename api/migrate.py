@@ -1526,6 +1526,29 @@ def main():
         else:
             print("  · table agent_documents will create_all on next boot")
 
+        # 2026-07-18 Offtaker invoice delivery truth (Resend webhook + send id).
+        # Mirrors clients delivery-health columns; last_resend_email_id lets the
+        # webhook match by Resend id when present (more precise than email alone).
+        offtaker_delivery_cols = [
+            ("last_resend_email_id",
+             "ALTER TABLE billing_report_subscriptions "
+             "ADD COLUMN last_resend_email_id VARCHAR(64)"),
+            ("last_delivered_at",
+             "ALTER TABLE billing_report_subscriptions "
+             "ADD COLUMN last_delivered_at TIMESTAMP"),
+            ("last_bounced_at",
+             "ALTER TABLE billing_report_subscriptions "
+             "ADD COLUMN last_bounced_at TIMESTAMP"),
+            ("last_bounce_reason",
+             "ALTER TABLE billing_report_subscriptions "
+             "ADD COLUMN last_bounce_reason TEXT"),
+        ]
+        for col, sql in offtaker_delivery_cols:
+            if not column_exists(conn, "billing_report_subscriptions", col):
+                conn.execute(text(sql))
+                added.append(f"billing_report_subscriptions.{col}")
+                print(f"  + billing_report_subscriptions.{col}")
+
     print("=== Migration complete ===")
 
 

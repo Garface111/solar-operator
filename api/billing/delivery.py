@@ -2178,6 +2178,10 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
             attachments=attachments, cc=cc or None, bcc=bcc or None, from_addr=from_addr,
             reply_to=(op_email or None), product=product,
         )
+        # Capture Resend id immediately after send (bool return is back-compat;
+        # id lives on the function attr / last_resend_id helper).
+        from ..notify import last_resend_id as _last_resend_id
+        resend_email_id = _last_resend_id() if ok else None
 
     result = {"ok": bool(ok), "to": to, "cc": cc, "bcc": bcc,
               "attachments": [p.name for p in paths],
@@ -2185,7 +2189,11 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
               "amount_owed": (match.computed_invoice or {}).get("amount_owed"),
               "triggered_by": triggered_by, "test": is_test,
               "pay_url": pay_url, "payment_id": payment_id, "fee_cents": fee_cents,
-              "pay_skip_reason": pay_skip_reason}
+              "pay_skip_reason": pay_skip_reason,
+              # Mailer accepted — NOT inbox-delivered. Webhook stamps delivered.
+              "resend_email_id": resend_email_id if ok else None}
+    if ok:
+        result["delivery_status"] = "accepted"
     if ok and not is_test:
         now = datetime.utcnow()
         sub.last_sent_at = now
@@ -2206,7 +2214,13 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
         if getattr(sub, "invoice_number_next", None) is not None:
             sub.invoice_number_next = sub.invoice_number_next + 1
         sub.next_send_at = next_send_at(sub.cadence, now)
+        # Delivery-truth: stamp Resend id so webhook can match by email_id.
+        # Do NOT set last_delivered_at here — that requires email.delivered.
+        if resend_email_id:
+            sub.last_resend_email_id = str(resend_email_id)[:64]
         db.commit()
+    # is_test: return resend_email_id in result (above) but never stamp delivery
+    # fields on the subscription row.
     if not ok:
         result["error"] = "email send failed (check RESEND_API_KEY / domain)"
     return result

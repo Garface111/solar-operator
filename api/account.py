@@ -3478,17 +3478,62 @@ class AutoSendAllBody(BaseModel):
     enabled: bool = True
 
 
+# Enable-only (no disable path): opening the gen-reports desk must not force
+# auto_send/billing off for enrolled clients. Operators who want the surface
+# dark again leave auto_send alone and stop using the desk; billing only fires
+# on auto_send or manual send/download output.
+_GENREPORTS_ENABLE_MESSAGE = (
+    "Generation reports are enabled for this account. Auto-send stays "
+    "per-client (default off for capture-created clients) and bills "
+    "$15/array/quarter only when a client has auto_send on or you send/"
+    "download a report — enabling the desk alone does not enroll or charge anyone."
+)
+
+
+@router.post("/v1/account/generation-reports/enable")
+def enable_generation_reports(authorization: str = Header(default=None)):
+    """Open the generation-reports desk for this tenant WITHOUT auto-billing.
+
+    Sets ``Tenant.generation_reports = True`` so AO tenants enter the reports
+    world (directory, digests eligibility surface, GET /v1/account flag). Does
+    **not** flip any client's ``auto_send``, does **not** create Stripe charges,
+    and does **not** mail anyone. Per-client enrollment + metered billing stay
+    on auto-send-all / per-client PATCH / send-report / download paths.
+
+    Idempotent. Demo tenants are rejected (require_not_demo). Enable-only —
+    there is no paired disable; turning the desk marker off while clients stay
+    auto_send=True would leave an inconsistent scheduler state.
+    """
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    with SessionLocal() as db:
+        row = db.get(Tenant, t.id)
+        if row is None:
+            raise HTTPException(404, "Account not found")
+        if not bool(getattr(row, "generation_reports", False)):
+            row.generation_reports = True
+            db.commit()
+    return {
+        "ok": True,
+        "generation_reports": True,
+        "message": _GENREPORTS_ENABLE_MESSAGE,
+    }
+
+
 @router.post("/v1/account/clients/auto-send-all")
 def set_auto_send_all(body: AutoSendAllBody,
-                      authorization: Optional[str] = Header(default=None)):
+                      authorization: str = Header(default=None)):
     """Turn generation-report auto-send ON (or off) for EVERY active client.
 
-    THE FOLD (Ford 2026-07-16): this is the one deliberate "turn my account on"
+    THE FOLD (Ford 2026-07-16): this is the deliberate "enroll everyone + bill"
     action — the operator has reviewed their auto-propagated clients, and now
     commits: every client's report ships automatically each period, and each
     array they report bills $15 once per quarter (metered, on first output).
     Flipping it on also enrolls the tenant in the reports world so the scheduler,
     digests and the operator directory come alive.
+
+    To open the gen-reports desk WITHOUT enrolling every client or starting
+    billing, use POST /v1/account/generation-reports/enable instead.
 
     Idempotent. Returns the counts the UI already showed the operator before they
     confirmed the cost, so the two can never disagree.

@@ -13,13 +13,16 @@ it's blank (local dev) we accept unsigned posts. No new dependency — the Svix
 verification is a few lines of stdlib hmac.
 
 Handled event types:
-  email.delivered  → stamp Client.last_delivered_at
-  email.bounced    → stamp Client.last_bounced_at + last_bounce_reason
-  email.complained → stamp Client.last_bounced_at + "Marked as spam"
+  email.delivered  → stamp Client.last_delivered_at (+ offtaker BillingReportSubscription)
+  email.bounced    → stamp Client.last_bounced_at + last_bounce_reason (+ offtaker sub)
+  email.complained → stamp Client.last_bounced_at + "Marked as spam" (+ offtaker sub)
 
-Recipients are matched to a Client by contact_email (case-insensitive). The
-[copy]/CC fan-out goes to tenant/cc addresses that don't match a Client's
-contact_email, so those events are simply ignored here.
+Recipients are matched to a Client by contact_email (case-insensitive) and to
+BillingReportSubscription by client_email (case-insensitive). When the payload
+carries an email_id that matches sub.last_resend_email_id, that offtaker row is
+preferred for a precise stamp. The [copy COPCC fan-out goes to tenant/cc
+addresses that don't match a Client's contact_email, so those events are simply
+ignored for Client matching (receipts are still recorded).
 """
 from __future__ import annotations
 
@@ -34,7 +37,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from sqlalchemy import select, func
 
 from .db import SessionLocal
-from .models import Client, now
+from .models import Client, BillingReportSubscription, now
 
 logger = logging.getLogger(__name__)
 
@@ -320,8 +323,33 @@ async def resend_webhook(
     reason = _bounce_reason(event_type, data) if event_type != "email.delivered" else None
     ts = now()
     matched: list[int] = []
+    matched_subs: list[int] = []
     recorded = 0
+    # Resend puts the sent-message id on data.email_id (and sometimes data.id).
+    email_id = data.get("email_id") or data.get("id")
+    email_id_str = str(email_id) if email_id else None
+
+    def _stamp_sub(sub: BillingReportSubscription) -> None:
+        if event_type == "email.delivered":
+            sub.last_delivered_at = ts
+        else:
+            sub.last_bounced_at = ts
+            sub.last_bounce_reason = reason
+        if sub.id not in matched_subs:
+            matched_subs.append(sub.id)
+
     with SessionLocal() as db:
+        # Prefer precise match by Resend email id when we stamped it on send.
+        if email_id_str:
+            id_subs = db.execute(
+                select(BillingReportSubscription).where(
+                    BillingReportSubscription.last_resend_email_id == email_id_str,
+                    BillingReportSubscription.deleted_at.is_(None),
+                )
+            ).scalars().all()
+            for sub in id_subs:
+                _stamp_sub(sub)
+
         for email in recipients:
             clients = db.execute(
                 select(Client).where(func.lower(Client.contact_email) == email)
@@ -333,6 +361,18 @@ async def resend_webhook(
                     c.last_bounced_at = ts
                     c.last_bounce_reason = reason
                 matched.append(c.id)
+
+            # Offtaker invoices: match BillingReportSubscription.client_email.
+            # Still match by email even when id-matched above — covers older
+            # sends without last_resend_email_id and multi-sub same-email rows.
+            offtaker_subs = db.execute(
+                select(BillingReportSubscription).where(
+                    func.lower(BillingReportSubscription.client_email) == email,
+                    BillingReportSubscription.deleted_at.is_(None),
+                )
+            ).scalars().all()
+            for sub in offtaker_subs:
+                _stamp_sub(sub)
 
             # Keep the receipt for EVERY recipient, not just offtakers. Resend
             # reports on all of them; we used to bin anything that wasn't a
@@ -346,7 +386,7 @@ async def resend_webhook(
                     event=(event_type or "").replace("email.", "")[:24],
                     subject=(data.get("subject") or None),
                     reason=reason,
-                    resend_email_id=(data.get("email_id") or data.get("id") or None),
+                    resend_email_id=email_id_str,
                     created_at=ts,
                 ))
                 recorded += 1
@@ -354,4 +394,10 @@ async def resend_webhook(
                 logger.exception("resend: failed to record delivery receipt for %s", email)
         db.commit()
 
-    return {"ok": True, "event": event_type, "matched": matched, "recorded": recorded}
+    return {
+        "ok": True,
+        "event": event_type,
+        "matched": matched,
+        "matched_subs": matched_subs,
+        "recorded": recorded,
+    }
