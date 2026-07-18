@@ -8265,10 +8265,30 @@ def _usage_cost(usage: dict) -> float:
     return (pin / 1000.0) * COST_PER_1K_INPUT + (pout / 1000.0) * COST_PER_1K_OUTPUT
 
 
+# Only fire the auto-build fast path on an UNAMBIGUOUS visual COMPLAINT/FIX
+# request — never on a neutral mention or a QUESTION. The old regex matched the
+# bare word "button" (also chip/badge), so "what's the point of this button?"
+# auto-filed a build instead of being answered (Ford 2026-07-17). A UI noun now
+# must be paired with complaint/imperative sentiment; anything ambiguous falls
+# through to the LLM, which can answer (with screen vision) or propose a change.
 _VISUAL_FIX_RE = re.compile(
-    r"\b(color|colour|look(s|ing)?|ugly|pretty|style|styling|theme|contrast|"
-    r"button|chip|badge|doesn.?t look|does not look|fix the (color|colour|button)|"
-    r"hard to (read|see|scan))\b",
+    r"\b("
+    r"ugly|too (busy|cluttered|small|big|much|loud)|cluttered|overwhelming|"
+    r"looks? (bad|wrong|off|broken|ugly|cluttered|weird)|"
+    r"doesn.?t look (right|good|great)|does not look (right|good|great)|"
+    r"hard to (read|see|scan)|"
+    r"(fix|change|clean up|improve|redesign|tweak) (the |this )?(color|colour|button|chip|badge|"
+    r"card|banner|header|nav|footer|styling|style|layout|spacing|look|contrast|font|ui|design)|"
+    r"(color|colour|button|chip|badge|card|banner|header|nav|font|spacing|layout|contrast|style)"
+    r"[\w\s]{0,30}(is|are|looks|feels)? ?(bad|ugly|wrong|off|broken|cluttered|too (small|big))"
+    r")\b",
+    re.I,
+)
+# Question / explanation shapes — these are ASKS about the UI, never fix requests.
+_UI_QUESTION_RE = re.compile(
+    r"(^|\b)(what('?s| is| are| does| do| were)?|why|how|where|which|who|when|"
+    r"explain|describe|tell me|point of|purpose of|meant? for|what does .* do|"
+    r"do(es)? (it|this|that|the button) do)\b",
     re.I,
 )
 
@@ -8282,6 +8302,11 @@ def _visual_fix_fast_path(
     if not text or len(text) < 8:
         return None
     force = bool(ctx.get("visual_fix_fast") or ctx.get("prefer_short_reply"))
+    # A QUESTION about the UI ("what's the point of this button", "what does X
+    # do", "why is this here") is NOT a fix request — never auto-file a build;
+    # let the LLM answer it (with screen vision). Ford 2026-07-17.
+    if not force and _UI_QUESTION_RE.search(text):
+        return None
     if not force and not _VISUAL_FIX_RE.search(text):
         return None
     # Don't steal pure data asks that merely mention "look"
