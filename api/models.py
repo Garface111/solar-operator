@@ -2220,3 +2220,58 @@ class AgentDocument(Base):
     __table_args__ = (
         Index("ix_agent_documents_tenant_created", "tenant_id", "created_at"),
     )
+
+
+class ProspectusShare(Base):
+    """A revocable, tokenized public share link for a persisted Array Prospectus
+    (an AgentDocument with doc_type='prospectus').
+
+    v0 "data room" sharing — the honest, Ford-gated way an owner hands a lender or
+    a prospective buyer a verified per-array package:
+
+      • DEFAULTS TO UNPUBLISHED (`published=False`). Minting a link NEVER exposes
+        anything until the owner deliberately turns it on. The FIRST external
+        share is a deliberate act — the public route 404s on an unpublished token.
+      • Offtaker PII (customer names / emails) is REDACTED BY DEFAULT
+        (`redact_offtaker_pii=True`); the owner opts in to reveal it.
+      • REVOCABLE — a revoked (`revoked_at`) or unpublished token 404s.
+      • `view_count` / `last_viewed_at` give the owner "your lender opened it
+        3 times, last Tuesday" feedback.
+
+    The prospectus is captured, timestamped and RE-DERIVABLE — NOT immutable and
+    NOT an appraisal. `content_sha256` makes the ARTIFACT tamper-evident (the same
+    underlying data reproduces the same hash), nothing more. No money, no fees, no
+    brokerage — this is a document surface only.
+    """
+    __tablename__ = "prospectus_shares"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    array_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("arrays.id"), nullable=True, index=True)
+    agent_document_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("agent_documents.id"), index=True
+    )
+    # Unguessable public token (secrets.token_urlsafe). The only credential the
+    # public route accepts; never leaks the tenant id.
+    token: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    # The content hash of the artifact this token points at (stamped at mint time,
+    # from the AgentDocument's stored canonical JSON) so a viewer can verify the
+    # bytes match what the owner shared.
+    content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # OFF until the owner deliberately publishes — see the class docstring.
+    published: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+    redact_offtaker_pii: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="true", nullable=False
+    )
+    view_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    last_viewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+    __table_args__ = (
+        Index("ix_prospectus_shares_tenant", "tenant_id", "array_id"),
+    )
