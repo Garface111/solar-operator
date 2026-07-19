@@ -12,6 +12,24 @@
 #   web:    RUN_SCHEDULER=0
 #   worker: PROCESS_ROLE=worker  RUN_SCHEDULER=1
 # RUN_SCHEDULER defaults to 1 inside the app for single-process backwards compat.
+#
+# WARNING - DEPLOY TRAP (2026-07-19): the `worker` service is the ONLY one running
+# the scheduler (RUN_SCHEDULER=1) - every job in api/scheduler.py and api/jobs/*
+# (generation-report sends, morning digest, pre-send reviews, delivery receipts,
+# co-op session warnings, alert sweeps) runs THERE and nowhere else. It has been
+# observed NOT auto-deploying on push while `web` and `cloud-capture-harvester`
+# (same repo, same branch, empty Watch Paths) deployed fine - so a scheduler
+# change can merge, "deploy", and silently never run.
+#
+# After ANY scheduler change, VERIFY a worker deployment newer than your push:
+#     railway deployment list --service worker --environment production
+# If it is stale, deploy it explicitly (builds identically; role is env-driven):
+#     git -C <repo> fetch origin
+#     git worktree add --detach /tmp/so-worker origin/main
+#     cd /tmp/so-worker && railway link \
+#         --project 7451f2d4-6d29-41de-b8f4-a7461052a578 \
+#         --environment production --service worker
+#     railway up --service worker --environment production --detach
 
 if [ "$CLOUD_CAPTURE_HARVESTER" = "1" ]; then
   echo "start.sh: launching Cloud Capture harvester (Xvfb :99)"
