@@ -31,7 +31,13 @@ from sqlalchemy import select
 from ..db import SessionLocal
 from ..models import HarvestRun, InverterAlertState, PortalCredential, Tenant, now
 from ..notify import send_internal_alert
-from .scheduler import MAX_LOGIN_FAILS, PAUSED_RETRY, account_key, coordinate_account_fails
+from .scheduler import (
+    MAX_LOGIN_FAILS,
+    PAUSED_RETRY,
+    account_key,
+    accounts_with_recent_fresh_login,
+    coordinate_account_fails,
+)
 
 log = logging.getLogger("harvester.lockout")
 
@@ -74,7 +80,10 @@ def paused_accounts() -> list[dict]:
                 )
             )
         ).scalars().all()
-        acct_fails = coordinate_account_fails(rows)
+        # Same coordination the scheduler uses, so the alert can never disagree
+        # with what is actually paused.
+        acct_fails = coordinate_account_fails(
+            rows, accounts_with_recent_fresh_login(db))
         groups: dict[tuple[str, str], list] = {}
         for c in rows:
             groups.setdefault(account_key(c.provider, c.username_lc), []).append(c)

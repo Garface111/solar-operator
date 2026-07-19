@@ -16,7 +16,7 @@ from datetime import timedelta
 from sqlalchemy import select
 
 from ..db import SessionLocal
-from ..models import PortalCredential, Tenant, now
+from ..models import HarvestRun, PortalCredential, Tenant, now
 from . import config
 
 log = logging.getLogger("harvester.scheduler")
@@ -123,24 +123,49 @@ def _is_due(c, _now, account_fails: int | None = None) -> bool:
     return last <= _now - _due_after(c.provider)
 
 
-def coordinate_account_fails(rows) -> dict[tuple[str, str], int]:
+def accounts_with_recent_fresh_login(db, window: timedelta | None = None) -> set[tuple[str, str]]:
+    """Portal accounts that let us in with a real password login inside `window`.
+
+    This is the evidence that an account is NOT heading for a lockout: the portal
+    accepted our credentials recently, which in every lockout policy worth the
+    name also resets ITS failure counter. Read off `harvest_run` rather than
+    `PortalCredential.last_harvest_ok` because that column only remembers the
+    single most recent run — a login that succeeds intermittently (SMA does, ~1
+    in 2) reads as "currently failing" between successes, which is true but is
+    NOT grounds for pausing the whole account.
+    """
+    cutoff = now() - (window or PAUSED_RETRY)
+    rows = db.execute(
+        select(HarvestRun.provider, HarvestRun.username_lc)
+        .where(HarvestRun.status == "ok",
+               HarvestRun.logged_in_fresh.is_(True),
+               HarvestRun.started_at >= cutoff)
+        .distinct()
+    ).all()
+    return {account_key(p, u) for (p, u) in rows}
+
+
+def coordinate_account_fails(rows, vouched: set[tuple[str, str]] | None = None
+                             ) -> dict[tuple[str, str], int]:
     """Fold per-row fail counters into one number per PORTAL ACCOUNT.
 
-    The account is treated as in trouble only when NO row sharing it can vouch
-    for the login. A sibling whose last run was ok with a clean counter has, by
-    definition of `harvest_fails` (consecutive FRESH-login failures), just proven
-    the password works — so one tenant's local trouble never pauses the whole
-    account. Otherwise the worst row wins, so a genuinely bad/locked login stops
-    every tenant that shares it rather than each burning its own 3 attempts.
+    The worst row wins, so a genuinely bad or locked login stops every tenant
+    sharing it instead of each burning its own MAX_LOGIN_FAILS attempts. But an
+    account that can still be logged into is never dragged down by one tenant's
+    local trouble — `vouched` (see `accounts_with_recent_fresh_login`) and a
+    sibling sitting at a clean counter both clear it. Without that escape hatch,
+    one credential row failing for days would take a 50%-healthy capture dark.
     """
+    vouched = vouched or set()
     groups: dict[tuple[str, str], list] = {}
     for c in rows:
         groups.setdefault(account_key(c.provider, c.username_lc), []).append(c)
     out: dict[tuple[str, str], int] = {}
     for key, group in groups.items():
-        vouched = any((g.harvest_fails or 0) == 0 and g.last_harvest_ok is True
-                      for g in group)
-        out[key] = 0 if vouched else max((g.harvest_fails or 0) for g in group)
+        ok_now = any((g.harvest_fails or 0) == 0 and g.last_harvest_ok is True
+                     for g in group)
+        out[key] = 0 if (ok_now or key in vouched) else max(
+            (g.harvest_fails or 0) for g in group)
     return out
 
 
@@ -185,7 +210,8 @@ def due_credentials() -> list[tuple[str, str, str]]:
             )
         ).scalars().all()
         # Lockout state is per PORTAL ACCOUNT, not per tenant row (see account_key).
-        acct_fails = coordinate_account_fails(rows)
+        acct_fails = coordinate_account_fails(
+            rows, accounts_with_recent_fresh_login(db))
         # Cache allow decisions per tenant_id (demo/allowlist still need Tenant).
         allowed_cache: dict[str, bool] = {}
         for c in rows:

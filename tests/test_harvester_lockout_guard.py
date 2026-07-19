@@ -32,6 +32,7 @@ from api.harvester.scheduler import (
     PAUSED_RETRY,
     _is_due,
     account_key,
+    accounts_with_recent_fresh_login,
     coordinate_account_fails,
 )
 from api.models import HarvestRun, InverterAlertState, PortalCredential, Tenant, now
@@ -204,6 +205,39 @@ def test_a_sibling_that_logged_in_fine_vouches_for_the_account():
             _fake(fails=0, ok=True, age_min=1)]
     fails = coordinate_account_fails(rows)
     assert fails[account_key("sma", "x@example.com")] == 0
+
+
+def test_a_recent_successful_fresh_login_vouches_even_while_currently_failing():
+    """An intermittently-succeeding login (SMA logs in ~1 try in 2) reads as
+    'currently failing' between successes. That is honest but is NOT a lockout —
+    the portal accepted our password minutes ago — so it must not pause the
+    account and take a half-healthy capture dark."""
+    rows = [_fake(fails=MAX_LOGIN_FAILS + 1, ok=False, age_min=5),
+            _fake(fails=1, ok=False, age_min=5)]
+    key = account_key("sma", "x@example.com")
+    assert coordinate_account_fails(rows)[key] >= MAX_LOGIN_FAILS
+    assert coordinate_account_fails(rows, vouched={key})[key] == 0
+
+
+def test_recent_fresh_login_lookup_reads_the_run_log_not_the_last_run():
+    with SessionLocal() as db:
+        c = _cred(db, provider="sma", username="vouch@example.com")
+        _run(db, c, ok=True, status="ok", fresh=True)       # succeeded…
+        _run(db, c, ok=False, status="login_failed", fresh=True)   # …then failed
+        db.commit()
+        assert c.last_harvest_ok is False                   # last run says "bad"
+        assert account_key("sma", "vouch@example.com") in \
+            accounts_with_recent_fresh_login(db)            # history says "let us in"
+
+
+def test_an_account_that_never_gets_in_is_not_vouched():
+    with SessionLocal() as db:
+        c = _cred(db, provider="sma", username="locked@example.com")
+        for _ in range(MAX_LOGIN_FAILS + 1):
+            _run(db, c, ok=False, status="login_failed", fresh=True)
+        db.commit()
+        assert account_key("sma", "locked@example.com") not in \
+            accounts_with_recent_fresh_login(db)
 
 
 # ── 4. the pause is LOUD, and it clears ────────────────────────────────────
