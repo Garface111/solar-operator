@@ -88,10 +88,15 @@ Shipped on main (`4a56fa5d`, `7f200a9c`, follow-ups):
 |------|--------|
 | **T1-2 ops replacement** | `GET /admin/vault-stats` + `/admin/vault-health` (X-Admin-Key) — fleet counts without public SQL. Agents should prefer this over `DATABASE_PUBLIC_URL`. |
 | **T1-2 TCP proxy still open** | `zephyr.proxy.rlwy.net:54704` still reachable. Close in Railway Postgres → Networking → remove TCP proxy **after** confirming vault-stats works for your ops. Ciphertext mitigates dump risk until then. |
-| **T2-1 activity counts** | `/v1/cloud-capture/status` now returns `sign_ins_this_month` / `attempts_this_month` / `ok_this_month` per login (trust tripwire). |
+| **T2-1 activity counts** | `/v1/cloud-capture/status` now returns `sign_ins_this_month` / `attempts_this_month` / `ok_this_month` per login (trust tripwire). Owner UI shows sign-in count on Auto-refresh. |
 | **T2-7 dry-run** | `python -m scripts.vault_key_escrow_and_rotate --verify-decrypt` proves every vault row decrypts. Escrow checklist on Desktop + `docs/knowledge/so-config-key-escrow-checklist.md`. Live MultiFernet rotate still manual (`--mint-rotation`). |
 | **rearm_all** | Requires `tenant_id` (fleet-wide rearm refused). |
 | **persist path** | `_persist` defers `secret_enc` so health writes never decrypt the password. |
+| **Tiered harvest_run retention** | Warm-OK keep 14d; failures/fresh keep 45d. Daily job `prune_harvest_runs`. |
+| **Warm-OK write throttle** | At most one warm-session OK audit row per login per hour (failures + fresh logins always written). |
+| **EA detail scrub** | `capture_health_detail` never loads vault secrets; Playwright dumps stripped before LLM. |
+| **Account delete re-auth** | Password required when set — stolen session alone cannot wipe vault. |
+| **Sentry logging** | `LoggingIntegration` disabled (no INFO breadcrumbs). Contexts/breadcrumbs scrubbed. |
 
 ## Still open
 
