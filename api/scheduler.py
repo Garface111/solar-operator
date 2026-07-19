@@ -1654,16 +1654,22 @@ def start():
     # harvesting forever and only the owner re-saving the password brought it back.
     # It now retries on a slow heartbeat (scheduler.PAUSED_RETRY) and this watchdog
     # keeps the operator loudly informed until it recovers. Deliberately registered
-    # on the WEB service, not the harvester loop, so a wedged harvester can't take
-    # its own alarm down with it.
+    # here — on the scheduler-owning service, alongside every sibling watchdog —
+    # and NOT inside the harvester's own loop, so a wedged harvester can't take its
+    # own alarm down with it.
     # It also runs the STALL watchdog, which is cause-blind: the pause only counts
     # failures that spent a real password attempt, so everything else that kills a
     # capture would otherwise be silent — and `vip_watch`, the other staleness net,
     # was switched off 2026-07-19.
+    # next_run_time matters: a bare IntervalTrigger(hours=1) first fires a full
+    # hour after process start, so on a repo that auto-deploys several times an
+    # hour this alarm would statistically almost never run. Fire shortly after
+    # every boot instead; the InverterAlertState dedup makes extra runs free.
     scheduler.add_job(
         _run_cloud_capture_lockout_watchdog,
         IntervalTrigger(hours=1),
         id="cloud_capture_lockout_watchdog", replace_existing=True,
+        next_run_time=datetime.utcnow() + timedelta(minutes=3),
     )
     # Daily at 04:00 UTC: report Array Operator per-kWh usage to Stripe (LEGACY
     # metered billing). Self-skips subs with no metered line (i.e. nameplate subs),
