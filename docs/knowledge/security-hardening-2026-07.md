@@ -58,14 +58,42 @@ curl -s https://web-production-49c83.up.railway.app/health | jq .
 curl -sI https://web-production-49c83.up.railway.app/docs | head -1   # expect 404
 ```
 
-## Still open (not in this PR)
+## Cloud Capture vault hardening (2026-07-18/19)
 
+Shipped on main (`4a56fa5d`, `7f200a9c`, follow-ups):
+
+| Item | Status |
+|------|--------|
+| T0-1 churn: `_tenant_allowed` requires `Tenant.active`; vault teardown on cancel/stripe-delete/succession | Done (code) |
+| T0-1 residual: inactive tenant still held 1 enabled vault row | **Purged 2026-07-19** (test tenant `ten_47d849…`, 2793 harvest_run + 1 credential) |
+| T0-2 desk auth binds `tenant_id` allowlist (not editable email) | Done |
+| T0-3 email change confirmation link | Done |
+| T0-4 due-scan never selects `secret_enc` | Done |
+| T0-5 rotate `ADMIN_API_KEY` (leaked in agent transcript) | **Done 2026-07-19** (web+worker; old key 403s) |
+| T0-6 `POST /v1/account/delete` + script vault omit fix | Done |
+| T1-1 `SO_VAULT_DECRYPT=0` on web/worker; `=1` on harvester only | Done (env) |
+| T1-4 `RUN_SCHEDULER` defaults off | Done |
+| T2-3 Sentry locals scrub / include_local_variables=False | Done |
+| T2-4 remove decrypt-apply HTTP mode | Done |
+| T2-11 Sovereign ops flags fail-closed in code **and** prod env | **Prod set to 0 on 2026-07-19** |
+| cloud-capture `/status` load_only (no vault decrypt on web) | Done (`7f200a9c`) |
+| Decrypt audit log + volume anomaly warn | Done (contextvars + threshold) |
+
+**T0-0 live counts (2026-07-19 post-purge):**  
+`portal_credential` total=24, all enabled, **0** on inactive tenants, all have `secret_enc`.
+
+## Still open
+
+- **T1-2** Postgres TCP proxy still public (`zephyr.proxy.rlwy.net:54704`). Ciphertext mitigates dump risk; closing needs a replacement ops path (Railway private networking / working `railway ssh`). Do not close until agents can run read-only probes another way.
+- **T1-3** AWS KMS envelope encryption (~$1–3/mo) — money gate; ask Ford.
+- **T2-1** customer-visible “we signed into your portal N times” surface — detective log exists; product UI not built.
+- **T2-7** key escrow offline copy + dry-run prod rotation (never exercised against live vault).
 - Hash `tenant_key` at rest (needs extension re-auth UX)
 - HttpOnly cookie sessions / shorter TTL
 - CSP nonces (drop `unsafe-inline`)
 - Redis rate limits
 - Stripe pk/sk live/test alignment (ops config)
-- Rotate secrets that may have appeared in agent tool logs
+- MFA on operator accounts (Tier 3 / money)
 
 ## Prod encrypt status (2026-07-11)
 
