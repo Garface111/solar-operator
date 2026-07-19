@@ -1786,11 +1786,14 @@ TOOL_DEFS = [
         "function": {
             "name": "refresh_capture",
             "description": (
-                "Force fresh data NOW when capture has gone stale — re-arms cloud vault logins "
-                "(harvester re-captures in ~a minute) and re-pulls utility bills. Use when data "
-                "is stale (setup_status data_fresh=false) or the user asks 'refresh / why is my "
-                "data old / pull the latest'. Be honest about limits: device/extension vendors "
-                "and SmartHub/VEC co-ops only refresh from an open browser; SolarEdge auto-polls. "
+                "Force fresh data NOW when capture has gone stale. Does three things: POLLS THE "
+                "INVERTER VENDORS for every array we hold cloud creds for (SolarEdge / Fronius "
+                "Solar.web / SMA — readings land in ~30s), re-arms cloud vault logins (harvester "
+                "re-captures in ~a minute), and re-pulls utility bills. Use when data is stale "
+                "(setup_status data_fresh=false) or the user asks 'refresh / pull the vendor data "
+                "again / why is my data old'. Returns coverage.browser_only_arrays — arrays with "
+                "NO server-side credential, which nothing here can refresh; ALWAYS name those to "
+                "the owner rather than saying 'device vendors' generically. "
                 "Confirm before running (it reaches out to the portals)."
             ),
             "parameters": {
@@ -4940,14 +4943,50 @@ def _setup_status_tool(db, tenant: Tenant, args: dict) -> dict:
 def _refresh_capture_tool(db, tenant: Tenant, args: dict) -> dict:
     """Force fresh data now, across every path the SERVER can actually push:
       • Cloud vault logins → re-arm (harvester re-captures in ~a minute).
+      • INVERTER VENDOR data → tenant-scoped poll of every array whose vendor
+        connection we hold creds for (SolarEdge / Fronius Solar.web / SMA / …).
       • Utility bills (GMP-pullable) → background re-pull.
-    Honest about what it CANNOT force: device/extension capture and SmartHub/VEC
-    utilities only refresh when a signed-in browser is open; SolarEdge rides its
-    own 5-minute server poll. Never claims 'refreshed' for those — 'flagged' at most.
+    Honest about what it CANNOT force: arrays paired only through the browser
+    extension have NO server-side credential, so nothing we do here moves them —
+    and we now name those arrays instead of hand-waving at "device vendors".
+
+    Why the vendor poll had to be added (2026-07-19): the tool covered vault
+    re-arm + bills only, so when an owner said "pull the vendor data again" it
+    re-pulled UTILITY BILLS and truthfully reported "no cloud logins to re-arm"
+    — while a perfectly pollable Fronius connection sat there untouched. The
+    server could refresh it; the agent just had no lever. This is that lever.
     """
-    from .models import PortalCredential
+    from .models import PortalCredential  # Array/Inverter are module-level
     triggered: list[str] = []
     limits: list[str] = []
+
+    # 0) Per-array COVERAGE — the ground truth behind every claim below. An array
+    #    is server-refreshable only if poller._pullable_connection resolves creds
+    #    for it; everything else moves solely on browser/extension capture.
+    server_pollable: list[str] = []
+    browser_only: list[str] = []
+    try:
+        from .poller import _pullable_connection
+        arrs = db.execute(
+            select(Array).where(
+                Array.tenant_id == tenant.id, Array.deleted_at.is_(None)
+            ).order_by(Array.id)
+        ).scalars().all()
+        for a in arrs:
+            has_units = db.execute(
+                select(func.count(Inverter.id)).where(
+                    Inverter.array_id == a.id, Inverter.deleted_at.is_(None))
+            ).scalar()
+            if not has_units:
+                continue  # not a monitored array — no hardware to refresh
+            try:
+                conn = _pullable_connection(db, a)
+            except Exception:
+                conn = None
+            (server_pollable if conn is not None else browser_only).append(
+                a.name or f"array {a.id}")
+    except Exception as e:
+        log.warning("refresh_capture coverage scan failed: %s", e)
 
     # 1) Cloud vault — re-arm enabled creds (same as POST /v1/cloud-capture/refresh).
     cloud_n = 0
@@ -4973,6 +5012,31 @@ def _refresh_capture_tool(db, tenant: Tenant, args: dict) -> dict:
         db.rollback()
         log.warning("refresh_capture cloud re-arm failed: %s", e)
 
+    # 1.5) INVERTER VENDORS — poll this tenant's pullable connections NOW.
+    #      ignore_spacing: spacing only stretches our daily budget across daylight;
+    #      it is not a vendor rule, and a person is waiting. The daily ceiling
+    #      still applies (that one approximates the real vendor limit).
+    if server_pollable:
+        try:
+            import threading
+            from .poller import poll_all_sources
+            tid = tenant.id
+
+            def _poll():
+                try:
+                    s = poll_all_sources(tenant_id=tid, ignore_spacing=True)
+                    log.info("refresh_capture vendor poll %s: %s", tid, s)
+                except Exception as e:  # noqa: BLE001
+                    log.warning("refresh_capture vendor poll failed %s: %s", tid, e)
+
+            threading.Thread(target=_poll, daemon=True).start()
+            triggered.append(
+                f"Polling your inverter vendors now for {len(server_pollable)} "
+                f"array(s): {', '.join(server_pollable)} — readings land in ~30s."
+            )
+        except Exception as e:
+            log.warning("refresh_capture vendor poll dispatch failed: %s", e)
+
     # 2) Utility bills — background GMP re-pull (never block the turn; demo no-ops).
     if not bool(getattr(tenant, "is_demo", False)):
         try:
@@ -4992,40 +5056,61 @@ def _refresh_capture_tool(db, tenant: Tenant, args: dict) -> dict:
         except Exception as e:
             log.warning("refresh_capture bill pull dispatch failed: %s", e)
 
-    # 3) Honest limits for the paths the server cannot force.
-    hb = getattr(tenant, "extension_heartbeat_at", None)
-    hb_hours = _hours_since(hb)
-    if getattr(tenant, "capture_mode", None) == "device" or (hb_hours is not None and hb_hours < 24):
+    # 3) Honest limits — NAME the arrays we cannot move. "Device/extension
+    #    vendors" as a category was true but useless: the owner couldn't tell
+    #    which of their sites was actually stuck, so a permanently-unrefreshable
+    #    array looked identical to one that was merely between syncs.
+    if browser_only:
+        hb = getattr(tenant, "extension_heartbeat_at", None)
+        hb_hours = _hours_since(hb)
+        names = ", ".join(browser_only)
         if hb_hours is not None and hb_hours < 24:
-            limits.append("Device/extension vendors (Fronius/SMA/Chint) refresh on your next browser sync — a browser is paired, so it should catch up soon.")
+            limits.append(
+                f"No server-side credential for {len(browser_only)} array(s): {names}. "
+                "They only move when a signed-in browser syncs — one is paired, so they "
+                "should catch up on the next sync. Connecting the vendor's cloud API "
+                "would let us poll them without a browser."
+            )
         else:
-            limits.append("Device/extension vendors only refresh when a signed-in browser is open — open Array Operator to pull them.")
-    limits.append("SolarEdge rides its own 5-minute server poll — no manual poke needed.")
+            limits.append(
+                f"No server-side credential for {len(browser_only)} array(s): {names}. "
+                "Nothing on our side can refresh them and no browser has checked in "
+                "recently — open Array Operator with the extension signed in, or connect "
+                "the vendor's cloud API so we can poll them directly."
+            )
 
+    coverage = {
+        "server_pollable_arrays": server_pollable,
+        "browser_only_arrays": browser_only,
+    }
     if not triggered:
         return {
             "ok": True,
             "triggered_nothing": True,
+            "coverage": coverage,
             "message": (
-                "Nothing to force from our side right now — you're either on device/extension "
-                "capture or SolarEdge's automatic poll. "
+                "Nothing to force from our side right now — every monitored array is "
+                "browser/extension-paired, with no server-side credential to poll."
             ),
             "limits": limits,
             "instruction_for_agent": (
-                "Be honest: there was no server-forceable refresh. If data is stale and it's a "
-                "device/co-op login, tell them to open Array Operator (or re-add the login on "
-                "Account → Auto-refresh); don't claim you refreshed it."
+                "Be honest: there was no server-forceable refresh. Name the arrays that "
+                "are browser-only (coverage.browser_only_arrays) so they know exactly which "
+                "sites are stuck, and point at connecting the vendor cloud API as the real "
+                "fix. Don't claim you refreshed anything."
             ),
         }
     return {
         "ok": True,
         "cloud_logins_rearmed": cloud_n,
         "triggered": triggered,
+        "coverage": coverage,
         "limits": limits,
         "instruction_for_agent": (
-            "Tell them plainly what you kicked off (cloud re-arm ~1 min; bills re-pulling) and "
-            "be honest about what can't be forced. Offer to check back after it lands. Do NOT "
-            "over-promise instant results."
+            "Tell them plainly what you kicked off (vendor poll ~30s; cloud re-arm ~1 min; "
+            "bills re-pulling). If coverage.browser_only_arrays is non-empty, name those "
+            "arrays — they are NOT being refreshed and the owner needs to know which ones. "
+            "Offer to check back after it lands. Do NOT over-promise instant results."
         ),
     }
 

@@ -148,12 +148,23 @@ def _governor(cred_key: str, day) -> dict:
     return st
 
 
-def _governor_allows(cred_key: str, day, ts, sites_under_key: int) -> bool:
+def _governor_allows(
+    cred_key: str, day, ts, sites_under_key: int, *, ignore_spacing: bool = False
+) -> bool:
     """True if this credential may make ONE more site call right now: under the
-    hard daily ceiling AND past the minimum spacing interval."""
+    hard daily ceiling AND past the minimum spacing interval.
+
+    ignore_spacing: a HUMAN asked for fresh data right now (owner hit refresh, or
+    the Energy Agent ran refresh_capture). Spacing exists to stretch our daily
+    budget across the daylight span — it is not a vendor rule — so a person
+    waiting on an answer may jump it. The daily ceiling is NOT bypassable: that
+    one approximates the vendor's real limit and skipping it risks a ban.
+    """
     st = _governor(cred_key, day)
     if st["calls"] + 1 > DAILY_BUDGET_PER_KEY:
         return False
+    if ignore_spacing:
+        return True
     last = st["last_poll"]
     if last is not None:
         elapsed = (ts - last).total_seconds()
@@ -236,17 +247,29 @@ def _allocate_power(inverters: list[Inverter], site_power_w) -> dict[int, float]
     return out
 
 
-def poll_all_sources(*, force_daylight: bool | None = None) -> dict:
+def poll_all_sources(
+    *,
+    force_daylight: bool | None = None,
+    tenant_id: str | None = None,
+    ignore_spacing: bool = False,
+) -> dict:
     """Poll every array with a pullable vendor connection via ONE site-level
     fetch_live call each (budget-governed), allocate the site power across its
     inverters by nameplate share, write InverterReading rows, and refresh
     Inverter.last_power_w/at. Returns a run summary.
 
     force_daylight: override the daylight gate (True=poll anyway, used by tests /
-    manual kicks; None=use the real sun check)."""
+    manual kicks; None=use the real sun check).
+    tenant_id: scope the run to ONE tenant's arrays. The 5-minute scheduler job
+    leaves this None (whole fleet); an owner-initiated refresh passes their id so
+    a person asking "pull my vendor data now" touches only their own sites.
+    ignore_spacing: skip the budget SPACING interval (not the daily ceiling) —
+    see _governor_allows. Set when a human is waiting on the result.
+    """
     daylight = _fleet._is_daylight() if force_daylight is None else force_daylight
     summary = {
         "ran": True, "daylight": bool(daylight),
+        "tenant_id": tenant_id,
         "arrays_polled": 0, "arrays_skipped": 0, "arrays_throttled": 0,
         "inverters_updated": 0, "readings_written": 0, "api_calls": 0,
         "errors": [],
@@ -260,9 +283,10 @@ def poll_all_sources(*, force_daylight: bool | None = None) -> dict:
     ts = now()
     day = ts.date()
     with SessionLocal() as db:
-        arrays = db.execute(
-            select(Array).where(Array.deleted_at.is_(None)).order_by(Array.id)
-        ).scalars().all()
+        q = select(Array).where(Array.deleted_at.is_(None))
+        if tenant_id:
+            q = q.where(Array.tenant_id == tenant_id)
+        arrays = db.execute(q.order_by(Array.id)).scalars().all()
 
         # First pass: resolve pullable connections and count sites per credential
         # so the governor can size spacing (cadence) adaptively.
@@ -281,7 +305,9 @@ def poll_all_sources(*, force_daylight: bool | None = None) -> dict:
         for arr, conn, cfg, ck in entries:
             # Budget governor: skip (throttle) this site if its credential has
             # spent its budget or hasn't waited the minimum spacing interval.
-            if not _governor_allows(ck, day, ts, sites_per_key[ck]):
+            if not _governor_allows(
+                ck, day, ts, sites_per_key[ck], ignore_spacing=ignore_spacing
+            ):
                 summary["arrays_throttled"] += 1
                 continue
 
