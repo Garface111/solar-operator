@@ -27,6 +27,7 @@ from sqlalchemy.orm import joinedload
 from .db import SessionLocal
 from .models import Array, Client
 from .account import tenant_from_session, require_not_demo
+from .report_arrays import not_vendor_only
 from .ingest import (
     _file_to_text,
     _detect_gmcs_shape,
@@ -155,6 +156,7 @@ def nepool_stats(authorization: Optional[str] = Header(default=None)):
                 Array.tenant_id == t.id,
                 Array.deleted_at.is_(None),
                 Array.nepool_gis_id.is_(None),
+                not_vendor_only(),
                 Client.active.is_(True),
                 Client.deleted_at.is_(None),
             )
@@ -239,7 +241,8 @@ async def nepool_preview(
     # Load tenant's existing arrays (eager-load client for display names).
     # When client_id is set, scope to that client's arrays only.
     with SessionLocal() as db:
-        array_filters = [Array.tenant_id == t.id, Array.deleted_at.is_(None)]
+        array_filters = [Array.tenant_id == t.id, Array.deleted_at.is_(None),
+                         not_vendor_only()]
         if client_id is not None:
             array_filters.append(Array.client_id == client_id)
         existing_arrays: list[Array] = db.execute(

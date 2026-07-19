@@ -49,6 +49,7 @@ from .email_skin import render_email_skin, render_email_skin_text
 from . import ratelimit
 from .providers import PROVIDERS, PROVIDER_CODES, get_provider
 from .stripe_helpers import reconcile_subscription_quantity, create_subscription_for_tenant, billable_array_count
+from .report_arrays import not_vendor_only
 from .email_templates import (
     DEFAULT_SUBJECT_TEMPLATE, DEFAULT_BODY_TEMPLATE, DEFAULT_SIGNOFF,
     MERGE_TAGS, build_context, render_email,
@@ -2041,7 +2042,8 @@ def send_sample_report(authorization: Optional[str] = Header(default=None)):
         row = db.execute(
             select(Client)
             .join(Array, Array.client_id == Client.id)
-            .where(Client.tenant_id == t.id, Client.active == True)  # noqa: E712
+            .where(Client.tenant_id == t.id, Client.active == True,  # noqa: E712
+                   not_vendor_only())
             .order_by(Client.name.asc())
             .limit(1)
         ).scalar_one_or_none()
@@ -2090,7 +2092,8 @@ def _query_sample_client_ctx(db, tenant_id: str, tenant_name: str,
     if client:
         n_arrays = db.execute(
             select(func.count()).select_from(Array)
-            .where(Array.client_id == client.id, Array.deleted_at.is_(None))
+            .where(Array.client_id == client.id, Array.deleted_at.is_(None),
+                   not_vendor_only())
         ).scalar() or 1
         client_name = client.name
     else:
@@ -2973,6 +2976,7 @@ def list_clients(authorization: Optional[str] = Header(default=None)):
             .where(
                 Array.client_id.in_([c.id for c in clients]),
                 Array.deleted_at.is_(None),
+                not_vendor_only(),
             )
             .group_by(Array.client_id)
         ).all()
@@ -3850,6 +3854,7 @@ def set_auto_send_all(body: AutoSendAllBody,
                 Array.tenant_id == t.id,
                 Array.deleted_at.is_(None),
                 Array.excluded.is_(False),
+                not_vendor_only(),
                 Array.client_id.in_([c.id for c in clients]) if clients else False,
             )
         ).scalar() or 0) if clients else 0
@@ -3918,7 +3923,7 @@ def update_client(client_id: int, body: ClientUpdate,
             c.is_placeholder = False
         db.commit(); db.refresh(c)
         n_arr = db.execute(
-            select(Array).where(Array.client_id == c.id)
+            select(Array).where(Array.client_id == c.id, not_vendor_only())
         ).scalars().all()
         return {"ok": True, "client": _client_to_dict(c, len(n_arr))}
 
@@ -3993,7 +3998,7 @@ def refresh_capture(client_id: int,
         if not c or c.tenant_id != t.id:
             raise HTTPException(404, "Client not found")
         n_arr = db.execute(
-            select(Array).where(Array.client_id == c.id)
+            select(Array).where(Array.client_id == c.id, not_vendor_only())
         ).scalars().all()
         return {"ok": True, "client": _client_to_dict(c, len(n_arr))}
 
@@ -4422,7 +4427,7 @@ def list_client_arrays(
     t = tenant_from_session(authorization)
     with SessionLocal() as db:
         c = _resolve_client_for_tenant(db, t.id, client_id)
-        arr_query = select(Array).where(Array.client_id == c.id)
+        arr_query = select(Array).where(Array.client_id == c.id, not_vendor_only())
         if not include_deleted:
             arr_query = arr_query.where(Array.deleted_at.is_(None))
         arrays = db.execute(arr_query.order_by(Array.name.asc())).scalars().all()
@@ -5170,6 +5175,7 @@ def get_reports_next_run(
                 Array.tenant_id == t.id,
                 Array.deleted_at.is_(None),
                 Array.excluded.is_(False),
+                not_vendor_only(),
                 Client.active.is_(True),
                 Client.deleted_at.is_(None),
             )

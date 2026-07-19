@@ -31,6 +31,7 @@ from sqlalchemy import select
 
 from ..db import SessionLocal
 from ..models import Array, Client
+from ..report_arrays import not_vendor_only
 from . import gmcs_writer
 from . import rec_writer
 
@@ -75,6 +76,7 @@ def _resolve_fuel(client_id: Optional[int], tenant_id: Optional[str]) -> str:
                 select(Array).where(
                     Array.client_id == cid,
                     Array.excluded.is_(False),
+                    not_vendor_only(),
                 )
             ).scalars().all()
 

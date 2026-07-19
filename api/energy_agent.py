@@ -41,6 +41,7 @@ from .account import require_not_demo, tenant_from_session
 from .db import SessionLocal
 from .models import Array, Base, Client, Tenant
 from .notify import send_internal_alert
+from .report_arrays import not_vendor_only
 
 log = logging.getLogger("energy_agent")
 router = APIRouter()
@@ -5947,7 +5948,8 @@ def _gen_client_row(db, c) -> dict:
     8000-char tool-result cap and the model never sees a truncated list."""
     n = db.execute(
         select(func.count()).select_from(Array).where(
-            Array.client_id == c.id, Array.deleted_at.is_(None))
+            Array.client_id == c.id, Array.deleted_at.is_(None),
+            not_vendor_only())
     ).scalar() or 0
     return {
         "id": c.id, "name": c.name,
@@ -5966,7 +5968,8 @@ def _gen_client_detail(db, c) -> dict:
     """Full detail for ONE client — arrays (capped) + logins. Bounded so even a
     42-array client stays under the tool-result cap."""
     arrs = db.execute(
-        select(Array).where(Array.client_id == c.id, Array.deleted_at.is_(None))
+        select(Array).where(Array.client_id == c.id, Array.deleted_at.is_(None),
+                            not_vendor_only())
         .order_by(Array.name)
     ).scalars().all()
     total_arr = len(arrs)
@@ -6134,7 +6137,7 @@ def _patch_gen_client_tool(db, tenant: Tenant, args: dict, user_text: str = "") 
         n_arr = db.execute(
             select(func.count()).select_from(Array).where(
                 Array.client_id == c.id, Array.deleted_at.is_(None),
-                Array.excluded.is_(False))
+                Array.excluded.is_(False), not_vendor_only())
         ).scalar() or 0
         return {"status": "needs_confirm", "money": True,
                 "message": (

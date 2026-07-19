@@ -29,6 +29,7 @@ from .models import Tenant, Client, Array, now
 from .writers import build_workbook
 from .notify import send_workbook_email, send_internal_alert
 from .email_templates import build_context, render_email, resolve_from_header
+from .report_arrays import not_vendor_only
 
 logger = logging.getLogger(__name__)
 
@@ -276,6 +277,7 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
                 Array.client_id == client_id,
                 Array.deleted_at.is_(None),
                 Array.excluded.is_(False),
+                not_vendor_only(),
             )
         ).scalar() or 0
 

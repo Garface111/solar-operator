@@ -31,6 +31,7 @@ from ..bill_attribution import distribute_kwh_by_calendar_day
 from ..db import SessionLocal
 from ..generation_sources import EXTENSION_SOURCES, VENDOR_TELEMETRY_SOURCES
 from ..models import Array, Bill, Client, DailyGeneration, Tenant, UtilityAccount
+from ..report_arrays import not_vendor_only
 from ..reports import gmp_daily_read
 from .gmcs_writer import _daily_generation_by_month, _quarter_months, _sheet_name_for_array
 
@@ -195,7 +196,8 @@ def build_generation_workbook(client_id: int, out_path, *, year: int, quarter: i
         arrays = db.execute(
             select(Array).where(Array.client_id == client_id,
                                 Array.deleted_at.is_(None),
-                                Array.excluded.is_(False)).order_by(Array.name)
+                                Array.excluded.is_(False),
+                                not_vendor_only()).order_by(Array.name)
         ).scalars().all()
 
         summary_rows = []
@@ -300,7 +302,8 @@ def build_all_clients_generation_workbook(tenant_id: str, out_path, *, year: int
             arrays = db.execute(
                 select(Array).where(Array.client_id == c.id,
                                     Array.deleted_at.is_(None),
-                                    Array.excluded.is_(False)).order_by(Array.name)
+                                    Array.excluded.is_(False),
+                                    not_vendor_only()).order_by(Array.name)
             ).scalars().all()
             for arr in arrays:
                 monthly = _array_monthly(db, arr.id, months, start, end)

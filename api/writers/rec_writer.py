@@ -35,6 +35,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from ..bill_attribution import distribute_kwh_by_calendar_day
 from ..db import SessionLocal, DATA_DIR
 from ..models import Tenant, Client, UtilityAccount, Array, Bill, DailyGeneration
+from ..report_arrays import not_vendor_only
 
 # Reuse the sacred writer's pure helpers so the quarter math + REC floor stay
 # identical. None of these touch GMCS-specific formatting or wording.
@@ -163,6 +164,7 @@ def build_workbook(tenant_id: Optional[str] = None,
             select(Array).where(
                 Array.client_id == client.id,
                 Array.excluded.is_(False),
+                not_vendor_only(),
             )
         ).scalars().all()
         arrays_by_id = {a.id: a for a in arrays}

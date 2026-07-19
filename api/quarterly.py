@@ -16,6 +16,7 @@ from typing import Optional
 from sqlalchemy import select
 
 from .models import Array, Bill, UtilityAccount
+from .report_arrays import not_vendor_only
 
 
 def _quarter_of(month: int) -> int:
@@ -105,6 +106,7 @@ def compute_quarterly_progress(
             Array.client_id == client_id,
             Array.deleted_at.is_(None),
             Array.excluded.is_(False),
+            not_vendor_only(),
         )
     ).scalars().all()
 

@@ -36,6 +36,7 @@ from openpyxl.utils import get_column_letter
 from ..bill_attribution import distribute_kwh_by_calendar_day
 from ..db import SessionLocal, DATA_DIR
 from ..models import Tenant, Client, UtilityAccount, Array, Bill, DailyGeneration
+from ..report_arrays import not_vendor_only
 
 
 REPORTS_DIR = DATA_DIR / "reports"
@@ -235,6 +236,7 @@ def report_has_data(client_id: int, *, quarters: int = 6,
                 Array.client_id == client.id,
                 Array.excluded.is_(False),
                 Array.deleted_at.is_(None),
+                not_vendor_only(),
             )
         ).scalars().all()
         array_ids = [a.id for a in arrays]
@@ -303,6 +305,7 @@ def reported_array_ids(client_id: int, *, quarters: int = 6,
                 Array.client_id == client.id,
                 Array.excluded.is_(False),
                 Array.deleted_at.is_(None),
+                not_vendor_only(),
             )
         ).scalars().all()
         for arr in arrays:
@@ -402,6 +405,7 @@ def build_workbook(tenant_id: Optional[str] = None,
                 Array.client_id == client.id,
                 Array.excluded.is_(False),
                 Array.deleted_at.is_(None),
+                not_vendor_only(),
             )
         ).scalars().all()
         arrays_by_id = {a.id: a for a in arrays}
@@ -635,6 +639,7 @@ def build_directory_workbook(
                 Array.client_id.in_(list(clients_by_id.keys())),
                 Array.excluded.is_(False),
                 Array.deleted_at.is_(None),
+                not_vendor_only(),
             ).order_by(Array.name.asc())
         ).scalars().all()
 
