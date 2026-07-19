@@ -197,9 +197,24 @@ def status(authorization: Optional[str] = Header(default=None)):
     """Per-login Cloud-Capture state for the Auto-refresh panel. No secrets."""
     t = tenant_from_session(authorization)
     with SessionLocal() as db:
+        # Select only the columns the panel needs — NEVER the encrypted vault
+        # columns (secret_enc / session_state_enc). Materializing the full ORM
+        # entity would run their decrypting TypeDecorators at row-fetch time,
+        # which the public web process refuses (SO_VAULT_DECRYPT=0). "has_session"
+        # is derived at the SQL layer so the ciphertext is never touched.
         creds = db.execute(
-            select(PortalCredential).where(PortalCredential.tenant_id == t.id)
-        ).scalars().all()
+            select(
+                PortalCredential.provider,
+                PortalCredential.username,
+                PortalCredential.username_lc,
+                PortalCredential.cloud_capture_enabled,
+                PortalCredential.login_host,
+                PortalCredential.last_harvest_at,
+                PortalCredential.last_harvest_ok,
+                PortalCredential.harvest_fails,
+                PortalCredential.session_state_enc.isnot(None).label("has_session"),
+            ).where(PortalCredential.tenant_id == t.id)
+        ).all()
         # Distinguish WHY the last harvest wasn't ok — a bare last_harvest_ok=false
         # can't tell "wrong password" (status=login_failed, the only real credential
         # issue) from "signed in fine, the post-login data pull hit a transient
@@ -228,7 +243,7 @@ def status(authorization: Optional[str] = Header(default=None)):
             "last_harvest_ok": c.last_harvest_ok,
             "last_harvest_status": last_status.get((c.provider, c.username_lc)),
             "harvest_fails": c.harvest_fails or 0,
-            "has_session": bool(c.session_state_enc),
+            "has_session": bool(c.has_session),
         } for c in creds]
     return {
         "encryption_ready": cc.crypto_ready(),

@@ -126,6 +126,44 @@ def test_vault_decrypt_disabled_on_web(Session):
             _ = db.get(PortalCredential, rid).secret_enc
 
 
+def test_cloud_capture_status_never_decrypts_vault_on_web(Session, monkeypatch):
+    """The /v1/cloud-capture/status panel must load without unwrapping the vault.
+
+    Regression: the endpoint selected the full PortalCredential ORM entity, so
+    fetching each row ran the EncryptedVaultStr/JSON decryptors at fetch time —
+    which the public web process refuses (SO_VAULT_DECRYPT=0), 500ing the panel.
+    """
+    from api import cloud_capture
+
+    os.environ[crypto.ENV_KEY] = KEY
+    os.environ["SO_VAULT_DECRYPT"] = "1"  # arm decrypt to store an encrypted row
+    crypto._cache.clear()
+    with Session() as db:
+        t = _tenant(db)
+        db.add(PortalCredential(
+            tenant_id=t.id, provider="gmp", username="u", username_lc="u",
+            secret_enc="s3cret-password", cloud_capture_enabled=True,
+            session_state_enc={"cookies": ["c"]},
+        ))
+        db.commit()
+
+    # Simulate public web: decrypt is refused for vault secrets.
+    os.environ["SO_VAULT_DECRYPT"] = "0"
+    crypto._cache.clear()
+
+    class _T:
+        id = "ten_a"
+
+    monkeypatch.setattr(cloud_capture, "SessionLocal", Session)
+    monkeypatch.setattr(cloud_capture, "tenant_from_session", lambda a: _T())
+
+    out = cloud_capture.status(authorization="Bearer x")  # must not raise
+    assert len(out["credentials"]) == 1
+    row = out["credentials"][0]
+    assert row["provider"] == "gmp"
+    assert row["has_session"] is True  # derived at SQL layer, secret never decrypted
+
+
 def test_list_all_meta_requires_tenant_id(Session):
     from api.harvester.credentials import list_all_meta
 
