@@ -162,6 +162,9 @@ def test_cloud_capture_status_never_decrypts_vault_on_web(Session, monkeypatch):
     row = out["credentials"][0]
     assert row["provider"] == "gmp"
     assert row["has_session"] is True  # derived at SQL layer, secret never decrypted
+    assert row["sign_ins_this_month"] == 0
+    assert row["attempts_this_month"] == 0
+    assert "activity_month" in out
 
 
 def test_list_all_meta_requires_tenant_id(Session):
@@ -250,3 +253,25 @@ def test_decrypt_audit_includes_context(caplog):
     assert "tenant_id=ten_x" in joined
     assert "provider=gmp" in joined
     assert "hunter2" not in joined
+
+
+def test_rearm_all_requires_tenant_id(Session):
+    from api.harvester.credentials import rearm_all
+
+    with Session() as db:
+        with pytest.raises(ValueError, match="tenant_id"):
+            rearm_all(db)
+
+
+def test_admin_vault_stats_requires_header(monkeypatch):
+    from api import admin_vault
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(admin_vault, "ADMIN_API_KEY", "test-admin-key-xyz")
+    with pytest.raises(HTTPException) as ei:
+        admin_vault._check(None, "test-admin-key-xyz")  # query key rejected
+    assert ei.value.status_code == 400
+    with pytest.raises(HTTPException) as ei2:
+        admin_vault._check("wrong", None)
+    assert ei2.value.status_code == 403
+    admin_vault._check("test-admin-key-xyz", None)  # ok

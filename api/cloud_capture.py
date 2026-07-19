@@ -234,22 +234,70 @@ def status(authorization: Optional[str] = Header(default=None)):
             key = (provider, username_lc)
             if key not in last_status:
                 last_status[key] = run_status
-        rows = [{
-            "provider": c.provider,
-            "username": c.username,
-            "enabled": bool(c.cloud_capture_enabled),
-            "login_host": c.login_host,
-            "last_harvest_at": c.last_harvest_at.isoformat() if c.last_harvest_at else None,
-            "last_harvest_ok": c.last_harvest_ok,
-            "last_harvest_status": last_status.get((c.provider, c.username_lc)),
-            "harvest_fails": c.harvest_fails or 0,
-            "has_session": bool(c.has_session),
-        } for c in creds]
+
+        # T2-1: customer-visible harvest activity (trust + tripwire). Counts only
+        # — never detail text, never secrets. Month = UTC calendar month.
+        from datetime import datetime
+        from sqlalchemy import func, case
+        month_start = datetime.utcnow().replace(
+            day=1, hour=0, minute=0, second=0, microsecond=0,
+        )
+        activity_rows = db.execute(
+            select(
+                HarvestRun.provider,
+                HarvestRun.username_lc,
+                func.count().label("attempts"),
+                func.coalesce(
+                    func.sum(
+                        case((HarvestRun.logged_in_fresh.is_(True), 1), else_=0)
+                    ),
+                    0,
+                ).label("fresh_logins"),
+                func.coalesce(
+                    func.sum(case((HarvestRun.status == "ok", 1), else_=0)),
+                    0,
+                ).label("ok"),
+            )
+            .where(
+                HarvestRun.tenant_id == t.id,
+                HarvestRun.started_at >= month_start,
+            )
+            .group_by(HarvestRun.provider, HarvestRun.username_lc)
+        ).all()
+        activity: dict[tuple[str, str], dict] = {
+            (p, u): {
+                "attempts_this_month": int(a or 0),
+                "sign_ins_this_month": int(f or 0),  # full username/password logins
+                "ok_this_month": int(o or 0),
+            }
+            for p, u, a, f, o in activity_rows
+        }
+
+        rows = []
+        for c in creds:
+            act = activity.get((c.provider, c.username_lc), {
+                "attempts_this_month": 0,
+                "sign_ins_this_month": 0,
+                "ok_this_month": 0,
+            })
+            rows.append({
+                "provider": c.provider,
+                "username": c.username,
+                "enabled": bool(c.cloud_capture_enabled),
+                "login_host": c.login_host,
+                "last_harvest_at": c.last_harvest_at.isoformat() if c.last_harvest_at else None,
+                "last_harvest_ok": c.last_harvest_ok,
+                "last_harvest_status": last_status.get((c.provider, c.username_lc)),
+                "harvest_fails": c.harvest_fails or 0,
+                "has_session": bool(c.has_session),
+                **act,
+            })
     return {
         "encryption_ready": cc.crypto_ready(),
         "collection_enabled": config.collection_enabled(),
         "harvesting_enabled": config.enabled(),
         "credentials": rows,
+        "activity_month": month_start.strftime("%Y-%m"),
     }
 
 

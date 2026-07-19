@@ -424,6 +424,8 @@ app.include_router(dev_captures_router)
 # CC funnel dashboard (read-only admin metrics)
 from .admin_funnel import router as funnel_router
 app.include_router(funnel_router)
+from .admin_vault import router as admin_vault_router
+app.include_router(admin_vault_router)
 
 # CC feature-suggestion capture + admin review endpoints
 from .feature_suggestions import router as feature_suggestions_router

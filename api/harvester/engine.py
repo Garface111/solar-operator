@@ -129,15 +129,24 @@ class BrowserFarm:
     @staticmethod
     def _persist(tenant_id, provider, username_lc, *, storage_state, ok, status,
                  started_at, fresh, rows, error, shot):
-        """Persist session_state + health + audit row. Short session, one commit."""
+        """Persist session_state + health + audit row. Short session, one commit.
+
+        Never load ``secret_enc`` — persist does not need the password, and
+        loading it would decrypt the vault just to write health metadata.
+        """
+        from sqlalchemy.orm import defer
+
         with SessionLocal() as db:
-            cred = db.execute(
-                select(PortalCredential).where(
-                    PortalCredential.tenant_id == tenant_id,
-                    PortalCredential.provider == provider,
-                    PortalCredential.username_lc == username_lc,
-                )
-            ).scalar_one_or_none()
+            q = select(PortalCredential).where(
+                PortalCredential.tenant_id == tenant_id,
+                PortalCredential.provider == provider,
+                PortalCredential.username_lc == username_lc,
+            ).options(defer(PortalCredential.secret_enc))
+            # If we are not writing a new session blob, also skip decrypting the
+            # old session_state (EncryptedVaultJSON would unwrap it on fetch).
+            if storage_state is None:
+                q = q.options(defer(PortalCredential.session_state_enc))
+            cred = db.execute(q).scalar_one_or_none()
             if cred is None:
                 return
             if storage_state is not None:

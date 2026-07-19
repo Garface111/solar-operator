@@ -256,10 +256,15 @@ def rearm(
 
 
 def rearm_all(db, *, tenant_id: str | None = None, only_enabled: bool = False) -> int:
-    """Re-arm every vault credential (or one tenant). Returns count."""
-    q = select(PortalCredential)
-    if tenant_id:
-        q = q.where(PortalCredential.tenant_id == tenant_id)
+    """Re-arm vault credentials for ONE tenant. Fleet-wide rearm is refused.
+
+    ``tenant_id`` is required (blast-radius guard). Returns count re-armed.
+    """
+    if not (tenant_id or "").strip():
+        raise ValueError(
+            "rearm_all requires tenant_id — fleet-wide rearm is disabled"
+        )
+    q = select(PortalCredential).where(PortalCredential.tenant_id == tenant_id)
     if only_enabled:
         q = q.where(PortalCredential.cloud_capture_enabled.is_(True))
     rows = db.execute(q).scalars().all()

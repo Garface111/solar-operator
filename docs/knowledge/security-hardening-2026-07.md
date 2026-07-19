@@ -82,12 +82,22 @@ Shipped on main (`4a56fa5d`, `7f200a9c`, follow-ups):
 **T0-0 live counts (2026-07-19 post-purge):**  
 `portal_credential` total=24, all enabled, **0** on inactive tenants, all have `secret_enc`.
 
+### Follow-up (2026-07-19 continued)
+
+| Item | Status |
+|------|--------|
+| **T1-2 ops replacement** | `GET /admin/vault-stats` + `/admin/vault-health` (X-Admin-Key) — fleet counts without public SQL. Agents should prefer this over `DATABASE_PUBLIC_URL`. |
+| **T1-2 TCP proxy still open** | `zephyr.proxy.rlwy.net:54704` still reachable. Close in Railway Postgres → Networking → remove TCP proxy **after** confirming vault-stats works for your ops. Ciphertext mitigates dump risk until then. |
+| **T2-1 activity counts** | `/v1/cloud-capture/status` now returns `sign_ins_this_month` / `attempts_this_month` / `ok_this_month` per login (trust tripwire). |
+| **T2-7 dry-run** | `python -m scripts.vault_key_escrow_and_rotate --verify-decrypt` proves every vault row decrypts. Escrow checklist on Desktop + `docs/knowledge/so-config-key-escrow-checklist.md`. Live MultiFernet rotate still manual (`--mint-rotation`). |
+| **rearm_all** | Requires `tenant_id` (fleet-wide rearm refused). |
+| **persist path** | `_persist` defers `secret_enc` so health writes never decrypt the password. |
+
 ## Still open
 
-- **T1-2** Postgres TCP proxy still public (`zephyr.proxy.rlwy.net:54704`). Ciphertext mitigates dump risk; closing needs a replacement ops path (Railway private networking / working `railway ssh`). Do not close until agents can run read-only probes another way.
+- **T1-2** Flip the switch: remove Railway Postgres public TCP proxy once vault-stats is in daily ops.
 - **T1-3** AWS KMS envelope encryption (~$1–3/mo) — money gate; ask Ford.
-- **T2-1** customer-visible “we signed into your portal N times” surface — detective log exists; product UI not built.
-- **T2-7** key escrow offline copy + dry-run prod rotation (never exercised against live vault).
+- **T2-7 apply** Live key rotation (mint + re-wrap) — only after offline escrow is confirmed.
 - Hash `tenant_key` at rest (needs extension re-auth UX)
 - HttpOnly cookie sessions / shorter TTL
 - CSP nonces (drop `unsafe-inline`)
