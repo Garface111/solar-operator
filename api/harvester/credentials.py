@@ -341,9 +341,18 @@ def record_health(
     # warm tick, so a credential alternating login_failed → ok never reached
     # MAX_LOGIN_FAILS and the whole lockout guard was dead code — Bruce's SMA
     # login sat at harvest_fails=1 while eating 79 failed logins a day.)
+    #
+    # Symmetrically, only a failure that actually SUBMITTED the password counts.
+    # A cross-origin SSO portal can fail to authenticate without a login form ever
+    # appearing (login.perform_login → "sso-resumed"): no credentials are sent, so
+    # no portal failure counter moves and there is no lockout to guard against.
+    # Charging those to the pause would take a capture that is still delivering
+    # data down to a 6-hour heartbeat for a risk that does not exist. They are
+    # still recorded as failed runs, and `lockout_alert.run_capture_stall_watchdog`
+    # is what makes that class loud — this branch is about lockout, not silence.
     if ok and fresh_login:
         cred.harvest_fails = 0
-    elif login_failure:
+    elif login_failure and fresh_login:
         cred.harvest_fails = min((cred.harvest_fails or 0) + 1, 999)
 
     # Mirror into the roster row the dashboard reads.
@@ -368,7 +377,7 @@ def record_health(
         if fresh_login:
             row.fails = 0
             row.paused = False
-    elif login_failure:
+    elif login_failure and fresh_login:
         row.fails = min((row.fails or 0) + 1, 999)
         if row.fails >= PAUSE_FAILS:
             row.paused = True

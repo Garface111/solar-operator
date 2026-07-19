@@ -123,6 +123,22 @@ def test_fresh_login_ok_clears_the_counter():
         assert c.harvest_fails == 0
 
 
+def test_a_login_failure_that_typed_no_password_is_not_a_lockout_risk():
+    """SSO portals can fail to authenticate without ever showing a form
+    ("sso-resumed"): no credentials are submitted, so no portal failure counter
+    moves and there is nothing to be locked out of. Charging those to the pause
+    would throttle a capture that still delivers data. They stay visible as
+    failed runs and are covered by the stall watchdog instead."""
+    with SessionLocal() as db:
+        c = _cred(db, username="ssofail@example.com")
+        for _ in range(10):
+            _run(db, c, ok=False, status="login_failed", fresh=False)
+        assert c.harvest_fails == 0
+        # …but a real password attempt that fails still counts.
+        _run(db, c, ok=False, status="login_failed", fresh=True)
+        assert c.harvest_fails == 1
+
+
 def test_scrape_failures_never_count_toward_the_lockout():
     """A scrape failure happens AFTER authentication — no lockout risk, and it
     must not throttle the data path onto the 30-min login backoff."""
@@ -287,6 +303,75 @@ def test_paused_login_emits_a_deduped_operator_alert_and_clears_on_recovery(monk
     with SessionLocal() as db:
         assert db.execute(select(InverterAlertState).where(
             InverterAlertState.incident_key == mine)).scalar_one_or_none() is None
+
+
+def test_a_capture_that_never_trips_the_pause_still_alerts_when_it_stalls(monkeypatch):
+    """The gap narrowing the pause opens: a credential can fail forever without
+    ever spending a password attempt. Cause-blind staleness is what keeps that
+    class loud — otherwise the fix would have made a real failure quieter."""
+    from api.harvester import lockout_alert
+
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(lockout_alert, "send_internal_alert",
+                        lambda subject, body: sent.append((subject, body)) or True)
+
+    stale = now() - timedelta(hours=lockout_alert.STALL_INVERTER_HOURS + 2)
+    with SessionLocal() as db:
+        c = _cred(db, tid=TENANT2, provider="sma", username="stalled@example.com")
+        db.add(HarvestRun(tenant_id=TENANT2, provider="sma",
+                          username_lc="stalled@example.com",
+                          started_at=stale, ended_at=stale, status="ok",
+                          logged_in_fresh=False, rows_written=1))
+        db.add(HarvestRun(tenant_id=TENANT2, provider="sma",
+                          username_lc="stalled@example.com",
+                          started_at=now(), ended_at=now(), status="login_failed",
+                          logged_in_fresh=False, rows_written=0,
+                          detail="login outcome=sso-resumed, not authenticated"))
+        db.commit()
+        assert c.harvest_fails == 0, "precondition: the pause never fired"
+
+    mine = lockout_alert._stall_key(TENANT2, "sma", "stalled@example.com")
+    r1 = lockout_alert.run_capture_stall_watchdog()
+    assert mine in r1["alerted"]
+    body = sent[0][1]
+    assert "stalled@example.com" in body and "sso-resumed" in body
+
+    # Deduped inside the re-alert window.
+    assert mine not in lockout_alert.run_capture_stall_watchdog()["alerted"]
+    assert len(sent) == 1
+
+    # A successful capture clears the incident.
+    with SessionLocal() as db:
+        db.add(HarvestRun(tenant_id=TENANT2, provider="sma",
+                          username_lc="stalled@example.com",
+                          started_at=now(), ended_at=now(), status="ok",
+                          logged_in_fresh=False, rows_written=1))
+        db.commit()
+    lockout_alert.run_capture_stall_watchdog()
+    with SessionLocal() as db:
+        assert db.execute(select(InverterAlertState).where(
+            InverterAlertState.incident_key == mine)).scalar_one_or_none() is None
+
+
+def test_a_healthy_capture_is_not_reported_as_stalled():
+    from api.harvester import lockout_alert
+
+    with SessionLocal() as db:
+        _cred(db, tid=TENANT2, provider="chint", username="healthy@example.com")
+        db.add(HarvestRun(tenant_id=TENANT2, provider="chint",
+                          username_lc="healthy@example.com",
+                          started_at=now(), ended_at=now(), status="ok",
+                          logged_in_fresh=False, rows_written=1))
+        db.commit()
+    keys = [s["incident_key"] for s in lockout_alert.stalled_credentials()]
+    assert lockout_alert._stall_key(TENANT2, "chint", "healthy@example.com") not in keys
+
+
+def test_stall_incident_key_is_namespaced_out_of_the_inverter_sweep():
+    from api.harvester import lockout_alert
+    key = lockout_alert._stall_key("ten_x", "sma", "Owner@Example.com")
+    assert key == "cloud_capture_stalled:ten_x:sma:owner@example.com"
+    assert "|" not in key
 
 
 def test_alert_incident_key_is_namespaced_out_of_the_inverter_sweep():

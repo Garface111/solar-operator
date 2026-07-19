@@ -1656,6 +1656,10 @@ def start():
     # keeps the operator loudly informed until it recovers. Deliberately registered
     # on the WEB service, not the harvester loop, so a wedged harvester can't take
     # its own alarm down with it.
+    # It also runs the STALL watchdog, which is cause-blind: the pause only counts
+    # failures that spent a real password attempt, so everything else that kills a
+    # capture would otherwise be silent — and `vip_watch`, the other staleness net,
+    # was switched off 2026-07-19.
     scheduler.add_job(
         _run_cloud_capture_lockout_watchdog,
         IntervalTrigger(hours=1),
@@ -2494,8 +2498,8 @@ def _run_cloud_capture_lockout_watchdog() -> None:
     stalled server-side capture can never go quiet the way the extension's
     background refresh once did (memory: no-self-sabotage-reliability-audit)."""
     try:
-        from .harvester.lockout_alert import run_login_lockout_watchdog
-        run_login_lockout_watchdog()
+        from .harvester.lockout_alert import run_cloud_capture_watchdogs
+        run_cloud_capture_watchdogs()
     except Exception as exc:
         send_internal_alert(
             "Cloud Capture lockout watchdog: unhandled exception",
