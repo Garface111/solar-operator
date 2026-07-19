@@ -55,12 +55,20 @@ log = logging.getLogger("solar.crypto")
 # Optional audit context set by callers (harvester load_creds, etc.). Never secrets.
 _audit_ctx: ContextVar[dict[str, str]] = ContextVar("crypto_audit_ctx", default={})
 
-# Rolling decrypt volume (process-local) for anomaly detection.
+# Rolling decrypt volume (process-local) for anomaly detection — per kind.
+# kind=shared (vendor keys / utility JWTs) is NORMAL on web under load.
+# kind=vault (portal passwords) on web is NEVER normal (SO_VAULT_DECRYPT=0).
 _vol_lock = threading.Lock()
 _vol_window_start = 0.0
-_vol_count = 0
+_vol_counts: dict[str, int] = {}
+_alert_last_sent: dict[str, float] = {}  # key → monotonic ts
 _VOL_WINDOW_S = 60.0
-_VOL_WARN_THRESHOLD = int(os.environ.get("CRYPTO_DECRYPT_WARN_PER_MIN") or "120")
+# Shared decrypts fire constantly on dashboard traffic — high bar, log only.
+_SHARED_WARN = int(os.environ.get("CRYPTO_SHARED_DECRYPT_WARN_PER_MIN") or "5000")
+# Vault unwraps on harvester: spike above this is worth a log (not necessarily mail).
+_VAULT_WARN = int(os.environ.get("CRYPTO_VAULT_DECRYPT_WARN_PER_MIN") or "200")
+# Min gap between identical internal-alert emails (seconds).
+_ALERT_COOLDOWN_S = float(os.environ.get("CRYPTO_DECRYPT_ALERT_COOLDOWN_S") or "3600")
 
 
 def set_decrypt_audit_context(**kwargs: str) -> None:
@@ -78,45 +86,106 @@ def clear_decrypt_audit_context() -> None:
 
 
 def _note_decrypt(kind: str) -> None:
-    """Log a decrypt event (no secret) + warn on volume spikes."""
-    global _vol_window_start, _vol_count
+    """Log a decrypt event (no secret) + alert only on real vault anomalies.
+
+    False-positive fix (2026-07-19): kind=shared on role=web at ~120/min is
+    normal SaaS traffic (EncryptedStr on arrays/sessions). That must NOT mail.
+    Only kind=vault is crown-jewel volume; vault on web/worker is always wrong.
+    """
+    global _vol_window_start
     role = (os.environ.get("PROCESS_ROLE") or "unknown")[:40]
+    kind = (kind or "shared").strip().lower()
     ctx = _audit_ctx.get() or {}
     parts = [f"crypto_decrypt kind={kind}", f"role={role}", "envelope=SOENC1"]
     for k in ("tenant_id", "provider", "job_id", "username_lc"):
         if ctx.get(k):
             parts.append(f"{k}={ctx[k]}")
+    # Shared decrypts are hot path — DEBUG only. Vault stays INFO for audit.
     try:
-        log.info(" ".join(parts))
+        if kind == "vault":
+            log.info(" ".join(parts))
+        else:
+            log.debug(" ".join(parts))
     except Exception:
         pass
-    now = time.monotonic()
+
+    now_m = time.monotonic()
     with _vol_lock:
-        if _vol_window_start <= 0 or now - _vol_window_start >= _VOL_WINDOW_S:
-            _vol_window_start = now
-            _vol_count = 0
-        _vol_count += 1
-        count = _vol_count
-    if count == _VOL_WARN_THRESHOLD or (count > _VOL_WARN_THRESHOLD and count % 50 == 0):
+        if _vol_window_start <= 0 or now_m - _vol_window_start >= _VOL_WINDOW_S:
+            _vol_window_start = now_m
+            _vol_counts.clear()
+        _vol_counts[kind] = _vol_counts.get(kind, 0) + 1
+        count = _vol_counts[kind]
+
+    # ── Vault on public web/worker: any unwrap is a policy violation ──
+    if kind == "vault" and role in ("web", "worker", "unknown"):
         try:
-            log.warning(
-                "crypto_decrypt_volume_anomaly kind=%s role=%s count_in_window=%s "
-                "window_s=%s threshold=%s",
-                kind, role, count, int(_VOL_WINDOW_S), _VOL_WARN_THRESHOLD,
+            log.error(
+                "crypto_vault_decrypt_on_non_harvester kind=vault role=%s count=%s "
+                "(SO_VAULT_DECRYPT should be 0 here)",
+                role, count,
             )
         except Exception:
             pass
-        # Fire once at the threshold (not every 50) so a storm doesn't mail-flood.
-        if count == _VOL_WARN_THRESHOLD:
+        _maybe_alert(
+            alert_key=f"vault_on_{role}",
+            subject="CRITICAL: portal vault decrypt on public process",
+            body=(
+                f"kind=vault role={role} count_in_window={count}. "
+                f"Public web/worker must not unwrap portal passwords "
+                f"(SO_VAULT_DECRYPT=0). Investigate immediately."
+            ),
+            now_m=now_m,
+        )
+        return
+
+    # ── Vault volume on harvester: log spike, mail only at extreme ──
+    if kind == "vault":
+        if count == _VAULT_WARN or (count > _VAULT_WARN and count % 100 == 0):
             try:
-                from .notify import send_internal_alert
-                send_internal_alert(
-                    "Vault decrypt volume anomaly",
-                    f"kind={kind} role={role} count_in_{int(_VOL_WINDOW_S)}s={count} "
-                    f"threshold={_VOL_WARN_THRESHOLD}. Investigate unexpected vault unwraps.",
+                log.warning(
+                    "crypto_vault_decrypt_volume kind=vault role=%s count=%s "
+                    "window_s=%s threshold=%s",
+                    role, count, int(_VOL_WINDOW_S), _VAULT_WARN,
                 )
             except Exception:
                 pass
+        if count == _VAULT_WARN * 5:  # 1000/min default — real storm
+            _maybe_alert(
+                alert_key="vault_volume_harvester",
+                subject="Vault decrypt volume spike (harvester)",
+                body=(
+                    f"kind=vault role={role} count_in_{int(_VOL_WINDOW_S)}s={count} "
+                    f"(5× threshold {_VAULT_WARN}). Possible loop or abuse."
+                ),
+                now_m=now_m,
+            )
+        return
+
+    # ── Shared (vendor keys / JWTs): never email at normal SaaS load ──
+    if count == _SHARED_WARN or (count > _SHARED_WARN and count % 500 == 0):
+        try:
+            log.warning(
+                "crypto_shared_decrypt_volume kind=shared role=%s count=%s "
+                "window_s=%s threshold=%s (log only — not vault)",
+                role, count, int(_VOL_WINDOW_S), _SHARED_WARN,
+            )
+        except Exception:
+            pass
+
+
+def _maybe_alert(*, alert_key: str, subject: str, body: str, now_m: float) -> None:
+    """Send at most one internal alert per key per cooldown window."""
+    with _vol_lock:
+        last = _alert_last_sent.get(alert_key, 0.0)
+        if now_m - last < _ALERT_COOLDOWN_S:
+            return
+        _alert_last_sent[alert_key] = now_m
+    try:
+        from .notify import send_internal_alert
+        send_internal_alert(subject, body)
+    except Exception:
+        pass
 
 ENV_KEY = "SO_CONFIG_KEY"
 

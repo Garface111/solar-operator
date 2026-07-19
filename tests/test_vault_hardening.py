@@ -255,6 +255,64 @@ def test_decrypt_audit_includes_context(caplog):
     assert "hunter2" not in joined
 
 
+def test_shared_decrypt_on_web_does_not_mail(monkeypatch):
+    """Regression: kind=shared role=web at 120/min must NOT send internal alert.
+
+    That was a false positive (dashboard traffic decrypting vendor keys / JWTs).
+    """
+    from api import crypto
+
+    os.environ[crypto.ENV_KEY] = KEY
+    os.environ["SO_VAULT_DECRYPT"] = "0"
+    os.environ["PROCESS_ROLE"] = "web"
+    crypto._cache.clear()
+    crypto._vol_counts.clear()
+    crypto._alert_last_sent.clear()
+    crypto._vol_window_start = 0.0
+
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "api.notify.send_internal_alert",
+        lambda subj, body, **k: sent.append((subj, body)),
+        raising=False,
+    )
+    # Patch the import path used inside _maybe_alert / _note_decrypt
+    import api.notify as notify
+    monkeypatch.setattr(notify, "send_internal_alert", lambda subj, body, **k: sent.append((subj, body)))
+
+    ct = crypto.encrypt_str("vendor-key")
+    for _ in range(130):
+        crypto.decrypt_str(ct)
+
+    assert sent == [], f"false-positive mail fired: {sent}"
+
+
+def test_vault_decrypt_on_web_alerts(monkeypatch):
+    """Vault unwrap on role=web is always wrong — must alert."""
+    from api import crypto
+    import api.notify as notify
+
+    os.environ[crypto.ENV_KEY] = KEY
+    os.environ["SO_VAULT_DECRYPT"] = "1"  # misconfigured web
+    os.environ["PROCESS_ROLE"] = "web"
+    crypto._cache.clear()
+    crypto._vol_counts.clear()
+    crypto._alert_last_sent.clear()
+    crypto._vol_window_start = 0.0
+
+    sent: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        notify, "send_internal_alert",
+        lambda subj, body, **k: sent.append((subj, body)),
+    )
+
+    ct = crypto.encrypt_str("portal-pw")
+    crypto.decrypt_vault_str(ct)
+    assert len(sent) == 1
+    assert "CRITICAL" in sent[0][0]
+    assert "vault" in sent[0][1].lower()
+
+
 def test_rearm_all_requires_tenant_id(Session):
     from api.harvester.credentials import rearm_all
 
