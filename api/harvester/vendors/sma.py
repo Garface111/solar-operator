@@ -51,6 +51,12 @@ class SMAVendor:
     provider = "sma"
 
     async def login_url(self, creds) -> str:
+        # Deliberately the PORTAL, not the Keycloak URL: ennexOS mints the OAuth
+        # state/redirect params itself, and hand-rolling an authorize URL would go
+        # stale the moment SMA rotates a client id. The portal bounces us to
+        # login.sma.energy — `login.SSO_AUTH_HOSTS["sma"]` makes the login routine
+        # WAIT for that cross-origin redirect instead of giving up on the generic
+        # ~6s form poll (the "login outcome=no-form" failures, prod 2026-07-19).
         return PORTAL
 
     async def _token(self, page) -> str | None:

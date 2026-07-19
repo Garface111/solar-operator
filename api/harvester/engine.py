@@ -228,10 +228,24 @@ class BrowserFarm:
                     await page.wait_for_load_state("networkidle", timeout=config.nav_timeout_ms())
                 except Exception:
                     pass
+                # A cross-origin SSO portal that served no form usually means the
+                # identity provider re-authenticated us silently — no password was
+                # typed, so this is NOT a fresh login and must not clear (or be
+                # charged to) the lockout counter. It also needs a longer settle:
+                # the silent handshake completes after the login step returns.
+                if outcome == "sso-resumed":
+                    fresh = False
+                # Bound by wall clock, not iterations — is_logged_in is itself a
+                # multi-second poll on some vendors, so "6 tries" meant wildly
+                # different budgets per vendor.
+                _deadline = asyncio.get_running_loop().time() + (
+                    60.0 if outcome in ("sso-resumed", "no-form") else 20.0)
                 _logged = False
-                for _ in range(6):
+                while True:
                     if await vendor.is_logged_in(page):
                         _logged = True
+                        break
+                    if asyncio.get_running_loop().time() >= _deadline:
                         break
                     await asyncio.sleep(2)
                 if not _logged:
@@ -240,11 +254,11 @@ class BrowserFarm:
                     self._persist(tenant_id, provider, username_lc,
                                   storage_state=storage_state, ok=False,
                                   status="login_failed", started_at=started,
-                                  fresh=True, rows=0,
+                                  fresh=fresh, rows=0,
                                   error=f"login outcome={outcome}, not authenticated",
                                   shot=shot)
                     return HarvestOutcome(provider, username_lc, "login_failed",
-                                          fresh=True, detail=outcome)
+                                          fresh=fresh, detail=outcome)
 
             result = await vendor.scrape(page, context, creds)
             storage_state = await context.storage_state()

@@ -1647,6 +1647,20 @@ def start():
         CronTrigger(hour=13, minute=30),
         id="gmp_freshness_watchdog", replace_existing=True,
     )
+    # Hourly: Cloud Capture lockout watchdog — alert while any stored portal login
+    # is held at the lockout pause. The pause is the one legitimate back-off we
+    # keep (a bad password hammered on a 3-min loop is how a portal locks the
+    # account), but it used to be SILENT and permanent: a paused login just stopped
+    # harvesting forever and only the owner re-saving the password brought it back.
+    # It now retries on a slow heartbeat (scheduler.PAUSED_RETRY) and this watchdog
+    # keeps the operator loudly informed until it recovers. Deliberately registered
+    # on the WEB service, not the harvester loop, so a wedged harvester can't take
+    # its own alarm down with it.
+    scheduler.add_job(
+        _run_cloud_capture_lockout_watchdog,
+        IntervalTrigger(hours=1),
+        id="cloud_capture_lockout_watchdog", replace_existing=True,
+    )
     # Daily at 04:00 UTC: report Array Operator per-kWh usage to Stripe (LEGACY
     # metered billing). Self-skips subs with no metered line (i.e. nameplate subs),
     # so it's a harmless no-op once a tenant is migrated to per-kW nameplate.
@@ -2469,6 +2483,23 @@ def _run_gmp_freshness_watchdog() -> None:
         send_internal_alert(
             "GMP freshness watchdog: unhandled exception",
             f"The GMP data-freshness watchdog raised an error:\n{exc}",
+        )
+
+
+def _run_cloud_capture_lockout_watchdog() -> None:
+    """Hourly: alert while any Cloud Capture portal login sits at the lockout pause.
+
+    Read-only — alerts, never mutates a credential. A paused login is still
+    retried on a slow heartbeat; this is the loud half of that contract, so a
+    stalled server-side capture can never go quiet the way the extension's
+    background refresh once did (memory: no-self-sabotage-reliability-audit)."""
+    try:
+        from .harvester.lockout_alert import run_login_lockout_watchdog
+        run_login_lockout_watchdog()
+    except Exception as exc:
+        send_internal_alert(
+            "Cloud Capture lockout watchdog: unhandled exception",
+            f"The Cloud Capture login lockout watchdog raised an error:\n{exc}",
         )
 
 

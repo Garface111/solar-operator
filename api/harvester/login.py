@@ -10,7 +10,7 @@ three-path shape:
   * identifier-first (WSO2/Keycloak): type username → continue → wait for the
     password step to render (AJAX or navigation) → fill it.
 
-Returns one of: "submitted" | "filled-username" | "no-form".
+Returns one of: "submitted" | "filled-username" | "sso-resumed" | "no-form".
 """
 from __future__ import annotations
 
@@ -77,6 +77,28 @@ HINTS: dict[str, dict[str, str]] = {
 }
 
 _INVERTER_KEYS = ("fronius", "sma", "chint")
+
+# ── Cross-origin SSO portals ────────────────────────────────────────────────
+# Some portals serve NO login form on their own origin: the landing URL is an SPA
+# that bounces to a separate identity provider. SMA's ennexOS
+# (ennexos.sunnyportal.com) hands off to Keycloak on login.sma.energy; the
+# handoff is an SPA boot + redirect that regularly takes longer than the generic
+# ~6s form poll. When it did, `perform_login` returned "no-form", the engine
+# recorded `login_failed`, and the credential burned a login attempt for nothing
+# — 79 of them a day against one live SMA account (prod, 2026-07-19: every single
+# failure carried "login outcome=no-form"). The fix is to WAIT for the auth
+# origin before hunting for a form, and to give Keycloak a realistic render
+# budget once we're there. Deliberately opt-in per provider so a portal that
+# already logs in reliably (Chint, GMP, SmartHub) keeps the tight generic path.
+SSO_AUTH_HOSTS: dict[str, tuple[str, ...]] = {
+    "sma": ("login.sma.energy",),
+}
+# How long to wait for the portal to bounce us to its identity provider.
+SSO_REDIRECT_TIMEOUT_MS = 25000
+# Form-poll attempts (×0.3s). Keycloak renders its form after the redirect lands,
+# so give the SSO path a real budget instead of the generic ~6s.
+_FORM_POLL_TRIES = 20
+_SSO_FORM_POLL_TRIES = 50
 
 # Generic field matchers (ported from findUser/findPass).
 _GENERIC_USER = ('input[type="text"], input[type="email"], input[type="tel"], '
@@ -198,16 +220,42 @@ async def _submit(page, btn, ref) -> None:
         pass
 
 
-async def _poll_for_form(page, hint):
-    """Poll ~6s for a username/password field (SSO pages lag the load event)."""
+async def _poll_for_form(page, hint, tries: int = _FORM_POLL_TRIES):
+    """Poll for a username/password field (SSO pages lag the load event)."""
     pw = user = None
-    for _ in range(20):
+    for _ in range(tries):
         pw = await _find_pass(page, hint)
         user = await _find_user(page, hint)
         if pw or user:
             break
         await asyncio.sleep(0.3)
     return pw, user
+
+
+def on_auth_origin(url: str, hosts: tuple[str, ...]) -> bool:
+    """Whether `url` is already on one of the provider's identity-provider hosts."""
+    u = (url or "").lower()
+    return any(h in u for h in hosts)
+
+
+async def _await_auth_origin(page, hosts: tuple[str, ...]) -> bool:
+    """Wait for the portal to redirect us to its identity provider.
+
+    Returns True once the page is on an auth host. False means the bounce never
+    happened within the budget — which on an SSO portal usually means the IdP
+    session was still valid and the SPA re-authenticated silently (no form will
+    ever appear). The caller distinguishes that from a genuinely missing form.
+    """
+    if on_auth_origin(page.url, hosts):
+        return True
+    try:
+        await page.wait_for_url(
+            lambda url: on_auth_origin(str(url), hosts),
+            timeout=SSO_REDIRECT_TIMEOUT_MS,
+        )
+        return True
+    except Exception:
+        return on_auth_origin(page.url, hosts)
 
 
 async def _click_login_entry(page) -> bool:
@@ -245,20 +293,44 @@ async def perform_login(page, username: str, password: str, provider: str) -> st
     NEVER logs the password."""
     if not username or not password:
         return "no-form"
-    hint = HINTS.get(hint_key_for(provider))
+    key = hint_key_for(provider)
+    hint = HINTS.get(key)
+    auth_hosts = SSO_AUTH_HOSTS.get(key)
 
-    # Poll up to ~6s for a field to appear (SSO pages lag the load event).
-    pw, user = await _poll_for_form(page, hint)
-    if not pw and not user:
-        # Many portals (Fronius/SMA) show a landing page with a "Login" button
-        # that bounces to the real form on a separate SSO origin (WSO2/Keycloak).
-        # No form here yet ⇒ click the login-entry link, then look again.
-        if await _click_login_entry(page):
-            try:
-                await page.wait_for_load_state("networkidle", timeout=20000)
-            except Exception:
-                pass
-            pw, user = await _poll_for_form(page, hint)
+    if auth_hosts:
+        # Cross-origin SSO (SMA → Keycloak): the form lives on ANOTHER origin, so
+        # look for the redirect before looking for fields. Waiting here is what
+        # stops the generic 6s poll from declaring "no-form" mid-handoff.
+        landed = await _await_auth_origin(page, auth_hosts)
+        if not landed and await _click_login_entry(page):
+            landed = await _await_auth_origin(page, auth_hosts)
+        pw, user = await _poll_for_form(
+            page, hint, _SSO_FORM_POLL_TRIES if landed else _FORM_POLL_TRIES)
+        if not pw and not user:
+            # No form anywhere on an SSO portal almost always means the identity
+            # provider still had a live session and re-authenticated us silently
+            # — a GOOD outcome: no password typed, no login attempt spent. Report
+            # it distinctly so the engine confirms auth state instead of charging
+            # a phantom failure to the lockout counter. If we really are logged
+            # out, the engine's auth check still records login_failed, so nothing
+            # is suppressed — only mislabelled failures go away.
+            log.info("login: %s served no form (auth-origin reached=%s) — treating "
+                     "as a silent SSO resume; caller verifies auth state",
+                     provider, landed)
+            return "sso-resumed"
+    else:
+        # Poll up to ~6s for a field to appear (SSO pages lag the load event).
+        pw, user = await _poll_for_form(page, hint)
+        if not pw and not user:
+            # Many portals (Fronius) show a landing page with a "Login" button
+            # that bounces to the real form on a separate SSO origin (WSO2).
+            # No form here yet ⇒ click the login-entry link, then look again.
+            if await _click_login_entry(page):
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=20000)
+                except Exception:
+                    pass
+                pw, user = await _poll_for_form(page, hint)
     if not pw and not user:
         return "no-form"
 

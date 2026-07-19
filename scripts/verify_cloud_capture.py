@@ -98,14 +98,18 @@ check("solaredge -> None (server-side API poll)", module_for("solaredge") is Non
 print("5) Lockout safety (never hammer a bad login)")
 from types import SimpleNamespace  # noqa: E402
 from datetime import timedelta      # noqa: E402
-from api.harvester.scheduler import _is_due, MAX_LOGIN_FAILS, FAIL_BACKOFF  # noqa: E402
+from api.harvester.scheduler import _is_due, MAX_LOGIN_FAILS, FAIL_BACKOFF, PAUSED_RETRY  # noqa: E402
 from api.models import now as _now_fn  # noqa: E402
 _n = _now_fn()
 def cred(fails=0, ok=None, age_min=None, provider="gmp"):
     last = None if age_min is None else _n - timedelta(minutes=age_min)
     return SimpleNamespace(harvest_fails=fails, last_harvest_ok=ok,
                            last_harvest_at=last, provider=provider)
-check("paused after MAX fails (never retried)", not _is_due(cred(fails=MAX_LOGIN_FAILS, ok=False, age_min=999), _n))
+check("paused after MAX fails (not retried on the tight loop)",
+      not _is_due(cred(fails=MAX_LOGIN_FAILS, ok=False, age_min=60), _n))
+check("paused login SELF-HEALS on the slow retry (never gives up forever)",
+      _is_due(cred(fails=MAX_LOGIN_FAILS, ok=False,
+                   age_min=int(PAUSED_RETRY.total_seconds()/60) + 1), _n))
 check("just-failed login backs off (not retried immediately)",
       not _is_due(cred(fails=1, ok=False, age_min=1), _n))
 check("failed login retried only after backoff window",

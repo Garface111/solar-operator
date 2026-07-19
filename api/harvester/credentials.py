@@ -334,7 +334,14 @@ def record_health(
     login_failure = (status == "login_failed")
     cred.last_harvest_at = now()
     cred.last_harvest_ok = ok
-    if ok:
+    # `harvest_fails` counts CONSECUTIVE FRESH-LOGIN failures — nothing else may
+    # clear it. A warm-session success proves the stored cookie/token still
+    # works; it proves NOTHING about the password, so it must not wipe a standing
+    # login problem. (Bug, live 2026-07-19: `if ok:` cleared the counter on every
+    # warm tick, so a credential alternating login_failed → ok never reached
+    # MAX_LOGIN_FAILS and the whole lockout guard was dead code — Bruce's SMA
+    # login sat at harvest_fails=1 while eating 79 failed logins a day.)
+    if ok and fresh_login:
         cred.harvest_fails = 0
     elif login_failure:
         cred.harvest_fails = min((cred.harvest_fails or 0) + 1, 999)
@@ -355,8 +362,12 @@ def record_health(
         db.add(row)
     if ok:
         row.last_ok_at = now()
-        row.fails = 0
-        row.paused = False
+        # Same rule as above: data flowing on a warm session is real (stamp
+        # last_ok_at), but only a successful FRESH login clears the pause — the
+        # roster must not show "healthy login" on the strength of a warm cookie.
+        if fresh_login:
+            row.fails = 0
+            row.paused = False
     elif login_failure:
         row.fails = min((row.fails or 0) + 1, 999)
         if row.fails >= PAUSE_FAILS:
