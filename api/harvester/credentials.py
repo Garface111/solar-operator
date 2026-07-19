@@ -363,12 +363,34 @@ def record_health(
             row.paused = True
     row.reported_at = now()
 
-    db.add(HarvestRun(
-        tenant_id=cred.tenant_id, provider=cred.provider,
-        username_lc=cred.username_lc, started_at=started_at, ended_at=now(),
-        status=status, logged_in_fresh=fresh_login, rows_written=rows_written,
-        detail=(error or None), screenshot_ref=screenshot_ref,
-    ))
+    # Audit row: always write failures + fresh password logins. Warm-session
+    # OK ticks fire every few minutes for inverters (~5k/day fleet-wide) and
+    # drown the table — throttle those to at most one per credential per hour.
+    write_audit = True
+    if ok and status == "ok" and not fresh_login:
+        from datetime import timedelta
+        recent = db.execute(
+            select(HarvestRun.id)
+            .where(
+                HarvestRun.tenant_id == cred.tenant_id,
+                HarvestRun.provider == cred.provider,
+                HarvestRun.username_lc == cred.username_lc,
+                HarvestRun.status == "ok",
+                HarvestRun.logged_in_fresh.is_(False),
+                HarvestRun.started_at >= now() - timedelta(hours=1),
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        if recent is not None:
+            write_audit = False
+    if write_audit:
+        db.add(HarvestRun(
+            tenant_id=cred.tenant_id, provider=cred.provider,
+            username_lc=cred.username_lc, started_at=started_at, ended_at=now(),
+            status=status, logged_in_fresh=fresh_login, rows_written=rows_written,
+            detail=(error or None), screenshot_ref=screenshot_ref,
+        ))
     # Deliberately NO password in any log line.
-    log.info("harvest %s provider=%s tenant=%s fresh=%s rows=%d",
-             status, cred.provider, cred.tenant_id, fresh_login, rows_written)
+    log.info("harvest %s provider=%s tenant=%s fresh=%s rows=%d audit=%s",
+             status, cred.provider, cred.tenant_id, fresh_login, rows_written,
+             write_audit)
