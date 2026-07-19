@@ -242,14 +242,38 @@ async def run_tick(farm) -> list:
     return results
 
 
+# How often the harvester loop runs the health watchdogs itself. This is a
+# DELIBERATE second home for them: they are also registered on the API
+# scheduler, but that runs only where RUN_SCHEDULER=1 and that service does not
+# auto-deploy on every push — so an alarm registered only there can sit dormant
+# for days after it ships. Running them here too means the alarm is live the
+# moment the harvester picks up a build. The InverterAlertState dedup is shared,
+# so whichever process gets there first wins and the other is a cheap no-op;
+# neither can double-email.
+WATCHDOG_EVERY = timedelta(minutes=int(os.environ.get("CLOUD_CAPTURE_WATCHDOG_MIN") or 15))
+
+
+def run_health_watchdogs() -> None:
+    """Run the Cloud Capture health watchdogs, swallowing nothing quietly."""
+    try:
+        from .lockout_alert import run_cloud_capture_watchdogs
+        run_cloud_capture_watchdogs()
+    except Exception as exc:                          # noqa: BLE001
+        log.exception("cloud capture watchdogs failed: %s", exc)
+
+
 async def run_forever():
     """Long-running loop: build one BrowserFarm and tick on the configured cadence."""
     from .engine import BrowserFarm
     interval = config.tick_seconds()
+    next_watchdog = now()
     async with BrowserFarm() as farm:
         while True:
             try:
                 await run_tick(farm)
             except Exception as exc:                  # noqa: BLE001 — never die on a tick
                 log.exception("tick error: %s", exc)
+            if now() >= next_watchdog:
+                next_watchdog = now() + WATCHDOG_EVERY
+                await asyncio.to_thread(run_health_watchdogs)
             await asyncio.sleep(interval)

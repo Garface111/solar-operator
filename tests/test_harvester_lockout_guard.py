@@ -16,6 +16,7 @@ is the exact thing the guard exists to prevent).
 from __future__ import annotations
 
 import base64
+import inspect
 import os
 from datetime import timedelta
 from types import SimpleNamespace
@@ -372,6 +373,18 @@ def test_stall_incident_key_is_namespaced_out_of_the_inverter_sweep():
     key = lockout_alert._stall_key("ten_x", "sma", "Owner@Example.com")
     assert key == "cloud_capture_stalled:ten_x:sma:owner@example.com"
     assert "|" not in key
+
+
+def test_the_watchdogs_have_a_second_home_in_the_harvester_loop():
+    """They are registered on the API scheduler AND run from the harvester loop.
+    The API scheduler only runs where RUN_SCHEDULER=1, and that service does not
+    auto-deploy on every push — an alarm living only there can ship and then sit
+    dormant for days. Dedup is shared, so the duplicate run is free."""
+    from api.harvester import scheduler as hsched
+    assert callable(hsched.run_health_watchdogs)
+    assert hsched.WATCHDOG_EVERY.total_seconds() > 0
+    src = inspect.getsource(hsched.run_forever)
+    assert "run_health_watchdogs" in src
 
 
 def test_alert_incident_key_is_namespaced_out_of_the_inverter_sweep():
