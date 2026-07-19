@@ -1268,6 +1268,17 @@ def prune_inverter_readings_job() -> dict:
         return {"pruned": 0, "error": "exception"}
 
 
+def prune_harvest_runs_job() -> dict:
+    """Hard-delete old harvest_run audit rows (Cloud Capture vault hygiene)."""
+    from .vault_retention import prune_harvest_runs
+    try:
+        return prune_harvest_runs()
+    except Exception as e:
+        logger.exception("vault: prune_harvest_runs crashed")
+        send_internal_alert("prune_harvest_runs crashed", f"Error: {e}")
+        return {"deleted": 0, "error": "exception"}
+
+
 def _prewarm_reconcile() -> None:
     """Keep the bill-audit reconcile sweep cache HOT so the offtaker-invoicing
     "Doesn't match GMP" KPI + Bill-audit view load INSTANTLY instead of waiting
@@ -1457,6 +1468,13 @@ def start():
         prune_inverter_readings_job,
         CronTrigger(hour=4, minute=10),
         id="prune_inverter_readings", replace_existing=True,
+    )
+    # Daily at 04:25 UTC: prune Cloud Capture harvest_run audit history
+    # (default 45 days). Append-only table was unbounded with real customers.
+    scheduler.add_job(
+        prune_harvest_runs_job,
+        CronTrigger(hour=4, minute=25),
+        id="prune_harvest_runs", replace_existing=True,
     )
     # Every 30 min: precompute the fleet forecast per tenant so the Analysis tab
     # serves an instant snapshot instead of computing (geocode + Open-Meteo) on the

@@ -106,6 +106,17 @@ def _note_decrypt(kind: str) -> None:
             )
         except Exception:
             pass
+        # Fire once at the threshold (not every 50) so a storm doesn't mail-flood.
+        if count == _VOL_WARN_THRESHOLD:
+            try:
+                from .notify import send_internal_alert
+                send_internal_alert(
+                    "Vault decrypt volume anomaly",
+                    f"kind={kind} role={role} count_in_{int(_VOL_WINDOW_S)}s={count} "
+                    f"threshold={_VOL_WARN_THRESHOLD}. Investigate unexpected vault unwraps.",
+                )
+            except Exception:
+                pass
 
 ENV_KEY = "SO_CONFIG_KEY"
 

@@ -60,19 +60,59 @@ def _scrub(data: Any) -> Any:
     return data
 
 
+def _scrub_stringy(val: Any) -> Any:
+    """Redact token-bearing strings that slip into contexts / breadcrumbs."""
+    if not isinstance(val, str):
+        return val
+    low = val.lower()
+    needles = (
+        "token=", "session=", "access_token=", "bearer ", "password=",
+        "so_session", "emchg_", "sol_live_", "whsec_", "sk_live", "sk_test",
+    )
+    if any(n in low for n in needles):
+        # Keep a short prefix so ops can still tell *what kind* of value it was.
+        return (val[:24] + "…[redacted]") if len(val) > 24 else "[redacted]"
+    return val
+
+
+def _scrub_deep(data: Any) -> Any:
+    """_scrub keys + scrub string values that look like secrets."""
+    data = _scrub(data)
+    if isinstance(data, dict):
+        return {k: _scrub_deep(v) for k, v in data.items()}
+    if isinstance(data, (list, tuple)):
+        return type(data)(_scrub_deep(v) for v in data)
+    return _scrub_stringy(data)
+
+
 def _before_send(event: dict, hint: dict) -> dict:
-    """Sentry hook: scrub headers/cookies/body before the event is sent."""
+    """Sentry hook: scrub headers/cookies/body/contexts/breadcrumbs before send."""
     try:
         req = event.get("request")
         if isinstance(req, dict):
-            for key in ("headers", "cookies", "data", "query_string"):
+            for key in ("headers", "cookies", "data", "query_string", "url"):
                 if key in req and req[key] is not None:
-                    req[key] = _scrub(req[key])
+                    req[key] = _scrub_deep(req[key])
         # Drop any captured local variables that look sensitive in stack frames.
         for ex in (event.get("exception", {}) or {}).get("values", []) or []:
             for frame in (ex.get("stacktrace", {}) or {}).get("frames", []) or []:
                 if isinstance(frame.get("vars"), dict):
-                    frame["vars"] = _scrub(frame["vars"])
+                    frame["vars"] = _scrub_deep(frame["vars"])
+        # T2-9: contexts (e.g. client url/stack) and breadcrumbs from LoggingIntegration
+        # were previously unscrubbed — token-bearing URLs could ship to Sentry.
+        if isinstance(event.get("contexts"), dict):
+            event["contexts"] = _scrub_deep(event["contexts"])
+        if isinstance(event.get("extra"), dict):
+            event["extra"] = _scrub_deep(event["extra"])
+        crumbs = (event.get("breadcrumbs") or {}).get("values")
+        if isinstance(crumbs, list):
+            for c in crumbs:
+                if not isinstance(c, dict):
+                    continue
+                if "message" in c:
+                    c["message"] = _scrub_stringy(c.get("message"))
+                if isinstance(c.get("data"), dict):
+                    c["data"] = _scrub_deep(c["data"])
     except Exception:  # never let scrubbing break error reporting
         log.exception("sentry _before_send scrub failed")
     return event

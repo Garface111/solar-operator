@@ -275,3 +275,49 @@ def test_admin_vault_stats_requires_header(monkeypatch):
         admin_vault._check("wrong", None)
     assert ei2.value.status_code == 403
     admin_vault._check("test-admin-key-xyz", None)  # ok
+
+
+def test_prune_harvest_runs_keeps_recent(Session, monkeypatch):
+    """Old harvest_run rows are hard-deleted; recent ones stay. Floor is 7 days."""
+    from datetime import timedelta
+    from api import vault_retention
+    from api.models import HarvestRun
+
+    monkeypatch.setattr(vault_retention, "SessionLocal", Session)
+    with Session() as db:
+        _tenant(db)
+        db.add(HarvestRun(
+            tenant_id="ten_a", provider="gmp", username_lc="u",
+            status="ok", started_at=now() - timedelta(days=3),
+        ))
+        db.add(HarvestRun(
+            tenant_id="ten_a", provider="gmp", username_lc="u",
+            status="ok", started_at=now() - timedelta(days=60),
+        ))
+        db.commit()
+
+    # keep_days=1 floors to 7 → 3-day-old survives, 60-day-old dies
+    out = vault_retention.prune_harvest_runs(keep_days=1)
+    assert out["ok"] is True
+    assert out["keep_days"] == 7
+    assert out["deleted"] == 1
+    with Session() as db:
+        left = db.execute(select(HarvestRun)).scalars().all()
+        assert len(left) == 1
+        assert (now() - left[0].started_at).days < 10
+
+
+def test_sentry_scrubs_contexts():
+    from api import observability
+    event = {
+        "request": {"url": "https://x/?token=secretvalue123"},
+        "contexts": {"client": {"url": "https://x/?token=abc", "stack": "ok"}},
+        "breadcrumbs": {"values": [{"message": "Bearer abcdef", "data": {"password": "x"}}]},
+        "exception": {"values": [{"stacktrace": {"frames": [{"vars": {"body": "nope"}}]}}]},
+    }
+    out = observability._before_send(event, {})
+    assert "secretvalue" not in str(out.get("request", {}))
+    assert "token=abc" not in str(out.get("contexts", {}))
+    crumb_msg = out["breadcrumbs"]["values"][0]["message"]
+    assert "abcdef" not in crumb_msg or "redacted" in crumb_msg.lower()
+    assert out["breadcrumbs"]["values"][0]["data"]["password"] == "[redacted]"
