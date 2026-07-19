@@ -33,10 +33,17 @@ import html as _html
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from ..db import SessionLocal
-from ..models import Tenant
+from ..models import (
+    Array,
+    DailyGeneration,
+    InverterAlertState,
+    Tenant,
+    UtilityAccount,
+    UtilitySession,
+)
 from .. import inverter_fleet, notify, branding
 from ..stripe_helpers import ao_gets_vendor_emails
 
@@ -47,7 +54,10 @@ log = logging.getLogger(__name__)
 _LEVEL_COLOR = {"ok": "#2563eb", "warn": "#d97706", "critical": "#dc2626"}
 _LEVEL_LABEL = {"ok": "Healthy", "warn": "Needs a look", "critical": "Attention"}
 
-# Plain-language phrasing for a flagged inverter's status.
+# Plain-language phrasing for a flagged inverter's status. FALLBACK ONLY — used
+# when the tree has not been enriched with outage facts (older callers, tests).
+# The enriched path (_phrase_for_inverter) is far more specific and, crucially,
+# never says "stopped producing" about a unit we simply cannot SEE.
 _STATUS_PHRASE = {
     "dead": "stopped producing",
     "fault": "reporting a fault",
@@ -189,7 +199,12 @@ def _flagged_inverters(cols: list[dict]) -> list[dict]:
                     "array_name": col.get("array_name", ""),
                     "name": inv.get("name") or inv.get("sn") or "Inverter",
                     "status": st,
-                    "phrase": _STATUS_PHRASE.get(st, "needs a look"),
+                    # Specific + honest when the tree has been enriched (the real
+                    # send path); the old generic phrasing otherwise.
+                    "phrase": _phrase_for_inverter(inv, st),
+                    "cause_kind": (inv.get("outage") or {}).get("cause_kind"),
+                    "visibility": inv.get("visibility") or {},
+                    "outage": inv.get("outage") or {},
                     "rank": inverter_fleet._ALERT_PRIORITY.get(st, 0),
                 })
     out.sort(key=lambda x: x["rank"], reverse=True)
@@ -424,6 +439,466 @@ def _all_flagged(cols: list[dict]) -> list[dict]:
     return sorted(base, key=lambda x: x["rank"], reverse=True)
 
 
+# ──────────────────── visibility, causes & connection health ─────────────────
+#
+# THE DISTINCTION THIS SECTION EXISTS TO PROTECT (Paul Bozuwa, 2026-07-19):
+#
+#   "we can't see it"  is NOT  "it went dark".
+#
+# A lapsed utility login, a stalled capture, or an array that never finished
+# connecting all produce the same shape in the data — no numbers — and the digest
+# used to render every one of them as lost production. It told a real customer
+# "West Glover went dark overnight" about an array that had never produced a
+# single kWh since the day it was connected, while the actual event (his Vermont
+# Electric Cooperative session dying eight hours earlier, starving a DIFFERENT
+# Glover site) went unmentioned. He got two emails telling two stories about one
+# root cause, and the vaguer one named the wrong site.
+#
+# So: every fact below is a DATE or a DURATION read from the data, never an
+# adjective. The note prompt is forbidden from inventing the rest.
+
+
+def _fmt_day(iso) -> str | None:
+    """'2026-07-01' → 'Jul 1'. Owner-legible, unambiguous, never a relative word."""
+    if not iso:
+        return None
+    try:
+        return datetime.strptime(str(iso), "%Y-%m-%d").strftime("%b %-d")
+    except (ValueError, TypeError):
+        return str(iso)
+
+
+def _days_since(iso) -> int | None:
+    """Whole days from an ISO day to fleet-local today, or None if unparseable."""
+    if not iso:
+        return None
+    try:
+        return (datetime.strptime(_local_today_iso(), "%Y-%m-%d")
+                - datetime.strptime(str(iso), "%Y-%m-%d")).days
+    except (ValueError, TypeError):
+        return None
+
+
+def _series_visibility(points: list) -> dict:
+    """Visibility facts for one daily series (array or inverter), from the data.
+
+    Separates the two things the old digest blurred:
+      * last_data_day    — the last day we RECEIVED anything (a row exists)
+      * last_nonzero_day — the last day it actually PRODUCED (kwh > 0)
+
+    A unit reporting zeros is a production question. A unit sending nothing is a
+    visibility question. days_at_zero counts complete days since it last produced;
+    never_reported means we have never received a single row for it.
+    """
+    days_data: list[str] = []
+    days_nonzero: list[str] = []
+    for pt in (points or []):
+        d = pt.get("date")
+        if not d or pt.get("kwh") is None:
+            continue
+        days_data.append(str(d))
+        try:
+            if float(pt["kwh"]) > 0:
+                days_nonzero.append(str(d))
+        except (TypeError, ValueError):
+            continue
+    last_data = max(days_data) if days_data else None
+    last_nz = max(days_nonzero) if days_nonzero else None
+    return {
+        "last_data_day": last_data,
+        "last_nonzero_day": last_nz,
+        "days_since_data": _days_since(last_data),
+        "days_at_zero": _days_since(last_nz) if last_nz else None,
+        "never_reported": not days_data,
+        "never_produced": bool(days_data) and not days_nonzero,
+    }
+
+
+def _provider_label(provider: str | None) -> str:
+    """The utility's real name, as the owner knows it ('Vermont Electric
+    Cooperative'), never our internal slug ('vec')."""
+    prov = (provider or "").strip()
+    if prov == "gmp":
+        return "Green Mountain Power"
+    try:
+        from ..adapters.smarthub import PROVIDER_TO_UTILITY
+        info = PROVIDER_TO_UTILITY.get(prov) or {}
+        name = info.get("name")
+        if name:
+            return name
+    except Exception:                                # pragma: no cover - defensive
+        log.debug("provider label lookup failed for %s", prov, exc_info=True)
+    return prov.upper() if prov else "your utility"
+
+
+def build_connection_health(db, tenant) -> dict:
+    """Is every data feed this fleet depends on actually ALIVE?
+
+    The digest was blind to this: it rendered production numbers with total
+    confidence while the login that produces them was dead, and never said so.
+    Two independent, cheap, read-only signals:
+
+      1. ``coop_session_dead:<tenant>:<provider>`` rows in inverter_alert_state —
+         the SAME incident the co-op death job already raised, so the digest and
+         that alert email cannot tell different stories. (That table is shared by
+         several jobs; per-inverter keys contain '|', these do not.)
+      2. UtilitySession rows whose ``expires_at`` has passed — a token we know is
+         dead before anything downstream notices.
+
+    Each problem carries the arrays that DEPEND on it, by name, with each one's
+    own last data day — so the note can name the specific starved site instead of
+    gesturing at "a site".
+    """
+    problems: list[dict] = []
+    try:
+        accounts = db.execute(
+            select(UtilityAccount.provider, UtilityAccount.array_id, Array.name)
+            .join(Array, Array.id == UtilityAccount.array_id)
+            .where(
+                UtilityAccount.tenant_id == tenant.id,
+                UtilityAccount.enabled.is_(True),
+                UtilityAccount.deleted_at.is_(None),
+            )
+        ).all()
+    except Exception:                                # pragma: no cover - defensive
+        log.exception("connection health: utility account lookup failed")
+        accounts = []
+
+    def _arrays_for(provider: str) -> list[dict]:
+        """Arrays fed by this provider, each with its own last metered day. NOTE
+        these are often ZERO-inverter utility arrays, which the vendor-only digest
+        body excludes — exactly why the starved site was invisible before."""
+        out = []
+        for prov, array_id, name in accounts:
+            if prov != provider or array_id is None:
+                continue
+            try:
+                last_day = db.execute(
+                    select(func.max(DailyGeneration.day)).where(
+                        DailyGeneration.array_id == array_id,
+                        # bill_prorate is a bill smeared across days — an ESTIMATE
+                        # whose dates track billing cycles, not feed health. Counting
+                        # it here would mask a dead session. (ao-data-honesty-audit)
+                        func.coalesce(DailyGeneration.source, "") != "bill_prorate",
+                    )
+                ).scalar()
+            except Exception:                        # pragma: no cover - defensive
+                log.exception("connection health: last-day lookup failed for %s", array_id)
+                last_day = None
+            iso = last_day.isoformat() if last_day is not None else None
+            out.append({
+                "array": name,
+                "last_data_day": iso,
+                "days_since_data": _days_since(iso),
+            })
+        return out
+
+    seen: set[str] = set()
+
+    # 1 ── co-op sessions the alert pipeline has already declared dead
+    try:
+        states = db.execute(
+            select(InverterAlertState).where(
+                InverterAlertState.tenant_id == tenant.id,
+                InverterAlertState.incident_key.like("coop_session_dead:%"),
+            )
+        ).scalars().all()
+    except Exception:                                # pragma: no cover - defensive
+        log.exception("connection health: alert-state lookup failed")
+        states = []
+    for st in states:
+        prov = str(st.incident_key).rsplit(":", 1)[-1]
+        since = st.first_flagged_at.date().isoformat() if st.first_flagged_at else None
+        seen.add(prov)
+        problems.append({
+            "provider": prov,
+            "provider_name": _provider_label(prov),
+            "kind": "login_expired",
+            "since": since,
+            "days_down": _days_since(since),
+            "detail": (f"Our sign-in to {_provider_label(prov)} has stopped working, "
+                       "so no new meter readings are reaching us."),
+            "fix": (f"Re-connect {_provider_label(prov)} in Array Operator — "
+                    "we backfill the missed days automatically once it's live."),
+            "arrays_affected": _arrays_for(prov),
+        })
+
+    # 2 ── sessions whose token has simply expired
+    try:
+        sessions = db.execute(
+            select(UtilitySession).where(UtilitySession.tenant_id == tenant.id)
+        ).scalars().all()
+    except Exception:                                # pragma: no cover - defensive
+        log.exception("connection health: session lookup failed")
+        sessions = []
+    now = datetime.utcnow()
+    for s in sessions:
+        prov = s.provider
+        if prov in seen or not s.expires_at or s.expires_at > now:
+            continue
+        seen.add(prov)
+        since = s.expires_at.date().isoformat()
+        problems.append({
+            "provider": prov,
+            "provider_name": _provider_label(prov),
+            "kind": "session_expired",
+            "since": since,
+            "days_down": _days_since(since),
+            "detail": (f"Your {_provider_label(prov)} sign-in expired, so no new "
+                       "meter readings are reaching us."),
+            "fix": (f"Re-connect {_provider_label(prov)} in Array Operator — "
+                    "we backfill the missed days automatically once it's live."),
+            "arrays_affected": _arrays_for(prov),
+        })
+
+    return {"ok": not problems, "problems": problems}
+
+
+def _array_visibility(db, col: dict) -> dict:
+    """Per-array visibility + provenance, read from its FULL stored history.
+
+    The tree carries a 14-day window; a streak can be longer than that, and "we
+    have never seen this array produce" is a materially different sentence from
+    "it has been flat a while". So the last-produced day comes from a direct
+    query over all of DailyGeneration, not just the window.
+    """
+    array_id = col.get("array_id")
+    vis = _series_visibility(_vendor_daily(col))
+
+    if array_id is not None:
+        try:
+            # Plain aggregates (no FILTER clause) so this behaves identically on
+            # Postgres and on the SQLite the tests run against.
+            real = func.coalesce(DailyGeneration.source, "") != "bill_prorate"
+            last_any, first_any = db.execute(
+                select(func.max(DailyGeneration.day), func.min(DailyGeneration.day))
+                .where(DailyGeneration.array_id == array_id, real)
+            ).one()
+            last_nz = db.execute(
+                select(func.max(DailyGeneration.day))
+                .where(DailyGeneration.array_id == array_id, real,
+                       DailyGeneration.kwh > 0)
+            ).scalar()
+            vis["last_nonzero_day"] = last_nz.isoformat() if last_nz else None
+            vis["last_data_day"] = last_any.isoformat() if last_any else None
+            vis["first_data_day"] = first_any.isoformat() if first_any else None
+            vis["days_since_data"] = _days_since(vis["last_data_day"])
+            vis["days_at_zero"] = (_days_since(vis["last_nonzero_day"])
+                                   if vis["last_nonzero_day"] else None)
+            vis["never_reported"] = last_any is None
+            vis["never_produced"] = last_any is not None and last_nz is None
+        except Exception:                            # pragma: no cover - defensive
+            log.exception("array visibility query failed for array %s", array_id)
+
+    # Provenance: how this array's numbers actually reach us. utility_meter =
+    # a utility login (dies when the login dies); extension_pull = the browser
+    # capture; a vendor slug = a cloud API. The owner's fix differs for each.
+    sources = [str(p.get("source")) for p in (col.get("daily") or [])
+               if p.get("source") and str(p.get("source")) != "bill_prorate"]
+    vis["data_source"] = max(set(sources), key=sources.count) if sources else None
+
+    # Whether this array has a utility login behind it at all. An array with NO
+    # utility account cannot be a victim of a dead utility session — which is
+    # precisely how the two similarly-named Glover sites got conflated.
+    vis["has_utility_account"] = False
+    if array_id is not None:
+        try:
+            vis["has_utility_account"] = bool(db.execute(
+                select(func.count(UtilityAccount.id)).where(
+                    UtilityAccount.array_id == array_id,
+                    UtilityAccount.enabled.is_(True),
+                    UtilityAccount.deleted_at.is_(None),
+                )
+            ).scalar())
+        except Exception:                            # pragma: no cover - defensive
+            log.exception("utility-account check failed for array %s", array_id)
+
+    # The array-level condition, on the same ladder the per-inverter classifier
+    # uses: never connected → never produced → feed gap → flat → producing.
+    if vis["never_reported"]:
+        cond = "never_connected"
+    elif vis["never_produced"]:
+        cond = "never_produced"
+    elif (vis.get("days_since_data") or 0) >= 2:
+        cond = "feed_gap"
+    elif (vis.get("days_at_zero") or 0) >= 2:
+        cond = "flat"
+    else:
+        cond = "producing"
+    vis["condition"] = cond
+    return vis
+
+
+def enrich_tree(db, tenant, tree: dict) -> dict:
+    """Attach visibility + cause facts to the tree, IN PLACE, once.
+
+    Every downstream surface (the LLM's fact JSON, the HTML body, the plain-text
+    body, the subject) then reads the SAME enriched tree, so they are structurally
+    incapable of describing the same inverter two different ways — the failure
+    mode that produced Paul's contradictory pair of emails.
+
+    Per-inverter causes come from ``inverter_outage_log.latest_episode`` — the
+    exact classifier behind the in-app Outage Log. The digest does not get its
+    own opinion about why a unit is down.
+    """
+    from ..inverter_outage_log import latest_episode
+
+    cols = _vendor_columns(tree)
+    # Only the units we will actually TALK about need a cause lookup: the worst
+    # 12, which is exactly what the body renders. Bounded work per fleet, so a
+    # large flagged set can't turn a daily email into a query storm.
+    interesting = {(f["array_name"], f["name"]) for f in _all_flagged(cols)[:12]}
+
+    for col in cols:
+        try:
+            col["visibility"] = _array_visibility(db, col)
+        except Exception:                            # pragma: no cover - defensive
+            log.exception("enrich: array visibility failed for %s", col.get("array_id"))
+        for inv in col.get("inverters", []):
+            try:
+                inv["visibility"] = _series_visibility(inv.get("daily") or [])
+                key = (col.get("array_name", ""), inv.get("name") or inv.get("sn") or "Inverter")
+                if key in interesting and inv.get("inverter_id"):
+                    inv["outage"] = latest_episode(db, tenant, inv["inverter_id"])
+            except Exception:                        # pragma: no cover - defensive
+                log.exception("enrich: inverter facts failed for %s", inv.get("inverter_id"))
+
+    try:
+        tree["connection_health"] = build_connection_health(db, tenant)
+    except Exception:                                # pragma: no cover - defensive
+        log.exception("enrich: connection health failed")
+    return tree
+
+
+def _phrase_for_inverter(inv: dict, status: str) -> str:
+    """The owner-facing sentence for a flagged inverter — SPECIFIC about what we
+    actually observed, and never claiming production knowledge we don't have.
+
+    "stopped producing" is a claim about the panels. When all we know is that the
+    unit stopped talking to us, the honest sentence is "no data since Jul 1".
+    Falls back to the old generic phrasing when the tree wasn't enriched.
+    """
+    og = inv.get("outage") or {}
+    vis = inv.get("visibility") or {}
+    kind = og.get("cause_kind")
+    since = _fmt_day(vis.get("last_data_day"))
+    since_nz = _fmt_day(vis.get("last_nonzero_day"))
+    gap = vis.get("days_since_data")
+
+    if og.get("state") == "no_history" or vis.get("never_reported"):
+        return ("has never sent us any data — it looks like it was never fully "
+                "connected, so we can't see it at all")
+
+    if kind == "vendor_code":
+        codes = ", ".join(og.get("vendor_codes") or []) or None
+        base = f"reporting fault {codes}" if codes else "reporting a fault to the vendor"
+        return f"{base}{f' since {since}' if since else ''}"
+
+    if kind == "no_data":
+        return (f"no data since {since} — a feed gap, so its production is unknown "
+                f"rather than zero" if since else
+                "no data reaching us — its production is unknown rather than zero")
+
+    if kind == "site_wide":
+        return (f"reading zero since {since_nz or since} — but so was the whole site, "
+                "so this points at the site, not this unit")
+
+    if kind == "unit":
+        if og.get("self_rows_present") is False:
+            tail = f" ({gap} days)" if gap else ""
+            return (f"no data since {since}{tail} while the rest of the array kept "
+                    "reporting — check this unit or its comms")
+        return (f"stopped producing on {since_nz} while the rest of the array kept "
+                f"going" if since_nz else
+                "stopped producing while the rest of the array kept going")
+
+    if status == "underperforming":
+        return "underperforming vs its neighbors"
+
+    # No episode, or an honestly-unknown cause: still say what we SAW.
+    if since and (gap or 0) >= 2:
+        return f"no data since {since} — we can't see it right now"
+    return _STATUS_PHRASE.get(status, "needs a look")
+
+
+def _connection_items(tree: dict) -> list[dict]:
+    """The "we can't see these" list: dead logins first, then arrays that are
+    silent or have never produced. Rendered as its OWN block, deliberately apart
+    from inverter faults — the fix is a login, not a service call.
+
+    This is additive honesty, never a mute: nothing here removes or softens a
+    flagged inverter (no-self-sabotage-reliability-audit).
+    """
+    items: list[dict] = []
+    health = tree.get("connection_health") or {}
+    # Arrays already accounted for by a dead login must not ALSO be listed on
+    # their own — that would report one root cause as two separate problems,
+    # which is how the customer ended up with two emails about one event.
+    claimed: set[str] = set()
+    for p in health.get("problems", []):
+        starved = [a for a in p.get("arrays_affected", [])
+                   if (a.get("days_since_data") or 0) >= 2]
+        claimed.update(a["array"] for a in starved)
+        who = ", ".join(a["array"] for a in starved[:3])
+        detail = p.get("detail", "")
+        if starved:
+            last = _fmt_day(starved[0].get("last_data_day"))
+            detail += (f" {who} {'has' if len(starved) == 1 else 'have'} no new readings"
+                       f"{f' since {last}' if last else ''}.")
+        items.append({
+            "title": f"{p.get('provider_name', 'Utility')} sign-in needs re-connecting",
+            "detail": (detail + " " + p.get("fix", "")).strip(),
+            "kind": p.get("kind"),
+        })
+
+    for col in _vendor_columns(tree):
+        vis = col.get("visibility") or {}
+        cond = vis.get("condition")
+        name = col.get("array_name", "Array")
+        if name in claimed:
+            continue                    # already explained by its dead login
+        if cond == "never_connected":
+            items.append({
+                "title": name,
+                "detail": ("has never sent us any data — it looks like it was never "
+                           "fully connected. Nothing has been lost that we can see; "
+                           "we simply can't see it."),
+                "kind": cond,
+            })
+        elif cond == "never_produced":
+            first = _fmt_day(vis.get("first_data_day"))
+            n = vis.get("days_since_data")
+            items.append({
+                "title": name,
+                "detail": (f"has reported 0 kWh every day since it was connected"
+                           f"{f' on {first}' if first else ''} — it has never produced "
+                           "for us. That reads like a setup or connection problem, not "
+                           "a production loss."),
+                "kind": cond,
+            })
+        elif cond == "feed_gap":
+            n = vis.get("days_since_data")
+            span = f" ({n} days)" if n else ""
+            items.append({
+                "title": name,
+                "detail": (f"no new readings since {_fmt_day(vis.get('last_data_day'))}"
+                           f"{span} — production over that stretch is unknown, "
+                           "not zero."),
+                "kind": cond,
+            })
+        elif cond == "flat":
+            n = vis.get("days_at_zero")
+            span = f" ({n} days)" if n else ""
+            items.append({
+                "title": name,
+                "detail": (f"has reported 0 kWh since "
+                           f"{_fmt_day(vis.get('last_nonzero_day'))}{span} — it is "
+                           "reporting, but producing nothing."),
+                "kind": cond,
+            })
+    return items
+
+
 # ─────────────────────────────── rendering ───────────────────────────────────
 
 def build_digest_html(tenant, tree: dict, personal_note: str | None = None) -> str:
@@ -497,8 +972,29 @@ def build_digest_html(tenant, tree: dict, personal_note: str | None = None) -> s
         for c in cols
     )
 
+    # Feeds we've lost sight of. Kept SEPARATE from the inverter-fault count: the
+    # fix is a login, not a service call, and a blind spot is not lost production.
+    conn_items = _connection_items(tree)
+
     # ---- banner: blue all-clear, or amber/red attention callout -------------
-    if attention == 0:
+    # An all-clear must be a REAL all-clear. If there's a site we cannot see, we
+    # do not get to say "all systems healthy" — that was the loudest lie in the
+    # old digest, and the fix is to say what we can't see, not to go quiet.
+    if attention == 0 and conn_items:
+        n = len(conn_items)
+        banner = (
+            f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
+            f'style="margin:0 0 22px;"><tr>'
+            f'<td bgcolor="#fffbeb" style="background:#fffbeb;border:1px solid #fde68a;'
+            f'border-radius:12px;padding:15px 18px;">'
+            f'<div style="font-size:17px;font-weight:700;color:#b45309;">'
+            f'&#9888; Every inverter we can see is healthy — '
+            f'but there {"is 1 feed" if n == 1 else f"are {n} feeds"} we can&rsquo;t see</div>'
+            f'<div style="color:#b45309;font-size:13px;margin-top:3px;">'
+            f'Their production is unknown, not zero. Details below.</div>'
+            f'</td></tr></table>'
+        )
+    elif attention == 0:
         banner = (
             f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" '
             f'style="margin:0 0 22px;"><tr>'
@@ -628,6 +1124,32 @@ def build_digest_html(tenant, tree: dict, personal_note: str | None = None) -> s
         + '</ul>'
     )
 
+    # ---- what we can't see --------------------------------------------------
+    # Its own block, above the inverter list, because a dead login is usually the
+    # CAUSE of the zeros below it — and because "we lost sight of this" is a
+    # different sentence from "this broke". Amber, never red: nothing here is a
+    # confirmed loss.
+    conn_html = ""
+    if conn_items:
+        rows = "".join(
+            f'<li style="margin:7px 0;color:{BODY};">'
+            f'<b style="color:#b45309;">{_html.escape(str(it["title"]))}</b> — '
+            f'{_html.escape(str(it["detail"]))}</li>'
+            for it in conn_items[:8]
+        )
+        more = (f'<li style="margin:7px 0;color:{MUTED};">… and '
+                f'{len(conn_items) - 8} more — open Array Operator to see them all.</li>'
+                if len(conn_items) > 8 else "")
+        conn_html = (
+            f'<div style="font-size:12px;color:{FAINT};margin:0 0 4px;text-transform:uppercase;'
+            f'letter-spacing:.6px;font-weight:700;">What we can&rsquo;t see</div>'
+            f'<div style="font-size:11.5px;color:{FAINT};margin:0 0 9px;line-height:1.45;">'
+            f'These aren&rsquo;t production losses — they&rsquo;re gaps in what reaches us. '
+            f'Production over these stretches is unknown, not zero.</div>'
+            f'<ul style="margin:0 0 22px;padding-left:20px;font-size:14px;line-height:1.55;">'
+            f'{rows}{more}</ul>'
+        )
+
     # ---- per-array summary rows ---------------------------------------------
     # On an attention day, show ONLY the arrays that hold a flagged inverter (the
     # ones the flagged list points at) — not the whole fleet. All-healthy days
@@ -717,7 +1239,7 @@ def build_digest_html(tenant, tree: dict, personal_note: str | None = None) -> s
         + stale_html +
         '</td></tr>'
         f'<tr><td bgcolor="{CARD}" style="padding:18px 28px 4px;">'
-        + note_html + kpis + banner + highlights + per_array +
+        + note_html + kpis + banner + conn_html + highlights + per_array +
         '</td></tr>'
         f'<tr><td bgcolor="{CARD}" style="padding:4px 28px 26px;">'
         f'<a href="{dash}" style="display:inline-block;background:{BLUE};color:#ffffff;'
@@ -752,8 +1274,15 @@ def build_digest_text(tenant, tree: dict, personal_note: str | None = None) -> s
     if stale:
         lines.append("(Some arrays haven't reported a full day recently — see their "
                      "dates below; open Array Operator to refresh.)")
+    conn_items = _connection_items(tree)
     lines.append("")
-    if attention == 0:
+    if attention == 0 and conn_items:
+        # Never claim an all-clear over a blind spot (mirrors the HTML banner).
+        n = len(conn_items)
+        lines.append(f"Every inverter we can see is healthy — but there "
+                     f"{'is 1 feed' if n == 1 else f'are {n} feeds'} we can't see. "
+                     "Their production is unknown, not zero.")
+    elif attention == 0:
         lines.append("All systems healthy: every inverter we can see produced as expected over the full day.")
     else:
         lines.append(f"{attention} inverter(s) need attention.")
@@ -766,6 +1295,15 @@ def build_digest_text(tenant, tree: dict, personal_note: str | None = None) -> s
         f"Arrays: {len(cols)}   Inverters: {inv_total}   Need attention: {attention}",
         "",
     ]
+    if conn_items:
+        lines.append("What we can't see (gaps in what reaches us — production unknown, "
+                     "not zero):")
+        for it in conn_items[:8]:
+            lines.append(f"  ? {it['title']} — {it['detail']}")
+        if len(conn_items) > 8:
+            lines.append(f"  … and {len(conn_items) - 8} more — open Array Operator.")
+        lines.append("")
+
     if attention > 0:
         # Just the flagged inverters — the per-array table is dropped (it repeats this).
         lines.append("Inverters needing attention:")
@@ -784,6 +1322,96 @@ def build_digest_text(tenant, tree: dict, personal_note: str | None = None) -> s
             lines.append(f"  - {col.get('array_name', 'Array')}: {state}, {out}")
     lines += ["", "Open Array Operator: https://arrayoperator.com"]
     return "\n".join(lines)
+
+
+def build_note_facts(db, tenant, tree: dict) -> dict:
+    """The ground-truth JSON handed to the Energy Agent for the personal note.
+
+    WHY THIS IS SHAPED THE WAY IT IS: the old payload gave the model a flagged
+    inverter, a best/worst array by kWh, and a single fleet-wide ``data_stale``
+    boolean. So an array that had never produced anything appeared as nothing but
+    ``{"name": "West Glover 50kW", "kwh": 0}`` — no duration, no provenance, no
+    hint that a utility session had died hours earlier. Told to write something
+    human, the model did the only thing that payload allowed: it invented a
+    timeframe ("overnight") and a cause ("went dark").
+
+    So every entry now carries WHEN we last heard from it, WHEN it last produced,
+    HOW its data reaches us, and — for flagged units — the cause_kind from our own
+    outage classifier. The model is never asked to supply a fact it wasn't given.
+    """
+    cols = _vendor_columns(tree)
+    flagged = _all_flagged(cols)
+    ranked = _ranked_arrays(cols)
+    _, date_label, stale = _fleet_reference_day(cols)
+
+    def _flag_fact(f: dict) -> dict:
+        vis = f.get("visibility") or {}
+        og = f.get("outage") or {}
+        return {
+            "array": f.get("array_name"),
+            "inverter": f.get("inverter") or f.get("name"),
+            "status": f.get("status"),
+            "note": f.get("phrase"),
+            # WHEN — the only source of any duration the note is allowed to state
+            "last_data_day": vis.get("last_data_day"),
+            "last_nonzero_day": vis.get("last_nonzero_day"),
+            "days_since_data": vis.get("days_since_data"),
+            "days_at_zero": vis.get("days_at_zero"),
+            "never_reported": bool(vis.get("never_reported")),
+            # WHY — our own classifier's verdict, the same one shown in-app
+            "cause_kind": og.get("cause_kind"),
+            "cause": og.get("cause"),
+            "down_since": og.get("ongoing_since"),
+            "still_down": og.get("ongoing"),
+            # Did the unit send rows at all? Distinguishes "producing nothing"
+            # from "we can't see it" — never let the note blur these.
+            "sent_any_data_during_outage": og.get("self_rows_present"),
+        }
+
+    def _array_fact(col: dict) -> dict:
+        vis = col.get("visibility") or {}
+        return {
+            "name": col.get("array_name"),
+            "inverters": int(col.get("inverter_count") or 0),
+            "condition": vis.get("condition"),
+            "data_source": vis.get("data_source"),
+            "has_utility_login": vis.get("has_utility_account"),
+            "last_data_day": vis.get("last_data_day"),
+            "last_nonzero_day": vis.get("last_nonzero_day"),
+            "days_since_data": vis.get("days_since_data"),
+            "days_at_zero": vis.get("days_at_zero"),
+            "first_data_day": vis.get("first_data_day"),
+            "never_reported": bool(vis.get("never_reported")),
+            "never_produced": bool(vis.get("never_produced")),
+            "last_full_day_kwh": _recent_kwh(col),
+        }
+
+    facts = {
+        "fleet_name": _fleet_name(tenant),
+        "date": date_label,
+        "arrays_total": len(cols),
+        "inverters_total": sum(int(c.get("inverter_count") or 0) for c in cols),
+        "attention_count": len(flagged),
+        "flagged": [_flag_fact(f) for f in flagged[:5]],
+        "arrays": [_array_fact(c) for c in cols],
+        "best_array": ({"name": ranked[0]["col"].get("array_name"),
+                        "kwh": round(ranked[0].get("kwh") or 0, 1)} if ranked else None),
+        "worst_array": ({"name": ranked[-1]["col"].get("array_name"),
+                         "kwh": round(ranked[-1].get("kwh") or 0, 1)}
+                        if len(ranked) > 1 else None),
+        "data_stale": bool(stale),
+        # Is every feed alive? When this has problems it is USUALLY the real story
+        # and the zero readings downstream are its symptom, not separate news.
+        "connection_health": tree.get("connection_health") or {"ok": True, "problems": []},
+    }
+    try:
+        from ..energy_agent import _compute_setup_status
+        st = _compute_setup_status(db, tenant)
+        facts["setup_gap"] = st.get("top_gap")
+        facts["fully_operational"] = st.get("fully_operational")
+    except Exception:                                # pragma: no cover - defensive
+        log.debug("setup status unavailable for note facts", exc_info=True)
+    return facts
 
 
 # ─────────────────────────────── send / batch ────────────────────────────────
@@ -846,40 +1474,17 @@ def send_digest_for_tenant(db, tenant: Tenant) -> bool:
         tenant.digest_hold_notified_at = None
         db.commit()
 
+    # Attach visibility + cause facts ONCE, before anything renders. From here on
+    # the note, the HTML, the text and the subject all read the same enriched
+    # tree, so they cannot contradict each other or the in-app Outage Log.
+    enrich_tree(db, tenant, tree)
+
     # HYBRID: a personal note from the Energy Agent brain on top of the visual
     # digest. All LLM/I-O stays HERE; build_digest_html stays a pure function so
     # any failure collapses the note to "" and the template-only digest ships.
     personal_note = None
     try:
-        _cols = _vendor_columns(tree)
-        _flagged = _all_flagged(_cols)
-        _ranked = _ranked_arrays(_cols)
-        _, _date_label, _stale = _fleet_reference_day(_cols)
-        _facts = {
-            "fleet_name": _fleet_name(tenant),
-            "date": _date_label,
-            "arrays_total": len(_cols),
-            "inverters_total": sum(int(c.get("inverter_count") or 0) for c in _cols),
-            "attention_count": len(_flagged),
-            "flagged": [
-                {"array": f.get("array_name"), "inverter": f.get("name"),
-                 "status": f.get("status"), "note": f.get("phrase")}
-                for f in _flagged[:5]
-            ],
-            "best_array": ({"name": _ranked[0]["col"].get("array_name"),
-                            "kwh": round(_ranked[0].get("kwh") or 0, 1)} if _ranked else None),
-            "worst_array": ({"name": _ranked[-1]["col"].get("array_name"),
-                             "kwh": round(_ranked[-1].get("kwh") or 0, 1)}
-                            if len(_ranked) > 1 else None),
-            "data_stale": bool(_stale),
-        }
-        try:
-            from ..energy_agent import _compute_setup_status
-            _st = _compute_setup_status(db, tenant)
-            _facts["setup_gap"] = _st.get("top_gap")
-            _facts["fully_operational"] = _st.get("fully_operational")
-        except Exception:
-            pass
+        _facts = build_note_facts(db, tenant, tree)
         from ..energy_agent_email import compose_morning_note
         personal_note = compose_morning_note(db, tenant, _facts)
     except Exception as e:

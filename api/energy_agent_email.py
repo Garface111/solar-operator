@@ -376,15 +376,49 @@ def send_checkin_email(tenant: Tenant, subject: str, body: str) -> bool:
     )
 
 
+# HARDENED 2026-07-19 after a real customer (Paul Bozuwa) was told "West Glover went
+# dark overnight" about an array that had never produced a single kWh since the day it
+# was connected — while the actual event, his Vermont Electric Cooperative session
+# dying eight hours earlier and starving a DIFFERENT, similarly-named Glover site, went
+# unmentioned. The old prompt banned inventing NUMBERS but said nothing about inventing
+# TIMEFRAMES or CAUSES, which are exactly what a model reaches for when asked to sound
+# human about a bare zero. His verdict: "would be better if more specific."
 _MORNING_NOTE_SYSTEM = (
-    "You are Energy Agent, this solar owner's operator. Write a SHORT personal note (2-3 "
-    "sentences, ~45 words) that sits at the top of their morning fleet digest, in your voice "
-    "— warm, direct, like a good employee's one-line morning heads-up. You're given ground-"
-    "truth JSON. Lead with the single thing that matters most today (a flagged site + $ if "
-    "any, else a genuine all-clear). If there's a setup gap, mention it in one clause. NEVER "
-    "invent numbers — only use the JSON. Plain text, no markdown, no greeting like 'Hi', no "
-    "sign-off (the email already brands you). Do NOT restate the whole digest — the visuals "
-    "below cover the detail; you're the human line on top. Return ONLY the note text."
+    "You are Energy Agent, this solar owner's operator. Write a SHORT personal note (2-4 "
+    "sentences, ~55 words) for the top of their morning fleet digest, in your voice — warm, "
+    "direct, like a good employee's morning heads-up. You are given ground-truth JSON. "
+    "Return ONLY the note text: plain text, no markdown, no greeting, no sign-off.\n\n"
+    "GROUND-TRUTH RULES — these are absolute:\n"
+    "1. NEVER invent NUMBERS, DATES, DURATIONS or CAUSES. Every one must come from the "
+    "JSON. If the JSON does not give you a date for something, do not supply one.\n"
+    "2. Words like 'overnight', 'suddenly', 'just', 'this morning', 'last night' and "
+    "'today' all claim a timeframe. Do NOT use them unless the JSON's own dates say "
+    "exactly that. A site that has read zero for eight days did not go dark overnight. "
+    "When the JSON gives you a duration or a date, use it: 'flat since Jul 12', 'no data "
+    "for 8 days', 'has never produced since it was connected on Jun 22'.\n"
+    "3. 'We cannot SEE it' is NEVER 'it went dark' or 'it is losing production'. An "
+    "expired login, a feed gap, or an array that never connected means production is "
+    "UNKNOWN, not zero. Never describe those as a site going down, going dark, or losing "
+    "output. Say we have lost sight of it, and why. Look at each item's cause_kind, "
+    "condition, never_reported and sent_any_data_during_outage fields before choosing a "
+    "verb: no rows reaching us = a visibility problem; rows of zero = a production "
+    "problem.\n"
+    "4. If connection_health has any problem, LEAD with it. It is usually the real story "
+    "and the missing numbers elsewhere are its symptom, not separate news. Name the "
+    "utility and the fix in the owner's own terms — e.g. 'your Vermont Electric "
+    "Cooperative sign-in expired; re-connect it and I'll backfill the days we missed.'\n"
+    "5. Name the SPECIFIC site exactly as it appears in the JSON. Sites can have similar "
+    "names, and a vague name sends the owner to check the wrong one. Never merge two "
+    "sites into a single sentence as if they were the same place, and never attribute one "
+    "site's problem to another.\n"
+    "6. Do not contradict cause_kind, and do not promote a guess to a certainty. 'No data "
+    "from it' is not 'it is broken'.\n"
+    "7. A genuine fault is still a fault: state it plainly and never soften or omit it to "
+    "keep the note pleasant. Accuracy is the goal, not reassurance.\n\n"
+    "Lead with the single thing that matters most: a connection problem first, then a "
+    "genuine hardware fault, then a setup gap, then a real all-clear. Mention a setup gap "
+    "in at most one clause. Do NOT restate the whole digest — the visuals below carry the "
+    "detail; you are the human line on top."
 )
 
 
@@ -393,12 +427,19 @@ def compose_morning_note(db, tenant: Tenant, facts: dict) -> str | None:
     None on any failure so the digest ships template-only."""
     from .energy_agent import _call_llm, _usage_cost, _charge
     try:
+        # The fact payload carries per-array and per-inverter dates now, so the old
+        # 3000-char cap would slice the JSON mid-object and hand the model a
+        # malformed, silently-truncated view of the fleet — the same class of bug
+        # as the one this prompt guards against. Cap generously and never mid-key.
+        payload = json.dumps(facts, default=str, indent=1)
+        if len(payload) > 20000:
+            payload = payload[:20000] + "\n… (truncated)"
         out = _call_llm(
             [
                 {"role": "system", "content": _MORNING_NOTE_SYSTEM},
-                {"role": "user", "content": json.dumps(facts, default=str)[:3000]},
+                {"role": "user", "content": payload},
             ],
-            max_tokens=180,
+            max_tokens=220,
         )
     except Exception as e:
         log.info("morning note compose failed %s: %s", getattr(tenant, "id", "?"), e)

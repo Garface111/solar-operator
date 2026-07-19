@@ -462,3 +462,221 @@ def test_mixed_fleet_still_sends_with_stale_note(monkeypatch):
     assert len(sent) == 1
     assert "held" not in sent[0]["subject"].lower()
     assert t.digest_hold_notified_at is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HONESTY: "we can't see it" is never "it went dark"
+#
+# Regression suite for the 2026-07-19 customer report (Paul Bozuwa). The digest
+# told him "West Glover went dark overnight" about an array that had NEVER
+# produced a kWh since the day it was connected, and never mentioned the Vermont
+# Electric Cooperative session that had died 8 hours earlier and starved a
+# DIFFERENT, similarly-named site. Each test below pins one half of that bug.
+# ─────────────────────────────────────────────────────────────────────────────
+import secrets
+
+from api.db import SessionLocal
+from api.models import (
+    Array, DailyGeneration, InverterAlertState, Tenant, UtilityAccount,
+)
+
+
+def _db_tenant() -> str:
+    tid = "ten_" + secrets.token_hex(6)
+    with SessionLocal() as db:
+        db.add(Tenant(id=tid, name="Digest Honesty", company_name="HCT Test",
+                      contact_email=f"{tid}@t.test",
+                      tenant_key="sol_test_" + secrets.token_hex(8),
+                      plan="standard", active=True, product="array_operator"))
+        db.commit()
+    return tid
+
+
+def _db_array(tid: str, name: str) -> int:
+    with SessionLocal() as db:
+        a = Array(tenant_id=tid, name=name)
+        db.add(a)
+        db.flush()
+        db.commit()
+        return a.id
+
+
+def _gen(tid: str, aid: int, rows: dict, source: str = "extension_pull") -> None:
+    """{days_ago: kwh} → DailyGeneration rows."""
+    with SessionLocal() as db:
+        for n, kwh in rows.items():
+            db.add(DailyGeneration(tenant_id=tid, array_id=aid,
+                                   day=date.fromisoformat(_iso_days_ago(n)),
+                                   kwh=kwh, source=source))
+        db.commit()
+
+
+def _zero_daily(n: int) -> list[dict]:
+    return [{"date": _iso_days_ago(i), "kwh": 0.0, "source": "extension_pull"}
+            for i in range(n, 0, -1)]
+
+
+def _col(aid: int, name: str, daily: list, inverters=None, inv_count: int = 1) -> dict:
+    return {
+        "array_id": aid, "array_name": name, "inverter_count": inv_count,
+        "alert": {"level": "ok", "count": 0, "status": "ok", "headline": ""},
+        "inverters": inverters if inverters is not None else [
+            {"inverter_id": aid * 100, "name": f"{name}-1", "status": "ok"}],
+        "daily": daily, "is_daylight": True,
+    }
+
+
+def test_eight_day_flatline_is_never_called_overnight():
+    """An array flat for days must carry its REAL, data-derived duration and the
+    day it last produced — so nothing downstream can imply a sudden event."""
+    tid = _db_tenant()
+    aid = _db_array(tid, "West Glover 50kW")
+    _gen(tid, aid, {20: 55.0})                       # last real production
+    _gen(tid, aid, {n: 0.0 for n in range(8, 0, -1)})
+
+    with SessionLocal() as db:
+        vis = digest._array_visibility(db, _col(aid, "West Glover 50kW", _zero_daily(8)))
+
+    assert vis["condition"] == "flat"
+    assert vis["last_nonzero_day"] == _iso_days_ago(20)
+    assert vis["days_at_zero"] == 20                  # real duration, not a guess
+    assert vis["never_produced"] is False
+    assert vis["data_source"] == "extension_pull"
+
+    items = digest._connection_items(
+        {"columns": [dict(_col(aid, "West Glover 50kW", _zero_daily(8)), visibility=vis)]})
+    blurb = " ".join(i["detail"] for i in items).lower()
+    assert "20 days" in blurb
+    for lie in ("overnight", "went dark", "suddenly"):
+        assert lie not in blurb
+
+
+def test_never_produced_array_reads_as_never_connected_not_as_going_dark():
+    """Paul's actual array: rows arriving every day, every one 0.00, no nonzero
+    EVER. A setup/connection condition — never a production loss."""
+    tid = _db_tenant()
+    aid = _db_array(tid, "West Glover 50kW")
+    _gen(tid, aid, {n: 0.0 for n in range(28, 0, -1)})
+    col = _col(aid, "West Glover 50kW", _zero_daily(14))
+
+    with SessionLocal() as db:
+        col["visibility"] = digest._array_visibility(db, col)
+
+    assert col["visibility"]["condition"] == "never_produced"
+    assert col["visibility"]["last_nonzero_day"] is None
+
+    items = digest._connection_items({"columns": [col]})
+    blurb = " ".join(i["title"] + " " + i["detail"] for i in items)
+    assert "West Glover 50kW" in blurb
+    assert "never produced" in blurb.lower()
+    for lie in ("went dark", "overnight", "losing production"):
+        assert lie not in blurb.lower()
+
+
+def test_dead_utility_session_leads_and_names_the_right_site():
+    """A dead co-op session must surface, name the SPECIFIC starved site (the
+    disambiguation Paul asked for), and lead — it is the cause, not a symptom."""
+    tid = _db_tenant()
+    starved = _db_array(tid, "52 COUNTY RD, GLOVER, VT")
+    other = _db_array(tid, "West Glover 50kW")
+    _gen(tid, starved, {n: 400.0 for n in range(20, 6, -1)}, source="utility_meter")
+    _gen(tid, other, {n: 0.0 for n in range(14, 0, -1)})
+    with SessionLocal() as db:
+        db.add(UtilityAccount(tenant_id=tid, array_id=starved, provider="vec",
+                              account_number="6578300", enabled=True))
+        db.add(InverterAlertState(
+            tenant_id=tid, incident_key=f"coop_session_dead:{tid}:vec",
+            first_flagged_at=digest.datetime.utcnow() - timedelta(days=1)))
+        db.commit()
+
+    with SessionLocal() as db:
+        t = db.get(Tenant, tid)
+        health = digest.build_connection_health(db, t)
+        col = _col(other, "West Glover 50kW", _zero_daily(14))
+        col["visibility"] = digest._array_visibility(db, col)
+
+    assert health["ok"] is False
+    prob = health["problems"][0]
+    assert prob["provider"] == "vec"
+    assert prob["provider_name"] == "Vermont Electric Cooperative"
+    # the SPECIFIC starved site — never the similarly-named neighbour
+    assert [a["array"] for a in prob["arrays_affected"]] == ["52 COUNTY RD, GLOVER, VT"]
+
+    items = digest._connection_items({"columns": [col], "connection_health": health})
+    assert "Vermont Electric Cooperative" in items[0]["title"]     # connection FIRST
+    assert "52 COUNTY RD, GLOVER, VT" in items[0]["detail"]
+    assert "re-connect" in items[0]["detail"].lower()
+
+
+def test_no_data_unit_is_not_described_as_stopped_producing():
+    """Template-side half: a unit we merely stopped hearing from reads as a feed/
+    comms gap. We do not know what its panels did, so we do not say."""
+    inv = {
+        "inverter_id": 406, "name": "Primo 12.5-1 208-240 (54)", "status": "dead",
+        "visibility": {"last_data_day": _iso_days_ago(18),
+                       "last_nonzero_day": _iso_days_ago(18),
+                       "days_since_data": 18, "never_reported": False},
+        "outage": {"cause_kind": "unit", "self_rows_present": False,
+                   "ongoing": True, "state": "ongoing"},
+    }
+    phrase = digest._phrase_for_inverter(inv, "dead")
+    assert "no data since" in phrase
+    assert "stopped producing" not in phrase
+    assert "rest of the array kept reporting" in phrase
+
+
+def test_never_reported_inverter_reads_as_never_connected():
+    inv = {"inverter_id": 587, "name": "0001013792224031", "status": "comm_gap",
+           "visibility": {"last_data_day": None, "last_nonzero_day": None,
+                          "days_since_data": None, "never_reported": True},
+           "outage": {"state": "no_history"}}
+    phrase = digest._phrase_for_inverter(inv, "comm_gap")
+    assert "never" in phrase.lower()
+    assert "stopped producing" not in phrase
+
+
+def test_genuine_unit_fault_with_producing_peers_still_flags_loudly():
+    """Accuracy, not volume: a real dead unit stays flagged, named and counted.
+    Nothing in this honesty work may mute a true fault."""
+    inv = {
+        "inverter_id": 406, "name": "Primo (54)", "status": "dead",
+        "visibility": {"last_data_day": _iso_days_ago(2),
+                       "last_nonzero_day": _iso_days_ago(9),
+                       "days_since_data": 2, "never_reported": False},
+        "outage": {"cause_kind": "unit", "self_rows_present": True,
+                   "ongoing": True, "state": "ongoing"},
+    }
+    col = {"array_id": 1, "array_name": "Danville Big Buck", "inverter_count": 8,
+           "alert": {"level": "critical", "count": 1, "status": "dead",
+                     "headline": "unit down"},
+           "inverters": [inv] + [
+               {"inverter_id": 400 + i, "name": f"Primo ({i})", "status": "ok"}
+               for i in range(7)],
+           "daily": [{"date": _iso_days_ago(1), "kwh": 500.0}], "is_daylight": True}
+    tree = {"columns": [col]}
+
+    assert any(f["name"] == "Primo (54)" for f in digest._all_flagged([col]))
+    assert "stopped producing" in digest._phrase_for_inverter(inv, "dead")
+
+    html = digest.build_digest_html(_tenant(), tree)
+    assert "Primo (54)" in html
+    assert "needs attention" in html                  # still counted, still loud
+    assert "All systems healthy" not in html
+
+
+def test_all_clear_is_withheld_when_a_feed_is_invisible():
+    """A blind spot breaks the green all-clear. Claiming 'all systems healthy'
+    over a site we cannot see was the loudest lie in the old digest."""
+    good = _col(1, "Sunny Field",
+                [{"date": _iso_days_ago(1), "kwh": 40.0, "source": "extension_pull"}])
+    dark = _col(2, "Never Connected", [])
+    dark["visibility"] = {"condition": "never_connected", "never_reported": True}
+    tree = {"columns": [good, dark]}
+
+    html = digest.build_digest_html(_tenant(), tree)
+    assert "All systems healthy" not in html
+    assert "Never Connected" in html
+
+    text = digest.build_digest_text(_tenant(), tree)
+    assert "All systems healthy" not in text
+    assert "Never Connected" in text

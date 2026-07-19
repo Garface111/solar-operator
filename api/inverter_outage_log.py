@@ -250,6 +250,68 @@ def build_outage_log(db, tenant, inverter_id: int, days: int = DEFAULT_WINDOW_DA
     return base
 
 
+def latest_episode(db, tenant, inverter_id: int, days: int = 45,
+                   today: date | None = None) -> dict | None:
+    """The CURRENT (or most recent) outage episode for one inverter, flattened for
+    NON-UI consumers — the morning digest, alert copy, the agent's reasoning.
+
+    This is deliberately a thin wrapper over :func:`build_outage_log`. The cause
+    ladder (vendor_code → no_data → site_wide → unit → unknown) therefore has
+    exactly ONE implementation, so an email can never describe an inverter
+    differently from the Outage Log the owner opens in the app to check it. Same
+    doctrine as ``FleetStore.arrayStatus``: one classifier, many surfaces.
+
+    Returns ``None`` when the inverter does not belong to ``tenant``. Otherwise a
+    flat dict; ``state`` is one of ``no_history`` / ``clean`` / ``ongoing`` /
+    ``recovered``, and the cause fields are ``None`` when there is no episode.
+    """
+    detail = build_outage_log(db, tenant, inverter_id, days=days, today=today)
+    if detail is None:
+        return None
+    summary = detail.get("summary") or {}
+    episodes = detail.get("episodes") or []
+    newest = episodes[0] if episodes else None      # episodes are newest-first
+
+    out = {
+        "state": summary.get("state"),
+        "headline": summary.get("headline"),
+        "ongoing": bool(summary.get("ongoing")),
+        "ongoing_since": summary.get("ongoing_since"),
+        "outage_days": summary.get("outage_days"),
+        "episode_count": summary.get("episode_count"),
+        "first_data_on": (detail.get("window") or {}).get("first_data_on"),
+        "peer_count": detail.get("peer_count"),
+        # cause fields — populated only when there IS an episode
+        "cause_kind": None,
+        "cause": None,
+        "started_on": None,
+        "days": None,
+        "last_zero_on": None,
+        "lost_kwh_est": None,
+        # Evidence the caller needs to word things honestly: whether the unit sent
+        # us ANY row during the episode. No rows = "we stopped hearing from it"
+        # (visibility); rows of zero = "it reported producing nothing" (production).
+        # Conflating those two is the exact bug this field exists to prevent.
+        "self_rows_present": None,
+        "peers_producing_days": None,
+        "peers_also_down": None,
+    }
+    if newest is not None:
+        ev = newest.get("evidence") or {}
+        out.update({
+            "cause_kind": newest.get("cause_kind"),
+            "cause": newest.get("cause"),
+            "started_on": newest.get("started_on"),
+            "days": newest.get("days"),
+            "last_zero_on": newest.get("last_zero_on"),
+            "lost_kwh_est": newest.get("lost_kwh_est"),
+            "self_rows_present": ev.get("self_rows_present"),
+            "peers_producing_days": ev.get("peers_producing_days"),
+            "peers_also_down": ev.get("peers_also_down"),
+        })
+    return out
+
+
 def _describe_episode(db, tenant, iv, array_name, run: list[date],
                       self_rows: dict, peer_rows: dict, peers: list,
                       peer_np: dict, window_end: date) -> dict:
