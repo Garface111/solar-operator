@@ -1422,10 +1422,18 @@ def _subject(tenant, tree: dict) -> str:
     # "yesterday") — the exact day is in the body and may be stale.
     attention = len(_all_flagged(_vendor_columns(tree)))
     fleet = _fleet_name(tenant)
+    # A blind spot belongs in the subject too. The owner decides whether to open
+    # the email from this line alone; "all systems healthy" over a feed we cannot
+    # see is exactly the reassurance that cost us Paul's trust.
+    blind = len(_connection_items(tree))
+    if attention == 0 and blind:
+        return (f"⚠️ {fleet}: "
+                f"{'1 feed' if blind == 1 else f'{blind} feeds'} we can’t see")
     if attention == 0:
         return f"☀️ {fleet}: all systems healthy"
     noun = "inverter needs" if attention == 1 else "inverters need"
-    return f"⚠️ {fleet}: {attention} {noun} attention"
+    tail = f" · {blind} we can’t see" if blind else ""
+    return f"⚠️ {fleet}: {attention} {noun} attention{tail}"
 
 
 def send_digest_for_tenant(db, tenant: Tenant) -> bool:
