@@ -277,8 +277,8 @@ def test_admin_vault_stats_requires_header(monkeypatch):
     admin_vault._check("test-admin-key-xyz", None)  # ok
 
 
-def test_prune_harvest_runs_keeps_recent(Session, monkeypatch):
-    """Old harvest_run rows are hard-deleted; recent ones stay. Floor is 7 days."""
+def test_prune_harvest_runs_tiered(Session, monkeypatch):
+    """Warm-OK prunes earlier than failures/fresh logins."""
     from datetime import timedelta
     from api import vault_retention
     from api.models import HarvestRun
@@ -286,25 +286,111 @@ def test_prune_harvest_runs_keeps_recent(Session, monkeypatch):
     monkeypatch.setattr(vault_retention, "SessionLocal", Session)
     with Session() as db:
         _tenant(db)
+        # warm OK 20d ago → should die (warm window 14d)
         db.add(HarvestRun(
             tenant_id="ten_a", provider="gmp", username_lc="u",
-            status="ok", started_at=now() - timedelta(days=3),
+            status="ok", logged_in_fresh=False,
+            started_at=now() - timedelta(days=20),
         ))
+        # fresh login 20d ago → keep (long window 45d)
         db.add(HarvestRun(
             tenant_id="ten_a", provider="gmp", username_lc="u",
-            status="ok", started_at=now() - timedelta(days=60),
+            status="ok", logged_in_fresh=True,
+            started_at=now() - timedelta(days=20),
+        ))
+        # login_failed 20d ago → keep
+        db.add(HarvestRun(
+            tenant_id="ten_a", provider="gmp", username_lc="u",
+            status="login_failed", logged_in_fresh=True,
+            started_at=now() - timedelta(days=20),
+        ))
+        # anything 60d → die
+        db.add(HarvestRun(
+            tenant_id="ten_a", provider="gmp", username_lc="u",
+            status="login_failed", logged_in_fresh=True,
+            started_at=now() - timedelta(days=60),
         ))
         db.commit()
 
-    # keep_days=1 floors to 7 → 3-day-old survives, 60-day-old dies
-    out = vault_retention.prune_harvest_runs(keep_days=1)
+    out = vault_retention.prune_harvest_runs(keep_days=45, warm_ok_days=14)
     assert out["ok"] is True
-    assert out["keep_days"] == 7
-    assert out["deleted"] == 1
+    assert out["deleted_warm_ok"] == 1
+    assert out["deleted_long"] == 1
     with Session() as db:
         left = db.execute(select(HarvestRun)).scalars().all()
-        assert len(left) == 1
-        assert (now() - left[0].started_at).days < 10
+        assert len(left) == 2
+        statuses = {(r.status, bool(r.logged_in_fresh)) for r in left}
+        assert ("ok", True) in statuses
+        assert ("login_failed", True) in statuses
+
+
+def test_safe_harvest_detail_strips_playwright():
+    from api.ea_ops_tools import _safe_harvest_detail
+    raw = "TimeoutError: waiting for selector\nCall log:\n  - waiting for .foo\n<html>secret acct</html>"
+    out = _safe_harvest_detail(raw, limit=200)
+    assert out is not None
+    assert "Call log" not in out
+    assert "<html" not in out
+    assert "secret acct" not in out
+
+
+def test_delete_account_requires_password_when_set(Session, monkeypatch):
+    """Passworded accounts need re-auth to wipe the vault."""
+    from api import account as acct
+    from api.models import PortalCredential
+    from fastapi import HTTPException
+
+    os.environ[crypto.ENV_KEY] = KEY
+    crypto._cache.clear()
+    monkeypatch.setattr(acct, "SessionLocal", Session)
+    monkeypatch.setattr(acct, "require_not_demo", lambda t: None)
+    monkeypatch.delenv("STRIPE_SECRET_KEY", raising=False)
+    monkeypatch.setattr(acct, "send_internal_alert", lambda *a, **k: None)
+
+    with Session() as db:
+        t = _tenant(db, email="del@x.com")
+        t.password_hash = acct._hash_password("correct-horse")
+        db.add(PortalCredential(
+            tenant_id=t.id, provider="gmp", username="u", username_lc="u",
+            secret_enc="portal-pw", cloud_capture_enabled=True,
+        ))
+        db.commit()
+
+    class T:
+        id = "ten_a"
+    monkeypatch.setattr(acct, "tenant_from_session", lambda a: T())
+    monkeypatch.setattr(acct.ratelimit, "enforce", lambda *a, **k: None)
+
+    # Missing password
+    with pytest.raises(HTTPException) as ei:
+        acct.delete_account(
+            acct.DeleteAccountIn(confirm="DELETE"),
+            request=MagicMock(),
+            authorization="Bearer x",
+        )
+    assert ei.value.status_code == 401
+
+    # Wrong password
+    with pytest.raises(HTTPException) as ei2:
+        acct.delete_account(
+            acct.DeleteAccountIn(confirm="DELETE", password="wrong"),
+            request=MagicMock(),
+            authorization="Bearer x",
+        )
+    assert ei2.value.status_code == 401
+
+    # Correct password → vault wiped
+    out = acct.delete_account(
+        acct.DeleteAccountIn(confirm="DELETE", password="correct-horse"),
+        request=MagicMock(),
+        authorization="Bearer x",
+    )
+    assert out["ok"] is True
+    with Session() as db:
+        left = db.execute(select(PortalCredential)).scalars().all()
+        assert left == []
+        tenant = db.get(Tenant, "ten_a")
+        assert tenant.active is False
 
 
 def test_sentry_scrubs_contexts():

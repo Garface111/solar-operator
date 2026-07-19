@@ -133,10 +133,18 @@ def init_sentry() -> bool:
         import sentry_sdk
         from sentry_sdk.integrations.fastapi import FastApiIntegration
         from sentry_sdk.integrations.starlette import StarletteIntegration
+        from sentry_sdk.integrations.logging import LoggingIntegration
     except Exception:
         log.warning("SENTRY_DSN set but sentry_sdk import failed — error monitoring OFF")
         return False
     try:
+        # Replace the default LoggingIntegration (INFO+ → breadcrumbs) so
+        # token-bearing log lines never become Sentry breadcrumbs. Errors still
+        # go through our exception handlers + before_send scrub.
+        logging_integration = LoggingIntegration(
+            level=None,          # never capture log records as breadcrumbs
+            event_level=None,    # never promote logs to events
+        )
         sentry_sdk.init(
             dsn=dsn,
             environment=os.getenv("SENTRY_ENVIRONMENT", "production"),
@@ -148,7 +156,11 @@ def init_sentry() -> bool:
             # can embed password= in repr even when request PII is off.
             include_local_variables=False,
             before_send=_before_send,
-            integrations=[StarletteIntegration(), FastApiIntegration()],
+            integrations=[
+                logging_integration,
+                StarletteIntegration(),
+                FastApiIntegration(),
+            ],
         )
         _ENABLED = True
         log.info("Sentry initialized (env=%s)", os.getenv("SENTRY_ENVIRONMENT", "production"))

@@ -323,8 +323,13 @@ class ConfirmEmailChange(BaseModel):
 
 
 class DeleteAccountIn(BaseModel):
-    """GDPR-style account deletion. confirm must equal DELETE (case-sensitive)."""
+    """GDPR-style account deletion. confirm must equal DELETE (case-sensitive).
+
+    If the account has a password set, ``password`` is required (re-auth) so a
+    stolen long-lived session token alone cannot wipe the vault.
+    """
     confirm: str
+    password: str | None = None
     # Optional free-text reason (ops only; never required)
     reason: str | None = None
 
@@ -1495,6 +1500,7 @@ def delete_account(
     """Hard-delete Cloud Capture vault + sensitive sessions and deactivate account.
 
     Irreversible for vault secrets. Requires confirm == 'DELETE'.
+    Password re-auth required when the account has a password set.
     """
     t = tenant_from_session(authorization)
     require_not_demo(t)
@@ -1514,6 +1520,17 @@ def delete_account(
         if not tenant:
             raise HTTPException(404, "Account not found")
 
+        # Re-auth: stolen session alone must not wipe the vault.
+        pw_hash = getattr(tenant, "password_hash", None)
+        if pw_hash:
+            if not (body.password or "").strip():
+                raise HTTPException(
+                    401,
+                    "Re-enter your password to delete this account",
+                )
+            if not _verify_password(body.password, pw_hash):
+                raise HTTPException(401, "Password incorrect")
+
         from .vault_lifecycle import purge_tenant_sensitive_data
         purge = purge_tenant_sensitive_data(
             db, tenant.id, reason=body.reason or "customer_account_delete",
@@ -1521,7 +1538,7 @@ def delete_account(
 
         # Cancel Stripe subscription if present (best-effort; never blocks wipe).
         sub_id = tenant.stripe_subscription_id
-        if sub_id and STRIPE_SECRET_KEY:
+        if sub_id and os.getenv("STRIPE_SECRET_KEY"):
             try:
                 stripe.Subscription.cancel(sub_id)
             except Exception:

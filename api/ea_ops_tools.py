@@ -153,14 +153,57 @@ def fleet_financial_health(db, tenant: Tenant, *, args: dict | None = None) -> d
 
 # ── capture_health_detail ────────────────────────────────────────────────────
 
+def _safe_harvest_detail(detail: str | None, *, limit: int = 160) -> str | None:
+    """Strip Playwright/HTML/selector dumps before anything reaches an external LLM."""
+    if not detail:
+        return None
+    msg = str(detail)
+    for marker in ("Call log:", "<html", "<!DOCTYPE", "Locator.", "waiting for", "\n  - "):
+        idx = msg.find(marker)
+        if idx > 0:
+            msg = msg[:idx]
+    msg = " ".join(msg.split())
+    if len(msg) > limit:
+        msg = msg[:limit] + "…"
+    return msg or None
+
+
 def capture_health_detail(db, tenant: Tenant, *, args: dict | None = None) -> dict:
-    """Per-vendor capture status: last success, last error, why stale."""
+    """Per-vendor capture status: last success, last error, why stale.
+
+    Never materializes portal passwords — web runs with SO_VAULT_DECRYPT=0.
+    """
     args = args or {}
     provider_filter = (args.get("provider") or args.get("vendor") or "").strip().lower() or None
+    from sqlalchemy.orm import load_only
 
+    # Scheduling/meta columns only — EncryptedVault* decrypts on full-entity fetch.
     creds = list(db.execute(
-        select(PortalCredential).where(PortalCredential.tenant_id == tenant.id)
+        select(PortalCredential)
+        .where(PortalCredential.tenant_id == tenant.id)
+        .options(load_only(
+            PortalCredential.id,
+            PortalCredential.tenant_id,
+            PortalCredential.provider,
+            PortalCredential.username,
+            PortalCredential.username_lc,
+            PortalCredential.cloud_capture_enabled,
+            PortalCredential.last_harvest_at,
+            PortalCredential.last_harvest_ok,
+            PortalCredential.harvest_fails,
+        ))
     ).scalars().all())
+    # has_secret without decrypt
+    secret_flags: dict[int, bool] = {}
+    if creds:
+        from sqlalchemy import bindparam, text as sa_text
+        ids = [c.id for c in creds]
+        stmt = sa_text(
+            "SELECT id, (secret_enc IS NOT NULL) FROM portal_credential WHERE id IN :ids"
+        ).bindparams(bindparam("ids", expanding=True))
+        for rid, has in db.execute(stmt, {"ids": ids}).fetchall():
+            secret_flags[int(rid)] = bool(has)
+
     statuses = list(db.execute(
         select(PortalLoginStatus).where(PortalLoginStatus.tenant_id == tenant.id)
     ).scalars().all())
@@ -176,6 +219,7 @@ def capture_health_detail(db, tenant: Tenant, *, args: dict | None = None) -> di
             continue
         uname_lc = (c.username_lc or c.username or "").lower()
         st = status_by_key.get((prov, uname_lc))
+        has_secret = secret_flags.get(c.id, False)
 
         # Latest harvest runs
         runs = list(db.execute(
@@ -208,13 +252,17 @@ def capture_health_detail(db, tenant: Tenant, *, args: dict | None = None) -> di
         run_status = (last_run.status if last_run else None) or (
             "ok" if c.last_harvest_ok else ("failed" if c.last_harvest_ok is False else "unknown")
         )
+        safe_detail = _safe_harvest_detail(
+            (last_run.detail if last_run else None) or (last_fail.detail if last_fail else None),
+            limit=200,
+        )
         why = _explain_capture_failure(
             run_status=run_status,
-            detail=(last_run.detail if last_run else None) or (last_fail.detail if last_fail else None),
+            detail=safe_detail,
             harvest_fails=c.harvest_fails or 0,
             paused=bool(st.paused) if st else False,
             enabled=bool(c.cloud_capture_enabled),
-            has_secret=bool(c.secret_enc),
+            has_secret=has_secret,
             age_h=age_h,
             device_mode=(getattr(tenant, "capture_mode", None) or "").lower() == "device",
         )
@@ -223,7 +271,7 @@ def capture_health_detail(db, tenant: Tenant, *, args: dict | None = None) -> di
             "provider": c.provider,
             "username": c.username,
             "cloud_enabled": bool(c.cloud_capture_enabled),
-            "has_password_stored": bool(c.secret_enc),
+            "has_password_stored": has_secret,
             "last_harvest_at": _iso(c.last_harvest_at),
             "last_harvest_ok": c.last_harvest_ok,
             "harvest_fails": c.harvest_fails or 0,
@@ -239,21 +287,21 @@ def capture_health_detail(db, tenant: Tenant, *, args: dict | None = None) -> di
                 "status": last_run.status if last_run else None,
                 "started_at": _iso(last_run.started_at) if last_run else None,
                 "ended_at": _iso(last_run.ended_at) if last_run else None,
-                "detail": (last_run.detail or "")[:400] if last_run else None,
+                "detail": _safe_harvest_detail(last_run.detail if last_run else None, limit=200),
                 "logged_in_fresh": last_run.logged_in_fresh if last_run else None,
                 "rows_written": last_run.rows_written if last_run else None,
             } if last_run else None,
             "last_error": {
                 "status": last_fail.status if last_fail else None,
                 "at": _iso(last_fail.started_at) if last_fail else None,
-                "detail": (last_fail.detail or "")[:400] if last_fail else None,
+                "detail": _safe_harvest_detail(last_fail.detail if last_fail else None, limit=200),
             } if last_fail else None,
             "diagnosis": why,
             "recent_runs": [
                 {
                     "status": r.status,
                     "at": _iso(r.started_at),
-                    "detail": (r.detail or "")[:160],
+                    "detail": _safe_harvest_detail(r.detail, limit=120),
                     "rows": r.rows_written,
                 }
                 for r in runs
@@ -346,7 +394,8 @@ def _explain_capture_failure(
         "severity": severity,
         "summary": "; ".join(reasons),
         "raw_status": st,
-        "raw_detail": (detail or "")[:300] if detail else None,
+        # Already sanitized by callers; hard-cap + re-scrub for defense in depth.
+        "raw_detail": _safe_harvest_detail(detail, limit=200),
     }
 
 
