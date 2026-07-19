@@ -34,10 +34,14 @@ Two halves:
      while SOME browser is open). Runs for every ACTIVE, non-demo tenant, one
      universal fast bar (ALERT_AFTER_MINUTES). Alerts Ford ONCE per incident,
      clears on recovery, can re-fire later.
+
+DISABLED BY FORD 2026-07-19 — both halves are gated off by default; see
+VIP_WATCH_ENABLED below.
 """
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timedelta
 
 from sqlalchemy import select
@@ -50,6 +54,20 @@ log = logging.getLogger("vip_watch")
 VIP_STALE_MINUTES = 15
 # Alert-Ford bar. ONE tier, universal -- no "protect the inbox" throttle.
 ALERT_AFTER_MINUTES = 90
+
+
+# Ford, 2026-07-19: "please disable the vip watch system." OFF by default — this
+# gates BOTH halves (the silent per-heartbeat self-heal nudge AND the alert
+# sweep), so the whole system is inert unless explicitly switched back on.
+#
+# NOTE this is a deliberate, Ford-directed shutdown, NOT the self-sabotage the
+# module docstring above argues against: that rule is about agents quietly
+# disarming their own reliability to "protect the inbox". Re-enable with
+# VIP_WATCH_ENABLED=1 (no code change needed).
+def vip_watch_enabled() -> bool:
+    return (os.getenv("VIP_WATCH_ENABLED", "0") or "0").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
 _EXT_VENDORS = ("fronius", "sma", "chint")
 
 
@@ -59,7 +77,12 @@ def vip_stale_vendors(db, tenant_id: str, *, now_: datetime | None = None) -> se
     read-only, called for every tenant on every heartbeat. Merge the result
     into a capture-debt "drain" list so the next heartbeat (within ~60s, if a
     browser is open) nudges a recapture — far faster than the normal
-    day-granularity bar."""
+    day-granularity bar.
+
+    Returns an empty set while the system is disabled (VIP_WATCH_ENABLED)."""
+    if not vip_watch_enabled():
+        return set()
+
     from .inverter_fleet import _daylight_for
     from .models import Array, Inverter
 
@@ -104,7 +127,14 @@ def vip_watch_sweep(dry_run: bool = False) -> dict:
     bar for everyone, no tiers. Alerts Ford ONCE per incident (InverterAlertState
     dedup, namespaced 'vip_stale:' — this table is SHARED across alert jobs,
     never touch a key outside your own namespace); the incident clears itself,
-    and can re-fire later, once the array reports fresh again."""
+    and can re-fire later, once the array reports fresh again.
+
+    No-ops while the system is disabled (VIP_WATCH_ENABLED)."""
+    if not vip_watch_enabled():
+        log.info("vip_watch_sweep: disabled (VIP_WATCH_ENABLED off) — skipping")
+        return {"alerted": [], "recovered_cleared": 0, "skipped_dedup": 0,
+                "dry_run": dry_run, "disabled": True}
+
     from .db import SessionLocal
     from .inverter_fleet import _daylight_for
     from .models import Array, Inverter, InverterAlertState, Tenant

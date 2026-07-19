@@ -13,15 +13,38 @@ bar -- no tenant gets a slower/quieter tier; (3) is_demo=True tenants are
 excluded entirely (the real fix for the inbox-noise problem, per the
 fronius-real-stale-census finding that most "stale" tenants were Ford's own
 scratch/test signups, not real customers).
+
+NOTE (2026-07-19): Ford disabled the whole system — VIP_WATCH_ENABLED now
+defaults OFF, so BOTH halves are inert in production. The behaviour tests below
+switch it ON explicitly (they pin the mechanism, which is unchanged and must
+still work whenever it's turned back on); test_disabled_by_default pins the new
+default itself.
 """
 from __future__ import annotations
 
 import secrets
 from datetime import datetime, timedelta
 
+import pytest
+
 from api.db import SessionLocal
 from api.models import Array, Inverter, InverterAlertState, Tenant
 from api.vip_watch import ALERT_AFTER_MINUTES, VIP_STALE_MINUTES, vip_stale_vendors, vip_watch_sweep
+
+
+@pytest.fixture(autouse=True)
+def _enable_vip_watch(monkeypatch):
+    """Every behaviour test below exercises the mechanism, so turn it on."""
+    monkeypatch.setenv("VIP_WATCH_ENABLED", "1")
+
+
+def test_disabled_by_default(monkeypatch):
+    """Ford, 2026-07-19: "please disable the vip watch system." With the env
+    unset BOTH halves must be inert — no alert emails, no heartbeat nudges."""
+    monkeypatch.delenv("VIP_WATCH_ENABLED", raising=False)
+    assert vip_watch_sweep(dry_run=True).get("disabled") is True
+    # returns empty WITHOUT touching the db (passing None proves the early exit)
+    assert vip_stale_vendors(None, "ten_whatever") == set()
 
 
 def _mk_tenant(*, is_demo: bool = False) -> str:
