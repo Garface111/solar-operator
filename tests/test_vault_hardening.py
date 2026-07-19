@@ -227,3 +227,26 @@ def test_sovereign_ops_defaults_fail_closed(monkeypatch):
     assert ops.ops_enabled() is False
     assert ops.credentials_unlocked() is False
     assert ops.portal_signoff_enabled() is False
+
+
+def test_decrypt_audit_includes_context(caplog):
+    """Vault decrypt logs role + tenant/provider context, never the secret."""
+    import logging
+    from api import crypto
+
+    os.environ[crypto.ENV_KEY] = KEY
+    os.environ["SO_VAULT_DECRYPT"] = "1"
+    os.environ["PROCESS_ROLE"] = "cloud-capture-harvester"
+    crypto._cache.clear()
+
+    ct = crypto.encrypt_str("hunter2-not-in-log")
+    crypto.set_decrypt_audit_context(tenant_id="ten_x", provider="gmp", job_id="harvest")
+    with caplog.at_level(logging.INFO, logger="solar.crypto"):
+        plain = crypto.decrypt_vault_str(ct)
+    crypto.clear_decrypt_audit_context()
+    assert plain == "hunter2-not-in-log"
+    joined = " ".join(r.message for r in caplog.records)
+    assert "kind=vault" in joined
+    assert "tenant_id=ten_x" in joined
+    assert "provider=gmp" in joined
+    assert "hunter2" not in joined

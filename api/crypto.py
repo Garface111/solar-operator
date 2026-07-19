@@ -41,6 +41,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
+import time
+from contextvars import ContextVar
 from typing import Any, Optional
 
 from cryptography.fernet import Fernet, MultiFernet
@@ -48,6 +51,61 @@ from sqlalchemy import Text
 from sqlalchemy.types import TypeDecorator
 
 log = logging.getLogger("solar.crypto")
+
+# Optional audit context set by callers (harvester load_creds, etc.). Never secrets.
+_audit_ctx: ContextVar[dict[str, str]] = ContextVar("crypto_audit_ctx", default={})
+
+# Rolling decrypt volume (process-local) for anomaly detection.
+_vol_lock = threading.Lock()
+_vol_window_start = 0.0
+_vol_count = 0
+_VOL_WINDOW_S = 60.0
+_VOL_WARN_THRESHOLD = int(os.environ.get("CRYPTO_DECRYPT_WARN_PER_MIN") or "120")
+
+
+def set_decrypt_audit_context(**kwargs: str) -> None:
+    """Attach non-secret metadata (tenant_id, provider, job_id) to decrypt logs."""
+    cur = dict(_audit_ctx.get() or {})
+    for k, v in kwargs.items():
+        if v is None:
+            continue
+        cur[str(k)] = str(v)[:80]
+    _audit_ctx.set(cur)
+
+
+def clear_decrypt_audit_context() -> None:
+    _audit_ctx.set({})
+
+
+def _note_decrypt(kind: str) -> None:
+    """Log a decrypt event (no secret) + warn on volume spikes."""
+    global _vol_window_start, _vol_count
+    role = (os.environ.get("PROCESS_ROLE") or "unknown")[:40]
+    ctx = _audit_ctx.get() or {}
+    parts = [f"crypto_decrypt kind={kind}", f"role={role}", "envelope=SOENC1"]
+    for k in ("tenant_id", "provider", "job_id", "username_lc"):
+        if ctx.get(k):
+            parts.append(f"{k}={ctx[k]}")
+    try:
+        log.info(" ".join(parts))
+    except Exception:
+        pass
+    now = time.monotonic()
+    with _vol_lock:
+        if _vol_window_start <= 0 or now - _vol_window_start >= _VOL_WINDOW_S:
+            _vol_window_start = now
+            _vol_count = 0
+        _vol_count += 1
+        count = _vol_count
+    if count == _VOL_WARN_THRESHOLD or (count > _VOL_WARN_THRESHOLD and count % 50 == 0):
+        try:
+            log.warning(
+                "crypto_decrypt_volume_anomaly kind=%s role=%s count_in_window=%s "
+                "window_s=%s threshold=%s",
+                kind, role, count, int(_VOL_WINDOW_S), _VOL_WARN_THRESHOLD,
+            )
+        except Exception:
+            pass
 
 ENV_KEY = "SO_CONFIG_KEY"
 
@@ -158,11 +216,7 @@ def decrypt_str(value: str) -> str:
             f"(scripts/encrypt_vendor_credentials.py --decrypt) before removing it."
         )
     plain = f.decrypt(value[len(_PREFIX):].encode("ascii")).decode("utf-8")
-    # Detective control: volume + context without the secret itself.
-    try:
-        log.info("crypto_decrypt kind=shared envelope=SOENC1")
-    except Exception:
-        pass
+    _note_decrypt("shared")
     return plain
 
 
@@ -175,11 +229,15 @@ def decrypt_vault_str(value: str) -> str:
             "Vault decrypt is disabled in this process (SO_VAULT_DECRYPT=0). "
             "Only the harvester role may unwrap portal passwords."
         )
-    plain = decrypt_str(value)
-    try:
-        log.info("crypto_decrypt kind=vault envelope=SOENC1")
-    except Exception:
-        pass
+    # Decrypt directly (do not call decrypt_str — that would double-log as "shared").
+    f = _fernet()
+    if f is None:
+        raise RuntimeError(
+            f"Found encrypted vault secrets but {ENV_KEY} is not set. "
+            f"Restore the key before harvesting."
+        )
+    plain = f.decrypt(value[len(_PREFIX):].encode("ascii")).decode("utf-8")
+    _note_decrypt("vault")
     return plain
 
 

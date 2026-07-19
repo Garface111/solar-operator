@@ -48,13 +48,32 @@ def load_creds(cred: PortalCredential) -> Creds | None:
     missing."""
     if not cred.secret_enc:
         return None
+    # Tag decrypt audit logs with tenant/provider (never the password).
+    try:
+        from ..crypto import set_decrypt_audit_context, clear_decrypt_audit_context
+        set_decrypt_audit_context(
+            tenant_id=str(cred.tenant_id or ""),
+            provider=str(cred.provider or ""),
+            username_lc=str(getattr(cred, "username_lc", "") or ""),
+        )
+    except Exception:
+        pass
+    try:
+        password = cred.secret_enc  # column decrypts here (vault audit fires)
+        session_state = cred.session_state_enc
+    finally:
+        try:
+            from ..crypto import clear_decrypt_audit_context
+            clear_decrypt_audit_context()
+        except Exception:
+            pass
     return Creds(
         tenant_id=cred.tenant_id,
         provider=cred.provider,
         username=cred.username,
-        password=cred.secret_enc,          # already decrypted by the column type
+        password=password,
         login_host=cred.login_host,
-        session_state=cred.session_state_enc,
+        session_state=session_state,
     )
 
 

@@ -93,17 +93,38 @@ class BrowserFarm:
     @staticmethod
     def _load(tenant_id: str, provider: str, username_lc: str):
         """Read the credential + decrypt into an in-memory Creds. Short session."""
-        with SessionLocal() as db:
-            cred = db.execute(
-                select(PortalCredential).where(
-                    PortalCredential.tenant_id == tenant_id,
-                    PortalCredential.provider == provider,
-                    PortalCredential.username_lc == username_lc,
-                )
-            ).scalar_one_or_none()
-            if cred is None:
-                return None
-            return credentials.load_creds(cred)
+        # Tag decrypt audit BEFORE the ORM fetch — EncryptedVault* decrypts at
+        # process_result_value (row materialization), not at attribute access.
+        try:
+            from ..crypto import set_decrypt_audit_context, clear_decrypt_audit_context
+            set_decrypt_audit_context(
+                tenant_id=str(tenant_id or ""),
+                provider=str(provider or ""),
+                username_lc=str(username_lc or ""),
+                job_id="harvest",
+            )
+        except Exception:
+            clear = None
+        else:
+            clear = clear_decrypt_audit_context
+        try:
+            with SessionLocal() as db:
+                cred = db.execute(
+                    select(PortalCredential).where(
+                        PortalCredential.tenant_id == tenant_id,
+                        PortalCredential.provider == provider,
+                        PortalCredential.username_lc == username_lc,
+                    )
+                ).scalar_one_or_none()
+                if cred is None:
+                    return None
+                return credentials.load_creds(cred)
+        finally:
+            if clear:
+                try:
+                    clear()
+                except Exception:
+                    pass
 
     @staticmethod
     def _persist(tenant_id, provider, username_lc, *, storage_state, ok, status,
