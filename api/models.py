@@ -695,6 +695,16 @@ class Array(Base):
     # implicit NEPOOL-GIS registry that solar has always used.
     cert_registry: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
+    # REC Desk (Marketplace) — who holds the renewable attributes for this array.
+    # unknown | owner_retained | assigned_to_utility | counterparty | split
+    # Default unknown: we never assume the owner can sell RECs (many NM/SMART/REG
+    # programs assign attributes to the utility in exchange for a rate adjustor).
+    rec_ownership: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, default="unknown", server_default="unknown")
+    rec_ownership_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Independent Verifier / REC agent who files generation into the registry.
+    rec_verifier_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
     tenant: Mapped[Tenant] = relationship(back_populates="arrays")
     client: Mapped["Client | None"] = relationship(back_populates="arrays")
     accounts: Mapped[list["UtilityAccount"]] = relationship(back_populates="array")
@@ -2229,4 +2239,108 @@ class AgentDocument(Base):
 
     __table_args__ = (
         Index("ix_agent_documents_tenant_created", "tenant_id", "created_at"),
+    )
+
+
+class ExchangeDemand(Base):
+    """Offtaker Exchange — a DEMAND lead (v0 concierge). Someone who wants bill
+    credits in a utility territory: an operator adding a caller to their waitlist,
+    or (v1) a public intake signup. v0 STORES the lead only — it never sends
+    anything and never touches money. Ford brokers matches by hand from the
+    admin board; the sealed-bid matcher + ExchangeListing/ExchangeMatch machinery
+    come in v1 (see the plan §5). New tables auto-create via
+    Base.metadata.create_all — no migrate.py change needed.
+
+    tenant_id is the OPERATOR who captured the lead (operator_waitlist); NULL for
+    an unattributed public/marketing signup. No cross-tenant field ever crosses a
+    boundary — the admin board reads leads server-side only, never through a
+    tenant-scoped API.
+    """
+    __tablename__ = "exchange_demand"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # The operator who captured the lead (waitlist). NULL for public/marketing.
+    tenant_id: Mapped[str | None] = mapped_column(
+        String(32), ForeignKey("tenants.id"), nullable=True, index=True)
+    contact_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    contact_email: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    contact_phone: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # The utility territory the demand is in (gmp | vec | …) — the hard match key.
+    utility: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # Rough size band the caller wants (free text in v0: e.g. "~2,000 kWh/mo").
+    desired_band: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    # Their rough current monthly bill, if they gave one (helps size the match).
+    monthly_bill_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # operator_waitlist | public_intake | marketing
+    source: Mapped[str] = mapped_column(
+        String(32), default="operator_waitlist",
+        server_default="operator_waitlist", nullable=False)
+    # new | suggested | drafted | utility_pending | live | dead | qualified | matched
+    status: Mapped[str] = mapped_column(
+        String(24), default="new", server_default="new", nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Suggested host array from match suggestions (operator may override on draft).
+    suggested_array_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("arrays.id"), nullable=True, index=True)
+    # When "Draft offtaker" succeeds, the BillingReportSubscription.id created.
+    linked_subscription_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("billing_report_subscriptions.id"), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+
+    __table_args__ = (
+        Index("ix_exchange_demand_tenant_created", "tenant_id", "created_at"),
+    )
+
+
+class ProspectusShare(Base):
+    """A revocable, tokenized public share link for a persisted Array Prospectus
+    (an AgentDocument with doc_type='prospectus').
+
+    v0 "data room" sharing — the honest, Ford-gated way an owner hands a lender or
+    a prospective buyer a verified per-array package:
+
+      • DEFAULTS TO UNPUBLISHED (`published=False`). Minting a link NEVER exposes
+        anything until the owner deliberately turns it on. The FIRST external
+        share is a deliberate act — the public route 404s on an unpublished token.
+      • Offtaker PII (customer names / emails) is REDACTED BY DEFAULT
+        (`redact_offtaker_pii=True`); the owner opts in to reveal it.
+      • REVOCABLE — a revoked (`revoked_at`) or unpublished token 404s.
+      • `view_count` / `last_viewed_at` give the owner "your lender opened it
+        3 times, last Tuesday" feedback.
+
+    The prospectus is captured, timestamped and RE-DERIVABLE — NOT immutable and
+    NOT an appraisal. `content_sha256` makes the ARTIFACT tamper-evident (the same
+    underlying data reproduces the same hash), nothing more. No money, no fees, no
+    brokerage — this is a document surface only.
+    """
+    __tablename__ = "prospectus_shares"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    array_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("arrays.id"), nullable=True, index=True)
+    agent_document_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("agent_documents.id"), index=True
+    )
+    # Unguessable public token (secrets.token_urlsafe). The only credential the
+    # public route accepts; never leaks the tenant id.
+    token: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    # The content hash of the artifact this token points at (stamped at mint time,
+    # from the AgentDocument's stored canonical JSON) so a viewer can verify the
+    # bytes match what the owner shared.
+    content_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # OFF until the owner deliberately publishes — see the class docstring.
+    published: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False
+    )
+    redact_offtaker_pii: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="true", nullable=False
+    )
+    view_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    last_viewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+    __table_args__ = (
+        Index("ix_prospectus_shares_tenant", "tenant_id", "array_id"),
     )

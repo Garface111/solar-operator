@@ -5601,3 +5601,283 @@ def list_offtaker_payments(
             "created_at": r.created_at.isoformat() if r.created_at else None,
         } for r in rows]
     return {"ok": True, "payments": items, "count": len(items)}
+
+
+# ─── Offtaker Exchange — vacancy + demand + suggestions + draft offtaker ─────
+# Instrumentation + paper/workflow. NO money code. Host always confirms.
+
+@router.get("/vacancy")
+def offtaker_vacancy(authorization: str | None = Header(default=None)):
+    """This tenant's arrays with their computed UNALLOCATED-excess vacancy
+    (bill-side primary, registry-side secondary, honest confidence tier) + a FIFO
+    expiry read. Tenant-scoped: an operator sees only their OWN arrays' vacancy —
+    no cross-tenant data crosses this boundary in v0."""
+    t = tenant_from_session(authorization)
+    from ..market_vacancy import tenant_vacancy
+    with SessionLocal() as db:
+        return tenant_vacancy(db, t.id)
+
+
+class _DemandBody(BaseModel):
+    contact_name: Optional[str] = None
+    contact_email: Optional[str] = None
+    contact_phone: Optional[str] = None
+    utility: Optional[str] = None
+    desired_band: Optional[str] = None
+    monthly_bill_usd: Optional[float] = None
+    notes: Optional[str] = None
+    suggested_array_id: Optional[int] = None
+
+
+@router.post("/exchange/demand")
+def add_exchange_demand(body: _DemandBody,
+                        authorization: str | None = Header(default=None)):
+    """Add a demand lead to the operator's waitlist (someone who wants credits in
+    a utility territory). STORES the lead — does NOT send anything and does NOT
+    take money. Matches are suggested; host confirms."""
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    from ..models import ExchangeDemand
+    name = (body.contact_name or "").strip()
+    email = (body.contact_email or "").strip()
+    if not name and not email:
+        raise HTTPException(422, "Add at least a name or an email for the lead.")
+    with SessionLocal() as db:
+        row = ExchangeDemand(
+            tenant_id=t.id,
+            contact_name=name or None,
+            contact_email=email or None,
+            contact_phone=(body.contact_phone or "").strip() or None,
+            utility=((body.utility or "").strip().lower() or None),
+            desired_band=(body.desired_band or "").strip() or None,
+            monthly_bill_usd=body.monthly_bill_usd,
+            notes=(body.notes or "").strip() or None,
+            suggested_array_id=body.suggested_array_id,
+            source="operator_waitlist",
+            status="new",
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        from ..exchange_match import lead_dict
+        return {"ok": True, "id": row.id, "lead": lead_dict(row)}
+
+
+@router.get("/exchange/demand")
+def list_exchange_demand(authorization: str | None = Header(default=None)):
+    """This operator's own waitlist leads (tenant-scoped, newest first)."""
+    t = tenant_from_session(authorization)
+    from ..models import ExchangeDemand
+    from ..exchange_match import lead_dict
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(ExchangeDemand).where(ExchangeDemand.tenant_id == t.id)
+            .order_by(ExchangeDemand.id.desc()).limit(200)
+        ).scalars().all()
+        items = [lead_dict(r) for r in rows]
+    return {"ok": True, "leads": items, "count": len(items)}
+
+
+class _DemandPatch(BaseModel):
+    status: Optional[str] = None
+    notes: Optional[str] = None
+    suggested_array_id: Optional[int] = None
+    contact_name: Optional[str] = None
+    contact_email: Optional[str] = None
+    contact_phone: Optional[str] = None
+    utility: Optional[str] = None
+    desired_band: Optional[str] = None
+    monthly_bill_usd: Optional[float] = None
+
+
+@router.patch("/exchange/demand/{lead_id}")
+def patch_exchange_demand(lead_id: int, body: _DemandPatch,
+                          authorization: str | None = Header(default=None)):
+    """Update waitlist lead status / fields. Status values:
+    new | suggested | drafted | utility_pending | live | dead."""
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    from ..models import ExchangeDemand
+    from ..exchange_match import LEAD_STATUSES, lead_dict
+    with SessionLocal() as db:
+        row = db.get(ExchangeDemand, lead_id)
+        if row is None or row.tenant_id != t.id:
+            raise HTTPException(404, "Lead not found")
+        if body.status is not None:
+            st = body.status.strip().lower()
+            if st not in LEAD_STATUSES:
+                raise HTTPException(422, f"status must be one of {sorted(LEAD_STATUSES)}")
+            row.status = st
+        if body.notes is not None:
+            row.notes = body.notes.strip() or None
+        if body.suggested_array_id is not None:
+            row.suggested_array_id = body.suggested_array_id or None
+        if body.contact_name is not None:
+            row.contact_name = body.contact_name.strip() or None
+        if body.contact_email is not None:
+            row.contact_email = body.contact_email.strip() or None
+        if body.contact_phone is not None:
+            row.contact_phone = body.contact_phone.strip() or None
+        if body.utility is not None:
+            row.utility = body.utility.strip().lower() or None
+        if body.desired_band is not None:
+            row.desired_band = body.desired_band.strip() or None
+        if body.monthly_bill_usd is not None:
+            row.monthly_bill_usd = body.monthly_bill_usd
+        db.commit()
+        db.refresh(row)
+        return {"ok": True, "lead": lead_dict(row)}
+
+
+@router.get("/exchange/suggestions")
+def exchange_suggestions(authorization: str | None = Header(default=None)):
+    """Suggest (waitlist lead × vacant array) pairings inside this tenant only.
+
+    Never auto-enrolls. Operator must click through to draft an offtaker.
+    Demo/synthetic tenants still see their own suggestions; cross-tenant boards
+    remain gated elsewhere."""
+    t = tenant_from_session(authorization)
+    from ..market_vacancy import tenant_vacancy
+    from ..models import ExchangeDemand
+    from ..exchange_match import suggest_pairings
+    with SessionLocal() as db:
+        vac = tenant_vacancy(db, t.id)
+        leads = db.execute(
+            select(ExchangeDemand).where(ExchangeDemand.tenant_id == t.id)
+            .order_by(ExchangeDemand.id.desc()).limit(200)
+        ).scalars().all()
+        pairs = suggest_pairings(vacancies=vac.get("arrays") or [], leads=list(leads))
+    return {
+        "ok": True,
+        "suggestions": pairs,
+        "count": len(pairs),
+        "note": "Suggestions only — host must confirm. AO never assigns credits.",
+    }
+
+
+class _DraftOfftakerBody(BaseModel):
+    array_id: Optional[int] = None
+    allocation_pct: Optional[float] = None
+    utility_account_id: Optional[int] = None
+
+
+@router.post("/exchange/demand/{lead_id}/draft-offtaker")
+async def draft_offtaker_from_lead(
+    lead_id: int,
+    body: _DraftOfftakerBody | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """Turn a waitlist lead into a real offtaker subscription (Invoices pipeline).
+
+    Creates via the same manual-subscription path operators already use. Marks
+    the lead `drafted` and links the subscription id. Does NOT file anything with
+    the utility and does NOT send invoices until the operator uses Invoices.
+    """
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    body = body or _DraftOfftakerBody()
+    from ..models import ExchangeDemand, Array
+    from ..exchange_match import lead_dict, parse_desired_kwh_mo
+    from ..market_vacancy import array_vacancy
+
+    with SessionLocal() as db:
+        lead = db.get(ExchangeDemand, lead_id)
+        if lead is None or lead.tenant_id != t.id:
+            raise HTTPException(404, "Lead not found")
+        if lead.linked_subscription_id:
+            raise HTTPException(
+                409, f"Lead already drafted to subscription {lead.linked_subscription_id}")
+
+        array_id = body.array_id or lead.suggested_array_id
+        if not array_id:
+            raise HTTPException(
+                422, "Pick an array_id (or set suggested_array_id on the lead first).")
+        arr = db.get(Array, array_id)
+        if arr is None or arr.tenant_id != t.id or arr.deleted_at is not None:
+            raise HTTPException(404, f"Array {array_id} not found")
+
+        alloc = body.allocation_pct
+        if alloc is None:
+            # Derive a conservative suggestion from vacancy / desired band.
+            vac = array_vacancy(db, arr) or {}
+            pool = float(vac.get("pool_kwh") or 0)
+            frac = float(vac.get("vacancy_frac") or 0)
+            desired = parse_desired_kwh_mo(lead.desired_band)
+            if desired and pool > 0:
+                alloc = min(0.95, max(0.01, (desired * 12.0) / pool))
+            elif frac > 0:
+                alloc = min(0.5, max(0.05, frac * 0.5))
+            else:
+                alloc = 0.10  # honest default — operator edits in Invoices
+        try:
+            alloc_f = float(alloc)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "allocation_pct must be a number in (0, 1]")
+        if not (0.0 < alloc_f <= 1.0):
+            raise HTTPException(400, "allocation_pct must be a fraction in (0, 1]")
+
+        name = (lead.contact_name or "").strip() or (lead.contact_email or "").strip()
+        if not name:
+            raise HTTPException(422, "Lead needs a name or email before drafting.")
+        email = (lead.contact_email or "").strip() or None
+        # Stash ids before leaving the session (create opens its own).
+        lead_pk = lead.id
+
+    # Reuse the production manual create path (array-first → utility bill bind).
+    result = await _create_manual_subscription(
+        t,
+        customer_name=name,
+        array_id=array_id,
+        utility_account_id=body.utility_account_id,
+        allocation_pct=alloc_f,
+        array_allocations=None,
+        array_share_pct=None,
+        crosscheck_threshold_pct=None,
+        invoice_number_start=None,
+        budget_amount_usd=None,
+        rate_per_kwh=None,
+        discount_pct=None,
+        net_rate_per_kwh=None,
+        cadence="monthly",
+        send_mode="to_me",
+        delivery_mode="approval",
+        client_email=email,
+        cc_emails=None,
+        operator_email=None,
+        formats=None,
+        include_summary=False,
+        annual_trueup=False,
+        enabled=True,
+    )
+    sub = (result or {}).get("subscription") or {}
+    sub_id = sub.get("id")
+    if not sub_id:
+        raise HTTPException(500, "Offtaker create did not return a subscription id")
+
+    from ..models import ExchangeDemand
+    from ..exchange_match import lead_dict
+    with SessionLocal() as db:
+        lead = db.get(ExchangeDemand, lead_pk)
+        if lead is not None:
+            lead.status = "drafted"
+            lead.linked_subscription_id = int(sub_id)
+            lead.suggested_array_id = array_id
+            note_bit = f"Drafted offtaker sub #{sub_id} @ {alloc_f*100:.2f}% on array {array_id}."
+            lead.notes = ((lead.notes + "\n") if lead.notes else "") + note_bit
+            db.commit()
+            db.refresh(lead)
+            lead_out = lead_dict(lead)
+        else:
+            lead_out = None
+
+    return {
+        "ok": True,
+        "subscription": sub,
+        "lead": lead_out,
+        "allocation_pct": alloc_f,
+        "array_id": array_id,
+        "next": {
+            "invoices_hash": "#reports",
+            "hint": "Open Invoices to set the final share, bind the utility bill if needed, and generate the first draft. Submit the utility membership change outside AO.",
+        },
+    }

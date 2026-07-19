@@ -438,6 +438,13 @@ app.include_router(utility_requests_router)
 from .portal_access import router as portal_access_router
 app.include_router(portal_access_router)
 
+# Array Prospectus (Array Secondary Market v0): per-array verified data-room
+# artifact + revocable tokenized public share link. No money, document-only.
+from .prospectus_routes import router as prospectus_router
+app.include_router(prospectus_router)
+from .rec_desk_routes import router as rec_desk_router
+app.include_router(rec_desk_router)
+
 # Cloud Capture: server-side headless-browser harvesting (the opt-in alternative
 # to the browser extension). Collects/toggles/deletes server-side portal
 # credentials + reports harvest status. See api/harvester/ for the engine.
