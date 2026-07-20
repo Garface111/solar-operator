@@ -7,8 +7,13 @@ from __future__ import annotations
 
 import secrets
 
+import pytest
+from sqlalchemy import delete, select
+from sqlalchemy.orm.exc import StaleDataError
+
 from api.db import SessionLocal, init_db
-from api.models import Tenant, Client
+from api.models import Tenant, Client, now
+from api.resend_webhook import _stamp_clients_by_email
 
 
 def _seed_client(contact_email: str | None) -> tuple[str, int]:
@@ -27,6 +32,31 @@ def _seed_client(contact_email: str | None) -> tuple[str, int]:
         cid = c.id
         db.commit()
     return tid, cid
+
+
+def _seed_n_clients(contact_email: str, n: int) -> list[int]:
+    """N live clients sharing one contact_email (prod race: operator address)."""
+    init_db()
+    tid = "ten_test_" + secrets.token_hex(6)
+    ids: list[int] = []
+    with SessionLocal() as db:
+        t = Tenant(
+            id=tid, name="Shared Email Co", contact_email="agent@shared.test",
+            tenant_key="sol_test_" + secrets.token_hex(8),
+            plan="comped", active=True, subscription_status="comped",
+        )
+        db.add(t)
+        db.flush()
+        for i in range(n):
+            c = Client(
+                tenant_id=tid, name=f"Client {i} {secrets.token_hex(3)}",
+                contact_email=contact_email, active=True,
+            )
+            db.add(c)
+            db.flush()
+            ids.append(c.id)
+        db.commit()
+    return ids
 
 
 def test_delivered_event_stamps_last_delivered(client):
@@ -86,3 +116,91 @@ def test_case_insensitive_match_and_unknown_event(client):
     })
     assert other.status_code == 200
     assert other.json()["ignored"] == "email.opened"
+
+
+def test_orm_dirty_update_raises_staledata_when_row_vanishes():
+    """Documents Sentry PYTHON-FASTAPI-1B failure mode: ORM expects N updates,
+    one PK was hard-deleted concurrently → StaleDataError."""
+    email = f"stale_{secrets.token_hex(4)}@race.test"
+    ids = _seed_n_clients(email, n=5)
+    with SessionLocal() as db:
+        loaded = db.execute(
+            select(Client).where(Client.contact_email == email)
+        ).scalars().all()
+        assert len(loaded) == 5
+        victim = ids[0]
+        with SessionLocal() as other:
+            other.execute(delete(Client).where(Client.id == victim))
+            other.commit()
+        ts = now()
+        for c in loaded:
+            c.last_delivered_at = ts
+        with pytest.raises(StaleDataError):
+            db.commit()
+
+
+def test_stamp_helper_survives_concurrent_client_delete():
+    """Regression: set-based stamp must not raise when one matched row is gone
+    (the bug the ORM dirty path hits above)."""
+    email = f"ok_{secrets.token_hex(4)}@race.test"
+    ids = _seed_n_clients(email, n=5)
+    victim = ids[0]
+    with SessionLocal() as db:
+        # Load all into the identity map first (old webhook did this, then
+        # dirtied every instance — race window until commit).
+        preloaded = db.execute(
+            select(Client).where(Client.contact_email == email)
+        ).scalars().all()
+        assert len(preloaded) == 5
+        with SessionLocal() as other:
+            other.execute(delete(Client).where(Client.id == victim))
+            other.commit()
+        # Helper must use Core UPDATE and not dirty the vanished ORM instance.
+        matched = _stamp_clients_by_email(
+            db, email, "email.delivered", None, now()
+        )
+        db.commit()
+    assert victim not in matched
+    assert set(matched) == set(ids[1:])
+    with SessionLocal() as db:
+        for cid in ids[1:]:
+            c = db.get(Client, cid)
+            assert c.last_delivered_at is not None
+
+
+def test_webhook_many_clients_same_email_delivered(client):
+    """Shared contact_email (magic-link / operator address) stamps all live rows."""
+    email = f"many_{secrets.token_hex(4)}@shared.test"
+    ids = _seed_n_clients(email, n=10)
+    resp = client.post("/v1/resend/webhook", json={
+        "type": "email.delivered",
+        "data": {
+            "to": [email],
+            "subject": "Sign in to Array Operator",
+            "email_id": "test-email-id-many",
+        },
+    })
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert set(body["matched"]) == set(ids)
+    with SessionLocal() as db:
+        for cid in ids:
+            assert db.get(Client, cid).last_delivered_at is not None
+
+
+def test_webhook_skips_soft_deleted_clients(client):
+    email = f"soft_{secrets.token_hex(4)}@shared.test"
+    ids = _seed_n_clients(email, n=3)
+    with SessionLocal() as db:
+        gone = db.get(Client, ids[0])
+        gone.deleted_at = now()
+        db.commit()
+    resp = client.post("/v1/resend/webhook", json={
+        "type": "email.delivered",
+        "data": {"to": [email]},
+    })
+    assert resp.status_code == 200
+    matched = resp.json()["matched"]
+    assert ids[0] not in matched
+    assert set(matched) == set(ids[1:])
