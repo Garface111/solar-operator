@@ -10,6 +10,7 @@ Schedule:
   - 1st of every month at 09:00 UTC: deliver to monthly clients
   - 1st of Jan/Apr/Jul/Oct at 09:00 UTC: deliver to quarterly clients
 """
+import atexit
 import logging
 import os
 from datetime import datetime, timedelta
@@ -17,6 +18,7 @@ from datetime import datetime, timedelta
 import stripe as stripe
 
 logger = logging.getLogger(__name__)
+from apscheduler.executors.pool import ThreadPoolExecutor as APSThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
@@ -35,6 +37,29 @@ from .notify import (
     send_gmp_reauth_needed_email,
 )
 
+
+class _ShutdownSafeExecutor(APSThreadPoolExecutor):
+    """Thread-pool executor that tolerates process-exit races.
+
+    On SIGTERM / interpreter teardown, ``concurrent.futures`` shuts down its
+    pools via atexit while APScheduler's daemon thread may still call
+    ``submit``. That raises ``RuntimeError: cannot schedule new futures after
+    shutdown``, which APScheduler logs as ERROR (Sentry noise on every deploy).
+    Swallow that specific race; re-raise anything else.
+    """
+
+    def submit_job(self, job, run_times):
+        try:
+            return super().submit_job(job, run_times)
+        except RuntimeError as exc:
+            if "shutdown" not in str(exc).lower():
+                raise
+            self._logger.warning(
+                "Not submitting job %s — executor already shut down (process exit)",
+                getattr(job, "id", job),
+            )
+
+
 # job_defaults: APScheduler's built-in misfire_grace_time is 1 SECOND, so any
 # daily cron whose fire moment lands during a restart / GC pause was silently
 # marked "missed" and skipped until the next day, with no trace (this is why the
@@ -45,7 +70,10 @@ from .notify import (
 scheduler = BackgroundScheduler(
     timezone="UTC",
     job_defaults={"misfire_grace_time": 3600, "coalesce": True},
+    executors={"default": _ShutdownSafeExecutor()},
 )
+
+_atexit_stop_registered = False
 
 
 def scheduler_enabled() -> bool:
@@ -1363,12 +1391,28 @@ def refresh_fleet_forecasts() -> dict:
     return {"snapshots_built": built}
 
 
+def stop() -> None:
+    """Idempotent scheduler shutdown for process exit / FastAPI lifespan.
+
+    Registered via atexit from start() so we stop the job thread *before*
+    concurrent.futures tears down the pool (LIFO atexit order).
+    """
+    if not getattr(scheduler, "running", False):
+        return
+    try:
+        scheduler.shutdown(wait=False)
+        logger.info("scheduler stopped")
+    except Exception:
+        logger.exception("scheduler stop failed")
+
+
 def start():
     """Register all jobs and start BackgroundScheduler. Idempotent.
 
     Safe to call once per process. If already running, no-ops so a double
     import / re-entry cannot re-register or call scheduler.start() twice.
     """
+    global _atexit_stop_registered
     if scheduler.running:
         logger.info("scheduler already running — skip re-register")
         return
@@ -1863,6 +1907,11 @@ def start():
         next_run_time=datetime.utcnow() + timedelta(seconds=90),
     )
     scheduler.start()
+    # atexit is LIFO: registered after concurrent.futures import, so stop()
+    # runs before ThreadPoolExecutor's _python_exit and avoids the submit race.
+    if not _atexit_stop_registered:
+        atexit.register(stop)
+        _atexit_stop_registered = True
 
 
 def _run_ford_escalation_worker() -> None:
