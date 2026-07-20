@@ -1022,12 +1022,31 @@ def array_owners_fleet_trends(
                 pass
             life = round(sum(per_day.values()), 1)
             kwh_by_year: dict[int, float] = {}
+            kwh_by_ym: dict[tuple[int, int], float] = {}
             for d, kwh in per_day.items():
                 kwh_by_year[d.year] = kwh_by_year.get(d.year, 0.0) + float(kwh or 0)
+                ym = (d.year, d.month)
+                kwh_by_ym[ym] = kwh_by_ym.get(ym, 0.0) + float(kwh or 0)
             ytd_year = today.year
             ytd_kwh = round(sum(
                 v for d, v in per_day.items() if d.year == ytd_year
             ), 1)
+            # Trailing 12 calendar months (same window as fleet ttm_kwh) so the
+            # year matrix can compare an apples-to-apples rolling year against
+            # full prior calendar years (YTD alone understates the current year).
+            arr_ttm = 0.0
+            for off in range(12):
+                yy, mm = today.year, today.month - off
+                while mm <= 0:
+                    mm += 12
+                    yy -= 1
+                arr_ttm += kwh_by_ym.get((yy, mm), 0.0)
+            prior_year = today.year - 1
+            prior_year_kwh = round(kwh_by_year.get(prior_year, 0.0), 1)
+            ttm_vs_prior_pct = None
+            if prior_year_kwh > 0 and arr_ttm > 0:
+                ttm_vs_prior_pct = round(
+                    100.0 * (arr_ttm - prior_year_kwh) / prior_year_kwh, 1)
             by_array[arr.id] = {
                 "array_id": arr.id,
                 "name": arr.name,
@@ -1038,6 +1057,10 @@ def array_owners_fleet_trends(
                 },
                 "kwh_ytd": ytd_kwh,
                 "ytd_year": ytd_year,
+                "kwh_ttm": round(arr_ttm, 1),
+                "kwh_prior_year": prior_year_kwh if prior_year_kwh > 0 else None,
+                "prior_year": prior_year,
+                "ttm_vs_prior_year_pct": ttm_vs_prior_pct,
             }
 
     years = sorted({y for (y, _m) in fleet_ym.keys()})

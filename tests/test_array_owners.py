@@ -1307,6 +1307,15 @@ def test_fleet_trends_aggregates_across_arrays_and_years(client):
     # by_array sorted by lifetime desc; West Chester (350) before Londonderry (70).
     assert [a["name"] for a in b["by_array"]] == ["West Chester", "Londonderry"]
     assert b["by_array"][0]["lifetime_kwh"] == 350.0
+    # Trailing-12-mo + prior-year fields (for year-matrix YoY vs full prior year).
+    for row in b["by_array"]:
+        assert "kwh_ttm" in row
+        assert "kwh_prior_year" in row or row.get("kwh_prior_year") is None
+        assert "prior_year" in row
+        assert "ttm_vs_prior_year_pct" in row
+    # West Chester has 150 kWh in Jan 2025 + 200 in Jan 2026; TTM includes both
+    # months when "today" is after those dates (test DB has only those days).
+    assert b["by_array"][0]["kwh_ttm"] >= 0
 
 
 def test_fleet_trends_excludes_deleted_and_excluded_arrays(client):

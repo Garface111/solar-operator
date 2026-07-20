@@ -268,36 +268,21 @@ def ensure_default_ledger(db, sub) -> dict:
 
 
 def sync_payment_into_ledger(db, payment) -> dict:
-    """After a payment is created or marked paid, keep the offtaker spreadsheet current.
-
-    * Default (auto) ledger — full rebuild with generation + paid/collected columns.
-    * BYO generation sheet — reconcile missing generation periods, then stamp
-      paid date / status / collected onto the matching period row (when columns exist).
-    * No sheet yet — create the default auto ledger so Download always reflects payment.
-
-    Called from Stripe pay-link mint + mark_payment_paid (webhook). Best-effort.
-    """
+    """After a payment is created or marked paid, rebuild the default ledger for
+    that offtaker (auto sheets only). Safe no-op for BYO sheets."""
     from ..models import BillingReportSubscription
     sub = db.get(BillingReportSubscription, payment.subscription_id)
     if sub is None:
         return {"ok": False, "error": "subscription missing"}
     m = getattr(sub, "tracker_map", None) or {}
-    has = bool(getattr(sub, "tracker_workbook", None))
-    is_byo = has and m.get("ok") and not m.get("auto")
-
+    if getattr(sub, "tracker_workbook", None) and m.get("ok") and not m.get("auto"):
+        return {"ok": True, "skipped": True, "reason": "byo_sheet"}
     try:
-        if is_byo:
-            from .sheet_tracker import apply_payment_to_subscription_sheet
-            res = apply_payment_to_subscription_sheet(db, sub, payment)
-            db.commit()
-            return {"ok": True, "byo": True, **(res or {})}
-
-        # Auto ledger or empty → rebuild so Status / Paid date / Collected $ match Stripe
         ensure_default_ledger(db, sub)
         db.commit()
-        return {"ok": True, "rebuilt": True, "auto": True}
+        return {"ok": True, "rebuilt": True}
     except Exception as e:  # noqa: BLE001
-        logger.exception("ledger/payment sheet sync failed for sub=%s", payment.subscription_id)
+        logger.exception("ledger rebuild failed for sub=%s", payment.subscription_id)
         try:
             db.rollback()
         except Exception:
