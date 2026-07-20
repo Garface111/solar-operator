@@ -29,6 +29,7 @@ from typing import Optional
 
 import httpx  # noqa: F401 — kept so tests can monkeypatch array_owners.httpx.get
 from fastapi import APIRouter, Header, HTTPException, Query, Request
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import exists, func, select
 from sqlalchemy.exc import IntegrityError
@@ -1413,6 +1414,67 @@ def _array_alert(inverters: list[dict], array_status: str | None) -> dict:
         "ok": "All clear",
     }.get(worst, "All clear")
     return {"level": level, "count": bad, "status": worst, "headline": headline}
+
+
+# ── Master Array Data Pack (Paul 2026-07) ─────────────────────────────────────
+# Per-array mega spreadsheet: all utility bills + daily + monthly + YoY/TTM.
+# Transmit path today = download (and zip of all arrays). Email schedule later.
+
+
+@router.get("/v1/array-owners/arrays/{array_id}/master-data.xlsx")
+def download_array_master_data(
+    array_id: int,
+    authorization: str | None = Header(default=None),
+):
+    """Download the Master Data Pack for one array (xlsx).
+
+    Sheets: Meta · Bills · Monthly · Daily · YoY (calendar years + trailing 12 mo).
+    Built live from Bill + DailyGeneration — never a frozen snapshot.
+    """
+    tenant = _tenant_from_bearer(authorization)
+    from .reports.array_master_pack import (
+        array_master_filename, build_array_master_workbook,
+    )
+    with SessionLocal() as db:
+        arr = db.get(Array, array_id)
+        if arr is None or arr.tenant_id != tenant.id or arr.deleted_at is not None:
+            raise HTTPException(404, "Array not found")
+        name = arr.name or f"array-{array_id}"
+        blob = build_array_master_workbook(tenant.id, array_id, db=db)
+    if not blob:
+        raise HTTPException(404, "Array not found")
+    fname = array_master_filename(name, array_id)
+    return Response(
+        content=blob,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{fname}"',
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@router.get("/v1/array-owners/master-data.zip")
+def download_fleet_master_data_zip(
+    authorization: str | None = Header(default=None),
+):
+    """Zip of one Master Data Pack per live array for this tenant."""
+    tenant = _tenant_from_bearer(authorization)
+    from .reports.array_master_pack import build_fleet_master_zip
+    from .models import local_today as _lt
+    blob, n = build_fleet_master_zip(tenant.id)
+    if n == 0:
+        raise HTTPException(404, "No arrays to export")
+    fname = f"fleet-master-data-{_lt().isoformat()}.zip"
+    return Response(
+        content=blob,
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="{fname}"',
+            "Cache-Control": "no-store",
+            "X-Array-Count": str(n),
+        },
+    )
 
 
 @router.get("/v1/array-owners/fleet-tree")
