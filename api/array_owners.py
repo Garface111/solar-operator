@@ -721,6 +721,16 @@ def array_owners_overview(authorization: str | None = Header(default=None)) -> d
             value = _value_model(today_kwh, month_kwh, lifetime_kwh, rate)
             health = _health(has_live_source, last_day, overview_ok, today)
 
+            # Vendor-offline continuity flag (utility stands in for dead inverter feed).
+            try:
+                from . import production_fallback as _pf
+                _pfall = _pf.compute_production_fallback(db, arr.id)
+            except Exception:
+                _pfall = {
+                    "active": False, "source": None,
+                    "days_filled": 0, "vendor_last_day": None,
+                }
+
             entry = {
                 "array_id": arr.id,
                 "name": arr.name,
@@ -741,6 +751,8 @@ def array_owners_overview(authorization: str | None = Header(default=None)) -> d
                 # Daily kWh over the peer window (ascending) for the owner
                 # dashboard's sparkline. Kept lightweight (date+kwh only).
                 "_daily": daily_series,
+                # {active, source, days_filled, vendor_last_day} — UI chip + graph
+                "production_fallback": _pfall,
             }
             arrays_out.append(entry)
             out_by_array_id[arr.id] = entry
@@ -5113,7 +5125,14 @@ def _persist_meter_accounts(
             _cap = (float(_np) * 24.0) if _np and _np > 0 else None
 
             # ── Per-day series (preferred when present) ──────────────────────
+            # Write rules live in production_fallback.apply_utility_day:
+            #   • empty / estimate day → write utility_meter
+            #   • measured utility → climb only
+            #   • measured vendor with positive kWh → never overwrite
+            #   • measured vendor ZERO + vendor feed DEAD → gap-fill with utility
+            #     (source stays utility_meter — never relabeled as the vendor)
             if daily_rows:
+                from . import production_fallback as _pf
                 for d in daily_rows:
                     day = _meter_day(d.date)
                     if day is None or d.generated_kwh is None or d.generated_kwh < 0:
@@ -5123,35 +5142,18 @@ def _persist_meter_accounts(
                         log.warning("utility_meter: skip implausible daily %.0f kWh "
                                     "(cap %.0f) array=%s day=%s", dk, _cap, arr.id, day)
                         continue
-                    row = db.execute(
-                        select(DailyGeneration).where(
-                            DailyGeneration.array_id == arr.id,
-                            DailyGeneration.day == day,
-                        )
-                    ).scalar_one_or_none()
-                    if row is None:
-                        # Race-safe: concurrent meter-capture (live loop + manual
-                        # sync, or two tabs) can commit (array, day) between our
-                        # read and insert — bare INSERT hit uq_daily_array_day
-                        # (Sentry: ten_anna_800 array 2482). SAVEPOINT + max/source
-                        # rules instead of 500ing the whole capture.
-                        if _insert_daily_generation_race_safe(
-                                db, tenant_id=tenant.id, array_id=arr.id,
-                                day=day, kwh=dk, source="utility_meter"):
-                            kwh_recorded += dk
-                            days_written += 1
-                    elif not generation_sources.is_measured(row.source):
-                        # Only refresh a None / bill_prorate / prior utility_meter row.
-                        # NEVER overwrite, raise, or relabel a real metered reading
-                        # (solaredge/fronius/gmp_api/…): a utility-meter figure must
-                        # not clobber a finer real vendor day. Mirrors bill_to_daily's
-                        # real-source guard (audit #9).
-                        row.kwh = dk
-                        row.source = "utility_meter"
-                        row.uploaded_at = now()
+                    action = _pf.apply_utility_day(
+                        db,
+                        tenant_id=tenant.id,
+                        array_id=arr.id,
+                        day=day,
+                        utility_kwh=dk,
+                        utility_source="utility_meter",
+                        insert_fn=_insert_daily_generation_race_safe,
+                    )
+                    if action in ("inserted", "updated", "gap_filled"):
                         kwh_recorded += dk
                         days_written += 1
-                    # else: a real measured reading already owns this day — leave it.
             else:
                 # ── Billing-period TOTAL: prorate across the period's days ───────
                 # NEVER write a whole period's kWh into one day — that is a physically

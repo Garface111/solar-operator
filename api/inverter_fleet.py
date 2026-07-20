@@ -1235,6 +1235,22 @@ def _array_daily_split(db, array_id: int, days: int = 14) -> dict:
     }
 
 
+def _production_fallback_block(db, array_id: int, days: int = 14) -> dict:
+    """Thin wrapper so fleet-tree columns always carry production_fallback."""
+    from . import production_fallback as pf
+    try:
+        return pf.compute_production_fallback(db, array_id, days=days)
+    except Exception:
+        log.warning("production_fallback compute failed array=%s", array_id,
+                    exc_info=True)
+        return {
+            "active": False,
+            "source": None,
+            "days_filled": 0,
+            "vendor_last_day": None,
+        }
+
+
 
 # Fleet-local timezone for "what day is it" when judging health on COMPLETE days
 # (stable_verdicts). Every Array Operator customer today is Vermont/GMP-territory,
@@ -1784,6 +1800,10 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
             # System still integrates both; this just lets the owner view each on
             # its own. {vendor:[...], utility:[...], has_vendor, has_utility}.
             "daily_split": _array_daily_split(db, arr.id),
+            # Vendor-offline continuity: when inverter feed is dead but the
+            # utility meter still has days, the UI draws utility with a
+            # provenance chip (never relabels as vendor). See production_fallback.
+            "production_fallback": _production_fallback_block(db, arr.id),
             # Sun-up flag for the card "Sleeping" night state. The card gates
             # "Sleeping" on (is_daylight==False AND output==0) so a daytime fault
             # that zeroes output never reads as "asleep". Per-array when the
