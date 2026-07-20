@@ -32,6 +32,7 @@ import threading
 from datetime import date, datetime, timedelta
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .. import inverters
@@ -141,11 +142,37 @@ def backfill_connection_history(
                         row.uploaded_at = now()
                         upd += 1
                 else:
-                    ng = DailyGeneration(tenant_id=arr.tenant_id, array_id=arr.id,
-                                         day=d, kwh=kwh, source=vendor)
-                    db.add(ng)
-                    existing[d] = ng
-                    ins += 1
+                    # Race-safe insert: connect-path / nightly pull / sibling
+                    # capture can commit the same (array_id, day) after our
+                    # preload. SAVEPOINT + IntegrityError → re-read and apply
+                    # the update path (never clobber protected sources).
+                    try:
+                        with db.begin_nested():
+                            ng = DailyGeneration(
+                                tenant_id=arr.tenant_id, array_id=arr.id,
+                                day=d, kwh=kwh, source=vendor,
+                            )
+                            db.add(ng)
+                            db.flush()
+                        existing[d] = ng
+                        ins += 1
+                    except IntegrityError:
+                        row = db.execute(
+                            select(DailyGeneration).where(
+                                DailyGeneration.array_id == arr.id,
+                                DailyGeneration.day == d,
+                            )
+                        ).scalar_one_or_none()
+                        if row is None:
+                            raise
+                        existing[d] = row
+                        if row.source in _PROTECT_SOURCES:
+                            continue
+                        if abs((row.kwh or 0) - kwh) > 1e-6 or row.source != vendor:
+                            row.kwh = kwh
+                            row.source = vendor
+                            row.uploaded_at = now()
+                            upd += 1
 
         # Stamp ONLY if no year hit an error — a partial/failed pass stays NULL
         # so the scheduled healer retries it next run (true self-healing).

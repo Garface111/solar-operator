@@ -152,3 +152,35 @@ def test_heal_processes_only_unstamped_and_is_idempotent(monkeypatch):
         # the heal must not crash and c1 stays stamped.
         assert db.get(InverterConnection, c1).history_backfilled_at is not None
         assert db.query(DailyGeneration).filter_by(array_id=a1).count() >= 1
+
+
+def test_backfill_race_uq_daily_array_day_is_idempotent(monkeypatch):
+    """REGRESSION (Sentry on-connect history backfill): concurrent writer
+    commits the same (array_id, day) after preload; insert must not crash on
+    uq_daily_array_day — re-read and refresh vendor kWh instead."""
+    tid = _tenant()
+    aid = _array(tid, "SE Race")
+    cid = _conn(aid)
+    day = date(2024, 6, 15)
+
+    def fake_daily(vendor, config, start, end):
+        if start.year != 2024:
+            return []
+        # Concurrent connect-path / nightly pull wins the row after our preload.
+        with SessionLocal() as other:
+            if other.query(DailyGeneration).filter_by(array_id=aid, day=day).first() is None:
+                other.add(DailyGeneration(
+                    tenant_id=tid, array_id=aid, day=day, kwh=10.0, source="solaredge",
+                ))
+                other.commit()
+        return [{"day": day, "kwh": 50.0}]
+
+    monkeypatch.setattr(inverters, "fetch_daily", fake_daily)
+    r = ih.backfill_connection_history(cid, start_year=2024)
+    assert "error" not in r or r.get("error") is None
+    assert r.get("stamped") is True
+    with SessionLocal() as db:
+        rows = db.query(DailyGeneration).filter_by(array_id=aid, day=day).all()
+        assert len(rows) == 1
+        assert rows[0].kwh == 50.0
+        assert rows[0].source == "solaredge"
