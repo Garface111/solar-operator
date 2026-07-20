@@ -156,7 +156,10 @@ def _check_admin(key_header: str | None, key_query: str | None) -> None:
     key = key_header or key_query
     if not ADMIN_API_KEY:
         raise HTTPException(503, "Admin API not configured (set ADMIN_API_KEY)")
-    if not hmac.compare_digest(key or "", ADMIN_API_KEY):
+    # compare_digest(str, str) raises TypeError on non-ASCII; bytes is safe.
+    provided = (key or "").encode("utf-8")
+    expected = ADMIN_API_KEY.encode("utf-8")
+    if not hmac.compare_digest(provided, expected):
         raise HTTPException(403, "Invalid or missing admin key")
 
 
