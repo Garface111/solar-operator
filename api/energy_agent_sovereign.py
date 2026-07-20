@@ -1844,9 +1844,37 @@ def get_pending_mind_patch(db) -> dict | None:
         return None
 
 
+def _coerce_text(val: Any) -> str:
+    """Coerce an LLM patch field to a stripped string.
+
+    Brain models sometimes emit lists for summary/directives/persona (bullet
+    rules); .strip() on a list raises AttributeError.
+    """
+    if val is None:
+        return ""
+    if isinstance(val, list):
+        parts: list[str] = []
+        for item in val:
+            if item is None:
+                continue
+            s = item if isinstance(item, str) else str(item)
+            s = s.strip()
+            if s:
+                parts.append(s)
+        return "\n".join(parts)
+    if isinstance(val, str):
+        return val.strip()
+    return str(val).strip()
+
+
 def _normalize_mind_patch(raw: dict) -> dict:
     """Sanitize a proposed patch dict."""
-    summary = (raw.get("summary") or raw.get("title") or raw.get("rationale") or "Mind update").strip()[:500]
+    summary = (
+        _coerce_text(raw.get("summary"))
+        or _coerce_text(raw.get("title"))
+        or _coerce_text(raw.get("rationale"))
+        or "Mind update"
+    )[:500]
     memory_writes: list[dict] = []
     for mw in (raw.get("memory_writes") or raw.get("writes") or []):
         if not isinstance(mw, dict):
@@ -1860,8 +1888,8 @@ def _normalize_mind_patch(raw: dict) -> dict:
         k = str(raw["key"]).strip()[:120]
         if k and k not in _MIND_DENY_KEYS and k != _PENDING_PATCH_KEY:
             memory_writes.append({"key": k, "value": str(raw.get("value") or "")[:8000]})
-    persona = (raw.get("persona_addendum") or raw.get("persona") or "").strip()[:4000]
-    directives = (raw.get("directives") or raw.get("directive") or "").strip()[:4000]
+    persona = _coerce_text(raw.get("persona_addendum") or raw.get("persona"))[:4000]
+    directives = _coerce_text(raw.get("directives") or raw.get("directive"))[:4000]
     agenda = raw.get("agenda") if isinstance(raw.get("agenda"), list) else []
     return {
         "summary": summary,
@@ -1869,7 +1897,7 @@ def _normalize_mind_patch(raw: dict) -> dict:
         "persona_addendum": persona,
         "directives": directives,
         "agenda": agenda[:12],
-        "why": (raw.get("why") or raw.get("rationale") or "")[:1000],
+        "why": _coerce_text(raw.get("why") or raw.get("rationale"))[:1000],
     }
 
 

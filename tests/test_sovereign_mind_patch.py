@@ -98,6 +98,55 @@ def test_cannot_apply_without_pending(db_session):
     assert out.get("applied") is False
 
 
+def test_normalize_mind_patch_coerces_list_fields():
+    """LLM may emit list values for string patch fields — must not AttributeError."""
+    from api.energy_agent_sovereign import _normalize_mind_patch
+
+    patch = _normalize_mind_patch(
+        {
+            "summary": ["Quieter digests", "Partner-letter tone"],
+            "why": ["Ford asked for less noise"],
+            "persona_addendum": ["Write like a partner letter.", "No demo urgency."],
+            "directives": [
+                "Never invent customer urgency from demo tenants.",
+                "Prefer high-level digests only.",
+            ],
+            "memory_writes": [
+                {"key": "policy_email_tone", "value": "high_level_only"},
+            ],
+        }
+    )
+    assert isinstance(patch["summary"], str)
+    assert "Quieter digests" in patch["summary"]
+    assert isinstance(patch["persona_addendum"], str)
+    assert "partner letter" in patch["persona_addendum"].lower()
+    assert isinstance(patch["directives"], str)
+    assert "demo tenants" in patch["directives"]
+    assert isinstance(patch["why"], str)
+    assert "noise" in patch["why"]
+    assert patch["memory_writes"][0]["key"] == "policy_email_tone"
+
+
+def test_propose_mind_patch_accepts_list_fields(db_session):
+    """Regression: propose_mind_patch used to crash when directives was a list."""
+    db, sov = db_session
+    prop = sov.propose_mind_patch(
+        db,
+        {
+            "summary": ["Autonomy defaults"],
+            "directives": ["Act on build-out without waiting", "Propose freely"],
+            "persona_addendum": ["Be proactive"],
+        },
+        source="test",
+    )
+    assert prop["ok"] is True
+    assert prop["awaiting_ford_approval"] is True
+    pending = sov.get_pending_mind_patch(db)
+    assert pending is not None
+    assert isinstance(pending["patch"]["directives"], str)
+    assert "build-out" in pending["patch"]["directives"]
+
+
 def test_desk_prompt_leads_with_ford_message():
     from api.energy_agent_sovereign_desk import _desk_chat_prompt
     hist = [
