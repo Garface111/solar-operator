@@ -254,3 +254,103 @@ def test_tracker_status_works_even_when_flag_off(client, monkeypatch):
     assert tr["has_sheet"] is True
     assert tr["auto"] is True
     assert tr["collected_usd"] == 9.95
+
+
+# ─── payment → spreadsheet (auto + BYO) ─────────────────────────────────────
+
+def test_sync_payment_rebuilds_auto_ledger():
+    from api.billing.invoice_ledger import sync_payment_into_ledger, ensure_default_ledger
+    from openpyxl import load_workbook
+    t = _tenant()
+    sid = _sub(t.id)
+    pid = _pay(t.id, sid, status="open", amount_cents=10_000, fee_cents=50,
+               period_key="2026-05-31", invoice_number="2026-05", paid_at=None)
+    with SessionLocal() as db:
+        sub = db.get(BillingReportSubscription, sid)
+        ensure_default_ledger(db, sub)
+        db.commit()
+        pay = db.get(OfftakerPayment, pid)
+        pay.status = "paid"
+        pay.paid_at = datetime(2026, 6, 5, 12, 0, 0)
+        db.add(pay)
+        db.commit()
+        res = sync_payment_into_ledger(db, pay)
+        assert res.get("ok") is True
+        assert res.get("auto") is True
+        db.refresh(sub)
+        blob = bytes(sub.tracker_workbook)
+    wb = load_workbook(io.BytesIO(blob))
+    ws = wb.active
+    # find 2026-05 row
+    found = False
+    for r in range(2, ws.max_row + 1):
+        if str(ws.cell(r, 1).value or "").startswith("2026-05"):
+            assert ws.cell(r, 4).value == "Paid"
+            assert ws.cell(r, 5).value == "2026-06-05"
+            assert float(ws.cell(r, 6).value) == pytest.approx(99.50, abs=0.01)
+            found = True
+    assert found
+
+
+def test_sync_payment_updates_byo_generation_sheet(monkeypatch):
+    """BYO sheet with period + status + paid_date + collected gets stamped on pay."""
+    monkeypatch.setenv("SPREADSHEET_TRACKER_ENABLED", "true")
+    from openpyxl import Workbook, load_workbook
+    from api.billing.invoice_ledger import sync_payment_into_ledger
+    from api.billing.sheet_tracker import apply_payment_to_workbook
+
+    # Unit: apply_payment_to_workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Period", "Generation kWh", "Invoice $", "Status", "Paid date", "Collected $"])
+    ws.append(["2026-05", 120.5, 51.90, "Awaiting payment", "", ""])
+    ws.append(["2026-04", 100.0, 40.00, "Paid", "2026-05-01", 39.80])
+    buf = io.BytesIO()
+    wb.save(buf)
+    mapping = {
+        "ok": True, "auto": False, "sheet": ws.title, "header_row": 0,
+        "period_style": "iso",
+        "columns": {
+            "period": 0, "generation": 1, "amount": 2,
+            "status": 3, "paid_date": 4, "collected": 5,
+        },
+        "data_rows": 2, "last_period": "2026-05",
+    }
+    new_bytes, meta = apply_payment_to_workbook(
+        buf.getvalue(), mapping,
+        period_label="2026-05",
+        status_label="Paid",
+        paid_date="2026-06-05",
+        collected_usd=99.50,
+        amount_usd=100.0,
+    )
+    assert meta.get("updated") is True
+    assert meta.get("appended") is False
+    wb2 = load_workbook(io.BytesIO(new_bytes))
+    ws2 = wb2.active
+    assert ws2.cell(2, 4).value == "Paid"
+    assert ws2.cell(2, 5).value == "2026-06-05"
+    assert float(ws2.cell(2, 6).value) == pytest.approx(99.50)
+
+    # Integration: sync_payment_into_ledger on BYO sub
+    t = _tenant()
+    sid = _sub(t.id)
+    pid = _pay(t.id, sid, status="paid", amount_cents=10_000, fee_cents=50,
+               period_key="2026-05-31", invoice_number="2026-05",
+               paid_at=datetime(2026, 6, 5, 12, 0, 0))
+    with SessionLocal() as db:
+        sub = db.get(BillingReportSubscription, sid)
+        sub.tracker_workbook = new_bytes  # reuse sheet shape; will re-stamp
+        sub.tracker_filename = "town_gen.xlsx"
+        sub.tracker_map = mapping
+        db.add(sub)
+        db.commit()
+        pay = db.get(OfftakerPayment, pid)
+        res = sync_payment_into_ledger(db, pay)
+        assert res.get("ok") is True
+        assert res.get("byo") is True
+        db.refresh(sub)
+        out = bytes(sub.tracker_workbook)
+    wb3 = load_workbook(io.BytesIO(out))
+    # period 2026-05 still Paid with collected
+    assert wb3.active.cell(2, 4).value == "Paid"

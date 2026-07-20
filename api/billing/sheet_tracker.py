@@ -81,6 +81,13 @@ _FIELD_KEYWORDS: list[tuple[str, list[tuple[str, float]]]] = [
                 ("bill amount", 3.0), ("amount", 2.5), ("total credit", 2.5),
                 ("bill", 2.2), ("total", 1.8), ("balance", 2.0), ("owed", 2.5),
                 ("due", 1.5), ("credit", 1.2)]),
+    # payment / collection columns (written when offtaker pays via our portal)
+    ("status", [("payment status", 4.0), ("pay status", 3.5), ("invoice status", 3.0),
+                ("status", 2.0)]),
+    ("paid_date", [("paid date", 4.5), ("date paid", 4.5), ("payment date", 4.0),
+                   ("paid on", 3.5), ("date paid", 4.0)]),
+    ("collected", [("collected", 4.0), ("amount paid", 3.5), ("paid amount", 3.5),
+                   ("received", 2.5), ("net received", 3.0)]),
 ]
 
 # A kWh column that is a CUMULATIVE / running-total (e.g. "Cumm KwH", "YTD kWh") is
@@ -1074,6 +1081,179 @@ def append_recipe_rows(file_bytes: bytes, mapping: dict, facts_list: list,
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue(), appended
+
+
+def apply_payment_to_workbook(
+    file_bytes: bytes,
+    mapping: dict,
+    *,
+    period_label: str,
+    status_label: str = "Paid",
+    paid_date: Optional[str] = None,
+    collected_usd: Optional[float] = None,
+    amount_usd: Optional[float] = None,
+) -> tuple[bytes, dict]:
+    """Update (or append) the generation-spreadsheet row for `period_label` with
+    payment fields after an offtaker pays via Stripe pay-link.
+
+    Finds the data row whose period cell matches (tolerant of May 2026 vs 2026-05).
+    Writes only columns the detector mapped: status, paid_date, collected, amount.
+    If no matching period row exists and a period column is mapped, appends a thin
+    row with period + payment fields (generation left blank — bill reconcile fills later).
+
+    Returns (new_bytes, meta) where meta has updated/appended/fields_written.
+    """
+    from openpyxl import load_workbook
+
+    cols = (mapping or {}).get("columns") or {}
+    if not cols.get("period") and not any(
+        k in cols for k in ("status", "paid_date", "collected", "amount")
+    ):
+        return file_bytes, {"updated": False, "reason": "no-payment-or-period-columns"}
+
+    wb = load_workbook(io.BytesIO(file_bytes))
+    sheet = mapping.get("sheet")
+    ws = wb[sheet] if sheet and sheet in wb.sheetnames else wb.active
+    header_row = int(mapping.get("header_row") or 0)  # 0-based
+    period_col = cols.get("period")
+    style = mapping.get("period_style") or "iso"
+
+    # Locate write row: match period, else first empty data row
+    write_row = None
+    if isinstance(period_col, int):
+        max_row = ws.max_row or (header_row + 1)
+        for r in range(header_row + 2, max_row + 1):  # 1-based openpyxl
+            cell_v = ws.cell(row=r, column=period_col + 1).value
+            if cell_v is None or cell_v == "":
+                continue
+            if _period_matches(str(cell_v), period_label):
+                write_row = r
+                break
+    appended = False
+    if write_row is None:
+        # Append new row (same probe as append_period_row)
+        probe_cols = [c for c in cols.values() if isinstance(c, int)]
+        write_row = header_row + 2
+        max_row = ws.max_row or write_row
+        r = header_row + 2
+        while r <= max_row:
+            if any(
+                (ws.cell(row=r, column=c + 1).value not in (None, ""))
+                for c in probe_cols
+            ):
+                write_row = r + 1
+            r += 1
+        appended = True
+        if isinstance(period_col, int):
+            try:
+                ws.cell(
+                    row=write_row,
+                    column=period_col + 1,
+                    value=_format_period(period_label, style),
+                )
+            except Exception:  # noqa: BLE001
+                ws.cell(row=write_row, column=period_col + 1, value=period_label)
+
+    written: list[str] = []
+    field_values = {
+        "status": status_label,
+        "paid_date": paid_date or "",
+        "collected": collected_usd,
+        "amount": amount_usd,
+    }
+    for field, val in field_values.items():
+        col_idx = cols.get(field)
+        if not isinstance(col_idx, int):
+            continue
+        if val is None or val == "":
+            if field != "status":
+                continue
+        ws.cell(row=write_row, column=col_idx + 1, value=val)
+        written.append(field)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue(), {
+        "updated": True,
+        "appended": appended,
+        "row": write_row,
+        "fields_written": written,
+        "period": period_label,
+    }
+
+
+def apply_payment_to_subscription_sheet(db, sub, payment) -> dict:
+    """Persist payment fields onto the offtaker's stored tracker workbook.
+
+    1) Reconcile generation rows (bill-driven, idempotent).
+    2) Stamp paid/status/collected onto the matching period row (BYO or auto).
+    Best-effort; never raises into the Stripe webhook.
+    """
+    if not tracker_enabled():
+        return {"ok": False, "reason": "feature-disabled"}
+    bytes_ = getattr(sub, "tracker_workbook", None)
+    mapping = getattr(sub, "tracker_map", None) or {}
+    if not bytes_ or not mapping.get("ok"):
+        return {"ok": False, "reason": "no-tracker-sheet"}
+
+    # Keep generation history current first (missing months from bills).
+    try:
+        recon = update_subscription_sheet(db, sub)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("payment sheet reconcile failed sub=%s: %s", getattr(sub, "id", None), e)
+        recon = {"status": "error", "error": str(e)[:200]}
+
+    # Re-read after reconcile may have rewritten tracker_workbook
+    bytes_ = getattr(sub, "tracker_workbook", None) or bytes_
+    mapping = getattr(sub, "tracker_map", None) or mapping
+
+    from .invoice_ledger import _period_label_from_payment, _status_label, _money
+
+    period = _period_label_from_payment(payment)
+    status = _status_label(getattr(payment, "status", None) or "paid")
+    paid_at = getattr(payment, "paid_at", None)
+    paid_date = None
+    if paid_at:
+        try:
+            paid_date = (
+                paid_at.date().isoformat()
+                if hasattr(paid_at, "date")
+                else str(paid_at)[:10]
+            )
+        except Exception:  # noqa: BLE001
+            paid_date = str(paid_at)[:10]
+    amount = _money(getattr(payment, "amount_cents", None))
+    fee = _money(getattr(payment, "fee_cents", None))
+    collected = None
+    if getattr(payment, "status", None) == "paid" and amount is not None:
+        collected = round(float(amount) - float(fee or 0), 2)
+
+    try:
+        new_bytes, meta = apply_payment_to_workbook(
+            bytes(bytes_),
+            mapping,
+            period_label=period,
+            status_label=status,
+            paid_date=paid_date,
+            collected_usd=collected,
+            amount_usd=amount,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.exception("apply_payment_to_workbook failed sub=%s", getattr(sub, "id", None))
+        return {"ok": False, "reason": "write-failed", "error": str(e)[:200], "reconcile": recon}
+
+    if meta.get("updated"):
+        sub.tracker_workbook = new_bytes
+        sub.tracker_updated_at = datetime.utcnow()
+        # bump last_period if we appended
+        if meta.get("appended") and period:
+            new_map = dict(mapping)
+            new_map["last_period"] = period
+            new_map["data_rows"] = int(mapping.get("data_rows") or 0) + 1
+            sub.tracker_map = new_map
+        db.add(sub)
+
+    return {"ok": True, "payment": meta, "reconcile": recon}
 
 
 def update_subscription_sheet(db, sub) -> dict:
