@@ -479,6 +479,34 @@ _OFFTAKER_TEMPLATE_SYSTEM_PROMPT = (
 )
 
 
+def _normalize_anthropic_messages(messages: list[dict]) -> list[dict]:
+    """Coerce chat history into the shape Anthropic's Messages API accepts.
+
+    Requirements that 400 without this: non-empty content, only user|assistant,
+    roles alternating, first message role=user. Merge consecutive same-role
+    turns (e.g. two user messages after a failed prior attempt) rather than
+    dropping them.
+    """
+    cleaned: list[dict] = []
+    for m in messages or []:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role")
+        content = m.get("content")
+        if role not in ("user", "assistant") or not isinstance(content, str):
+            continue
+        content = content.strip()
+        if not content:
+            continue
+        if cleaned and cleaned[-1]["role"] == role:
+            cleaned[-1]["content"] = cleaned[-1]["content"] + "\n\n" + content
+        else:
+            cleaned.append({"role": role, "content": content})
+    while cleaned and cleaned[0]["role"] != "user":
+        cleaned.pop(0)
+    return cleaned
+
+
 def regenerate_template_via_ai(
     *,
     current_body: str,
@@ -494,32 +522,82 @@ def regenerate_template_via_ai(
     system_prompt/allowed_tags default to the NEPOOL client-report variant;
     the AO offtaker studio passes its own prompt + tag set.
     Returns {'reply': str, 'body': str, 'subject': str | None}.
-    Raises httpx.HTTPStatusError on API failure. Non-JSON / empty model
-    replies are returned as a polite assistant message with the template
-    left unchanged (never raises ValueError for parse failures).
+    Upstream Anthropic HTTP errors and non-JSON / empty model replies are
+    returned as a polite assistant message with the template left unchanged
+    (never raises for those — Sentry PYTHON-FASTAPI-10 / PYTHON-FASTAPI-17).
     """
+    unchanged = {
+        "reply": (
+            "I couldn't apply that — tell me what to change about the "
+            "greeting, tone, or wording."
+        ),
+        "body": None,
+        "subject": None,
+    }
+    api_messages = _normalize_anthropic_messages(messages)
+    if not api_messages:
+        return {
+            "reply": unchanged["reply"],
+            "body": current_body,
+            "subject": None,
+        }
+
     model = os.getenv("INGEST_LLM_MODEL", "claude-sonnet-4-5")
     system = (
         f"{system_prompt}\n\n"
         f"Current subject template:\n{current_subject}\n\n"
         f"Current body template:\n{current_body}"
     )
-    resp = httpx.post(
-        "https://api.anthropic.com/v1/messages",
-        headers={
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        },
-        json={
-            "model": model,
-            "max_tokens": 4096,
-            "system": system,
-            "messages": messages,
-        },
-        timeout=60.0,
-    )
-    resp.raise_for_status()
+    try:
+        resp = httpx.post(
+            "https://api.anthropic.com/v1/messages",
+            headers={
+                "x-api-key": api_key,
+                "anthropic-version": "2023-06-01",
+                "content-type": "application/json",
+            },
+            json={
+                "model": model,
+                "max_tokens": 4096,
+                "system": system,
+                "messages": api_messages,
+            },
+            timeout=60.0,
+        )
+    except httpx.HTTPError:
+        # Transport failure — soft-fail like an API error so the studio never 502s.
+        result = {
+            "reply": (
+                "I couldn't reach the writing assistant just now — try again "
+                "in a moment, or edit the template by hand."
+            ),
+            "body": None,
+            "subject": None,
+        }
+        return {
+            "reply": str(result["reply"]),
+            "body": current_body,
+            "subject": None,
+        }
+
+    if resp.status_code >= 400:
+        # Sentry PYTHON-FASTAPI-10: Anthropic 400 on a well-formed offtaker
+        # studio chat ("testing") used to bubble as HTTPException 502. Soft-fail
+        # so the operator keeps editing; leave the template unchanged.
+        result = {
+            "reply": (
+                "I couldn't reach the writing assistant just now — try again "
+                "in a moment, or edit the template by hand."
+            ),
+            "body": None,
+            "subject": None,
+        }
+        return {
+            "reply": str(result["reply"]),
+            "body": current_body,
+            "subject": None,
+        }
+
     body = resp.json()
     content = "".join(b.get("text", "") for b in body.get("content", []))
     raw = content.strip()
@@ -542,7 +620,7 @@ def regenerate_template_via_ai(
         # answer. Surface that message to the operator as the assistant's reply and leave
         # the template UNCHANGED, instead of failing with a scary "invalid JSON" 502.
         result = {"reply": (raw[:1500].strip()
-                            or "I couldn't apply that — tell me what to change about the greeting, tone, or wording."),
+                            or unchanged["reply"]),
                   "body": None, "subject": None}
     return {
         "reply": _augment_reply_with_strip_notice(
