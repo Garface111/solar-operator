@@ -232,6 +232,43 @@ def test_client_error_ignores_resize_observer_noise(client, monkeypatch):
     assert "TypeError" in sent.get("subject", "")
 
 
+def test_client_error_ignores_anonymous_click_automation_noise(client, monkeypatch):
+    """Eval/automation `.click()` on missing nodes must not alert (PYTHON-FASTAPI-39)."""
+    sent = {}
+    monkeypatch.setattr("api.notify.send_internal_alert",
+                        lambda s, b: sent.update(subject=s, body=b) or True)
+    import api.app as appmod
+    appmod._LAST_ALERT.clear()
+    # Live Sentry event shape: Chromium message + only <anonymous> frames.
+    r = client.post("/v1/client-error", json={
+        "source": "arrayoperator",
+        "kind": "unhandledrejection",
+        "message": "Cannot read properties of undefined (reading 'click')",
+        "stack": (
+            "TypeError: Cannot read properties of undefined (reading 'click')\n"
+            "    at <anonymous>:14:23"
+        ),
+        "url": "https://arrayoperator.com/#arrays",
+    })
+    assert r.status_code == 200
+    assert r.json().get("ignored") == "benign"
+    assert sent == {}
+    # Same message WITH an app frame is a real bug — still alert.
+    r2 = client.post("/v1/client-error", json={
+        "source": "arrayoperator",
+        "message": "Cannot read properties of undefined (reading 'click')",
+        "stack": (
+            "TypeError: Cannot read properties of undefined (reading 'click')\n"
+            "    at focusNepoolTarget (ClientsSection.tsx:255:17)"
+        ),
+        "url": "https://arrayoperator.com/#arrays",
+    })
+    assert r2.status_code == 200
+    assert r2.json().get("ok") is True
+    assert "ignored" not in r2.json()
+    assert "click" in sent.get("subject", "").lower()
+
+
 def test_client_error_caps_payload(client, monkeypatch):
     body_seen = {}
     monkeypatch.setattr("api.notify.send_internal_alert",
