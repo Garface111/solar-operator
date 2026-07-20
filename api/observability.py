@@ -19,9 +19,10 @@ Env:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
-from typing import Any
+from typing import Any, Optional
 
 log = logging.getLogger("solar_operator.observability")
 
@@ -85,8 +86,35 @@ def _scrub_deep(data: Any) -> Any:
     return _scrub_stringy(data)
 
 
-def _before_send(event: dict, hint: dict) -> dict:
-    """Sentry hook: scrub headers/cookies/body/contexts/breadcrumbs before send."""
+def _is_benign_cancelled_noise(event: dict, hint: dict) -> bool:
+    """Drop asyncio.CancelledError deploy/restart noise (Sentry PYTHON-FASTAPI-X).
+
+    uvicorn ERROR-logs CancelledError from Starlette lifespan ``await receive()``
+    on process cancel — normal teardown, not an app bug.
+    """
+    exc_info = hint.get("exc_info") if isinstance(hint, dict) else None
+    if isinstance(exc_info, tuple) and len(exc_info) >= 2:
+        if isinstance(exc_info[1], asyncio.CancelledError):
+            return True
+    for ex in (event.get("exception") or {}).get("values") or []:
+        etype = (ex.get("type") or "") if isinstance(ex, dict) else ""
+        if etype.endswith("CancelledError"):
+            return True
+    logentry = event.get("logentry") if isinstance(event.get("logentry"), dict) else {}
+    msg = logentry.get("formatted") or logentry.get("message") or event.get("message") or ""
+    if not isinstance(msg, str) or "CancelledError" not in msg:
+        return False
+    return "lifespan" in msg or event.get("logger") == "uvicorn.error"
+
+
+def _before_send(event: dict, hint: dict) -> Optional[dict]:
+    """Sentry hook: drop benign cancel noise, then scrub secrets before send."""
+    try:
+        if _is_benign_cancelled_noise(event, hint):
+            return None
+    except Exception:
+        log.exception("sentry cancel-noise filter failed")
+
     try:
         req = event.get("request")
         if isinstance(req, dict):
@@ -155,6 +183,8 @@ def init_sentry() -> bool:
             # Local vars are the landmine: CredentialIn body / Creds dataclass
             # can embed password= in repr even when request PII is off.
             include_local_variables=False,
+            # Deploy/restart cancels the lifespan wait task — not an app bug.
+            ignore_errors=[asyncio.CancelledError, KeyboardInterrupt],
             before_send=_before_send,
             integrations=[
                 logging_integration,
