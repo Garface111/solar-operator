@@ -248,3 +248,68 @@ def test_autopop_username_client_ignores_email(client):
         new_c = all_clients[1]
         assert new_c.gmp_email == "jdoe@gmp.test"
         assert new_c.gmp_username == "someone-else"
+
+
+# ─── (7) existing same-name array → link, never UniqueViolation ─────────────
+
+def test_autopop_reuses_existing_array_same_name(client):
+    """Sentry PYTHON-FASTAPI-M: /v1/sync INSERTed Array 'Tannery Brook' while
+    (tenant_id, name) already existed → UniqueViolation on uq_array_per_tenant.
+    Capture must link the account to the existing live array (or survive the
+    race via _safe_create_array) and return 200 with exactly one live row.
+    """
+    email = "tannery@gmp.test"
+    tid, key, cid = _make_tenant_with_client(autopop=True, gmp_email=email)
+
+    with SessionLocal() as db:
+        db.add(Array(
+            tenant_id=tid, client_id=cid, name="Tannery Brook",
+            bill_offset_months=1,
+        ))
+        db.commit()
+
+    resp = _sync(client, key, _payload(email, [_account("9001", "Tannery Brook")]))
+    assert resp.status_code == 200, resp.text
+
+    with SessionLocal() as db:
+        arrays = db.execute(
+            select(Array).where(
+                Array.tenant_id == tid, Array.deleted_at.is_(None),
+            )
+        ).scalars().all()
+        assert len(arrays) == 1
+        assert arrays[0].name == "Tannery Brook"
+        uaccts = db.execute(
+            select(UtilityAccount).where(UtilityAccount.tenant_id == tid)
+        ).scalars().all()
+        assert len(uaccts) == 1
+        assert uaccts[0].array_id == arrays[0].id
+
+
+def test_autopop_same_cleaned_nickname_one_array(client):
+    """GMP sub-meters '1a_Tannery Brook' / '2b_Tannery Brook' clean to the same
+    name. One payload must not double-INSERT and 500 on uq_array_per_tenant.
+    """
+    email = "submeters@gmp.test"
+    tid, key, cid = _make_tenant_with_client(autopop=True, gmp_email=email)
+
+    accounts = [
+        _account("9101", "1a_Tannery Brook"),
+        _account("9102", "2b_Tannery Brook"),
+    ]
+    resp = _sync(client, key, _payload(email, accounts))
+    assert resp.status_code == 200, resp.text
+
+    with SessionLocal() as db:
+        arrays = db.execute(
+            select(Array).where(
+                Array.tenant_id == tid, Array.deleted_at.is_(None),
+            )
+        ).scalars().all()
+        assert len(arrays) == 1
+        assert arrays[0].name == "Tannery Brook"
+        uaccts = db.execute(
+            select(UtilityAccount).where(UtilityAccount.tenant_id == tid)
+        ).scalars().all()
+        assert len(uaccts) == 2
+        assert {u.array_id for u in uaccts} == {arrays[0].id}

@@ -185,7 +185,7 @@ from .ingest import router as ingest_router
 from .billing.routes import router as billing_router
 from .array_tracker import router as array_tracker_router
 from .daily_generation import router as daily_generation_router
-from .array_owners import router as array_owners_router
+from .array_owners import router as array_owners_router, _safe_create_array
 from .warranty_claims import router as warranty_claims_router
 from .repair_ops import router as repair_ops_router
 from .solaredge import router as solaredge_router
@@ -1154,19 +1154,20 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                             ghost_arr.client_id = owner.id
                             ghost_arr.bill_offset_months = _autopop_cfg["bill_offset_months"]
                             arr = ghost_arr
+                            db.flush()  # assign arr.id before linking
                         else:
-                            arr = Array(
-                                tenant_id=tenant.id,
+                            # SAVEPOINT + reuse-on-conflict: concurrent /v1/sync
+                            # captures race the unique (tenant_id, name) index
+                            # (Sentry uq_array_per_tenant UniqueViolation).
+                            arr, _ = _safe_create_array(
+                                db, tenant.id, arr_name,
                                 client_id=owner.id,
-                                name=arr_name,
                                 bill_offset_months=_autopop_cfg["bill_offset_months"],
                                 # Inherit the fuel the operator picked for this
                                 # client during onboarding (defaults to solar).
                                 fuel_type=normalize_fuel(
                                     getattr(owner, "default_fuel_type", None)),
                             )
-                            db.add(arr)
-                        db.flush()  # assign arr.id before linking
                         acct.array_id = arr.id
                         ctx.add("array_created", decision=f"created array {arr_name!r} for account {acct_no}")
                         # Record the autopop name so re-captures can detect
@@ -1413,19 +1414,19 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                                 ghost_arr.client_id = target.id
                                 ghost_arr.bill_offset_months = _autopop_cfg["bill_offset_months"]
                                 arr = ghost_arr
+                                db.flush()
                             else:
-                                arr = Array(
-                                    tenant_id=tenant.id,
+                                # Same race-safe insert as the autopop branch
+                                # (uq_array_per_tenant UniqueViolation).
+                                arr, _ = _safe_create_array(
+                                    db, tenant.id, arr_name,
                                     client_id=target.id,
-                                    name=arr_name,
                                     bill_offset_months=_autopop_cfg["bill_offset_months"],
                                     # Inherit the fuel the operator picked for
                                     # this client during onboarding (def. solar).
                                     fuel_type=normalize_fuel(
                                         getattr(target, "default_fuel_type", None)),
                                 )
-                                db.add(arr)
-                            db.flush()
                             acct.array_id = arr.id
                             ctx.add("array_created", decision=f"created array {arr_name!r} for account {acct_no}")
                             # Record the autopop name so re-captures can detect
