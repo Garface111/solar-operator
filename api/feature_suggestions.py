@@ -137,6 +137,92 @@ class FeatureSuggestion(Base):
     auto_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+# create_all only creates missing *tables* — it never ALTERs existing ones. When
+# auto_prompt (or screenshot_b64) was added to the model, prod kept the old
+# shape and every FeatureSuggestion SELECT died with UndefinedColumn
+# (Sentry: /v1/sovereign/desk/ops → list_features). migrate.py has the ALTER,
+# but this module is also the create_all path; self-heal so reads work even if
+# migrate has not run yet.
+_schema_ensured_ids: set[int] = set()
+
+
+def ensure_feature_suggestion_columns(db_or_bind=None) -> None:
+    """Idempotent ADD COLUMN for feature_suggestions fields create_all skips."""
+    from sqlalchemy import text
+    from sqlalchemy.orm import Session as SASession
+
+    from .db import engine as default_engine
+
+    session = db_or_bind if isinstance(db_or_bind, SASession) else None
+    if session is not None:
+        eng = session.get_bind()
+        conn = session.connection()
+    else:
+        eng = db_or_bind or default_engine
+        conn = None
+
+    key = id(getattr(eng, "sync_engine", eng))
+    if key in _schema_ensured_ids:
+        return
+
+    def _table_exists(connection) -> bool:
+        dialect = connection.dialect.name
+        if dialect == "sqlite":
+            row = connection.execute(text(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='feature_suggestions'"
+            )).fetchone()
+            return row is not None
+        row = connection.execute(text(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_name = 'feature_suggestions'"
+        )).fetchone()
+        return row is not None
+
+    def _existing_cols(connection) -> set[str]:
+        dialect = connection.dialect.name
+        if dialect == "sqlite":
+            rows = connection.execute(
+                text("PRAGMA table_info(feature_suggestions)")
+            ).fetchall()
+            return {r[1] for r in rows}
+        rows = connection.execute(text(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'feature_suggestions'"
+        )).fetchall()
+        return {r[0] for r in rows}
+
+    def _apply(connection) -> None:
+        if not _table_exists(connection):
+            FeatureSuggestion.__table__.create(bind=connection, checkfirst=True)
+            return
+        cols = _existing_cols(connection)
+        for col in ("auto_prompt", "screenshot_b64"):
+            if col in cols:
+                continue
+            try:
+                connection.execute(text(
+                    f"ALTER TABLE feature_suggestions ADD COLUMN {col} TEXT"
+                ))
+            except Exception as exc:
+                msg = str(exc).lower()
+                if "already exists" in msg or "duplicate column" in msg:
+                    continue
+                raise
+
+    if conn is not None:
+        _apply(conn)
+    else:
+        with eng.begin() as c:
+            _apply(c)
+    _schema_ensured_ids.add(key)
+
+
+def _reset_schema_ensure_for_tests() -> None:
+    """Test-only: clear the ensure cache so a fresh engine is re-checked."""
+    _schema_ensured_ids.clear()
+
+
 class SuggestionIn(BaseModel):
     text: str
     email: str | None = None
@@ -259,6 +345,7 @@ def submit_suggestion(body: SuggestionIn, authorization: str | None = Header(def
     auto_prompt = f"Site improve: {text[:200]}"
 
     with SessionLocal() as db:
+        ensure_feature_suggestion_columns(db)
         fs = FeatureSuggestion(
             text=text,
             email=email,
@@ -369,6 +456,7 @@ def wait_new_suggestions(
     deadline = time.time() + min(timeout, 55)
     while time.time() < deadline:
         with SessionLocal() as db:
+            ensure_feature_suggestion_columns(db)
             rows = (
                 db.query(FeatureSuggestion)
                 .filter(FeatureSuggestion.status == "new")
@@ -426,6 +514,7 @@ def list_suggestions(
 ):
     _check_admin(x_admin_key, key)
     with SessionLocal() as db:
+        ensure_feature_suggestion_columns(db)
         q = db.query(FeatureSuggestion)
         if status and status != "all":
             q = q.filter(FeatureSuggestion.status == status)
