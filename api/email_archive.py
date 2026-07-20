@@ -323,6 +323,155 @@ def _alert(db, row: EmailArchive, flags: list[str]) -> None:
         log.warning("email_archive: alert failed: %s", exc)
 
 
+# ── pre-flight deliverability ────────────────────────────────────────────────
+# Ford, 2026-07-20: we sent two sign-in links to m@rubin.biz — John Spencer's
+# partner, a real prospect — and both were undeliverable. rubin.biz publishes a
+# NULL MX (`MX 0 .`, RFC 7505), which is the domain owner explicitly declaring
+# that it accepts no mail, ever. That is knowable in milliseconds BEFORE we
+# send. Ford found out from a postmaster bounce in his own inbox; we shouldn't
+# have sent at all.
+#
+# HARD RULE — FAIL OPEN. Only a DEFINITIVE negative blocks a send:
+#   * NXDOMAIN  — the domain does not exist
+#   * null MX   — the domain refuses all mail by declaration
+# A timeout, a network blip, a malformed response, a resolver outage: SEND
+# ANYWAY. Silently dropping a customer email because DNS was slow is exactly
+# the self-sabotage that cost a real array 7.5 days of darkness in July. Better
+# to send into a maybe-bad address than to invent a reason not to send.
+#
+# And when we DO block, it is LOUD: archived with a flag and alerted, never a
+# quiet return.
+_MX_CACHE: dict[str, tuple[bool, str]] = {}
+_MX_CACHE_MAX = 2000
+DOH_URL = "https://dns.google/resolve"
+
+
+def domain_accepts_mail(domain: str, *, timeout: float = 4.0) -> tuple[bool, str]:
+    """(deliverable, reason). Unknown/error → (True, ...) — fail open."""
+    dom = (domain or "").strip().lower().rstrip(".")
+    if not dom:
+        return True, "no domain parsed"
+    if dom in _MX_CACHE:
+        return _MX_CACHE[dom]
+
+    import json as _json
+    import urllib.request
+
+    def _q(rrtype: str):
+        req = urllib.request.Request(
+            f"{DOH_URL}?name={dom}&type={rrtype}",
+            headers={"accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return _json.loads(r.read().decode())
+
+    try:
+        d = _q("MX")
+        status = d.get("Status")
+        if status == 3:  # NXDOMAIN — the domain does not exist
+            out = (False, "domain does not exist (NXDOMAIN)")
+        else:
+            answers = [a.get("data", "") for a in d.get("Answer", [])
+                       if a.get("type") == 15 or "data" in a]
+            mx = [a.strip() for a in answers if a]
+            # RFC 7505 null MX: a single record whose exchange is the root ".".
+            if mx and all(m.split()[-1].rstrip(".") == "" for m in mx):
+                out = (False, "domain publishes a null MX (RFC 7505) — accepts no email")
+            elif mx:
+                out = (True, f"MX ok ({len(mx)} record(s))")
+            else:
+                # No MX is legal: RFC 5321 falls back to the A record.
+                a = _q("A")
+                if a.get("Status") == 3:
+                    out = (False, "domain does not exist (NXDOMAIN)")
+                elif a.get("Answer"):
+                    out = (True, "no MX, A-record fallback")
+                else:
+                    # Ambiguous, not proven bad → fail open.
+                    out = (True, "no MX and no A record — sending anyway (unproven)")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("email_archive: MX preflight failed for %s (sending anyway): %s", dom, exc)
+        return True, f"dns check failed ({type(exc).__name__}) — failing open"
+
+    if len(_MX_CACHE) < _MX_CACHE_MAX:
+        _MX_CACHE[dom] = out
+    return out
+
+
+def preflight(to_email: str) -> tuple[bool, str]:
+    """Should we attempt this send? (deliverable, reason). Fails open."""
+    addr = (to_email or "").strip()
+    if "@" not in addr:
+        return True, "unparseable address — failing open"
+    return domain_accepts_mail(addr.rsplit("@", 1)[-1])
+
+
+def record_blocked(to_email: str, subject: str | None, reason: str,
+                   source: str | None = None) -> None:
+    """A send we refused to make. Archived AND alerted — never silent."""
+    try:
+        ensure_table()
+        with SessionLocal() as db:
+            row = EmailArchive(
+                to_email=(to_email or "")[:300], subject=(subject or "")[:400],
+                source=source, ok=False, dry_run=False,
+                severity="high", flags=f"undeliverable_blocked:{reason}"[:400],
+                body_text=f"NOT SENT — pre-flight blocked.\nreason: {reason}",
+            )
+            db.add(row)
+            db.commit()
+            log.error("email preflight BLOCKED to=%s reason=%s subject=%r",
+                      to_email, reason, subject)
+            if not is_internal(to_email, subject):
+                _alert(db, row, [f"undeliverable_blocked:{reason}"])
+    except Exception as exc:  # noqa: BLE001
+        log.warning("email_archive: record_blocked failed: %s", exc)
+
+
+# ── delivery events (bounce / complaint) ─────────────────────────────────────
+def on_delivery_event(to_email: str, event: str, subject: str | None,
+                      reason: str | None, resend_id: str | None = None) -> None:
+    """Called from the Resend webhook. A bounce or spam complaint to a real
+    person is a delivery FAILURE and must reach Ford — before this, the archive
+    said ok=True (Resend accepted it) and the downstream rejection was invisible
+    unless he happened to read a postmaster email."""
+    ev = (event or "").lower()
+    if ev not in ("bounced", "complained"):
+        return
+    try:
+        ensure_table()
+        with SessionLocal() as db:
+            # Mark the original archived send as failed, so the archive tells
+            # the truth instead of a stale "accepted by Resend".
+            row = None
+            if resend_id:
+                row = db.execute(select(EmailArchive).where(
+                    EmailArchive.resend_id == resend_id).limit(1)).scalars().first()
+            if row is not None:
+                row.ok = False
+                row.severity = "high"
+                flags = set((row.flags or "").split(",")) - {""}
+                flags.add(ev)
+                row.flags = ",".join(sorted(flags))
+                db.commit()
+
+            if is_internal(to_email, subject or (row.subject if row else None)):
+                return  # our own alert bouncing must not spawn more alerts
+
+            marker = row or EmailArchive(
+                to_email=(to_email or "")[:300],
+                subject=(subject or "")[:400],
+                source="delivery_event", ok=False, severity="high",
+                flags=ev, resend_id=resend_id,
+                body_text=f"{ev} — {reason or 'no reason given'}",
+            )
+            if row is None:
+                db.add(marker)
+                db.commit()
+            _alert(db, marker, [ev, f"reason:{(reason or 'unknown')[:80]}"])
+    except Exception as exc:  # noqa: BLE001
+        log.warning("email_archive: on_delivery_event failed: %s", exc)
+
+
 def prune_email_archive(keep_days: int = 400) -> int:
     """Manual retention. Deliberately NOT scheduled — see class docstring."""
     ensure_table()

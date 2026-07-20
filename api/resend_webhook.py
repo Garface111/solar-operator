@@ -415,6 +415,24 @@ async def resend_webhook(
                 recorded += 1
             except Exception:  # noqa: BLE001 — a receipt must never break the webhook
                 logger.exception("resend: failed to record delivery receipt for %s", email)
+
+            # A bounce/complaint is a DELIVERY FAILURE and must reach Ford.
+            # Previously it was recorded here and nowhere else: the archive kept
+            # saying ok=True (Resend ACCEPTED the message; the recipient's
+            # server rejected it later), so a hard failure to a real prospect
+            # was invisible unless Ford happened to read a postmaster email —
+            # which is exactly how the m@rubin.biz bounce surfaced (2026-07-20).
+            try:
+                from .email_archive import on_delivery_event
+                on_delivery_event(
+                    to_email=email,
+                    event=(event_type or "").replace("email.", ""),
+                    subject=(data.get("subject") or None),
+                    reason=reason,
+                    resend_id=email_id_str,
+                )
+            except Exception:  # noqa: BLE001 — alerting must never break the webhook
+                logger.exception("resend: delivery-event monitor failed for %s", email)
         db.commit()
 
     return {

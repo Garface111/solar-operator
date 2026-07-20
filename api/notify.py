@@ -168,7 +168,34 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
                      headers: dict | None = None,
                      product: str = "nepool",
                      log_failures: bool = True) -> bool:
-    """Send, then archive + monitor. Archiving can never affect the send."""
+    """Pre-flight, send, then archive + monitor.
+
+    Archiving can never affect the send. The pre-flight CAN stop one — but only
+    on a proven-undeliverable domain (NXDOMAIN or RFC 7505 null MX), and it
+    fails open on every uncertainty, so a slow resolver never costs a customer
+    an email. See email_archive.domain_accepts_mail.
+    """
+    try:
+        import sys as _sys0
+        from . import email_archive as _pf
+        _to = to if isinstance(to, str) else (list(to) or [""])[0]
+        # Never gate our own alerting on DNS — if that path broke we would lose
+        # the very channel that reports the breakage.
+        if not _pf.is_internal(_to, subject):
+            deliverable, why = _pf.preflight(_to)
+            if not deliverable:
+                try:
+                    f0 = _sys0._getframe(1)
+                    src0 = f"{os.path.basename(f0.f_code.co_filename)}:{f0.f_code.co_name}"[:80]
+                except Exception:  # noqa: BLE001
+                    src0 = None
+                _pf.record_blocked(_to, subject, why, source=src0)
+                _send_via_resend._last_id = None
+                _send_via_resend._last_error = f"preflight: {why}"
+                return False
+    except Exception as _pfe:  # noqa: BLE001
+        logger.warning("email preflight skipped (sending anyway): %s", _pfe)
+
     ok = _send_via_resend_raw(
         to=to, subject=subject, html=html, text=text, attachments=attachments,
         cc=cc, bcc=bcc, from_addr=from_addr, reply_to=reply_to, headers=headers,
