@@ -57,6 +57,46 @@ def test_before_send_scrubs_request_headers():
     assert out["request"]["headers"]["host"] == "api"
 
 
+# ─── Benign CancelledError noise (Sentry PYTHON-FASTAPI-X) ──────────────────────
+
+def test_before_send_drops_lifespan_cancelled_noise():
+    """uvicorn lifespan CancelledError (deploy/restart) must not reach Sentry."""
+    import asyncio
+    msg = (
+        "Traceback (most recent call last):\n"
+        '  File "starlette/routing.py", line 700, in lifespan\n'
+        "    await receive()\n"
+        "asyncio.exceptions.CancelledError\n"
+    )
+    # Log-message path (how PYTHON-FASTAPI-X actually arrived)
+    assert observability._before_send(
+        {"logger": "uvicorn.error", "message": msg, "logentry": {"formatted": msg}},
+        {},
+    ) is None
+    # Exception-event path
+    assert observability._before_send(
+        {"exception": {"values": [{"type": "CancelledError", "value": ""}]}},
+        {},
+    ) is None
+    # hint["exc_info"] path
+    try:
+        raise asyncio.CancelledError()
+    except asyncio.CancelledError as exc:
+        hint = {"exc_info": (type(exc), exc, exc.__traceback__)}
+    assert observability._before_send({"message": "task cancelled"}, hint) is None
+    # Real errors still scrub + ship
+    out = observability._before_send(
+        {
+            "message": "RuntimeError: intentional boom",
+            "request": {"headers": {"authorization": "Bearer secret", "host": "api"}},
+        },
+        {},
+    )
+    assert out is not None
+    assert out["message"] == "RuntimeError: intentional boom"
+    assert out["request"]["headers"]["authorization"] == "[redacted]"
+
+
 # ─── Global exception handler ───────────────────────────────────────────────────
 
 @pytest.fixture()
