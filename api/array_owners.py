@@ -1381,7 +1381,8 @@ def _array_alert(inverters: list[dict], array_status: str | None) -> dict:
 
 
 @router.get("/v1/array-owners/fleet-tree")
-def fleet_tree(force: int = 0, authorization: str | None = Header(default=None)) -> dict:
+def fleet_tree(force: int = 0, mode: str = "live",
+               authorization: str | None = Header(default=None)) -> dict:
     """Owner-grouped three-tier sandbox structure — the REAL integrated model:
 
         Alert  (per array, rolled-up worst state)
@@ -1393,11 +1394,17 @@ def fleet_tree(force: int = 0, authorization: str | None = Header(default=None))
     runs within each OWNER group — so moving an inverter genuinely changes its
     cohort. Pass ?force=1 to bypass the 10-min telemetry cache.
 
+    mode=stored|lite|fast|db — INSTANT first-paint path: DB only, no vendor API.
+    The owner spreadsheet loads this first so provider groups stream into the DOM
+    immediately, then upgrades with mode=live (default) in the background.
+
     See api/inverter_fleet.py for the model rationale (owners reproduce the model
     in their head; the vendor's site grouping is just the starting point).
     """
     tenant = _tenant_from_bearer(authorization)
     from . import inverter_fleet
+    _mode = (mode or "live").strip().lower()
+    stored_only = _mode in ("stored", "lite", "fast", "db")
     with SessionLocal() as db:
         # stable_verdicts: judge inverter HEALTH on complete days + per-active-day
         # peer comparison (immune to dawn weather + capture-gap days that fake
@@ -1405,8 +1412,10 @@ def fleet_tree(force: int = 0, authorization: str | None = Header(default=None))
         # app and the emails never disagree about which inverters need attention.
         # Live elements (current kW, daylight, live-dark overlay) are computed
         # independently of the verdict, so the dashboard stays real-time.
-        return inverter_fleet.build_fleet_tree(db, tenant, force_refresh=bool(force),
-                                               stable_verdicts=True)
+        return inverter_fleet.build_fleet_tree(
+            db, tenant, force_refresh=bool(force),
+            stable_verdicts=True, stored_only=stored_only,
+        )
 
 
 class ReassignInverterBody(BaseModel):

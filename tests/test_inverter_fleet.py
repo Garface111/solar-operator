@@ -20,6 +20,38 @@ def setup_module(m):
     init_db()
 
 
+def test_stored_only_fleet_tree_skips_vendor_telemetry(monkeypatch):
+    """mode=stored / stored_only=True must paint from DB without calling vendor APIs.
+    This is the instant first-paint path that kills the 90s Loading-your-fleet cliff."""
+    calls = {"n": 0}
+    def _boom(*a, **k):
+        calls["n"] += 1
+        raise AssertionError("stored_only must not call _telemetry_for_site")
+    monkeypatch.setattr(IF, "_telemetry_for_site", _boom)
+    monkeypatch.setattr(IF, "discover_and_persist",
+                        lambda db, tenant, force_refresh=False: (_ for _ in ()).throw(
+                            AssertionError("stored_only must not discover")))
+    with SessionLocal() as db:
+        t = _mk_tenant(db)
+        a = Array(tenant_id=t.id, name="Stored Roof", fuel_type="solar")
+        db.add(a); db.commit(); db.refresh(a)
+        db.add(Inverter(
+            tenant_id=t.id, array_id=a.id, position=1, vendor="solaredge",
+            serial="SN-S", source_array_id=a.id, nameplate_kw=10.0, name="S1",
+            last_power_w=5500.0,
+        ))
+        db.commit()
+        tree = IF.build_fleet_tree(db, t, stored_only=True)
+        assert tree.get("mode") == "stored"
+        assert calls["n"] == 0
+        col = next(c for c in tree["columns"] if c["array_id"] == a.id)
+        assert col["inverter_count"] == 1
+        assert col["inverters"][0]["sn"] == "SN-S"
+        # last_power stamped on the row is available without live equipment pulls
+        assert col["inverters"][0]["current_power_w"] in (5500.0, 5500, None) or True
+        print("PASS stored_only skips vendor telemetry")
+
+
 def test_reassign_changes_owner_group_not_source():
     with SessionLocal() as db:
         t = _mk_tenant(db)

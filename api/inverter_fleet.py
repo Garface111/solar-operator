@@ -327,6 +327,14 @@ def _resolve_connection(db, arr: Array):
 
 # ─────────────────────────── telemetry (by source) ───────────────────────────
 
+# SolarEdge equipment telemetry is one HTTP call PER inverter. Serial calls on a
+# 190-inverter fleet were the ~90s "Loading your fleet…" first-paint blocker
+# (Paul/Dwight/Sana/Bru/Ken). Cap concurrency so we stay polite to SE's budget
+# without blocking the whole tree on one long chain.
+_SE_TEL_WORKERS = max(4, min(16, int(os.getenv("FLEET_SE_TEL_WORKERS", "12") or "12")))
+_LOCUS_TEL_WORKERS = max(4, min(12, int(os.getenv("FLEET_LOCUS_TEL_WORKERS", "8") or "8")))
+
+
 def _telemetry_for_site(vendor: str, config: dict, site_id, *, force: bool = False) -> dict:
     """Return {serial: {name, model, nameplate_kw, daily, error_code, last_report,
     last_mode, last_power_w}} for one source site. Cached 10 min. `config` is the
@@ -341,6 +349,7 @@ def _telemetry_for_site(vendor: str, config: dict, site_id, *, force: bool = Fal
     config = config or {}
     out: dict[str, dict] = {}
     if vendor == "solaredge":
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         from .adapters import solaredge as _se
         api_key = config.get("api_key")
         try:
@@ -348,26 +357,48 @@ def _telemetry_for_site(vendor: str, config: dict, site_id, *, force: bool = Fal
         except _se.SolarEdgeError as exc:
             log.warning("fleet: inventory fetch failed for site %s: %s", site_id, exc)
             return _site_cache.get(ck, (None, {}))[1] if ck in _site_cache else {}
-        for it in inv:
+
+        def _se_one(it: dict) -> tuple[str, dict] | None:
             sn = it.get("sn")
             if not sn:
-                continue
+                return None
             try:
                 tel = _se.fetch_inverter_telemetry(api_key, int(site_id), sn, days_back=7)
             except _se.SolarEdgeError:
                 tel = {"daily": [], "error_code": None, "last_report": None,
                        "last_mode": None, "last_power_w": None}
-            out[str(sn)] = {
+            return str(sn), {
                 "name": it.get("name"), "model": it.get("model"),
                 "nameplate_kw": it.get("nameplate_kw"),
                 "daily": tel["daily"], "error_code": tel["error_code"],
                 "last_report": tel["last_report"], "last_mode": tel.get("last_mode"),
                 "last_power_w": tel.get("last_power_w"),
             }
+
+        # Parallel per-inverter equipment pulls — the inventory list is small; the
+        # N equipment/{sn}/data calls were the serial cliff.
+        workers = min(_SE_TEL_WORKERS, max(1, len(inv)))
+        if workers <= 1 or len(inv) <= 1:
+            for it in inv:
+                row = _se_one(it)
+                if row:
+                    out[row[0]] = row[1]
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futs = [pool.submit(_se_one, it) for it in inv]
+                for fut in as_completed(futs):
+                    try:
+                        row = fut.result()
+                    except Exception:
+                        log.warning("fleet: SE telemetry worker failed site %s", site_id, exc_info=True)
+                        continue
+                    if row:
+                        out[row[0]] = row[1]
     elif vendor == "locus":
         # Locus exposes each inverter as an INVERTER component; identity is the
         # component id (serials are usually blank). One components call + per-unit
         # latest power + 7-day daily. Cached 10 min like every source.
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         from .adapters import locus as _locus
         creds = {"username": config.get("username"), "password": config.get("password")}
         if config.get("cognito_client_id"):
@@ -379,7 +410,8 @@ def _telemetry_for_site(vendor: str, config: dict, site_id, *, force: bool = Fal
             return _site_cache.get(ck, (None, {}))[1] if ck in _site_cache else {}
         end = now().date()
         start = end - timedelta(days=7)
-        for c in comps:
+
+        def _locus_one(c: dict) -> tuple[str, dict] | None:
             cid = c["component_id"]
             try:
                 latest = _locus.fetch_component_latest(creds, cid)
@@ -390,7 +422,7 @@ def _telemetry_for_site(vendor: str, config: dict, site_id, *, force: bool = Fal
             except _locus.LocusError:
                 daily = []
             model = " ".join(x for x in (c.get("oem"), c.get("model")) if x) or None
-            out[str(cid)] = {
+            return str(cid), {
                 "name": c.get("name") or f"Inverter {cid}",
                 "model": model,
                 "nameplate_kw": c.get("nameplate_kw"),
@@ -400,6 +432,24 @@ def _telemetry_for_site(vendor: str, config: dict, site_id, *, force: bool = Fal
                 "last_mode": None,
                 "last_power_w": latest.get("last_power_w"),
             }
+
+        workers = min(_LOCUS_TEL_WORKERS, max(1, len(comps)))
+        if workers <= 1 or len(comps) <= 1:
+            for c in comps:
+                row = _locus_one(c)
+                if row:
+                    out[row[0]] = row[1]
+        else:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futs = [pool.submit(_locus_one, c) for c in comps]
+                for fut in as_completed(futs):
+                    try:
+                        row = fut.result()
+                    except Exception:
+                        log.warning("fleet: locus telemetry worker failed site %s", site_id, exc_info=True)
+                        continue
+                    if row:
+                        out[row[0]] = row[1]
     _site_cache[ck] = (now(), out)
     return out
 
@@ -592,6 +642,19 @@ def discover_and_persist(db, tenant: Tenant, *, force_refresh: bool = False) -> 
         ).scalars().all()
     }
 
+    # Next free position per owner array (avoid a maxpos SELECT per new serial).
+    next_pos: dict[int, int] = defaultdict(int)
+    for iv in existing.values():
+        if iv.deleted_at is None and iv.array_id is not None:
+            next_pos[iv.array_id] = max(next_pos[iv.array_id], (iv.position or 0) + 1)
+
+    # Build unique site jobs first, then pull telemetry in parallel (DB apply stays
+    # single-threaded). Previously each array waited on the previous site's full
+    # N-inverter equipment fan-out — multi-site fleets paid that cliff end-to-end.
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    jobs: list[tuple] = []  # (arr, conn, vendor, cfg, site_id)
+    seen_site: set[tuple] = set()
+    arr_by_site: dict[tuple, list] = defaultdict(list)
     for arr in arrays:
         conn = _resolve_connection(db, arr)
         if conn is None:
@@ -601,35 +664,66 @@ def discover_and_persist(db, tenant: Tenant, *, force_refresh: bool = False) -> 
         site_id = cfg.get("site_id")
         if not site_id:
             continue
-        tel = _telemetry_for_site(vendor, cfg, site_id, force=force_refresh)
+        skey = ((vendor or ""), str(site_id))
+        arr_by_site[skey].append((arr, conn, vendor, cfg, site_id))
+        if skey in seen_site:
+            continue
+        seen_site.add(skey)
+        jobs.append((skey, vendor, cfg, site_id))
+
+    def _job_tel(job):
+        skey, vendor, cfg, site_id = job
+        try:
+            return skey, _telemetry_for_site(vendor, cfg, site_id, force=force_refresh)
+        except Exception:
+            log.warning("fleet: discover telemetry failed for %s", skey, exc_info=True)
+            return skey, {}
+
+    tel_by_site: dict[tuple, dict] = {}
+    if len(jobs) <= 1:
+        for job in jobs:
+            k, tel = _job_tel(job)
+            tel_by_site[k] = tel
+    else:
+        with ThreadPoolExecutor(max_workers=min(6, len(jobs))) as pool:
+            futs = [pool.submit(_job_tel, job) for job in jobs]
+            for fut in as_completed(futs):
+                try:
+                    k, tel = fut.result()
+                except Exception:
+                    continue
+                tel_by_site[k] = tel
+
+    # Apply telemetry → Inverter rows (one site's tel can feed multiple arrays that
+    # share a connection; we seed NEW serials onto the first array that owns the site).
+    for skey, owners in arr_by_site.items():
+        tel = tel_by_site.get(skey) or {}
+        if not tel:
+            continue
+        # Prefer the array that actually holds the connection as the discovery home.
+        home_arr, home_conn, vendor, cfg, site_id = owners[0]
         for serial, m in tel.items():
             key = (vendor, str(serial))
             iv = existing.get(key)
             if iv is None:
-                # Find the next position under this (source) array.
-                maxpos = db.execute(
-                    select(Inverter.position).where(
-                        Inverter.tenant_id == tenant.id,
-                        Inverter.array_id == arr.id,
-                        Inverter.deleted_at.is_(None),
-                    ).order_by(Inverter.position.desc())
-                ).scalars().first()
+                pos = next_pos[home_arr.id]
+                next_pos[home_arr.id] = pos + 1
                 candidate = Inverter(
                     tenant_id=tenant.id,
-                    array_id=arr.id,                 # owner grouping starts = source
-                    position=(maxpos or 0) + 1,
+                    array_id=home_arr.id,                 # owner grouping starts = source
+                    position=pos,
                     vendor=vendor, serial=str(serial),
                     source_site_id=str(site_id),
-                    source_connection_id=getattr(conn, "id", None),
-                    source_array_id=arr.id,
+                    source_connection_id=getattr(home_conn, "id", None),
+                    source_array_id=home_arr.id,
                 )
                 iv = _insert_inverter_race_safe(db, candidate)
                 if iv is not candidate:
                     # Concurrent discover won — refresh source pointers only;
                     # never clobber owner array_id/position.
                     iv.source_site_id = str(site_id)
-                    iv.source_connection_id = getattr(conn, "id", None)
-                    iv.source_array_id = iv.source_array_id or arr.id
+                    iv.source_connection_id = getattr(home_conn, "id", None)
+                    iv.source_array_id = iv.source_array_id or home_arr.id
                     if iv.deleted_at is not None:
                         iv.deleted_at = None
                 existing[key] = iv
@@ -637,8 +731,8 @@ def discover_and_persist(db, tenant: Tenant, *, force_refresh: bool = False) -> 
                 # Refresh source pointers in case the connection moved, but DO NOT
                 # touch array_id/position (owner's layout).
                 iv.source_site_id = str(site_id)
-                iv.source_connection_id = getattr(conn, "id", None)
-                iv.source_array_id = iv.source_array_id or arr.id
+                iv.source_connection_id = getattr(home_conn, "id", None)
+                iv.source_array_id = iv.source_array_id or home_arr.id
                 if iv.deleted_at is not None:
                     iv.deleted_at = None
             # metadata refresh (cheap, safe). An OWNER-renamed inverter
@@ -654,6 +748,39 @@ def discover_and_persist(db, tenant: Tenant, *, force_refresh: bool = False) -> 
             if m.get("nameplate_kw") is not None:
                 iv.nameplate_kw = m.get("nameplate_kw")
             iv.last_seen_at = now()
+            # Stamp live power so the stored/lite fleet-tree path (instant first
+            # paint, no vendor round-trips) still shows kW-now instead of blanks
+            # until the slow live enrichment finishes. API-polled vendors used to
+            # skip this column entirely; that made mode=stored look empty on power.
+            lp = m.get("last_power_w")
+            if lp is not None:
+                try:
+                    lp_f = float(lp)
+                except (TypeError, ValueError):
+                    lp_f = None
+                if lp_f is not None and lp_f >= 0:
+                    iv.last_power_w = lp_f
+                    iv.last_power_at = now()
+                    iv.last_power_estimated = False
+            lr = m.get("last_report")
+            if lr:
+                # Best-effort: keep source clock when the vendor gave us one.
+                # Store as naive UTC so it matches models.now() (naive utcnow) and
+                # _live_power_w's subtraction never mixes aware/naive.
+                try:
+                    parsed = None
+                    if isinstance(lr, str):
+                        raw = lr.replace("Z", "+00:00")
+                        parsed = datetime.fromisoformat(raw)
+                    elif isinstance(lr, datetime):
+                        parsed = lr
+                    if parsed is not None:
+                        if parsed.tzinfo is not None:
+                            from datetime import timezone as _tz
+                            parsed = parsed.astimezone(_tz.utc).replace(tzinfo=None)
+                        iv.source_last_data_at = parsed
+                except Exception:
+                    pass
 
     db.commit()
     return _persisted_inverters(db, tenant)
@@ -951,11 +1078,24 @@ def _live_power_w(iv: Inverter, m: dict, *, daylight: bool = True,
     # REGRESSION FIXED: this had collapsed to a 15-min "own_fresh" window with no
     # daylight tier, which blanked every extension array between its (hourly) recaptures
     # — Ford's "Waterford produces on Solar.web but shows no live feed here".
-    _lpa = getattr(iv, "last_power_at", None)
-    _slda = getattr(iv, "source_last_data_at", None)
+    _lpa = _sane_dt(getattr(iv, "last_power_at", None))
+    _slda = _sane_dt(getattr(iv, "source_last_data_at", None))
     _lpw = getattr(iv, "last_power_w", None)
-    own_recent = (_lpa is not None and (now() - _lpa) <= _POWER_FRESH)
-    src_live = (_slda is None or (now() - _slda) <= _SOURCE_LIVE_FRESH)
+    def _age_ok(dt, window):
+        if dt is None:
+            return False
+        try:
+            # Guard mixed aware/naive (e.g. ISO-Z stamps vs models.now naive UTC).
+            n = now()
+            if getattr(dt, "tzinfo", None) is not None and getattr(n, "tzinfo", None) is None:
+                dt = dt.replace(tzinfo=None)
+            elif getattr(dt, "tzinfo", None) is None and getattr(n, "tzinfo", None) is not None:
+                n = n.replace(tzinfo=None)
+            return (n - dt) <= window
+        except Exception:
+            return False
+    own_recent = _age_ok(_lpa, _POWER_FRESH)
+    src_live = (_slda is None or _age_ok(_slda, _SOURCE_LIVE_FRESH))
     capture_live = own_recent and src_live and daylight
     if base is None and _lpw is not None and capture_live:
         base = _lpw
@@ -1103,7 +1243,8 @@ _FLEET_TZ = "America/New_York"
 
 
 def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
-                     stable_verdicts: bool = False) -> dict:
+                     stable_verdicts: bool = False,
+                     stored_only: bool = False) -> dict:
     """Owner-grouped 3-tier tree. Inverters are read from the persisted table
     (owner's arrangement), telemetry pulled from each one's SOURCE site, then
     peer-analyzed WITHIN each owner array group — so a drag changes real cohorts.
@@ -1113,8 +1254,18 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
     dawn day) and uses a cohort-relative "gone quiet" test, so early-morning
     weather variability stops producing false "needs attention" alarms. The live
     dashboard leaves it False so it keeps showing the real-time picture.
+
+    stored_only=True is the INSTANT first-paint path for the owner spreadsheet:
+    skip vendor discovery + live equipment pulls, build entirely from persisted
+    Inverter / InverterDaily / last_power_* rows. Frontend paints this in <1s,
+    then upgrades with the live tree in the background. Without this, a cold
+    SolarEdge site cache serially fetched ~190 equipment endpoints (~60–90s)
+    before anything was usable.
     """
-    inverters = discover_and_persist(db, tenant, force_refresh=force_refresh)
+    if stored_only:
+        inverters = _persisted_inverters(db, tenant)
+    else:
+        inverters = discover_and_persist(db, tenant, force_refresh=force_refresh)
 
     arrays = db.execute(
         select(Array).where(Array.tenant_id == tenant.id, Array.deleted_at.is_(None))
@@ -1180,6 +1331,109 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
     for iv in inverters:
         by_array[iv.array_id].append(iv)
 
+    # ── batched InverterDaily (was N+1) ───────────────────────────────────────
+    # _merged_daily / _stored_inverter_daily used to SELECT per inverter inside
+    # the hot loop. On a 190-inverter fleet that's 190 round-trips even in the
+    # stored/lite path. Load recent days for every inverter once.
+    # Match _stored_inverter_daily: last 14 ROWS per inverter (not a calendar
+    # window) — a 20-day API outage must not blank the graph.
+    _daily_by_iv: dict[int, list[dict]] = defaultdict(list)
+    _iv_ids = [iv.id for iv in inverters if getattr(iv, "id", None) is not None]
+    if _iv_ids:
+        try:
+            _drows = db.execute(
+                select(InverterDaily)
+                .where(InverterDaily.inverter_id.in_(_iv_ids))
+                .order_by(InverterDaily.day.desc())
+            ).scalars().all()
+            _tmp: dict[int, list] = defaultdict(list)
+            for r in _drows:
+                bucket = _tmp[r.inverter_id]
+                if len(bucket) >= 14:
+                    continue
+                bucket.append(r)
+            for iid, rows in _tmp.items():
+                _daily_by_iv[iid] = [
+                    {"date": r.day.isoformat(), "kwh": r.kwh}
+                    for r in sorted(rows, key=lambda x: x.day)
+                ]
+        except Exception:
+            log.warning("fleet: batched InverterDaily load failed", exc_info=True)
+
+    def _merged_daily_cached(inverter_id: int, live_series: list[dict]) -> list[dict]:
+        """Same merge rule as _merged_daily, but against the preloaded store map."""
+        merged: dict[str, float] = {}
+        for pt in _daily_by_iv.get(inverter_id, []):
+            merged[pt["date"]] = float(pt["kwh"] or 0)
+        for pt in (live_series or []):
+            d = pt.get("date")
+            if isinstance(d, datetime):
+                d = d.date().isoformat()
+            elif isinstance(d, _date):
+                d = d.isoformat()
+            elif isinstance(d, str):
+                d = d[:10]
+            else:
+                continue
+            k = pt.get("kwh")
+            if k is None:
+                continue
+            try:
+                k = float(k)
+            except (TypeError, ValueError):
+                continue
+            merged[d] = max(merged.get(d, 0), k)
+        out = [{"date": d, "kwh": round(v, 3)} for d, v in sorted(merged.items())]
+        return out[-14:]
+
+    # Prefetch unique site telemetry OUTSIDE the inverter loop when live, so a
+    # multi-array site is only pulled once and (with the parallel SE/Locus
+    # workers) the whole fleet warms in one bounded burst. Sites themselves also
+    # run concurrently — a 30-site SolarEdge book used to pay inventory+equipment
+    # serially per site even after per-inverter fan-out.
+    _tel_by_key: dict[tuple, dict] = {}
+    if not stored_only:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        _site_jobs: list[tuple[tuple, str, dict, object]] = []
+        _seen_sites: set[tuple] = set()
+        for iv in inverters:
+            src_arr = array_by_id.get(iv.source_array_id) or array_by_id.get(iv.array_id)
+            conn = _conn_for(src_arr) if src_arr is not None else None
+            if conn is None:
+                continue
+            site_id = (conn.config or {}).get("site_id")
+            if not site_id:
+                continue
+            key = ((conn.vendor or iv.vendor or ""), str(site_id))
+            if key in _seen_sites:
+                continue
+            _seen_sites.add(key)
+            _site_jobs.append((key, conn.vendor or iv.vendor, conn.config or {}, site_id))
+
+        def _pull_site(job):
+            key, vendor, cfg, sid = job
+            try:
+                return key, _telemetry_for_site(vendor, cfg, sid, force=force_refresh)
+            except Exception:
+                log.warning("fleet: site telemetry failed for %s", key, exc_info=True)
+                return key, {}
+
+        if len(_site_jobs) <= 1:
+            for job in _site_jobs:
+                k, tel = _pull_site(job)
+                _tel_by_key[k] = tel
+        else:
+            # Bound site-level concurrency; each site already fans out inverters.
+            sw = min(6, len(_site_jobs))
+            with ThreadPoolExecutor(max_workers=sw) as pool:
+                futs = [pool.submit(_pull_site, job) for job in _site_jobs]
+                for fut in as_completed(futs):
+                    try:
+                        k, tel = fut.result()
+                    except Exception:
+                        continue
+                    _tel_by_key[k] = tel
+
     columns: list[dict] = []
     inv_total = 0
     # Regional (central-VT) sun-up default, computed once per build — the
@@ -1218,9 +1472,15 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
             src_arr = array_by_id.get(iv.source_array_id) or arr
             conn = _conn_for(src_arr)
             tel_map = {}
-            if conn is not None and (conn.config or {}).get("site_id"):
-                tel_map = _telemetry_for_site(conn_vendor, conn.config or {},
-                                              conn.config["site_id"], force=force_refresh)
+            if not stored_only and conn is not None and (conn.config or {}).get("site_id"):
+                key = ((conn.vendor or conn_vendor or ""), str(conn.config["site_id"]))
+                tel_map = _tel_by_key.get(key) or {}
+                if not tel_map and key not in _tel_by_key:
+                    # Fallback if prefetch missed this site.
+                    tel_map = _telemetry_for_site(
+                        conn_vendor, conn.config or {}, conn.config["site_id"],
+                        force=force_refresh,
+                    )
             m = tel_map.get(iv.serial, {})
             # --- API-INDEPENDENT HISTORY STORE ---
             # 1) Whatever daily readings we just saw LIVE (e.g. SolarEdge's API),
@@ -1228,7 +1488,7 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
             #    time that API is slow/down/off-peak. (Extension vendors already
             #    persisted their readings at capture time.)
             live_daily = m.get("daily") or []
-            if live_daily:
+            if live_daily and not stored_only:
                 try:
                     _persist_daily_series(db, tenant.id, iv.id, live_daily,
                                           source=f"{conn_vendor or 'api'}_live")
@@ -1237,7 +1497,7 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
             # 2) The graph's series is now STORAGE-authoritative (stored history with
             #    any fresh live readings merged on top) — never a bare live read that
             #    can vanish. Falls back gracefully to whatever live gave us.
-            merged = _merged_daily(db, iv.id, live_daily)
+            merged = _merged_daily_cached(iv.id, live_daily)
             m = dict(m)
             m["daily"] = merged if merged else live_daily
             # Extension vendors often lack live-API last_report — fall back to
@@ -1251,6 +1511,10 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
                 if _pick is not None:
                     _lr = _pick.isoformat()
             m["last_report"] = _lr
+            # stored/lite path: seed last_power from the Inverter row so kW-now
+            # paints without a live equipment call.
+            if m.get("last_power_w") is None and getattr(iv, "last_power_w", None) is not None:
+                m["last_power_w"] = iv.last_power_w
             meta_by_serial[iv.serial] = m
             units.append({
                 "id": iv.serial,
@@ -1540,14 +1804,17 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
     attention = sum(c["alert"]["count"] for c in columns)
     # Commit the daily history we snapshotted into InverterDaily during the build
     # (persist-on-read). Never let a storage hiccup break the tree the owner sees.
-    try:
-        db.commit()
-    except Exception:
-        log.warning("fleet: daily-history commit failed", exc_info=True)
-        db.rollback()
+    # stored/lite path never writes live daily, so skip the commit.
+    if not stored_only:
+        try:
+            db.commit()
+        except Exception:
+            log.warning("fleet: daily-history commit failed", exc_info=True)
+            db.rollback()
     return {
         "generated_at": now().replace(microsecond=0).isoformat() + "Z",
         "tiers": ["alerts", "arrays", "inverters"],
+        "mode": "stored" if stored_only else "live",
         "columns": columns,
         "summary": {
             "arrays_total": len(columns),
