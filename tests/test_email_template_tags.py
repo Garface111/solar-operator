@@ -321,3 +321,90 @@ def test_render_email_default_template_org_greeting():
     )
     _, html, _ = render_email(subject_template=None, body_template=None, ctx=ctx)
     assert "Dear Green Mountain Community Solar," in html
+
+
+# ── regenerate_template_via_ai: non-JSON LLM replies must not 500 ─────────────
+# Sentry PYTHON-FASTAPI-17: ValueError "LLM response did not contain valid JSON"
+# when the model declined in prose (or returned empty content). The helper must
+# surface that text as the assistant reply and leave the template unchanged.
+
+
+class _FakeAnthropicResp:
+    def __init__(self, text: str, status_code: int = 200):
+        self.status_code = status_code
+        self._text = text
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import httpx
+            raise httpx.HTTPStatusError(
+                "err", request=None, response=self  # type: ignore[arg-type]
+            )
+
+    def json(self):
+        return {"content": [{"type": "text", "text": self._text}]}
+
+
+def _call_regen(monkeypatch, llm_text: str, *, current_body: str = "<p>Original</p>"):
+    import httpx
+    from api.email_templates import regenerate_template_via_ai
+
+    monkeypatch.setattr(
+        httpx, "post", lambda *a, **k: _FakeAnthropicResp(llm_text)
+    )
+    return regenerate_template_via_ai(
+        current_body=current_body,
+        current_subject="Subj {{client_name}}",
+        messages=[{"role": "user", "content": "Make it warmer"}],
+        api_key="sk-test",
+    )
+
+
+def test_regen_prose_decline_does_not_raise(monkeypatch):
+    """Polite prose decline (the live-demo muffin-recipe case) stays a soft no."""
+    prose = (
+        "I can't put a muffin recipe in a solar generation report email — "
+        "tell me what you'd like to change about the greeting or tone."
+    )
+    out = _call_regen(monkeypatch, prose)
+    assert prose in out["reply"]
+    assert out["body"] == "<p>Original</p>"
+    assert out["subject"] is None
+
+
+def test_regen_empty_llm_content_does_not_raise(monkeypatch):
+    """Empty model content used to raise JSONDecodeError → ValueError 502."""
+    out = _call_regen(monkeypatch, "")
+    assert out["body"] == "<p>Original</p>"
+    assert out["subject"] is None
+    assert isinstance(out["reply"], str) and out["reply"]
+    assert "JSON" not in out["reply"]
+
+
+def test_regen_malformed_braced_garbage_does_not_raise(monkeypatch):
+    out = _call_regen(monkeypatch, "Sure! {not: valid json, trailing")
+    assert out["body"] == "<p>Original</p>"
+    assert "Sure!" in out["reply"] or out["reply"]
+
+
+def test_regen_valid_json_still_applies(monkeypatch):
+    payload = (
+        '{"reply": "Tightened the tone.", '
+        '"body": "<p>Hi {{greeting}},</p>", '
+        '"subject": null}'
+    )
+    out = _call_regen(monkeypatch, payload)
+    assert out["reply"] == "Tightened the tone."
+    assert out["body"] == "<p>Hi {{greeting}},</p>"
+    assert out["subject"] is None
+
+
+def test_regen_fenced_json_still_applies(monkeypatch):
+    payload = (
+        "```json\n"
+        '{"reply": "Ok.", "body": "<p>New</p>", "subject": "Q report"}\n'
+        "```"
+    )
+    out = _call_regen(monkeypatch, payload)
+    assert out["body"] == "<p>New</p>"
+    assert out["subject"] == "Q report"

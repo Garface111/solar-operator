@@ -494,7 +494,9 @@ def regenerate_template_via_ai(
     system_prompt/allowed_tags default to the NEPOOL client-report variant;
     the AO offtaker studio passes its own prompt + tag set.
     Returns {'reply': str, 'body': str, 'subject': str | None}.
-    Raises httpx.HTTPStatusError on API failure, ValueError on bad JSON.
+    Raises httpx.HTTPStatusError on API failure. Non-JSON / empty model
+    replies are returned as a polite assistant message with the template
+    left unchanged (never raises ValueError for parse failures).
     """
     model = os.getenv("INGEST_LLM_MODEL", "claude-sonnet-4-5")
     system = (
