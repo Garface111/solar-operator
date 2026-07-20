@@ -470,6 +470,8 @@ from .energy_agent_sovereign_desk import router as energy_agent_sovereign_desk_r
 app.include_router(energy_agent_sovereign_desk_router)
 from .ford_escalations import router as ford_escalations_router
 app.include_router(ford_escalations_router)
+from .telemetry import router as telemetry_router
+app.include_router(telemetry_router)
 if _SO_DEV_ENABLED:
     import logging
     logging.getLogger("uvicorn.error").warning(

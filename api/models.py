@@ -2424,3 +2424,25 @@ class ProspectusShare(Base):
     __table_args__ = (
         Index("ix_prospectus_shares_tenant", "tenant_id", "array_id"),
     )
+
+class SessionPing(Base):
+    """Web time-on-site: one row per tenant per minute of visible signed-in use.
+
+    Frontend pings every 60s while the tab is visible; time on site =
+    COUNT(DISTINCT minute_bucket). Bounded growth (~1 row/tenant/minute max).
+    No session table existed before 2026-07 — login_tokens only recorded logins.
+    """
+    __tablename__ = "session_ping"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    email: Mapped[str | None] = mapped_column(String(200), nullable=True, index=True)
+    day: Mapped[date] = mapped_column(Date, index=True)
+    # Floored to the minute (seconds=0). Unique with tenant_id for upsert.
+    minute_bucket: Mapped[datetime] = mapped_column(DateTime, index=True)
+    path: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "minute_bucket", name="uq_session_ping_tenant_minute"),
+        Index("ix_session_ping_tenant_day", "tenant_id", "day"),
+    )
