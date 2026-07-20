@@ -408,3 +408,83 @@ def test_regen_fenced_json_still_applies(monkeypatch):
     out = _call_regen(monkeypatch, payload)
     assert out["body"] == "<p>New</p>"
     assert out["subject"] == "Q report"
+
+
+# ── regenerate_template_via_ai: Anthropic 400 must not 502 ────────────────────
+# Sentry PYTHON-FASTAPI-10: Client error '400 Bad Request' for
+# https://api.anthropic.com/v1/messages on offtaker email-template/chat.
+# Soft-fail with template unchanged (same UX as prose declines).
+
+
+def test_regen_anthropic_400_soft_fails(monkeypatch):
+    import httpx
+    from api.email_templates import regenerate_template_via_ai
+
+    monkeypatch.setattr(
+        httpx, "post", lambda *a, **k: _FakeAnthropicResp("bad", status_code=400)
+    )
+    out = regenerate_template_via_ai(
+        current_body="<p>Original</p>",
+        current_subject="Subj",
+        messages=[{"role": "user", "content": "testing"}],
+        api_key="sk-test",
+    )
+    assert out["body"] == "<p>Original</p>"
+    assert out["subject"] is None
+    assert isinstance(out["reply"], str) and out["reply"]
+    assert "writing assistant" in out["reply"].lower() or "try again" in out["reply"].lower()
+
+
+def test_normalize_anthropic_messages_merges_consecutive_users():
+    from api.email_templates import _normalize_anthropic_messages
+
+    out = _normalize_anthropic_messages([
+        {"role": "user", "content": "make it warmer"},
+        {"role": "user", "content": "  and shorter  "},
+        {"role": "assistant", "content": "ok"},
+        {"role": "assistant", "content": ""},  # dropped
+        {"role": "user", "content": "thanks"},
+    ])
+    assert out == [
+        {"role": "user", "content": "make it warmer\n\nand shorter"},
+        {"role": "assistant", "content": "ok"},
+        {"role": "user", "content": "thanks"},
+    ]
+
+
+def test_normalize_anthropic_messages_drops_leading_assistant():
+    from api.email_templates import _normalize_anthropic_messages
+
+    out = _normalize_anthropic_messages([
+        {"role": "assistant", "content": "stale"},
+        {"role": "user", "content": "hi"},
+    ])
+    assert out == [{"role": "user", "content": "hi"}]
+
+
+def test_regen_sends_normalized_messages(monkeypatch):
+    """Consecutive user turns must be merged before the Anthropic POST."""
+    import httpx
+    from api.email_templates import regenerate_template_via_ai
+
+    captured = {}
+
+    def fake_post(*a, **k):
+        captured["json"] = k.get("json") or (a[1] if len(a) > 1 else None)
+        return _FakeAnthropicResp(
+            '{"reply": "Ok.", "body": "<p>New</p>", "subject": null}'
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    regenerate_template_via_ai(
+        current_body="<p>Original</p>",
+        current_subject="Subj",
+        messages=[
+            {"role": "user", "content": "first"},
+            {"role": "user", "content": "second"},
+        ],
+        api_key="sk-test",
+    )
+    assert captured["json"]["messages"] == [
+        {"role": "user", "content": "first\n\nsecond"},
+    ]
