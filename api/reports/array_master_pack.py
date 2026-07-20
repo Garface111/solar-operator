@@ -78,15 +78,22 @@ def _hdr_row(ws, row: int, labels: list[str]) -> None:
         c.border = _THIN
 
 
-def _autosize(ws, max_width: int = 28) -> None:
-    for col in ws.columns:
-        letter = get_column_letter(col[0].column)
+def _autosize(ws, max_width: int = 28, sample_rows: int = 80) -> None:
+    """Set column widths from header + a sample of rows (not the full sheet).
+
+    openpyxl's `ws.columns` materializes every cell — death on a Daily sheet with
+    thousands of rows × dozens of arrays in a fleet zip. Sample only.
+    """
+    max_row = min(ws.max_row or 1, sample_rows)
+    max_col = ws.max_column or 1
+    for col in range(1, max_col + 1):
         width = 10
-        for cell in col:
-            if cell.value is None:
+        for row in range(1, max_row + 1):
+            val = ws.cell(row, col).value
+            if val is None:
                 continue
-            width = min(max_width, max(width, len(str(cell.value)) + 2))
-        ws.column_dimensions[letter].width = width
+            width = min(max_width, max(width, len(str(val)) + 2))
+        ws.column_dimensions[get_column_letter(col)].width = width
 
 
 def _load_array_pack(db, tenant_id: str, array_id: int) -> Optional[dict]:
@@ -370,7 +377,10 @@ def _render_workbook(pack: dict) -> bytes:
         ws.cell(i, 3).border = _THIN
     if not pack["daily"]:
         ws.cell(2, 1, "No daily generation rows yet.").font = _MUTED
-    _autosize(ws)
+    # Fixed widths — never walk thousands of daily rows for autosize.
+    ws.column_dimensions["A"].width = 14
+    ws.column_dimensions["B"].width = 12
+    ws.column_dimensions["C"].width = 18
 
     # ── YoY ───────────────────────────────────────────────────────────────
     ws = wb.create_sheet("YoY")
@@ -438,7 +448,9 @@ def build_fleet_master_zip(tenant_id: str, *, db=None) -> tuple[bytes, int]:
         ).scalars().all()
         buf = io.BytesIO()
         n = 0
-        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        # STORED is much faster than DEFLATED for already-compact xlsx (zip-of-zips);
+        # fleet packs with 50–80 arrays used to edge past the Netlify ~26s proxy cap.
+        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_STORED) as zf:
             for arr in arrays:
                 blob = build_array_master_workbook(tenant_id, arr.id, db=db)
                 if not blob:
