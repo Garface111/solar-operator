@@ -38,6 +38,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from starlette.background import BackgroundTask
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import select, func, or_
+from sqlalchemy.exc import OperationalError
 
 from . import branding
 from .bill_attribution import distribute_kwh_by_calendar_day
@@ -554,15 +555,34 @@ def issue_magic_link(email: str, persist: bool = True, product: str | None = Non
     # nepooloperator.com/accounts — keyed off the TENANT's product. See branding.
     brand = branding.brand_name(product)
     link = branding.magic_link_url(product, token)
+    # Say the REAL lifetime. This copy hardcoded "expires in 15 minutes", so a
+    # link issued with a longer TTL told the recipient the opposite of the truth
+    # — someone handed a long-lived evaluation link would read "15 minutes",
+    # assume it was dead, and not bother clicking (Mathew Rubin, 2026-07-20).
+    # Derived from the constant, so the copy can never drift from the behaviour.
+    _mins = max(1, int(LOGIN_LINK_TTL_SECONDS // 60))
+    if LOGIN_LINK_TTL_SECONDS >= 365 * 24 * 3600:
+        _life = "does not expire"
+        _life_phrase = "single use, does not expire"
+    elif _mins >= 2880:
+        _life = f"expires in {_mins // 1440} days"
+        _life_phrase = f"{_life}, single use"
+    elif _mins >= 120:
+        _life = f"expires in {_mins // 60} hours"
+        _life_phrase = f"{_life}, single use"
+    else:
+        _life = f"expires in {_mins} minutes"
+        _life_phrase = f"{_life}, single use"
+
     # Render in the tenant's brand skin (NEPOOL light / Array Operator dark).
     body_html = (
         f"<p>Click below to sign in to your <strong>{brand}</strong> account. "
-        f"This link expires in 15 minutes and can only be used once.</p>"
+        f"This link {_life} and can only be used once.</p>"
         f'<p style="font-size:12px;word-break:break-all;margin-top:20px;opacity:.6;">'
         f"Or paste this link into your browser:<br>{link}</p>"
     )
     html = render_email_skin(
-        preheader=f"Your secure {brand} sign-in link — expires in 15 minutes.",
+        preheader=f"Your secure {brand} sign-in link — {_life}.",
         intro_line=f"Sign-in link for {tenant_name or 'your account'}",
         body_html=body_html,
         cta={"label": "Sign in to my account", "url": link},
@@ -572,7 +592,7 @@ def issue_magic_link(email: str, persist: bool = True, product: str | None = Non
     text = render_email_skin_text(
         intro_line=f"Sign-in link for {tenant_name or 'your account'}",
         body_text=(
-            f"Sign in to your {brand} account (expires in 15 minutes, single use):\n\n{link}"
+            f"Sign in to your {brand} account ({_life_phrase}):\n\n{link}"
         ),
         cta={"label": "Sign in", "url": link},
         product=product,
@@ -3283,7 +3303,17 @@ def get_merge_suggestions(client_id: int,
         ).scalar_one_or_none()
         if not client:
             raise HTTPException(404, "client not found")
-        return {"ok": True, "suggestions": _merge_candidates_for(db, t.id, client)}
+        # Merge suggestions are advisory — a transient lock/statement timeout
+        # (e.g. contention on `arrays` behind a concurrent write/DDL) must not
+        # 500 the whole endpoint. Degrade to no suggestions instead.
+        try:
+            suggestions = _merge_candidates_for(db, t.id, client)
+        except OperationalError:
+            logger.warning(
+                "merge-suggestions: lock/timeout computing candidates for "
+                "tenant=%s client=%s — returning none", t.id, client_id)
+            suggestions = []
+        return {"ok": True, "suggestions": suggestions}
 
 
 class MergeIntoBody(BaseModel):
