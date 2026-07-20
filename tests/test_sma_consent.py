@@ -266,6 +266,29 @@ def test_request_consent_sends_bearer_json_loginhint(monkeypatch):
     assert captured["headers"].get("Authorization") == "Bearer TOK"
 
 
+def test_production_bc_base_default_is_async_auth_not_monitoring(monkeypatch):
+    """Regression: productive bc-authorize is on async-auth.smaapis.de.
+
+    monitoring.smaapis.de/oauth2/v2/bc-authorize returns HTML 504 Gateway
+    Time-out (live probe); SMA docs list async-auth for production. A wrong
+    default (or SMA_BC_BASE=monitoring) is what filled Sentry on /sma/consent.
+    """
+    import importlib
+
+    import api.inverters.sma as sma
+
+    monkeypatch.delenv("SMA_BC_BASE", raising=False)
+    reloaded = importlib.reload(sma)
+    try:
+        assert reloaded.BC_BASE == "https://async-auth.smaapis.de"
+        assert reloaded._BC_URL == (
+            "https://async-auth.smaapis.de/oauth2/v2/bc-authorize"
+        )
+        assert "monitoring" not in reloaded.BC_BASE
+    finally:
+        importlib.reload(sma)  # restore module state for later tests
+
+
 def test_discover_systems_parses_plantid_shape(monkeypatch):
     """VERIFIED /plants shape: {"plants":[{plantId,name,timezone}]}."""
     import api.inverters.sma as sma
