@@ -1710,6 +1710,12 @@ class BillingReportSubscription(Base):
     client_email: Mapped[str | None] = mapped_column(String(200), nullable=True)
     cc_emails: Mapped[str | None] = mapped_column(Text, nullable=True)
     operator_email: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # Per-offtaker custom invoice email letter (plain text). When set, this
+    # offtaker's sends use it instead of the tenant master offtaker email
+    # template. NULL = fall back to the master (Tenant.offtaker_email_*).
+    # Draft.note still overrides for a single send; "Revert to default" clears
+    # this so the offtaker returns to the master letter.
+    email_letter: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Format choices (Ford: "you should be able to choose")
     formats: Mapped[dict | None] = mapped_column(JSON, default=lambda: ["pdf"])

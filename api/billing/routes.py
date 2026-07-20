@@ -3442,13 +3442,17 @@ def _calc_credit_for_budget(sub):
 
 
 def _draft_letter_default(d: ReportDraft, sub, email_fields: dict) -> Optional[dict]:
-    """{'letter': plain-text mass-template letter, 'subject': rendered subject}
-    for THIS draft — what the send uses when the operator hasn't written a
-    note, so the card's 'Edit email' box + envelope prefill with exactly what
-    would go out. Rendered from the draft's own snapshot figures (no
-    build_match). email_fields comes from delivery._offtaker_email_fields —
-    fetch it ONCE per request and share it across a draft loop (a per-draft
-    fetch would be the next N+1)."""
+    """{'letter', 'subject', 'source'} for THIS draft's Edit-email prefill.
+
+    Hierarchy (master is the fallback):
+      1. Per-offtaker custom letter on the subscription (``sub.email_letter``)
+         → exclusive to this offtaker for every invoice until reverted
+      2. Tenant master offtaker email template (merge-tag letter)
+      3. Built-in default letter
+
+    ``source`` is ``"custom"`` or ``"master"`` so the UI can badge + show
+    Revert. Draft.note still overrides at send time for a one-off edit.
+    """
     if not email_fields:
         return None
     try:
@@ -3480,8 +3484,16 @@ def _draft_letter_default(d: ReportDraft, sub, email_fields: dict) -> Optional[d
         subject = render_merge(subj_t, ctx)
         if not ctx["invoice_number"]:
             subject = subject.replace(" ()", "")
-        return {"letter": html_to_text(render_merge(body_t, ctx)),
-                "subject": subject}
+        master_letter = html_to_text(render_merge(body_t, ctx))
+        # Per-offtaker custom letter wins over the master as this offtaker's default.
+        custom = ""
+        if sub is not None:
+            custom = (getattr(sub, "email_letter", None) or "").strip()
+        if custom:
+            return {"letter": custom, "subject": subject, "source": "custom",
+                    "master_letter": master_letter}
+        return {"letter": master_letter, "subject": subject, "source": "master",
+                "master_letter": master_letter}
     except Exception:  # noqa: BLE001 — the prefill is a nicety, never break a draft
         logger.exception("draft letter-default render failed")
         return None
@@ -3518,12 +3530,21 @@ def _draft_dict(d: ReportDraft, sub=None, gmp_auto_status=None, operator_name=No
     _letter = (_draft_letter_default(d, sub, email_fields)
                if email_fields else None) or {}
     rate_meta = rate_meta or {}
+    _has_draft_note = bool((d.note or "").strip())
+    _email_src = "custom" if (
+        _has_draft_note or _letter.get("source") == "custom"
+    ) else "master"
     return {
-        # The mass-template letter + subject rendered for this draft — the
-        # operator's per-draft note overrides the letter; None when
-        # email_fields wasn't supplied (payloads that don't render the email).
+        # Effective default letter for this offtaker (custom exclusive if set,
+        # else master). Per-draft note still overrides at send time.
         "email_letter_default": _letter.get("letter"),
         "email_subject_default": _letter.get("subject"),
+        # "custom" = this offtaker has their own letter (or this draft was edited);
+        # "master" = falling back to the shared master offtaker email.
+        "email_source": _email_src,
+        "email_is_custom": _email_src == "custom",
+        # Pure master render — used by Revert so we can restore without a round-trip.
+        "email_letter_master": _letter.get("master_letter") or _letter.get("letter"),
         "id": d.id,
         "subscription_id": d.subscription_id,
         # Display name follows the LIVE subscription (renaming the offtaker
@@ -4035,12 +4056,19 @@ def get_draft_gmp_bill(draft_id: int, authorization: Optional[str] = Header(defa
 
 class DraftPatch(BaseModel):
     note: Optional[str] = None
+    # Per-offtaker permanent custom letter (BillingReportSubscription.email_letter).
+    # Send a string to set; explicit null clears (revert to master). Omitted = leave.
+    email_letter: Optional[str] = None
 
 
 @router.patch("/drafts/{draft_id}")
 def patch_draft(draft_id: int, body: DraftPatch,
                 authorization: Optional[str] = Header(default=None)):
-    """Modify a draft before sending (Paul: 'approve it or MODIFY it and send')."""
+    """Modify a draft before sending (Paul: 'approve it or MODIFY it and send').
+
+    Also persists ``email_letter`` onto the offtaker subscription when provided
+    so a custom letter sticks for this offtaker (master remains the fallback).
+    """
     t = tenant_from_session(authorization)
     require_not_demo(t)
     with SessionLocal() as db:
@@ -4049,8 +4077,21 @@ def patch_draft(draft_id: int, body: DraftPatch,
             raise HTTPException(409, "draft already resolved")
         if body.note is not None:
             d.note = body.note[:2000]
+        # Per-offtaker custom letter (exclusive) — master is fallback when null.
+        if "email_letter" in body.model_fields_set:
+            sub = db.get(BillingReportSubscription, d.subscription_id)
+            if sub is not None and sub.tenant_id == t.id:
+                raw = body.email_letter
+                if raw is None or not str(raw).strip():
+                    sub.email_letter = None
+                else:
+                    sub.email_letter = str(raw).strip()[:2000]
         db.commit()
-        return {"ok": True, "draft": _draft_dict(d)}
+        # Re-load sub for letter defaults after possible email_letter write.
+        sub = db.get(BillingReportSubscription, d.subscription_id)
+        from .delivery import _offtaker_email_fields
+        email_fields = _offtaker_email_fields(t.id)
+        return {"ok": True, "draft": _draft_dict(d, sub=sub, email_fields=email_fields)}
 
 
 @router.post("/drafts/{draft_id}/approve")

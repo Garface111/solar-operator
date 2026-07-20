@@ -1842,20 +1842,22 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
         return (f'<tr><td style="padding:{pad} 0;color:#4C596B;font-size:13px;">{label}</td>'
                 f'<td style="padding:{pad} 0;text-align:right;font-size:14px;{valstyle}">{val}</td></tr>')
 
-    # The operator's edited note (Paul's "edit a pre-written email"), shown above
-    # the figures. Plain text → escaped + newlines to <br> so it renders safely.
+    # Letter hierarchy (master is the fallback):
+    #   1. Per-draft note (this send only) — explicit edit on the draft card
+    #   2. Per-offtaker custom letter (sub.email_letter) — exclusive to this offtaker
+    #   3. Tenant master offtaker email template (merge-tag HTML letter)
+    # Plain-text paths (1–2) replace the letter; master is HTML merge.
+    import html as _html
     note_html = ""
     note_text = ""
-    if note and note.strip():
-        import html as _html
-        safe = _html.escape(note.strip()).replace("\n", "<br>")
+    offtaker_custom = (getattr(sub, "email_letter", None) or "").strip()
+    effective_plain = (note or "").strip() or offtaker_custom or None
+    if effective_plain:
+        safe = _html.escape(effective_plain).replace("\n", "<br>")
         note_html = (f'<div style="font-size:14px;line-height:1.55;margin:0 0 16px;">'
                      f'{safe}</div>')
-        note_text = note.strip() + "\n\n"
+        note_text = effective_plain + "\n\n"
 
-    # No per-draft note → the tenant's mass template letter (default: a warm
-    # personalized "Hi <first name>" letter). A note REPLACES the letter for
-    # that one send — the operator's explicit words always win.
     letter_html = ("" if note_html
                    else render_merge((fields.get("body_t") or "").strip()
                                      or DEFAULT_OFFTAKER_BODY_TEMPLATE, ctx))

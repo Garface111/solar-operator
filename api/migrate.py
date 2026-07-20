@@ -1549,6 +1549,14 @@ def main():
                 added.append(f"billing_report_subscriptions.{col}")
                 print(f"  + billing_report_subscriptions.{col}")
 
+        # 2026-07-20 Per-offtaker custom invoice email letter (master is fallback).
+        if not column_exists(conn, "billing_report_subscriptions", "email_letter"):
+            conn.execute(text(
+                "ALTER TABLE billing_report_subscriptions "
+                "ADD COLUMN email_letter TEXT"))
+            added.append("billing_report_subscriptions.email_letter")
+            print("  + billing_report_subscriptions.email_letter")
+
         # 2026-07-18 Marketplace expand — REC Desk fields on arrays + exchange
         # demand links (lead → offtaker draft). Additive / nullable.
         for col, ddl in (
