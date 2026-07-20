@@ -648,6 +648,25 @@ async def client_error(request: Request):
     if "resizeobserver loop" in message.lower():
         return {"ok": True, "ignored": "benign"}
 
+    # Browser-automation (Claude Computer Use / injected eval) often does
+    # `document.querySelector(...).click()` with no null check. Failures show up as
+    # "Cannot read properties of undefined (reading 'click')" with stacks that only
+    # have `<anonymous>` frames — no app file — so they are not actionable product
+    # bugs. Real app bugs that hit the same message keep real script frames and still
+    # alert. (Sentry PYTHON-FASTAPI-39 on #arrays, UA Claude/… Electron.)
+    msg_l = message.lower()
+    if "reading 'click'" in msg_l and "undefined" in msg_l and stack:
+        code_frames = [
+            ln.strip()
+            for ln in stack.splitlines()
+            if ln.strip() and not ln.strip().lower().startswith("typeerror")
+        ]
+        if code_frames and all(
+            "<anonymous>" in ln or "eval" in ln.lower()
+            for ln in code_frames
+        ):
+            return {"ok": True, "ignored": "benign"}
+
     # Redact token-bearing query strings before they leave the process (T2-9).
     def _scrub_url(u: str) -> str:
         low = u.lower()
