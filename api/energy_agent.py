@@ -9997,6 +9997,22 @@ async def realtime_call(request: Request, authorization: str | None = Header(def
             answer_sdp = r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
         err = e.read().decode("utf-8", "replace")[:800]
+        # 409 call_id_in_use: browser re-posted the same SDP while a live session
+        # still exists for that offer (double-connect / retry). Client should hang
+        # up and mint a fresh RTCPeerConnection offer — not a server outage.
+        if e.code == 409:
+            log.warning("realtime-call conflict %s: %s", e.code, err)
+            raise HTTPException(
+                409,
+                detail={
+                    "error": "realtime_session_in_use",
+                    "message": (
+                        "A live voice session already exists for this connection. "
+                        "Hang up and start a new call with a fresh WebRTC offer."
+                    ),
+                    "upstream": err,
+                },
+            ) from e
         log.error("realtime-call failed %s: %s", e.code, err)
         raise HTTPException(502, f"OpenAI Realtime error {e.code}: {err}") from e
 
