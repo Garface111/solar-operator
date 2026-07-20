@@ -150,6 +150,25 @@ def test_preview_site_level_key_hint(monkeypatch):
     assert "account-level" in body["message"]
 
 
+def test_preview_vendor_unreachable_is_friendly(monkeypatch):
+    """SolarEdge 5xx/CDN HTML must NOT become HTTP 502 (Sentry noise) or leak
+    upstream body HTML into the client response."""
+    def _boom(key):
+        raise ao.InverterError(
+            "SolarEdge /sites/list returned 502: <!DOCTYPE html>"
+            "<!--[if lt IE 7]> <html class=\"no-js ie6 oldie\" lang=\"en-US\">"
+        )
+    monkeypatch.setattr(ao.inverters.solaredge, "discover_sites", _boom)
+    r = client.post("/v1/array-owners/public/preview", json={"api_key": "ACCT_KEY"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is False
+    assert body["sites"] == []
+    assert "unreachable" in body["message"].lower()
+    assert "DOCTYPE" not in body["message"]
+    assert "html" not in body["message"].lower()
+
+
 def test_preview_rate_limited(monkeypatch):
     monkeypatch.setattr(ao.inverters.solaredge, "discover_sites", lambda key: [])
     # The oracle guard no-ops under pytest (the suite shares one client IP); drop

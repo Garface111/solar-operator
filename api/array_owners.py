@@ -2769,8 +2769,10 @@ def public_solaredge_preview(body: PublicPreviewBody, request: Request) -> dict:
 
     Accepts either {api_key} (legacy → SolarEdge) or {vendor, config}. Returns
     {ok, vendor, sites:[{site_id,name,peak_power_kw,annual_kwh,annual_value_usd}],
-    totals, message}. Recoverable failures (bad creds, scope, empty) come back
-    as ok:false + friendly message; rate limit → 429; vendor 5xx → 502."""
+    totals, message}. Recoverable failures (bad creds, scope, empty, vendor
+    unreachable) come back as ok:false + friendly message; rate limit → 429.
+    Vendor 5xx/network never raise HTTP 502 here — that was Sentry noise and
+    leaked upstream HTML into the client detail."""
     _guard_preview_oracle(request)
 
     # Resolve vendor + config (back-compat: a bare api_key is SolarEdge).
@@ -2811,8 +2813,17 @@ def public_solaredge_preview(body: PublicPreviewBody, request: Request) -> dict:
     except InverterAuthError:
         return {"ok": False, "vendor": vendor, "sites": [],
                 "message": _PREVIEW_AUTH_MSG.get(vendor, "Those credentials didn't work.")}
-    except InverterError as exc:
-        raise HTTPException(502, f"{inverters.VENDORS[vendor].LABEL} is unreachable right now: {exc}")
+    except InverterError:
+        # Upstream 5xx/network is expected flakiness, not an app bug. Do NOT raise
+        # HTTPException(502) — Sentry captures those as errors, and the old path
+        # appended raw vendor HTML (CDN 502 pages) into the detail string.
+        label = inverters.VENDORS[vendor].LABEL
+        return {
+            "ok": False,
+            "vendor": vendor,
+            "sites": [],
+            "message": f"{label} is unreachable right now — try again in a few minutes.",
+        }
 
     total_kw = 0.0
     total_val = 0.0
