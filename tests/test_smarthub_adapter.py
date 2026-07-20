@@ -408,3 +408,32 @@ def test_parse_bill_basic():
 def test_parse_bill_no_date():
     parsed = parse_bill({"account_id": "123", "billing_date": ""})
     assert parsed["billing_date"] is None
+
+
+def test_parse_bill_numeric_amounts_no_strip_error():
+    """Harvester sends NISC amounts as raw floats/ints; must not call .strip().
+
+    Regression for Sentry PYTHON-FASTAPI-14: AttributeError 'float' has no
+    attribute 'strip' in _parse_amount → 500 on every /v1/sync bill batch.
+    """
+    row = {
+        "account_id": "8001234",
+        "billing_date": "03/15/2024",
+        "bill_amount": -112.34,
+        "adjustments": 0.0,
+        "total_due": -112,
+    }
+    parsed = parse_bill(row)
+    assert parsed["bill_amount"] == pytest.approx(-112.34)
+    assert parsed["adjustments"] == pytest.approx(0.0)
+    assert parsed["total_due"] == pytest.approx(-112.0)
+    # Still accept string amounts from the extension scrape path.
+    parsed_str = parse_bill({
+        "billing_date": "03/15/2024",
+        "bill_amount": "-$1,234.50",
+        "adjustments": "",
+        "total_due": None,
+    })
+    assert parsed_str["bill_amount"] == pytest.approx(-1234.50)
+    assert parsed_str["adjustments"] is None
+    assert parsed_str["total_due"] is None
