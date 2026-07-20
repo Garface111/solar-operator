@@ -31,6 +31,7 @@ from datetime import timedelta, date as _date, datetime
 from typing import Optional
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from . import generation_sources
 from .db import SessionLocal
@@ -539,6 +540,30 @@ def _persisted_inverters(db, tenant: Tenant) -> list[Inverter]:
     ).scalars().all()
 
 
+def _insert_inverter_race_safe(db, iv: Inverter) -> Inverter:
+    """Insert an Inverter the caller believes is missing (SELECT-then-INSERT).
+
+    Concurrent fleet-tree / discover calls can both pass the empty-existing read
+    and race the INSERT — the loser hits uq_inverter_tenant_vendor_serial and
+    used to 500 /v1/array-owners/fleet-tree (Sentry, locus serial 2294589).
+    SAVEPOINT the insert; on IntegrityError re-read the winner's row.
+    Mirrors array_owners capture path (dialect-agnostic: PG + sqlite).
+    """
+    try:
+        with db.begin_nested():
+            db.add(iv)
+            db.flush()
+        return iv
+    except IntegrityError:
+        return db.execute(
+            select(Inverter).where(
+                Inverter.tenant_id == iv.tenant_id,
+                Inverter.vendor == iv.vendor,
+                Inverter.serial == iv.serial,
+            )
+        ).scalar_one()
+
+
 def discover_and_persist(db, tenant: Tenant, *, force_refresh: bool = False) -> list[Inverter]:
     """Walk every array's connection, pull live inventory, and upsert one
     persisted Inverter per real serial. IDEMPOTENT and owner-safe:
@@ -589,7 +614,7 @@ def discover_and_persist(db, tenant: Tenant, *, force_refresh: bool = False) -> 
                         Inverter.deleted_at.is_(None),
                     ).order_by(Inverter.position.desc())
                 ).scalars().first()
-                iv = Inverter(
+                candidate = Inverter(
                     tenant_id=tenant.id,
                     array_id=arr.id,                 # owner grouping starts = source
                     position=(maxpos or 0) + 1,
@@ -598,7 +623,15 @@ def discover_and_persist(db, tenant: Tenant, *, force_refresh: bool = False) -> 
                     source_connection_id=getattr(conn, "id", None),
                     source_array_id=arr.id,
                 )
-                db.add(iv)
+                iv = _insert_inverter_race_safe(db, candidate)
+                if iv is not candidate:
+                    # Concurrent discover won — refresh source pointers only;
+                    # never clobber owner array_id/position.
+                    iv.source_site_id = str(site_id)
+                    iv.source_connection_id = getattr(conn, "id", None)
+                    iv.source_array_id = iv.source_array_id or arr.id
+                    if iv.deleted_at is not None:
+                        iv.deleted_at = None
                 existing[key] = iv
             else:
                 # Refresh source pointers in case the connection moved, but DO NOT

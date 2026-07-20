@@ -360,6 +360,56 @@ def test_fleet_tree_reports_vendor_from_connection_before_first_poll():
     print("PASS vendor reported from InverterConnection pre-first-poll")
 
 
+def test_insert_inverter_race_safe_lost_race_no_raise():
+    """Sentry: fleet-tree UniqueViolation uq_inverter_tenant_vendor_serial
+    (tenant ten_5b5300363f4bbd3e, locus serial 2294589). Concurrent discover
+    already committed the row; our INSERT must SAVEPOINT-fallback and return
+    the winner — not 500 the whole /fleet-tree request."""
+    from sqlalchemy import select as _select
+    with SessionLocal() as db:
+        t = _mk_tenant(db)
+        a = Array(tenant_id=t.id, name="Locus Race", fuel_type="solar")
+        db.add(a); db.commit(); db.refresh(a)
+        # Concurrent fleet-tree request already won the insert.
+        with SessionLocal() as db2:
+            db2.add(Inverter(
+                tenant_id=t.id, array_id=a.id, position=1,
+                vendor="locus", serial="2294589", name="Winner",
+                source_site_id="3583132", source_array_id=a.id,
+            ))
+            db2.commit()
+        # Our request believed the serial was missing and tries to insert.
+        candidate = Inverter(
+            tenant_id=t.id, array_id=a.id, position=2,
+            vendor="locus", serial="2294589", name="Loser",
+            source_site_id="3583132", source_array_id=a.id,
+        )
+        iv = IF._insert_inverter_race_safe(db, candidate)
+        db.commit()
+        assert iv is not candidate
+        assert iv.serial == "2294589"
+        assert iv.name == "Winner"   # winner's row, not a second insert
+        rows = db.execute(_select(Inverter).where(
+            Inverter.tenant_id == t.id, Inverter.serial == "2294589"
+        )).scalars().all()
+        assert len(rows) == 1
+
+
+def test_insert_inverter_race_safe_clean_insert():
+    with SessionLocal() as db:
+        t = _mk_tenant(db)
+        a = Array(tenant_id=t.id, name="Clean Ins", fuel_type="solar")
+        db.add(a); db.commit(); db.refresh(a)
+        candidate = Inverter(
+            tenant_id=t.id, array_id=a.id, position=1,
+            vendor="locus", serial="SN-NEW-1", name="New",
+        )
+        iv = IF._insert_inverter_race_safe(db, candidate)
+        db.commit()
+        assert iv is candidate
+        assert iv.id is not None
+
+
 if __name__ == "__main__":
     setup_module(None)
     test_reassign_changes_owner_group_not_source()
