@@ -34,7 +34,7 @@ import hashlib
 import logging
 
 from fastapi import APIRouter, Header, HTTPException, Request
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 
 from .db import SessionLocal
 from .models import Client, BillingReportSubscription, now
@@ -155,6 +155,36 @@ def _recipients(data: dict) -> list[str]:
     if isinstance(to, str):
         to = [to]
     return [r.strip().lower() for r in (to or []) if isinstance(r, str) and r.strip()]
+
+
+def _stamp_clients_by_email(
+    db,
+    email: str,
+    event_type: str,
+    reason: str | None,
+    ts,
+) -> list[int]:
+    """Stamp delivery health on non-deleted clients matching contact_email.
+
+    Uses a set-based UPDATE (not ORM dirty-tracking) so a concurrent hard-delete
+    of one matched row cannot raise StaleDataError ("expected N rows; N-1
+    matched") — Sentry PYTHON-FASTAPI-1B on /v1/resend/webhook when many clients
+    share one contact_email (e.g. operator address on a magic-link delivery).
+    """
+    if event_type == "email.delivered":
+        values = {"last_delivered_at": ts}
+    else:
+        values = {"last_bounced_at": ts, "last_bounce_reason": reason}
+    result = db.execute(
+        update(Client)
+        .where(
+            func.lower(Client.contact_email) == email,
+            Client.deleted_at.is_(None),
+        )
+        .values(**values)
+        .returning(Client.id)
+    )
+    return list(result.scalars().all())
 
 
 @router.post("/v1/resend/webhook")
@@ -351,16 +381,9 @@ async def resend_webhook(
                 _stamp_sub(sub)
 
         for email in recipients:
-            clients = db.execute(
-                select(Client).where(func.lower(Client.contact_email) == email)
-            ).scalars().all()
-            for c in clients:
-                if event_type == "email.delivered":
-                    c.last_delivered_at = ts
-                else:
-                    c.last_bounced_at = ts
-                    c.last_bounce_reason = reason
-                matched.append(c.id)
+            matched.extend(
+                _stamp_clients_by_email(db, email, event_type, reason, ts)
+            )
 
             # Offtaker invoices: match BillingReportSubscription.client_email.
             # Still match by email even when id-matched above — covers older
