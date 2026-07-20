@@ -4710,8 +4710,15 @@ def _account_summary_tool(db, tenant: Tenant, args: dict) -> dict:
     # Best-effort cloud-capture roster counts (no passwords)
     try:
         from .models import PortalCredential
+        from sqlalchemy.orm import defer
+        # Full-entity fetch decrypts the vault columns, which this process is
+        # forbidden to do (SO_VAULT_DECRYPT=0) — it raised RuntimeError and paged
+        # Ford. We only read `provider` here, so never fetch the secret.
         creds = db.execute(
-            select(PortalCredential).where(PortalCredential.tenant_id == t.id)
+            select(PortalCredential)
+            .options(defer(PortalCredential.secret_enc),
+                     defer(PortalCredential.session_state_enc))
+            .where(PortalCredential.tenant_id == t.id)
         ).scalars().all()
         cloud_provs = sorted({
             (c.provider or "").strip().lower()
@@ -4991,8 +4998,14 @@ def _refresh_capture_tool(db, tenant: Tenant, args: dict) -> dict:
     # 1) Cloud vault — re-arm enabled creds (same as POST /v1/cloud-capture/refresh).
     cloud_n = 0
     try:
+        from sqlalchemy.orm import defer
+        # Re-arming touches only counters/timestamps. Never fetch the vault
+        # columns: a full-entity load decrypts them and this process may not.
         rows = db.execute(
-            select(PortalCredential).where(
+            select(PortalCredential)
+            .options(defer(PortalCredential.secret_enc),
+                     defer(PortalCredential.session_state_enc))
+            .where(
                 PortalCredential.tenant_id == tenant.id,
                 PortalCredential.cloud_capture_enabled.is_(True),
                 PortalCredential.secret_enc.isnot(None),

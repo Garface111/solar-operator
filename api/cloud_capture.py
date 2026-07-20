@@ -17,10 +17,30 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import defer
+
+# Loading a PortalCredential ENTITY decrypts its vault columns at row-fetch time
+# (crypto.EncryptedVaultStr.process_result_value), and the public web process is
+# forbidden to unwrap portal passwords (SO_VAULT_DECRYPT=0) — so every
+# management endpoint here raised
+#   RuntimeError: Vault decrypt is disabled in this process
+# 1,674 times, and each one also paged Ford with a CRITICAL alert. Toggle,
+# delete AND refresh were all 500ing in production: the whole Cloud Capture
+# management UI was dead, not just noisy (Ford 2026-07-20).
+#
+# These endpoints only ever touch METADATA — enabled flag, fail counters,
+# timestamps, or the row's existence. Deferring the vault columns means the
+# secret is never fetched, so nothing decrypts. The guard stays meaningful:
+# anything that genuinely touches .secret_enc still trips it, loudly.
+# (defined below, once PortalCredential is imported)
 
 from .account import tenant_from_session
 from .db import SessionLocal
 from .models import Client, PortalCredential, PortalLoginStatus, HarvestRun, now
+
+# See the note above: never fetch the vault columns in the web process.
+_NO_VAULT = (defer(PortalCredential.secret_enc),
+             defer(PortalCredential.session_state_enc))
 from .harvester import config
 from .harvester import credentials as cc
 from . import ratelimit
@@ -362,7 +382,7 @@ def toggle(body: ToggleIn, authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
     with SessionLocal() as db:
         row = db.execute(
-            select(PortalCredential).where(
+            select(PortalCredential).options(*_NO_VAULT).where(
                 PortalCredential.tenant_id == t.id,
                 PortalCredential.provider == body.provider.strip().lower(),
                 PortalCredential.username_lc == body.username.strip().lower(),
@@ -383,7 +403,7 @@ def delete_credential(body: DeleteIn, authorization: Optional[str] = Header(defa
     t = tenant_from_session(authorization)
     with SessionLocal() as db:
         row = db.execute(
-            select(PortalCredential).where(
+            select(PortalCredential).options(*_NO_VAULT).where(
                 PortalCredential.tenant_id == t.id,
                 PortalCredential.provider == body.provider.strip().lower(),
                 PortalCredential.username_lc == body.username.strip().lower(),
@@ -406,8 +426,10 @@ def refresh_now(authorization: Optional[str] = Header(default=None)):
     """
     t = tenant_from_session(authorization)
     with SessionLocal() as db:
+        # secret_enc.isnot(None) stays — it is a SQL predicate, evaluated in
+        # Postgres, and never fetches (or decrypts) the column.
         rows = db.execute(
-            select(PortalCredential).where(
+            select(PortalCredential).options(*_NO_VAULT).where(
                 PortalCredential.tenant_id == t.id,
                 PortalCredential.cloud_capture_enabled.is_(True),
                 PortalCredential.secret_enc.isnot(None),
