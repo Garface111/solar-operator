@@ -640,6 +640,14 @@ async def client_error(request: Request):
     if not message and not stack:
         return {"ok": True, "ignored": "empty"}
 
+    # Chrome ResizeObserver loop notices are not app bugs — the browser emits them
+    # when an RO callback can't deliver all notifications in the same frame (common
+    # with layout thrash / React Flow). Drop before Sentry + email (Sentry noise:
+    # "[arrayoperator] ResizeObserver loop completed with undelivered notifications.").
+    # Older Chromium wording: "ResizeObserver loop limit exceeded".
+    if "resizeobserver loop" in message.lower():
+        return {"ok": True, "ignored": "benign"}
+
     # Redact token-bearing query strings before they leave the process (T2-9).
     def _scrub_url(u: str) -> str:
         low = u.lower()

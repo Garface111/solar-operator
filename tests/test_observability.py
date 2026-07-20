@@ -197,6 +197,41 @@ def test_client_error_ignores_empty(client):
     assert r.json().get("ignored") == "empty"
 
 
+def test_client_error_ignores_resize_observer_noise(client, monkeypatch):
+    """Benign Chrome ResizeObserver loop messages must not alert or hit Sentry."""
+    sent = {}
+    monkeypatch.setattr("api.notify.send_internal_alert",
+                        lambda s, b: sent.update(subject=s, body=b) or True)
+    import api.app as appmod
+    appmod._LAST_ALERT.clear()
+    # Current Chromium wording (the live Sentry issue title).
+    r = client.post("/v1/client-error", json={
+        "source": "arrayoperator",
+        "message": "ResizeObserver loop completed with undelivered notifications.",
+        "url": "https://arrayoperator.com/",
+    })
+    assert r.status_code == 200
+    assert r.json().get("ignored") == "benign"
+    assert sent == {}
+    # Older Chromium wording.
+    r2 = client.post("/v1/client-error", json={
+        "source": "arrayoperator",
+        "message": "ResizeObserver loop limit exceeded",
+    })
+    assert r2.status_code == 200
+    assert r2.json().get("ignored") == "benign"
+    assert sent == {}
+    # Real client errors still alert.
+    r3 = client.post("/v1/client-error", json={
+        "source": "arrayoperator",
+        "message": "TypeError: x is undefined",
+    })
+    assert r3.status_code == 200
+    assert r3.json().get("ok") is True
+    assert "ignored" not in r3.json()
+    assert "TypeError" in sent.get("subject", "")
+
+
 def test_client_error_caps_payload(client, monkeypatch):
     body_seen = {}
     monkeypatch.setattr("api.notify.send_internal_alert",
