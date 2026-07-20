@@ -1,0 +1,13 @@
+Sentry auto-fix brake: PR-ONLY mode.
+
+While this file exists, scripts/sentry_autofix.py::automerge_on() returns False,
+so the orchestrator fixes, tests and OPENS A PR but never squash-merges (and so
+never auto-deploys). It overrides SENTRY_AUTOFIX_AUTOMERGE=1 — the env alone
+cannot re-arm merging.
+
+Placed 2026-07-19 at Ford's request ("open PRs, don't merge; I approve in the
+morning") after an unattended sweep merged 26 PRs to main in one night.
+
+To re-arm autonomous merging you must do BOTH:
+  1. rm .autofix_nomerge
+  2. set SENTRY_AUTOFIX_AUTOMERGE=1 in scripts/sentry_autofix_tick.sh
