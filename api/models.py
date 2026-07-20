@@ -12,8 +12,9 @@ from __future__ import annotations
 from datetime import datetime, date
 from sqlalchemy import (
     String, Integer, Float, Boolean, DateTime, Date, ForeignKey, JSON, Text,
-    LargeBinary, UniqueConstraint, Index, text
+    LargeBinary, MetaData, UniqueConstraint, Index, text
 )
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 # Encryption-at-rest for vendor credentials. EncryptedJSON/EncryptedStr are
@@ -23,8 +24,46 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from .crypto import EncryptedJSON, EncryptedStr, EncryptedVaultJSON, EncryptedVaultStr
 
 
+def _is_pg_concurrent_ddl_race(exc: BaseException) -> bool:
+    """True when Postgres lost a multi-process CREATE TABLE race.
+
+    Two processes calling create_all (web + worker init_db on deploy) both pass
+    checkfirst, then both CREATE TABLE. Postgres creates a composite type named
+    after the table; the loser hits UniqueViolation on pg_type_typname_nsp_index
+    (Sentry: ea_email_delivery). Safe to retry — peer already created the objects.
+    """
+    parts = [str(exc)]
+    orig = getattr(exc, "orig", None)
+    if orig is not None:
+        parts.append(str(orig))
+    msg = " ".join(parts).lower()
+    # Exact catalog race from concurrent CREATE TABLE … SERIAL / identity.
+    return "pg_type_typname_nsp_index" in msg
+
+
+class _RaceSafeMetaData(MetaData):
+    """create_all that retries once after a concurrent Postgres DDL race.
+
+    checkfirst is TOCTOU under multi-process boot; init_db stays a one-liner in
+    db.py while this shared metadata makes the write idempotent.
+    """
+
+    def create_all(self, bind=None, tables=None, checkfirst=True):
+        try:
+            return super().create_all(
+                bind=bind, tables=tables, checkfirst=checkfirst
+            )
+        except IntegrityError as exc:
+            if not _is_pg_concurrent_ddl_race(exc):
+                raise
+            # Engine.begin() rolled back the failed txn; retry with checkfirst.
+            return super().create_all(
+                bind=bind, tables=tables, checkfirst=checkfirst
+            )
+
+
 class Base(DeclarativeBase):
-    pass
+    metadata = _RaceSafeMetaData()
 
 
 def now() -> datetime:
