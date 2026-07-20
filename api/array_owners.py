@@ -4978,7 +4978,11 @@ def _persist_meter_accounts(
                             ua.deleted_at = None
                         if not ua.nickname and (acct.nickname or "").strip():
                             ua.nickname = (acct.nickname or "").strip()
-                        ua.last_seen = now()
+                        # Throttled. This function does NOT commit — the caller
+                        # owns the transaction — so every row it stamps stays
+                        # locked for the whole ingest, which is what starved
+                        # POST /v1/sync into LockNotAvailable 500s.
+                        ua.touch_last_seen()
                     ua_id = ua.id
                 results.append({
                     "account_number": acct_num,
@@ -5040,7 +5044,7 @@ def _persist_meter_accounts(
                         ua.array_id = arr.id
                     if not ua.nickname and (acct.nickname or "").strip():
                         ua.nickname = (acct.nickname or "").strip()
-                    ua.last_seen = now()
+                    ua.touch_last_seen()   # throttled — see UtilityAccount
 
                 # Bill from the GMP billing-period summary (the "paper bill" total).
                 # ONLY when the period has CLOSED. The GMP usage summary reports the

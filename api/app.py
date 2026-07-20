@@ -1018,7 +1018,10 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                 row.nickname = a.get("nickname") or row.nickname
                 row.service_address = a.get("service_address") or row.service_address
                 row.extra = {**(row.extra or {}), **extra}
-                row.last_seen = now()
+                # Throttled: an unconditional re-stamp here was half of the
+                # utility_accounts lock fight that 500'd this endpoint. See
+                # UtilityAccount.touch_last_seen.
+                row.touch_last_seen()
             row.is_residential = classify_residential(provider, a)
 
         # Flush so the accounts just upserted above have IDs and are findable
@@ -1837,7 +1840,7 @@ def _sync_replay_into_sibling(tenant: Tenant, normalized: dict) -> None:
                 row.nickname = a.get("nickname") or row.nickname
                 row.service_address = a.get("service_address") or row.service_address
                 row.extra = {**(row.extra or {}), **extra}
-                row.last_seen = now()
+                row.touch_last_seen()   # throttled — see UtilityAccount
             row.is_residential = classify_residential(provider, a)
         db.commit()
 

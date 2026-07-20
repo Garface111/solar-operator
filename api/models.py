@@ -9,6 +9,7 @@ Multi-tenant from day one. Every row that belongs to a customer carries
 tenant_id and queries are scoped through helpers in db.py.
 """
 from __future__ import annotations
+import os
 from datetime import datetime, date
 from sqlalchemy import (
     String, Integer, Float, Boolean, DateTime, Date, ForeignKey, JSON, Text,
@@ -775,6 +776,46 @@ class UtilityAccount(Base):
     extra: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # provider-specific raw blob
     last_seen: Mapped[datetime] = mapped_column(DateTime, default=now)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+    # Seconds of slack before a re-capture bothers to re-stamp last_seen.
+    # last_seen feeds the Capture Freshness Heatmap ("last captured"), where
+    # 5-minute granularity is indistinguishable from per-request precision.
+    TOUCH_MIN_INTERVAL_S = int(os.environ.get("UA_TOUCH_MIN_INTERVAL_S", "300"))
+
+    def touch_last_seen(self) -> bool:
+        """Stamp last_seen ONLY if it is meaningfully stale. Returns True if
+        written.
+
+        WHY (Ford, 2026-07-20 — "I'm getting a lot of these emails"):
+        every capture stamped last_seen on EVERY account, unconditionally. Two
+        paths do this — the extension's POST /v1/sync and the utility-meter
+        capture in array_owners._persist_meter_accounts, which explicitly does
+        NOT commit ("the caller owns the transaction") and so holds row locks on
+        utility_accounts for the length of a long ingest. The two collide on the
+        same rows, the loser waits out lock_timeout (15s, api/db.py) and dies
+        with LockNotAvailable -> HTTP 500 -> an alert email. Both sides of the
+        fight showed up in the archive: 500s on /v1/sync AND on
+        /v1/array-owners/utility-meter-capture.
+
+        The contended write was pure waste: re-stamping a recency marker that
+        was already seconds old. Skipping it when fresh removes almost all of
+        the contention without changing anything an owner can perceive.
+
+        NOTE this narrows the WINDOW for contention, it does not make writes
+        safe by itself — a genuinely stale row under a long ingest can still
+        block. That is correct: a real conflict should still surface rather than
+        be silently swallowed.
+        """
+        n = now()
+        prev = self.last_seen
+        if prev is not None:
+            try:
+                if (n - prev).total_seconds() < self.TOUCH_MIN_INTERVAL_S:
+                    return False
+            except TypeError:  # naive/aware mismatch — just write
+                pass
+        self.last_seen = n
+        return True
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
 
     # Canvas position (sandbox canvas v1, June 2026). Used for unclassified
