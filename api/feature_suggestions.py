@@ -147,23 +147,29 @@ _schema_ensured_ids: set[int] = set()
 
 
 def ensure_feature_suggestion_columns(db_or_bind=None) -> None:
-    """Idempotent ADD COLUMN for feature_suggestions fields create_all skips."""
+    """Idempotent ADD COLUMN for feature_suggestions fields create_all skips.
+
+    DDL always runs on a short-lived engine connection that commits on its own.
+    Never use the caller's session connection: on Postgres, ALTER is transactional,
+    so a later request rollback would undo the column while this process still
+    caches "ensured" — next SELECT dies with UndefinedColumn (Sentry PYTHON-FASTAPI-24
+    triage_feature_queue recurrence after the list_features self-heal).
+    """
     from sqlalchemy import text
     from sqlalchemy.orm import Session as SASession
 
     from .db import engine as default_engine
 
-    session = db_or_bind if isinstance(db_or_bind, SASession) else None
-    if session is not None:
-        eng = session.get_bind()
-        conn = session.connection()
+    if isinstance(db_or_bind, SASession):
+        eng = db_or_bind.get_bind()
     else:
         eng = db_or_bind or default_engine
-        conn = None
 
     key = id(getattr(eng, "sync_engine", eng))
     if key in _schema_ensured_ids:
         return
+
+    needed = ("auto_prompt", "screenshot_b64")
 
     def _table_exists(connection) -> bool:
         dialect = connection.dialect.name
@@ -190,14 +196,15 @@ def ensure_feature_suggestion_columns(db_or_bind=None) -> None:
             "SELECT column_name FROM information_schema.columns "
             "WHERE table_name = 'feature_suggestions'"
         )).fetchall()
-        return {r[0] for r in rows}
+        # PG may return identifiers with mixed case depending on driver/version
+        return {str(r[0]).lower() for r in rows}
 
     def _apply(connection) -> None:
         if not _table_exists(connection):
             FeatureSuggestion.__table__.create(bind=connection, checkfirst=True)
             return
         cols = _existing_cols(connection)
-        for col in ("auto_prompt", "screenshot_b64"):
+        for col in needed:
             if col in cols:
                 continue
             try:
@@ -210,12 +217,15 @@ def ensure_feature_suggestion_columns(db_or_bind=None) -> None:
                     continue
                 raise
 
-    if conn is not None:
+    # Commit outside any ambient request transaction (see docstring).
+    with eng.begin() as conn:
         _apply(conn)
-    else:
-        with eng.begin() as c:
-            _apply(c)
-    _schema_ensured_ids.add(key)
+        if _table_exists(conn):
+            cols_after = _existing_cols(conn)
+        else:
+            cols_after = {col.key for col in FeatureSuggestion.__table__.columns}
+    if all(col in cols_after for col in needed):
+        _schema_ensured_ids.add(key)
 
 
 def _reset_schema_ensure_for_tests() -> None:
