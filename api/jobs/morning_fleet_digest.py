@@ -67,13 +67,23 @@ _STATUS_PHRASE = {
 
 
 def _fleet_name(tenant) -> str:
-    """The owner-facing fleet name: company, else operator, else tenant name."""
-    return (
-        getattr(tenant, "company_name", None)
-        or getattr(tenant, "operator_name", None)
-        or getattr(tenant, "name", None)
-        or "Your fleet"
-    )
+    """The owner-facing fleet name: company, else operator, else tenant name.
+
+    Signup auto-names a tenant from the email local-part, so a customer who
+    never typed a company name gets addressed by their own login slug —
+    John Spencer's first-ever digest read "⚠️ Jrspencervt: 6 inverters need
+    attention" (2026-07-19). Never put a machine-derived handle in front of a
+    customer: fall through to the neutral phrasing instead.
+    """
+    for attr in ("company_name", "operator_name", "name"):
+        val = (getattr(tenant, attr, None) or "").strip()
+        if not val:
+            continue
+        local = (getattr(tenant, "contact_email", None) or "").split("@")[0].strip()
+        if local and val.lower() == local.lower():
+            continue  # auto-generated from the email — not a real fleet name
+        return val
+    return "Your fleet"
 
 
 def _vendor_daily(col: dict) -> list:

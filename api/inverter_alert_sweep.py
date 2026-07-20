@@ -263,10 +263,19 @@ def _incident_key(col: dict, inv: dict) -> str:
 
 def _render_email(tenant: Tenant, items: list[dict]) -> tuple[str, str, str]:
     n = len(items)
+    # SAY THE SCOPE. This sweep reports only NEWLY flagged incidents (deduped
+    # against inverter_alert_state); the morning digest reports the running
+    # TOTAL. Both read the same build_fleet_tree(stable_verdicts=True), so they
+    # never actually disagree — but when this said "3 inverters need attention"
+    # at 11:20 and the digest said "6 inverters need attention" at 12:00, the
+    # owner had no way to know one was a delta and the other a total. It read as
+    # the product contradicting itself (John Spencer, 2026-07-19, his 3rd day).
+    # Fixed by naming the scope, NOT by muting a channel: an owner must still
+    # hear about a new dead inverter the hour we see it.
     subject = (
-        f"⚠️ {n} inverter{'s' if n != 1 else ''} need attention"
+        f"⚠️ {n} new inverter alerts"
         if n != 1 else
-        f"⚠️ An inverter needs attention — {items[0]['inv'].get('name')}"
+        f"⚠️ New inverter alert — {items[0]['inv'].get('name')}"
     )
     labels = {
         "dead": "stopped producing",
