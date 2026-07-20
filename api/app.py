@@ -2255,6 +2255,84 @@ from .notify import send_workbook_email, send_internal_alert
 from datetime import datetime as _dt
 
 
+@app.get("/admin/emails")
+def admin_emails(
+    _: None = Depends(_require_admin),
+    to: str | None = None,
+    flagged: int = 0,
+    severity: str | None = None,
+    source: str | None = None,
+    q: str | None = None,
+    limit: int = 100,
+    offset: int = 0,
+):
+    """The outbound email archive — what we actually said, to whom, when.
+
+    Built after a real customer received two contradictory alerts 40 minutes
+    apart and we could see only the SUBJECTS (ea_email_delivery keeps no body).
+    Bodies are truncated here for listing; use /admin/emails/{id} for the full
+    text. Filters: to, flagged=1, severity, source, q (substring over subject
+    and body).
+    """
+    from .email_archive import EmailArchive, ensure_table
+    ensure_table()
+    with SessionLocal() as db:
+        stmt = select(EmailArchive)
+        if to:
+            stmt = stmt.where(EmailArchive.to_email.ilike(f"%{to}%"))
+        if flagged:
+            stmt = stmt.where(EmailArchive.flags.isnot(None))
+        if severity:
+            stmt = stmt.where(EmailArchive.severity == severity)
+        if source:
+            stmt = stmt.where(EmailArchive.source.ilike(f"%{source}%"))
+        if q:
+            stmt = stmt.where(or_(EmailArchive.subject.ilike(f"%{q}%"),
+                                  EmailArchive.body_text.ilike(f"%{q}%")))
+        total = db.execute(
+            select(func.count()).select_from(stmt.subquery())).scalar() or 0
+        rows = db.execute(
+            stmt.order_by(EmailArchive.created_at.desc())
+                .limit(max(1, min(limit, 500))).offset(max(0, offset))
+        ).scalars().all()
+        return {
+            "total": total, "limit": limit, "offset": offset,
+            "emails": [{
+                "id": r.id,
+                "at": r.created_at.isoformat() if r.created_at else None,
+                "to": r.to_email, "subject": r.subject,
+                "product": r.product, "source": r.source,
+                "ok": r.ok, "dry_run": r.dry_run,
+                "severity": r.severity,
+                "flags": (r.flags.split(",") if r.flags else []),
+                "resend_id": r.resend_id,
+                "preview": (r.body_text or "")[:280],
+            } for r in rows],
+        }
+
+
+@app.get("/admin/emails/{email_id}")
+def admin_email_detail(email_id: int, _: None = Depends(_require_admin)):
+    """One archived email, in full — the body we actually sent."""
+    from .email_archive import EmailArchive, ensure_table
+    ensure_table()
+    with SessionLocal() as db:
+        r = db.get(EmailArchive, email_id)
+        if r is None:
+            raise HTTPException(404, "No such archived email")
+        return {
+            "id": r.id,
+            "at": r.created_at.isoformat() if r.created_at else None,
+            "to": r.to_email, "cc": r.cc, "bcc": r.bcc, "from": r.from_addr,
+            "subject": r.subject, "product": r.product, "source": r.source,
+            "ok": r.ok, "dry_run": r.dry_run, "resend_id": r.resend_id,
+            "severity": r.severity,
+            "flags": (r.flags.split(",") if r.flags else []),
+            "attachments": r.attachments,
+            "body_text": r.body_text, "body_html": r.body_html,
+        }
+
+
 @app.get("/admin/scheduler")
 def scheduler_status(_: None = Depends(_require_admin)):
     """Inspect APScheduler — confirm cron is alive on Railway."""

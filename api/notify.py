@@ -142,6 +142,65 @@ _send_via_resend._last_id = None  # type: ignore[attr-defined]
 _send_via_resend._last_error = None  # type: ignore[attr-defined]
 
 
+# ── OUTBOUND ARCHIVE (Ford 2026-07-19) ───────────────────────────────────────
+# Every outbound email in this codebase funnels through _send_via_resend (the
+# only other Resend calls hit /emails/receiving, which is inbound), so ONE
+# wrapper here gives total coverage with no per-caller changes.
+#
+# Implemented as a wrapper rather than edits to the body because the sender has
+# five separate return paths (dry-run, import failure, unexpected response,
+# exception, success) and an archive that misses a path is worse than none —
+# you would trust a log that silently omits exactly the failures you care about.
+#
+# The id/error contract is preserved for free: the original body assigns to the
+# module global `_send_via_resend._last_id`, which resolves at CALL time to
+# whatever that name currently binds — i.e. this wrapper. last_resend_id() keeps
+# reading the same attribute it always did.
+_send_via_resend_raw = _send_via_resend
+
+
+def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
+                     attachments: list[dict] | None = None,
+                     cc: list[str] | str | None = None,
+                     bcc: list[str] | str | None = None,
+                     from_addr: str | None = None,
+                     reply_to: str | None = None,
+                     headers: dict | None = None,
+                     product: str = "nepool",
+                     log_failures: bool = True) -> bool:
+    """Send, then archive + monitor. Archiving can never affect the send."""
+    ok = _send_via_resend_raw(
+        to=to, subject=subject, html=html, text=text, attachments=attachments,
+        cc=cc, bcc=bcc, from_addr=from_addr, reply_to=reply_to, headers=headers,
+        product=product, log_failures=log_failures,
+    )
+    try:
+        import sys as _sys
+        from . import email_archive as _arch
+        # Provenance: which job actually sent this. Answers "who emailed the
+        # customer at 11:20?" without grepping the whole codebase.
+        try:
+            f = _sys._getframe(1)
+            src = f"{os.path.basename(f.f_code.co_filename)}:{f.f_code.co_name}"[:80]
+        except Exception:  # noqa: BLE001
+            src = None
+        _arch.record(
+            to_email=to if isinstance(to, str) else ", ".join(to),
+            subject=subject, html=html, text=text, product=product, source=src,
+            resend_id=getattr(_send_via_resend, "_last_id", None),
+            ok=bool(ok),
+            dry_run=os.getenv("EMAIL_DRY_RUN", "").strip().lower() in ("1", "true", "yes", "on"),
+            cc=cc, bcc=bcc, from_addr=from_addr, attachments=attachments,
+        )
+    except Exception as _e:  # noqa: BLE001
+        logger.warning("email archive skipped (email still sent): %s", _e)
+    return ok
+
+
+_send_via_resend._last_id = None  # type: ignore[attr-defined]
+_send_via_resend._last_error = None  # type: ignore[attr-defined]
+
+
 def send_workbook_email(to: str, subject: str, html: str, text: str,
                         workbook_path: str, filename: str | None = None,
                         from_addr: str | None = None,
