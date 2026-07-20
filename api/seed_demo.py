@@ -72,9 +72,10 @@ def _wipe(db, tid: str) -> None:
     so this: (a) disables FK triggers for the wipe when the DB role allows it (so
     cross-table order can't bite), and (b) deletes every tenant-scoped table by
     tenant_id in a children-first order (which also works if the trigger disable
-    isn't permitted) PLUS the one array-child that lacks tenant_id
-    (inverter_connections) by array_id — leaving no orphans."""
-    from sqlalchemy import text
+    isn't permitted) PLUS array-children by array_id (inverters + connections)
+    — leaving no orphans. Inverters must go before arrays or Postgres raises
+    inverters_array_id_fkey (Sentry: /admin/seed-realistic-demo)."""
+    from sqlalchemy import or_, text
     from . import models as _m
 
     arr_ids = [r[0] for r in db.query(Array.id).filter(Array.tenant_id == tid).all()]
@@ -86,21 +87,65 @@ def _wipe(db, tid: str) -> None:
     except Exception:
         db.rollback()
 
-    # The one array-child without a tenant_id column → delete by array_id.
-    if arr_ids and getattr(_m, "InverterConnection", None) is not None:
-        db.query(_m.InverterConnection).filter(
-            _m.InverterConnection.array_id.in_(arr_ids)).delete(synchronize_session=False)
+    # Array-linked inverter chain by array_id (not only tenant_id): catches every
+    # row still pointing at these arrays, and clears dependents that block the
+    # inverter DELETE (readings/daily/warranty/repair tickets). Connections last
+    # — Inverter.source_connection_id references them.
+    if arr_ids:
+        Inv = getattr(_m, "Inverter", None)
+        inv_ids: list[int] = []
+        if Inv is not None:
+            inv_ids = [r[0] for r in db.query(Inv.id).filter(or_(
+                Inv.array_id.in_(arr_ids),
+                Inv.source_array_id.in_(arr_ids),
+            )).all()]
+        if inv_ids:
+            RT = getattr(_m, "RepairTicket", None)
+            ticket_ids: list[int] = []
+            if RT is not None:
+                ticket_ids = [r[0] for r in db.query(RT.id).filter(or_(
+                    RT.inverter_id.in_(inv_ids),
+                    RT.array_id.in_(arr_ids),
+                )).all()]
+            if ticket_ids:
+                for nm in ("RepairCheckIn", "AgentDocument"):
+                    m = getattr(_m, nm, None)
+                    if m is not None and hasattr(m, "ticket_id"):
+                        db.query(m).filter(m.ticket_id.in_(ticket_ids)).delete(
+                            synchronize_session=False)
+            for nm in ("InverterReading", "InverterDaily", "WarrantyClaim", "RepairTicket"):
+                m = getattr(_m, nm, None)
+                if m is None:
+                    continue
+                if hasattr(m, "inverter_id"):
+                    db.query(m).filter(m.inverter_id.in_(inv_ids)).delete(
+                        synchronize_session=False)
+            # Array-only rows (inverter_id NULL) still block DELETE arrays.
+            for nm in ("WarrantyClaim", "RepairTicket"):
+                m = getattr(_m, nm, None)
+                if m is not None and hasattr(m, "array_id"):
+                    db.query(m).filter(m.array_id.in_(arr_ids)).delete(
+                        synchronize_session=False)
+            db.query(Inv).filter(Inv.id.in_(inv_ids)).delete(synchronize_session=False)
+        if getattr(_m, "InverterConnection", None) is not None:
+            db.query(_m.InverterConnection).filter(
+                _m.InverterConnection.array_id.in_(arr_ids)).delete(
+                synchronize_session=False)
 
     # Every tenant-scoped table, children before parents (getattr-guarded so a
     # renamed/absent model is simply skipped).
     order = [
         "ReportDraft", "OfftakerSubscriptionTemplate",       # → subscriptions
-        "InverterReading", "InverterDaily", "Inverter",      # → inverters/arrays
+        "InverterReading", "InverterDaily",                  # → inverters
+        "RepairCheckIn", "AgentDocument",                    # → repair_tickets
+        "WarrantyClaim", "RepairTicket",                     # → inverters/arrays
+        "Inverter",                                          # → arrays
         "Bill", "GmpUsageRaw", "GmpDailyGeneration", "DailyGeneration",  # → accounts/arrays
-        "ReportDelivery", "WarrantyClaim", "VerificationCheck", "CaptureEvent",
+        "ReportDelivery", "VerificationCheck", "CaptureEvent",
         "SiteFile", "AlertEvent", "InverterAlertState", "ArrayMergeDismissal",
         "ClientMergeDismissal", "OfftakerInvoiceTemplate", "Job", "LoginToken",
         "DeleteHistory", "SpongeProgress", "StripeEvent", "GmpDailyGeneration",
+        "GenReportCharge", "ArrayServiceAssignment", "ExchangeDemand", "ProspectusShare",
         "BillingReportSubscription",                          # after sub-children
         "UtilitySession", "UtilityAccount",                   # after bills
         "Array", "Client",                                    # last

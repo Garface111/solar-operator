@@ -73,3 +73,41 @@ def test_seed_is_idempotent():
         n = db.execute(select(func.count()).select_from(Tenant)
                        .where(Tenant.id == DEMO_TENANT_ID)).scalar()
         assert n == 1
+
+
+def test_wipe_clears_inverters_before_arrays():
+    """Regression: re-seed must not trip inverters_array_id_fkey (Sentry
+    IntegrityError on DELETE FROM arrays for ten_demo_realistic). Demo tenants
+    accumulate Inverter + WarrantyClaim + RepairTicket rows from background jobs;
+    _wipe has to remove that chain before arrays."""
+    from api.models import Array, Inverter, RepairTicket, WarrantyClaim
+
+    seed_realistic_demo(arrays=2, offtakers_per_array=2)
+    with SessionLocal() as db:
+        arrs = db.query(Array).filter(Array.tenant_id == DEMO_TENANT_ID).all()
+        assert arrs
+        for a in arrs:
+            inv = Inverter(
+                tenant_id=DEMO_TENANT_ID, array_id=a.id, vendor="solaredge",
+                serial=f"wipe-sn-{a.id}", name=f"inv-{a.id}", position=0,
+            )
+            db.add(inv)
+            db.flush()
+            db.add(WarrantyClaim(
+                tenant_id=DEMO_TENANT_ID, array_id=a.id, inverter_id=inv.id,
+                fail_type="dead",
+            ))
+            db.add(RepairTicket(
+                tenant_id=DEMO_TENANT_ID, array_id=a.id, inverter_id=inv.id,
+                fail_type="dead", title="seed wipe test",
+            ))
+        db.commit()
+        n_inv = db.query(Inverter).filter(Inverter.tenant_id == DEMO_TENANT_ID).count()
+        assert n_inv >= 2
+
+    # Re-seed must succeed (previously: ForeignKeyViolation on arrays).
+    summary = seed_realistic_demo(arrays=2, offtakers_per_array=2)
+    assert summary["ok"]
+    with SessionLocal() as db:
+        assert db.query(Inverter).filter(Inverter.tenant_id == DEMO_TENANT_ID).count() == 0
+        assert db.query(Array).filter(Array.tenant_id == DEMO_TENANT_ID).count() == 2
