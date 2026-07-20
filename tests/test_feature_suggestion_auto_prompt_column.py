@@ -94,6 +94,43 @@ def test_list_features_survives_missing_auto_prompt_column(legacy_fs_db):
     assert "auto_prompt" in cols
 
 
+def test_triage_feature_queue_survives_missing_auto_prompt(legacy_fs_db):
+    """Sentry PYTHON-FASTAPI-24: triage_feature_queue SELECT must not raise."""
+    db, ops, fs_mod, engine = legacy_fs_db
+    with engine.begin() as conn:
+        conn.execute(text(
+            "INSERT INTO feature_suggestions (text, status, product) "
+            "VALUES ('Add fleet CSV export', 'new', 'array_operator')"
+        ))
+
+    out = ops.triage_feature_queue(db, limit=15)
+    assert out.get("ok") is True
+    assert out.get("triaged", 0) >= 1
+
+    cols = {
+        r[1]
+        for r in engine.connect().execute(text("PRAGMA table_info(feature_suggestions)"))
+    }
+    assert "auto_prompt" in cols
+
+
+def test_ensure_ddl_commits_outside_caller_transaction(legacy_fs_db):
+    """ALTER must survive the caller's session.rollback() (PG recurrence class)."""
+    db, ops, fs_mod, engine = legacy_fs_db
+    fs_mod.ensure_feature_suggestion_columns(db)
+    # Caller aborts its ambient txn — DDL must already be committed separately.
+    db.rollback()
+
+    cols = {
+        r[1]
+        for r in engine.connect().execute(text("PRAGMA table_info(feature_suggestions)"))
+    }
+    assert "auto_prompt" in cols
+    # Cache must be set only after columns exist; a later SELECT still works.
+    rows = ops.list_features(db, status="reviewed", limit=5)
+    assert len(rows) == 1
+
+
 def test_ensure_is_idempotent(legacy_fs_db):
     db, ops, fs_mod, engine = legacy_fs_db
     fs_mod.ensure_feature_suggestion_columns(db)
