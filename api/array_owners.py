@@ -3980,13 +3980,20 @@ _ABS_INVERTER_DAILY_KWH_CEILING = 10_000.0
 # path would have applied. Dialect-agnostic (savepoints work on PG + sqlite).
 
 def _insert_daily_generation_race_safe(db, *, tenant_id: str, array_id: int,
-                                       day: date, kwh: float) -> bool:
+                                       day: date, kwh: float,
+                                       source: str = "extension_pull") -> bool:
     """Insert an array-day generation row the caller believes is missing.
-    Returns True when the value landed (insert OR losing-the-race update)."""
+    Returns True when the value landed (insert OR losing-the-race update).
+
+    `source` defaults to extension_pull (inverter-capture). utility-meter-capture
+    passes source='utility_meter' / 'bill_prorate' so a concurrent winner's row
+    is refreshed with the same rules as the non-race update path (never clobber
+    a measured reading; bill_prorate only fills None/bill_prorate gaps).
+    """
     try:
         with db.begin_nested():
             db.add(DailyGeneration(tenant_id=tenant_id, array_id=array_id,
-                                   day=day, kwh=kwh, source="extension_pull"))
+                                   day=day, kwh=kwh, source=source))
             db.flush()
         return True
     except IntegrityError:
@@ -3996,11 +4003,30 @@ def _insert_daily_generation_race_safe(db, *, tenant_id: str, array_id: int,
                 DailyGeneration.day == day,
             )
         ).scalar_one_or_none()
-        if row is not None and kwh > (row.kwh or 0):
-            row.kwh = kwh
-            row.source = "extension_pull"
-            row.uploaded_at = now()
-            return True
+        if row is None:
+            return False
+        if source == "extension_pull":
+            if kwh > (row.kwh or 0):
+                row.kwh = kwh
+                row.source = source
+                row.uploaded_at = now()
+                return True
+            return False
+        if source == "utility_meter":
+            # Mirrors _persist_meter_accounts non-race branch.
+            if not generation_sources.is_measured(row.source):
+                row.kwh = kwh
+                row.source = source
+                row.uploaded_at = now()
+                return True
+            return False
+        if source == "bill_prorate":
+            if row.source is None or row.source == "bill_prorate":
+                row.kwh = kwh
+                row.source = source
+                row.uploaded_at = now()
+                return True
+            return False
         return False
 
 
@@ -5080,12 +5106,16 @@ def _persist_meter_accounts(
                         )
                     ).scalar_one_or_none()
                     if row is None:
-                        db.add(DailyGeneration(
-                            tenant_id=tenant.id, array_id=arr.id, day=day,
-                            kwh=dk, source="utility_meter",
-                        ))
-                        kwh_recorded += dk
-                        days_written += 1
+                        # Race-safe: concurrent meter-capture (live loop + manual
+                        # sync, or two tabs) can commit (array, day) between our
+                        # read and insert — bare INSERT hit uq_daily_array_day
+                        # (Sentry: ten_anna_800 array 2482). SAVEPOINT + max/source
+                        # rules instead of 500ing the whole capture.
+                        if _insert_daily_generation_race_safe(
+                                db, tenant_id=tenant.id, array_id=arr.id,
+                                day=day, kwh=dk, source="utility_meter"):
+                            kwh_recorded += dk
+                            days_written += 1
                     elif not generation_sources.is_measured(row.source):
                         # Only refresh a None / bill_prorate / prior utility_meter row.
                         # NEVER overwrite, raise, or relabel a real metered reading
@@ -5134,11 +5164,10 @@ def _persist_meter_accounts(
                                 )
                             ).scalar_one_or_none()
                             if row is None:
-                                db.add(DailyGeneration(
-                                    tenant_id=tenant.id, array_id=arr.id, day=day,
-                                    kwh=per_day, source="bill_prorate",
-                                ))
-                                _wrote += 1
+                                if _insert_daily_generation_race_safe(
+                                        db, tenant_id=tenant.id, array_id=arr.id,
+                                        day=day, kwh=per_day, source="bill_prorate"):
+                                    _wrote += 1
                             elif row.source is None or row.source == "bill_prorate":
                                 # Only fill/refresh a gap or our own earlier estimate.
                                 # NEVER overwrite, RAISE, or relabel a real metered

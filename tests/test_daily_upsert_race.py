@@ -107,3 +107,45 @@ def test_inverter_daily_race_same_contract():
         rows = db.execute(select(InverterDaily).where(
             InverterDaily.inverter_id == ivid)).scalars().all()
         assert len(rows) == 1 and rows[0].kwh == 120.0
+
+
+def test_utility_meter_lost_race_does_not_raise():
+    """Sentry: /v1/array-owners/utility-meter-capture UniqueViolation
+    uq_daily_array_day (ten_anna_800, array 2482, 2026-07-07). Concurrent
+    capture already committed; our insert must SAVEPOINT-fallback, not 500."""
+    tid, aid, _ = _mk_fixture()
+    day = date(2026, 7, 7)
+    with SessionLocal() as db:
+        db.add(DailyGeneration(tenant_id=tid, array_id=aid, day=day, kwh=100.0,
+                               source="utility_meter"))
+        db.commit()
+    with SessionLocal() as db:
+        assert _insert_daily_generation_race_safe(
+            db, tenant_id=tid, array_id=aid, day=day, kwh=437.76,
+            source="utility_meter") is True
+        db.commit()
+    with SessionLocal() as db:
+        rows = db.execute(select(DailyGeneration).where(
+            DailyGeneration.array_id == aid)).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].kwh == 437.76
+        assert rows[0].source == "utility_meter"
+
+
+def test_utility_meter_lost_race_never_clobbers_measured():
+    tid, aid, _ = _mk_fixture()
+    day = date(2026, 7, 7)
+    with SessionLocal() as db:
+        db.add(DailyGeneration(tenant_id=tid, array_id=aid, day=day, kwh=900.0,
+                               source="solaredge"))
+        db.commit()
+    with SessionLocal() as db:
+        assert _insert_daily_generation_race_safe(
+            db, tenant_id=tid, array_id=aid, day=day, kwh=437.76,
+            source="utility_meter") is False
+        db.commit()
+    with SessionLocal() as db:
+        row = db.execute(select(DailyGeneration).where(
+            DailyGeneration.array_id == aid)).scalar_one()
+        assert row.kwh == 900.0
+        assert row.source == "solaredge"
