@@ -8165,6 +8165,19 @@ def _openai_content_to_anthropic(content: Any) -> Any:
     return blocks if blocks else ""
 
 
+# Anthropic model ids that return not_found_error (Sentry PYTHON-FASTAPI-1H).
+_RETIRED_ANTHROPIC_MODELS = {
+    "claude-sonnet-4-20250514": "claude-sonnet-4-5",
+}
+_DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-5"
+
+
+def _anthropic_model() -> str:
+    """Resolve EA Anthropic model; remap retired ids that 404 on current API."""
+    raw = (os.getenv("EA_ANTHROPIC_MODEL") or _DEFAULT_ANTHROPIC_MODEL).strip()
+    return _RETIRED_ANTHROPIC_MODELS.get(raw, raw) or _DEFAULT_ANTHROPIC_MODEL
+
+
 def _call_anthropic(messages: list[dict], tools: list, *, max_tokens: int | None = None) -> dict:
     if not ANTHROPIC_API_KEY:
         raise RuntimeError("no_anthropic")
@@ -8224,8 +8237,7 @@ def _call_anthropic(messages: list[dict], tools: list, *, max_tokens: int | None
     tok = int(max_tokens or os.getenv("EA_MAX_TOKENS", "1200") or 1200)
     tok = max(256, min(tok, 4096))
     body = {
-        # claude-sonnet-4-20250514 is retired/404 on current API — use 4.5 alias.
-        "model": os.getenv("EA_ANTHROPIC_MODEL", "claude-sonnet-4-5"),
+        "model": _anthropic_model(),
         "max_tokens": tok,
         "system": sys or PERSONA,
         "messages": a_msgs,
