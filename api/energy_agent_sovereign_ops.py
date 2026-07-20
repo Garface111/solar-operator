@@ -53,7 +53,13 @@ def portal_signoff_enabled() -> bool:
 
 # ── Features ────────────────────────────────────────────────────────────────
 def list_features(db, *, status: str = "reviewed", limit: int = 50) -> list[dict]:
-    from .feature_suggestions import FeatureSuggestion, VALID_STATUSES
+    from .feature_suggestions import (
+        FeatureSuggestion,
+        VALID_STATUSES,
+        ensure_feature_suggestion_columns,
+    )
+    # Prod: model has auto_prompt but existing tables may not (create_all no-op).
+    ensure_feature_suggestion_columns(db)
     q = select(FeatureSuggestion).order_by(FeatureSuggestion.created_at.asc())
     if status and status != "all":
         if status not in VALID_STATUSES:
@@ -83,7 +89,12 @@ def set_feature_status(
     review_note: str | None = None,
     actor: str = "sovereign",
 ) -> dict:
-    from .feature_suggestions import FeatureSuggestion, VALID_STATUSES
+    from .feature_suggestions import (
+        FeatureSuggestion,
+        VALID_STATUSES,
+        ensure_feature_suggestion_columns,
+    )
+    ensure_feature_suggestion_columns(db)
     if not ops_enabled():
         return {"ok": False, "denied": True, "denied_reason": "ops authority off"}
     status = (status or "").strip()
@@ -127,11 +138,12 @@ def bulk_feature_status(
 
 def ship_reviewed_features(db, *, limit: int = 10, also_code_hire: bool = True) -> dict:
     """Prioritize oldest reviewed features → building (+ optional code job)."""
-    from .feature_suggestions import FeatureSuggestion
+    from .feature_suggestions import FeatureSuggestion, ensure_feature_suggestion_columns
     from .energy_agent_sovereign import act_code_hire
 
     if not ops_enabled():
         return {"ok": False, "denied": True, "denied_reason": "ops authority off"}
+    ensure_feature_suggestion_columns(db)
     rows = db.execute(
         select(FeatureSuggestion)
         .where(FeatureSuggestion.status == "reviewed")
@@ -191,9 +203,10 @@ def assign_feature(
 
 def triage_feature_queue(db, *, limit: int = 20) -> dict:
     """Move new → reviewed with Sovereign triage notes (batch authority)."""
-    from .feature_suggestions import FeatureSuggestion
+    from .feature_suggestions import FeatureSuggestion, ensure_feature_suggestion_columns
     if not ops_enabled():
         return {"ok": False, "denied": True, "denied_reason": "ops authority off"}
+    ensure_feature_suggestion_columns(db)
     rows = db.execute(
         select(FeatureSuggestion)
         .where(FeatureSuggestion.status == "new")
