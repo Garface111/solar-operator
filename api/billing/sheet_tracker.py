@@ -673,6 +673,103 @@ def _parse_date_any(v):
     return None
 
 
+def _period_sort_key_from_value(v) -> Optional[str]:
+    """Canonical sort key for a single cell that might be a billing period.
+
+    Returns:
+      * 'YYYY-MM' when year is known (full date, ISO month, 'April 2025', …)
+      * '0000-MM' for bare month names ('April') so a batch still sorts Mar→Jun→Jul
+      * None when the value carries no period signal
+
+    Regression (Glover / new-sheet backfill): sorting only via _parse_date_any left
+    ISO 'YYYY-MM' and month-name period cells as None → all keys became '9999-99'
+    → rows kept the model's emit order (May, June, April).
+    """
+    if v is None or v == "":
+        return None
+    d = _parse_date_any(v)
+    if d is not None:
+        return d.strftime("%Y-%m")
+    s = str(v).strip()
+    if not s:
+        return None
+    ym = _ym(s)
+    if ym:
+        return f"{ym[0]:04d}-{ym[1]:02d}"
+    bm = _bare_month(s)
+    if bm:
+        return f"0000-{bm:02d}"
+    return None
+
+
+def _row_period_key(ai_row: dict) -> Optional[str]:
+    """Best period key for an AI/planner row dict {col: value}.
+
+    Prefer real YYYY-MM (max of any dated cells = period end). Fall back to bare
+    month keys only when no year-bearing cell exists.
+    """
+    if not isinstance(ai_row, dict):
+        return None
+    absolute, bare = [], []
+    for v in ai_row.values():
+        k = _period_sort_key_from_value(v)
+        if not k:
+            continue
+        if k.startswith("0000-"):
+            bare.append(k)
+        else:
+            absolute.append(k)
+    if absolute:
+        return max(absolute)
+    return max(bare) if bare else None
+
+
+def _normalize_present_labels(present) -> set:
+    """Expand present labels so '2025-04', 'April 2025', and bare 'April' can match.
+
+    Used for dedup: an AI row with period end 2025-04-30 must not re-append when
+    the sheet already has 'April' or '2025-04' in the period column.
+    """
+    out: set = set()
+    for p in present or ():
+        if p is None or p == "":
+            continue
+        raw = str(p).strip()
+        out.add(raw)
+        k = _period_sort_key_from_value(p)
+        if k:
+            out.add(k)
+            if not k.startswith("0000-"):
+                # also accept bare month of that period for sheets that omit the year
+                try:
+                    out.add(f"0000-{int(k[5:7]):02d}")
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                # bare month present → also match any YYYY-MM with that month at dedup time
+                # (handled symmetrically when checking the candidate row key)
+                pass
+    return out
+
+
+def _period_already_present(per: Optional[str], seen: set) -> bool:
+    """True if this period key collides with anything already on the sheet / batch."""
+    if not per:
+        return False
+    if per in seen:
+        return True
+    # bare month vs absolute month (and vice versa)
+    if per.startswith("0000-") and len(per) == 7:
+        mm = per[5:7]
+        return any(
+            (isinstance(s, str) and len(s) == 7 and s[4] == "-" and s[5:7] == mm and s[:4].isdigit())
+            for s in seen
+        )
+    if len(per) == 7 and per[4] == "-" and per[:4].isdigit():
+        return f"0000-{per[5:7]}" in seen
+    return False
+
+
 def _to_num(v):
     """A number from a cell that may carry $, commas, or a kWh/kW unit suffix. None if not numeric."""
     if isinstance(v, bool):
@@ -944,19 +1041,19 @@ def append_ai_rows(file_bytes: bytes, mapping: dict, ai_rows: list,
             except Exception:  # noqa: BLE001
                 pass
 
-    def row_period(ai_row):
-        keys = [d.strftime("%Y-%m") for d in (_parse_date_any(v) for v in ai_row.values()) if d]
-        return max(keys) if keys else None
-
     # Write in CHRONOLOGICAL order (by each row's period) so they land April, May, June — not the
     # order the model happened to emit them. Dedup against the sheet AND within this batch.
-    valid = sorted((rr for rr in ai_rows if isinstance(rr, dict)),
-                   key=lambda rr: row_period(rr) or "9999-99")
-    seen = set(present)
+    # Sort key must handle full dates, ISO 'YYYY-MM', 'April 2025', AND bare 'April' — not just
+    # date objects (regression: YYYY-MM / month-name rows all sorted as '9999-99' → model order).
+    valid = sorted(
+        (rr for rr in ai_rows if isinstance(rr, dict)),
+        key=lambda rr: _row_period_key(rr) or "9999-99",
+    )
+    seen = _normalize_present_labels(present)
     appended = []
     for ai_row in valid:
-        per = row_period(ai_row)
-        if per and per in seen:
+        per = _row_period_key(ai_row)
+        if _period_already_present(per, seen):
             continue                                  # already on the sheet, or already added this batch
         wr = next_row()
         for k, v in ai_row.items():
@@ -971,6 +1068,11 @@ def append_ai_rows(file_bytes: bytes, mapping: dict, ai_rows: list,
             write_cell(wr, col, cval)
         if per:
             seen.add(per)
+            # keep bare↔absolute aliases in the batch set so dups can't slip through
+            if len(per) == 7 and per[4] == "-" and per[:4].isdigit():
+                seen.add(f"0000-{per[5:7]}")
+            elif per.startswith("0000-") and len(per) == 7:
+                seen.add(per)
         appended.append(ai_row)
     buf = io.BytesIO()
     wb.save(buf)
@@ -1034,11 +1136,11 @@ def append_recipe_rows(file_bytes: bytes, mapping: dict, facts_list: list,
                 and len({str(x) for x in _vv}) == 1:
             const_cols[_ci] = _vv[-1]
 
-    seen = set(present or ())
+    seen = _normalize_present_labels(present)
     appended = []
     for fact in sorted(facts_list, key=lambda f: f.get("period") or "9999-99"):
         per = fact.get("period")
-        if per and per in seen:
+        if _period_already_present(per, seen):
             continue
         wr = next_row()
         for k, rule in recipe.items():
