@@ -16,12 +16,16 @@ def test_support_map_file_loads_all_topics():
     pmap = load_product_map(force=True)
     missing = REQUIRED_TOPICS - set(pmap)
     assert not missing, f"support map missing topics: {missing}"
-    # Tabs must teach the six owner-facing labels
+    # Tabs must teach current desktop + mobile chrome
     tabs = pmap["tabs"].lower()
-    for label in ("fleet triage", "inverters", "analysis", "invoices", "resources", "account"):
+    for label in (
+        "fleet", "analysis", "invoices", "repairs", "marketplace", "account",
+        "triage", "sandbox", "resources", "owner-web",
+    ):
         assert label in tabs, f"tabs section missing {label!r}"
-    # Tab is "Account" (not "Master Account"); offtakers still use "Master account" as a form field
-    assert "master account" not in tabs or "was" in tabs  # legacy note OK
+    # Master account form-field note is OK; spoken top tab is Account
+    assert "marketplace" in tabs
+    assert "bottom nav" in tabs or "owner-native" in tabs
 
 
 def test_parse_support_map_md_sections():

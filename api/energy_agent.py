@@ -166,7 +166,7 @@ You have a FREE MIND over THIS TENANT'S live data (not a fixed FAQ):
   (profile + fleet digest + open intents + pending UX) survives between visits.
   Initiative: may surface proactive insights or prepare UX changes offline, and
   email Ford/owner when something is prepared or auto-queued — still one mind.
-- product_map = HOW THE SYSTEM WORKS (authoritative support map + surface mental model).
+- product_map = HOW THE SYSTEM WORKS (authoritative support map + surface mental models).
   Domain: tabs | system | fleet | capture | vendors | analysis | offtakers |
   generation_reports | billing | status | security | tools | …
 - NEPOOL / REC / "generation reports" / "reports to my clients" / report cadence /
@@ -174,12 +174,17 @@ You have a FREE MIND over THIS TENANT'S live data (not a fixed FAQ):
   This is a REAL folded-in system (Invoices → Generation reports, #reports/generation) —
   never conflate it with offtaker invoices. CLIENTS = who receive generation reports;
   OFFTAKERS = who receive solar-credit invoices. Different people, different system.
-  SURFACE (macro why page exists / meso user goal / micro real controls — load BEFORE
-  tours or “what is this page?”): surface | product_spine | surface_invoices |
-  surface_inverters | surface_fleet_triage | surface_analysis | surface_account |
+  SURFACE DESKTOP (load BEFORE tours / “what is this page?” when ACCESS SURFACE is desktop):
+  surface | product_spine | surface_fleet | surface_fleet_triage | surface_inverters |
+  surface_analysis | surface_invoices | surface_marketplace | surface_account |
   surface_resources | surface_repairs | orientation_playbook.
-  Call topic=surface for whole-product layout; topic=surface_<tab> for that page;
-  topic=capture before Auto-refresh; topic=status when Solar.web/peer disagree.
+  SURFACE MOBILE (client owner-web | owner-native — load surface_mobile first):
+  surface_mobile | product_spine_mobile | surface_mobile_fleet | surface_mobile_* |
+  surface_mobile_agent | orientation_playbook_mobile.
+  Desktop top tabs NOW: Fleet · Analysis · Invoices · Repairs · Marketplace · Account
+  (Fleet owns Triage|Table|Sandbox — no separate Inverters top tab).
+  Call topic=surface or surface_mobile for whole-product layout; topic=surface_<tab>
+  for that page; topic=capture before Auto-refresh; topic=status when peer disagree.
 - investigate_attention / fleet_overview / array_detail = health verdicts (same engine as the UI).
   CRITICAL: Attention = 14-day peer health PLUS live dark/low overlays (Spreadsheet
   "NEED ATTENTION"). Never call a site healthy if tools or UI context flag live issues.
@@ -453,8 +458,25 @@ Hard rules:
   so the client opens the portal in a new tab.
 
 Context about where the user is may be provided as JSON (tab, selection, form).
+Every turn may also include an ACCESS SURFACE block — trust it over guesses.
 
-MOBILE OS (when context.mobile_os or context.is_mobile_os_home is true):
+ACCESS SURFACE / CLIENT (always honor when present):
+- context.client values:
+  · owner-web  → React mobile web at arrayoperator.com/m (bottom nav + AgentSheet).
+  · owner-native → Expo React Native app (bottom tabs + AgentModal).
+  · desktop / absent / classic SPA → wide browser hash-router (top tabs + orb).
+- context.surface / route / path: which screen or agent chrome (e.g. agent_sheet_mobile,
+  rn_agent, fleet, marketplace).
+- context.mobile true (or client owner-web|owner-native): you are ON MOBILE.
+  Lead with product_map(topic=surface_mobile). Bottom nav:
+  Fleet · Analysis · Invoices · Repairs · Market(place) · Account.
+  Prefer tools over desktop DOM tours. For files: "tap + / paperclip → Camera, Library, or File."
+- Desktop top tabs (CURRENT): Fleet · Analysis · Invoices · Repairs · Marketplace · Account.
+  Fleet segments: Triage | Table | Sandbox (no separate Inverters top tab).
+  product_map(topic=surface) for desktop atlas.
+
+MOBILE OS (when context.mobile_os or context.is_mobile_os_home is true — legacy
+in-SPA AI home on the desktop bundle):
 - YOU are the operating layer on the phone — not a side chat over tabs. There is no
   tab bar in AI-home mode; the owner talks to you to finish setup and run the fleet.
 - Phase "setup": drive the hands-off checklist as fast as possible, one next step at a
@@ -468,6 +490,12 @@ MOBILE OS (when context.mobile_os or context.is_mobile_os_home is true):
 - Prefer short spoken answers + one clear CTA. ui_navigate still works if they open
   Detail mode; on pure mobile OS home, explain and use tools/census rather than
   "click the third tab."
+
+OWNER-WEB / OWNER-NATIVE (when context.client is owner-web or owner-native):
+- Greet and reason as "Energy Agent on mobile" (web app vs React Native when known).
+- Same tools as desktop for data; UI directions must match bottom tabs + Agent sheet.
+- Attachments: owners can upload photos/PDFs/CSV from the chat composer — analyze them.
+- Do not send them to Chrome-extension-only flows without saying desktop is required.
 """
 
 
@@ -1162,13 +1190,12 @@ TOOL_DEFS = [
             "name": "product_map",
             "description": (
                 "Authoritative Array Operator product knowledge (support map + "
-                "surface mental model). ALWAYS call before explaining Auto-refresh, "
-                "cloud vs extension, invoices, analysis, plans, onboarding, OR before "
-                "describing what a page/tab is for (use surface / surface_*). "
-                "Topics include tabs, system, surface, product_spine, "
-                "surface_invoices, surface_inverters, surface_fleet_triage, "
-                "surface_analysis, surface_account, surface_resources, surface_repairs, "
-                "and domain topics."
+                "desktop and mobile surface mental models). ALWAYS call before explaining "
+                "Auto-refresh, cloud vs extension, invoices, analysis, plans, onboarding, "
+                "OR before describing what a page/tab is for. "
+                "Desktop: surface / surface_fleet / surface_marketplace / surface_*. "
+                "Mobile (owner-web / owner-native): surface_mobile / surface_mobile_*. "
+                "Match ACCESS SURFACE client before choosing desktop vs mobile atlas."
             ),
             "parameters": {
                 "type": "object",
@@ -1180,10 +1207,16 @@ TOOL_DEFS = [
                             "health | offtakers | generation_reports | billing | plans | "
                             "onboarding | resources | "
                             "status | agent | api | datamodel | glossary | security | tools. "
-                            "Surface mental model (macro/meso/micro): surface | product_spine | "
-                            "surface_invoices | surface_inverters | surface_fleet_triage | "
-                            "surface_analysis | surface_account | surface_resources | "
-                            "surface_repairs | orientation_playbook | surface_global | "
+                            "Desktop surface: surface | product_spine | surface_fleet | "
+                            "surface_marketplace | surface_invoices | surface_inverters | "
+                            "surface_fleet_triage | surface_analysis | surface_account | "
+                            "surface_resources | surface_repairs | orientation_playbook | "
+                            "surface_global | "
+                            "Mobile surface: surface_mobile | product_spine_mobile | "
+                            "surface_mobile_fleet | surface_mobile_analysis | "
+                            "surface_mobile_invoices | surface_mobile_repairs | "
+                            "surface_mobile_marketplace | surface_mobile_account | "
+                            "surface_mobile_agent | orientation_playbook_mobile | "
                             "anti_hallucination. "
                             "surface = whole-product layout + orientation playbook; "
                             "surface_invoices = Invoices tab purpose+structure; etc. "
@@ -3611,16 +3644,20 @@ def _array_detail_tool(db, tenant: Tenant, args: dict) -> dict:
 
 _SUPPORT_MAP_PATH = Path(__file__).with_name("energy_agent_support_map.md")
 _SURFACE_MODEL_PATH = Path(__file__).with_name("energy_agent_surface_model.md")
+_MOBILE_SURFACE_MODEL_PATH = Path(__file__).with_name(
+    "energy_agent_mobile_surface_model.md"
+)
 _PRODUCT_MAP_CACHE: dict[str, str] | None = None
 _PRODUCT_MAP_MTIME: float | None = None
 
 # Minimal emergency fallback if the markdown file is missing at runtime.
 _PRODUCT_MAP_FALLBACK: dict[str, str] = {
     "tabs": (
-        "TOP NAV labels: Fleet Triage (#dashboard), Inverters (#arrays), "
-        "Analysis (#analysis; trends is a sub-view), Invoices (#reports), "
-        "Operations (#ops; Resources is a sub-tab at #resources), Account (#account). "
-        "Never say Dashboard/Arrays/Reports/Trends as top tabs; Resources is not a top tab."
+        "DESKTOP TOP NAV: Fleet (#dashboard; segments Triage|Table|Sandbox), "
+        "Analysis (#analysis; Trends/Resources sub-views), Invoices (#reports), "
+        "Repairs (#ops), Marketplace (#marketplace), Account (#account). "
+        "MOBILE bottom nav (owner-web /m + RN): Fleet · Analysis · Invoices · "
+        "Repairs · Market · Account. Never invent Inverters/Resources/Trends as top tabs."
     ),
     "system": (
         "Array Operator (arrayoperator.com) = EnergyAgent owner product. "
@@ -3631,6 +3668,11 @@ _PRODUCT_MAP_FALLBACK: dict[str, str] = {
         "Auto-refresh: cloud = store passwords, harvester 24/7; device = extension vault. "
         "PLUS extension one-click Log-in-with capture attaches SMA/Fronius/Chint without a cloud vault row. "
         "SolarEdge usually API keys; never equate fleet vendors with cloud_capture.logins only."
+    ),
+    "surface_mobile": (
+        "Mobile clients: owner-web (arrayoperator.com/m) and owner-native (Expo). "
+        "Bottom nav Fleet·Analysis·Invoices·Repairs·Market·Account. Agent is bottom dock chat. "
+        "Prefer tools; attach photos via composer + button."
     ),
 }
 
@@ -3655,14 +3697,15 @@ def _parse_support_map_md(text: str) -> dict[str, str]:
 
 
 def load_product_map(*, force: bool = False) -> dict[str, str]:
-    """Load support topics + surface mental model (mtime-aware cache).
+    """Load support topics + desktop/mobile surface mental models (mtime-aware cache).
 
-    Support map = domain mechanics. Surface model = macro/meso/micro page atlas
-    (why each tab exists, user goals, real controls, nav graph).
+    Support map = domain mechanics.
+    Desktop surface model = macro/meso/micro page atlas for arrayoperator.com SPA.
+    Mobile surface model = owner-web (/m) + owner-native React Native shells.
     """
     global _PRODUCT_MAP_CACHE, _PRODUCT_MAP_MTIME
     mtimes: list[float] = []
-    for p in (_SUPPORT_MAP_PATH, _SURFACE_MODEL_PATH):
+    for p in (_SUPPORT_MAP_PATH, _SURFACE_MODEL_PATH, _MOBILE_SURFACE_MODEL_PATH):
         try:
             mtimes.append(p.stat().st_mtime)
         except OSError:
@@ -3680,7 +3723,7 @@ def load_product_map(*, force: bool = False) -> dict[str, str]:
         parsed = _parse_support_map_md(raw)
         if not parsed:
             raise ValueError("no ## topics in support map")
-        # Merge surface atlas topics (product_spine, surface_invoices, …)
+        # Merge desktop surface atlas topics (product_spine, surface_invoices, …)
         try:
             surf = _SURFACE_MODEL_PATH.read_text(encoding="utf-8")
             for k, v in _parse_support_map_md(surf).items():
@@ -3692,12 +3735,37 @@ def load_product_map(*, force: bool = False) -> dict[str, str]:
                     "orientation_playbook",
                     "anti_hallucination",
                     "surface_global",
+                    "surface_marketplace",
+                    "surface_fleet",
                 ):
                     if key in parsed:
                         bits.append(parsed[key])
                 parsed["surface"] = "\n\n".join(bits)
         except OSError as se:
             log.warning("surface model missing (%s)", se)
+        # Merge mobile surface atlas (owner-web + React Native)
+        try:
+            mob = _MOBILE_SURFACE_MODEL_PATH.read_text(encoding="utf-8")
+            for k, v in _parse_support_map_md(mob).items():
+                parsed[k] = v
+            if "product_spine_mobile" in parsed:
+                mbits = [parsed["product_spine_mobile"]]
+                for key in (
+                    "orientation_playbook_mobile",
+                    "anti_hallucination_mobile",
+                    "surface_mobile_agent",
+                ):
+                    if key in parsed:
+                        mbits.append(parsed[key])
+                # Keep explicit surface_mobile section if present; else build alias
+                if "surface_mobile" not in parsed or len(parsed.get("surface_mobile") or "") < 80:
+                    parsed["surface_mobile"] = "\n\n".join(mbits)
+                else:
+                    parsed["surface_mobile"] = (
+                        parsed["surface_mobile"] + "\n\n" + "\n\n".join(mbits)
+                    )
+        except OSError as me:
+            log.warning("mobile surface model missing (%s)", me)
         _PRODUCT_MAP_CACHE = parsed
         _PRODUCT_MAP_MTIME = mtime
         return parsed
@@ -3706,6 +3774,69 @@ def load_product_map(*, force: bool = False) -> dict[str, str]:
         _PRODUCT_MAP_CACHE = dict(_PRODUCT_MAP_FALLBACK)
         _PRODUCT_MAP_MTIME = mtime
         return _PRODUCT_MAP_CACHE
+
+
+def _access_surface_block(context: dict | None) -> str:
+    """Human-readable ACCESS SURFACE for the system prompt — mobile vs desktop."""
+    ctx = context if isinstance(context, dict) else {}
+    client_raw = ctx.get("client") or ctx.get("app") or ctx.get("app_client") or ""
+    client = str(client_raw).strip().lower()
+    surface = str(ctx.get("surface") or ctx.get("screen") or "").strip()
+    route = str(
+        ctx.get("route") or ctx.get("path") or ctx.get("hash") or ctx.get("tab") or ""
+    ).strip()
+    mobile_flag = bool(
+        ctx.get("mobile")
+        or ctx.get("is_mobile")
+        or ctx.get("is_mobile_os_home")
+        or ctx.get("mobile_os")
+    )
+    if client in ("owner-web", "owner-native", "mobile", "rn", "react-native"):
+        mobile_flag = True
+    if client in ("desktop", "spa", "owner-desktop", "classic"):
+        mobile_flag = False
+
+    if client == "owner-web":
+        where = "MOBILE WEB (arrayoperator.com/m · React owner-web)"
+        atlas = "surface_mobile"
+        nav = "Bottom nav: Fleet · Analysis · Invoices · Repairs · Market · Account. Agent = bottom dock → full-screen AgentSheet."
+    elif client == "owner-native":
+        where = "REACT NATIVE APP (Expo owner-native)"
+        atlas = "surface_mobile"
+        nav = "Bottom tabs: Fleet · Analysis · Invoices · Repairs · Marketplace · Account. Agent = AgentModal sheet."
+    elif mobile_flag or ctx.get("mobile_os") or ctx.get("is_mobile_os_home"):
+        where = "MOBILE (legacy mobile OS or mobile flag without client id)"
+        atlas = "surface_mobile"
+        nav = "Prefer tools + short CTAs; avoid desktop-only DOM tours."
+    else:
+        where = "DESKTOP WEB (arrayoperator.com SPA · top tab bar)"
+        atlas = "surface"
+        nav = (
+            "Top tabs: Fleet · Analysis · Invoices · Repairs · Marketplace · Account. "
+            "Fleet segments: Triage | Table | Sandbox. Energy Agent orb/panel + attach chip."
+        )
+
+    lines = [
+        f"You are Energy Agent on: {where}.",
+        f"product_map atlas to prefer: topic={atlas} (and surface_* / surface_mobile_* as needed).",
+        nav,
+    ]
+    if client:
+        lines.append(f"context.client={client}")
+    if surface:
+        lines.append(f"context.surface={surface}")
+    if route:
+        lines.append(f"context.route/tab={route}")
+    if mobile_flag:
+        lines.append(
+            "Mobile UX: thumb-sized steps; for uploads tell them to use the chat + / paperclip "
+            "(Camera, Library, or File). Do not quote desktop #element ids as click targets."
+        )
+    else:
+        lines.append(
+            "Desktop UX: exact top-bar labels; DOM tours OK; attach via composer paperclip."
+        )
+    return "\n".join(lines)
 
 
 # Eager load so import surfaces a missing map early (falls back if needed).
@@ -4612,16 +4743,24 @@ def _product_map_tool(args: dict) -> dict:
     pmap = load_product_map()
     topic = (args.get("topic") or "all").strip().lower()
     if topic in pmap:
-        src = (
-            "energy_agent_surface_model.md"
-            if topic.startswith("surface")
+        if (
+            topic.startswith("surface_mobile")
+            or topic.endswith("_mobile")
             or topic in (
-                "product_spine",
-                "orientation_playbook",
-                "anti_hallucination",
+                "product_spine_mobile",
+                "orientation_playbook_mobile",
+                "anti_hallucination_mobile",
             )
-            else "energy_agent_support_map.md"
-        )
+        ):
+            src = "energy_agent_mobile_surface_model.md"
+        elif topic.startswith("surface") or topic in (
+            "product_spine",
+            "orientation_playbook",
+            "anti_hallucination",
+        ):
+            src = "energy_agent_surface_model.md"
+        else:
+            src = "energy_agent_support_map.md"
         return {
             "topic": topic,
             "map": pmap[topic],
@@ -4632,7 +4771,7 @@ def _product_map_tool(args: dict) -> dict:
     keys = sorted(pmap.keys())
     entry = {
         k: pmap[k]
-        for k in ("system", "tabs", "surface", "tools")
+        for k in ("system", "tabs", "surface", "surface_mobile", "tools")
         if k in pmap
     }
     result = {
@@ -9650,6 +9789,11 @@ def _agent_turn(
             or (context or {}).get("voice_interrupted")
             or (context or {}).get("barge_in")
         )
+        try:
+            system += "\n\nACCESS SURFACE (GROUND TRUTH — which product shell the owner is in):\n"
+            system += _access_surface_block(context if isinstance(context, dict) else {})
+        except Exception as _ase:
+            log.info("access surface inject skipped: %s", _ase)
         system += "\n\nUI context:\n" + json.dumps(ctx_for_prompt, default=str)[:2000]
         if live_dom is not None:
             system += (
@@ -10158,10 +10302,11 @@ def create_session(body: SessionIn, authorization: str | None = Header(default=N
             content="session_start",
         ))
         db.commit()
-        # Mobile OS: AI is the home surface — intro matches setup vs running phase.
+        # Intros name the access surface so the model + owner stay aligned.
         mos = ctx.get("mobile_os") if isinstance(ctx, dict) else None
         if not isinstance(mos, dict):
             mos = {}
+        client = str((ctx.get("client") if isinstance(ctx, dict) else None) or "").lower()
         if mos or ctx.get("is_mobile_os_home"):
             phase = (mos.get("phase") or "").lower()
             nxt = mos.get("next_setup_step") or {}
@@ -10178,11 +10323,23 @@ def create_session(body: SessionIn, authorization: str | None = Header(default=N
                     "sync age, offtaker send rates. Deep edits live under **Detail** "
                     "at the bottom."
                 )
+        elif client == "owner-native":
+            intro = (
+                "Hi — **Energy Agent on the mobile app**. I can check fleet health, "
+                "offtakers, repairs, marketplace vacancy, and walk setup. "
+                "Attach a photo of a bill or screen if that helps — what should we tackle?"
+            )
+        elif client == "owner-web" or ctx.get("mobile"):
+            intro = (
+                "Hi — **Energy Agent on mobile**. Bottom tabs are Fleet, Analysis, "
+                "Invoices, Repairs, Market, and Account. Use **+** in the chat to attach "
+                "a photo, library image, or file. What should we tackle?"
+            )
         else:
             intro = (
                 "Hi — I'm Energy Agent. I can see your Array Operator account, "
                 "drive the screen when you say yes, and help with fleet, invoices, "
-                "and earnings. What should we tackle?"
+                "repairs, and marketplace. What should we tackle?"
             )
         return {
             "ok": True,
@@ -10709,8 +10866,21 @@ def chat(body: ChatIn, authorization: str | None = Header(default=None)):
     with SessionLocal() as db:
         _ea_ensure_asset_table(db)
         s = _get_session(db, body.session_id, t.id)
-        if body.context is not None:
+        # Merge session shell context (client/surface) with per-turn UI context so
+        # ACCESS SURFACE stays correct even if the client omits keys on a turn.
+        turn_ctx: dict = {}
+        try:
+            prev_ctx = json.loads(s.context_json or "{}")
+            if isinstance(prev_ctx, dict):
+                turn_ctx.update(prev_ctx)
+        except Exception:
+            pass
+        if body.context is not None and isinstance(body.context, dict):
+            turn_ctx.update(body.context)
+            s.context_json = json.dumps(turn_ctx)[:8000]
+        elif body.context is not None:
             s.context_json = json.dumps(body.context)
+            turn_ctx = body.context if isinstance(body.context, dict) else turn_ctx
 
         # Voice/text "yes" / "no" while a write is pending → resolve confirm without
         # another LLM round-trip (so offtaker % changes land immediately).
@@ -10757,7 +10927,7 @@ def chat(body: ChatIn, authorization: str | None = Header(default=None)):
             }
 
         out = _agent_turn(
-            db, t, s, msg, body.context,
+            db, t, s, msg, turn_ctx or None,
             attachment_ids=attach_ids,
             source=body.source or "text",
         )

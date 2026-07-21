@@ -7,35 +7,59 @@ Coding agents editing the product still load skill **`solar-operator-energyagent
 When product behavior changes, update **this file** (regenerate with the **product-map-cartographer** agent, or edit by hand).
 
 Topics = `## heading` ids below. Call `product_map(topic=<id>)` before explaining that area.
-Available topics: `tabs · system · fleet · capture · vendors · analysis · health · offtakers · generation_reports · billing · plans · onboarding · resources · status · agent · api · datamodel · glossary · security · tools · surface · product_spine · surface_*`.
+Available topics: `tabs · system · fleet · capture · vendors · analysis · health · offtakers · generation_reports · billing · plans · onboarding · resources · status · agent · api · datamodel · glossary · security · tools · surface · product_spine · surface_* · surface_mobile · product_spine_mobile · surface_mobile_*`.
 
-**Page-level understanding** (macro / meso / micro): `product_map(topic=surface)` or
-`surface_invoices` / `surface_inverters` / `surface_fleet_triage` / `surface_analysis` /
-`surface_account` / `surface_resources`. Full atlas + screenshots:
-`array-operator/docs/surface-atlas/` (source: `energy_agent_surface_model.md`).
+**Page-level understanding** (macro / meso / micro):
+- **Desktop:** `product_map(topic=surface)` or `surface_fleet` / `surface_marketplace` /
+  `surface_invoices` / … Source: `energy_agent_surface_model.md` + atlas shots in
+  `array-operator/docs/surface-atlas/`.
+- **Mobile (owner-web /m + React Native):** `product_map(topic=surface_mobile)` or
+  `surface_mobile_fleet` / `surface_mobile_agent` / … Source:
+  `energy_agent_mobile_surface_model.md`. Honor `context.client` (owner-web |
+  owner-native | desktop).
 
 ---
 
 ## tabs
 
-TOP NAV — use EXACTLY these labels when speaking to the owner (hashes are internal):
+### Desktop top nav — EXACT labels (hashes internal)
 
 | User-facing label | hash | What it is |
 |-------------------|------|------------|
-| Fleet Triage | `#dashboard` | Attention / fleet overview (NOT “Dashboard”) |
-| Inverters | `#arrays` | Live inverter canvas; **Sandbox** (spatial fleet tree) + **Spreadsheet** sub-views (NOT “Arrays”). This is the default landing tab. |
-| Analysis | `#analysis` | Fleet NOC: production vs expected, sites, health, hardware. **Trends / through-time is a sub-view** (`#trends`), NOT a separate top tab |
-| Invoices | `#reports` | Offtaker solar-credit invoices (NOT “Reports”). Sub-tabs: Offtakers · Bill audit · Invoice Trends · **Generation reports** (NEPOOL/REC generation workbooks to clients — `#reports/generation`, see `generation_reports`). |
-| Repairs | `#ops` | **Chat-first O&M automation.** Energy Agent opens with a staged prompt (not auto-sent). Setup (O&M contact + which arrays they cover) happens **in chat** via tools. After setup: panel shows what the agent is working on (open cases) or a calm empty state. Pipeline: detect fault → draft outreach → coordinate → verify recovery → close. Multiple cases in parallel. |
-| Account | `#account` | Profile, plan/card, Auto-refresh vault (was “Master Account”; use **Account**) |
+| **Fleet** | `#dashboard` (Triage) · `#arrays` (Sandbox) | **One top tab** with segments **Triage \| Table \| Sandbox**. Attention queue + vendor spreadsheet + spatial fleet canvas. (Inverters is no longer a separate top tab.) Default attention home = Triage. |
+| **Analysis** | `#analysis` | Fleet NOC. Sub-views: Fleet analysis · **Trends** (`#trends`) · **Resources** (`#resources`). Trends/Resources are NOT top tabs. |
+| **Invoices** | `#reports` | Offtaker solar-credit invoices (NOT “Reports”). Segments: Offtakers · Bill audit · Trends · **Generation reports** (when revealed — see `generation_reports`). |
+| **Repairs** | `#ops` | Chat-first O&M automation. Staged Agent prompt; roster + cases in chat/tools. |
+| **Marketplace** | `#marketplace` | Offtaker Exchange — vacancy (unallocated credits) + demand waitlist; Credit Exchange / Array Market subs. |
+| **Account** | `#account` | Profile, plan/card, Auto-refresh vault. |
 
-Never say Dashboard, Arrays, Reports, Operations, or Trends as top-tab names (Operations was renamed **Repairs**). **Analysis** has three sub-views: Fleet analysis (`#analysis`), Trends (`#trends`), Resources (`#resources` — rates/news/REC). **Resources is not a top tab.** The offtaker form field **Master account** is a different concept (net-meter group host — see `offtakers`).
+Never say Dashboard, Arrays, Reports, Operations, Inverters, Trends, or Resources as
+**top-tab** names. Spoken Fleet attention view = “Fleet Triage” or “Fleet → Triage.”
+The offtaker form field **Master account** is a different concept (net-meter group host).
 
-APP SHELL (how the SPA works, for accurate “where do I click” answers):
-- Static frontend; scripts load in order (`session-tabscope.js` first, then `fleet-store.js`, `app.js`, `sandbox.js`, view modules, `energy-agent.js`). The router lives in `sandbox.js`: `hashchange` → toggles the matching panel + lazy-loads that view. Empty/unknown hash → `#arrays`.
-- **Auth:** session token in `localStorage["so_session"]`, sent as `Authorization: Bearer …`. `session-tabscope.js` makes the token per-browser-tab, so two tabs can be signed into different accounts.
-- **FleetStore** (`fleet-store.js`) is the single source of truth for the Arrays domain: reactive store, optimistic in-memory edits + background persist, plus an `ao_fleet_cache` snapshot for instant first paint before the `/v1/array-owners/fleet-tree` refetch. Sandbox and Fleet Triage both read it, so views never drift.
-- **Mobile:** a fixed bottom nav (≤600px) mirrors the same tabs on **Detail mode**. **AI home (default, ≤960px, signed-in):** Energy Agent *is* the operating layer (`mobile-os.js`) — full-screen chat/voice, setup checklist chips until hands-off, then systems overview cards (inverters / auto-refresh / offtaker send rates). **Detail** at the bottom unlocks the full tab UI. Context JSON includes `mobile_os` + phase for the agent. A version-check banner offers a manual reload when a newer bundle ships (never auto-reloads).
+### Mobile bottom nav (owner-web `/m` + owner-native)
+
+| Label | Route (web) | Notes |
+|-------|-------------|--------|
+| Fleet | `/fleet` | Cards/table; default home |
+| Analysis | `/analysis` | Summary + Ask Agent |
+| Invoices | `/invoices` | Pipeline + offtakers |
+| Repairs | `/repairs` | Cases + Agent |
+| Market | `/marketplace` | Short label for Marketplace |
+| Account | `/account` | Profile / plan |
+
+Energy Agent: **bottom dock** → full-screen chat (AgentSheet / AgentModal). Attach via
+composer **+** (Camera / Library / File on web). Context: `client=owner-web|owner-native`,
+`surface=agent_sheet_mobile|rn_agent`, `mobile=true`.
+
+### APP SHELL notes
+- **Desktop SPA:** static `array-operator/public/*`; router in `sandbox.js` (`hashchange`).
+  Auth `localStorage["so_session"]` + tab-scoped session helper. FleetStore is source of
+  truth for arrays domain.
+- **Mobile web:** Vite React app `apps/owner-web` deployed under `/m`.
+- **Native:** Expo app `apps/owner-native`.
+- **Legacy mobile OS** on the desktop bundle (`mobile-os.js`, narrow viewports): AI-home
+  + Detail mode still possible; context may include `mobile_os` + phase.
 
 ---
 
