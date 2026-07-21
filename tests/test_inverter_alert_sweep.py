@@ -33,8 +33,9 @@ def _inv(name, status, *, power=None, nameplate=20.0, peer_index=None, inverter_
     }
 
 
-def _col(name, inverters, *, is_daylight=True, src_state="ok", age_hours=0.1):
-    return {
+def _col(name, inverters, *, is_daylight=True, src_state="ok", age_hours=0.1,
+         solar_elevation_deg=None, live_compare_ok=None):
+    col = {
         "array_id": name,
         "array_name": name,
         "is_daylight": is_daylight,
@@ -42,6 +43,11 @@ def _col(name, inverters, *, is_daylight=True, src_state="ok", age_hours=0.1):
                           "last_report": "2026-06-24T18:00:00+00:00"},
         "inverters": inverters,
     }
+    if solar_elevation_deg is not None:
+        col["solar_elevation_deg"] = solar_elevation_deg
+    if live_compare_ok is not None:
+        col["live_compare_ok"] = live_compare_ok
+    return col
 
 
 def _tree(*cols):
@@ -66,6 +72,47 @@ def test_live_dark_skips_at_night():
         _inv("A", "ok", power=0), _inv("B", "ok", power=0), _inv("C", "ok", power=0),
     ], is_daylight=False)
     assert sweep._live_dark_inverters(_tree(col)) == []
+
+
+def test_live_dark_skips_at_sunset_shoulder():
+    # Sun still "up" for Sleeping UI (is_daylight True) but low — orientation /
+    # shade makes one unit go dark while peers still produce. Must NOT page.
+    # Ford 2026-07-21: dusk false positives on fleet "dark while neighbors produce".
+    col = _col("Sunset", [
+        _inv("A", "ok", power=5000),
+        _inv("B", "ok", power=5000),
+        _inv("C", "ok", power=0),
+    ], is_daylight=True, solar_elevation_deg=5.0)
+    assert sweep._live_dark_inverters(_tree(col)) == []
+
+
+def test_live_dark_skips_when_live_compare_ok_false():
+    col = _col("DuskFlag", [
+        _inv("A", "ok", power=5000),
+        _inv("B", "ok", power=5000),
+        _inv("C", "ok", power=0),
+    ], is_daylight=True, live_compare_ok=False)
+    assert sweep._live_dark_inverters(_tree(col)) == []
+
+
+def test_live_dark_flags_when_sun_high():
+    # Explicit high sun must still page a genuine dark unit.
+    col = _col("Noon", [
+        _inv("A", "ok", power=5000),
+        _inv("B", "ok", power=5000),
+        _inv("C", "ok", power=0),
+    ], is_daylight=True, solar_elevation_deg=40.0)
+    assert [f["inv"]["name"] for f in sweep._live_dark_inverters(_tree(col))] == ["C"]
+
+
+def test_live_low_skips_at_sunset_shoulder():
+    col = _col("SunsetLow", [
+        _inv("A", "ok", power=10000, nameplate=20.0),  # 50% of nameplate
+        _inv("B", "ok", power=10000, nameplate=20.0),
+        _inv("C", "ok", power=10000, nameplate=20.0),
+        _inv("D", "ok", power=3000, nameplate=20.0),   # would be "low" at noon
+    ], is_daylight=True, solar_elevation_deg=4.0)
+    assert sweep._live_low_inverters(_tree(col)) == []
 
 
 def test_live_dark_needs_two_lit_peers():

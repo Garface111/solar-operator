@@ -160,6 +160,13 @@ _VT_LAT, _VT_LON = 44.26, -72.58   # central Vermont regional default (Montpelie
 # Sun is "up" for production purposes a touch below the horizon (civil-ish): a
 # panel still trickles at -2° elevation. Below this we call it night.
 _DAYLIGHT_MIN_ELEVATION_DEG = -2.0
+# Live peer-compare alerts ("dark while neighbors produce", "low vs peers") need
+# the sun HIGH enough that orientation/row-shading/sunset gradients don't create
+# fake gaps. At low elevation a west-facing unit can still make real watts while
+# an east-facing sibling (or a shadier neighbor array) already reads ~0 — that is
+# physics, not a fault. 12° is roughly 45–90 min from local sunset/sunrise at
+# mid-latitudes. is_daylight stays softer (-2°) for the UI "Sleeping" state only.
+LIVE_COMPARE_MIN_ELEVATION_DEG = 12.0
 
 
 def _solar_elevation_deg(when: datetime, lat: float, lon: float) -> float:
@@ -198,22 +205,40 @@ def _solar_elevation_deg(when: datetime, lat: float, lon: float) -> float:
     return 90.0 - _math.degrees(zenith)
 
 
+def _solar_elevation_now(lat: float | None = None, lon: float | None = None,
+                         when: datetime | None = None) -> float | None:
+    """Solar elevation (deg) at location, or None if the calc fails.
+    Falls back to central-Vermont coords when lat/lon omitted."""
+    import datetime as _dt
+    w = when or _dt.datetime.now(_dt.timezone.utc)
+    if w.tzinfo is not None:
+        w = w.astimezone(_dt.timezone.utc).replace(tzinfo=None)
+    try:
+        return _solar_elevation_deg(
+            w,
+            lat if lat is not None else _VT_LAT,
+            lon if lon is not None else _VT_LON,
+        )
+    except Exception:
+        return None
+
+
 def _is_daylight(lat: float | None = None, lon: float | None = None,
                  when: datetime | None = None) -> bool:
     """True when the sun is up at the given location (UTC `when`, default now).
     Falls back to the central-Vermont regional default when no per-array
     coordinates are known (current state — no lat/long stored yet)."""
-    import datetime as _dt
-    w = when or _dt.datetime.now(_dt.timezone.utc)
-    # the helper does its own UTC math; ensure naive UTC for timetuple/hour reads
-    if w.tzinfo is not None:
-        w = w.astimezone(_dt.timezone.utc).replace(tzinfo=None)
-    try:
-        elev = _solar_elevation_deg(w, lat if lat is not None else _VT_LAT,
-                                    lon if lon is not None else _VT_LON)
-    except Exception:
+    elev = _solar_elevation_now(lat, lon, when)
+    if elev is None:
         return True   # never let a sun-calc error hide a real card — default to "day"
     return elev > _DAYLIGHT_MIN_ELEVATION_DEG
+
+
+def _live_compare_ok_elev(elev: float | None) -> bool:
+    """True when elevation is high enough for live peer-compare alerts."""
+    if elev is None:
+        return True  # unknown sun → don't invent a suppress (callers still have is_daylight)
+    return elev >= LIVE_COMPARE_MIN_ELEVATION_DEG
 
 
 def _daylight_for(arr, default: bool, _cache: dict | None = None) -> bool:
@@ -222,20 +247,35 @@ def _daylight_for(arr, default: bool, _cache: dict | None = None) -> bool:
     location") when present, else the regional central-VT default. A
     geographically distant array must not be daylight-gated on Vermont's sun
     schedule — that blanked/showed its live power at the wrong hours. `_cache`
-    (rounded-coord → verdict) lets one fleet build reuse the sun calc across
-    co-located arrays."""
+    (rounded-coord → (elev, is_daylight)) lets one fleet build reuse the sun
+    calc across co-located arrays."""
+    _elev, day = _solar_state_for(arr, None, default, _cache)
+    return day
+
+
+def _solar_state_for(arr, default_elev: float | None, default_daylight: bool,
+                     _cache: dict | None = None) -> tuple[float | None, bool]:
+    """Per-array (elevation_deg, is_daylight). Uses stored lat/long when present,
+    else regional defaults. Cache key is rounded coords."""
     lat = getattr(arr, "latitude", None)
     lon = getattr(arr, "longitude", None)
     if lat is None or lon is None:
-        return default
+        # Regional / board-wide default already computed by caller
+        return default_elev, default_daylight
     try:
         lat_f, lon_f = float(lat), float(lon)
     except (TypeError, ValueError):
-        return default
+        return default_elev, default_daylight
     key = (round(lat_f, 1), round(lon_f, 1))
     if _cache is not None and key in _cache:
         return _cache[key]
-    verdict = _is_daylight(lat_f, lon_f)
+    elev = _solar_elevation_now(lat_f, lon_f)
+    # Day/night verdict goes through _is_daylight so existing monkeypatches/tests
+    # and the single soft-night threshold stay the source of truth.
+    day = _is_daylight(lat_f, lon_f)
+    if elev is None:
+        elev = default_elev
+    verdict = (elev, day)
     if _cache is not None:
         _cache[key] = verdict
     return verdict
@@ -1455,8 +1495,12 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
     # Regional (central-VT) sun-up default, computed once per build — the
     # board-wide summary flag and the fallback for arrays with no stored
     # location. Arrays WITH a lat/long get their own per-site verdict below
-    # (_daylight_for), so a distant array is never gated on Vermont's sun.
-    daylight = _is_daylight()
+    # (_solar_state_for), so a distant array is never gated on Vermont's sun.
+    regional_elev = _solar_elevation_now()
+    daylight = (
+        True if regional_elev is None
+        else regional_elev > _DAYLIGHT_MIN_ELEVATION_DEG
+    )
     _dl_cache: dict = {}
     # Cross-tenant live-power borrow map (vendor,serial) -> best fresh wattage
     # across ALL tenants. Lets a tenant whose browser captured a bogus near-zero
@@ -1475,8 +1519,10 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
         if arr.id in _util_array_ids and arr.id not in _arrays_with_inverters:
             continue
 
-        # THIS array's sun-up: its own coordinates when stored, else regional.
-        arr_daylight = _daylight_for(arr, daylight, _dl_cache)
+        # THIS array's sun: its own coordinates when stored, else regional.
+        arr_elev, arr_daylight = _solar_state_for(
+            arr, regional_elev, daylight, _dl_cache
+        )
 
         # Pull telemetry per source site (cached), then build peer-units for THIS
         # owner group (cohort = the inverters the owner placed under this array).
@@ -1809,6 +1855,13 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
             # that zeroes output never reads as "asleep". Per-array when the
             # array has a stored lat/long, else regional central-VT.
             "is_daylight": arr_daylight,
+            # Degrees above horizon at this array (NOAA approx). Soft night is
+            # elev ≤ -2°; live peer-compare alerts only fire when elev ≥
+            # LIVE_COMPARE_MIN_ELEVATION_DEG (dusk/dawn shoulder otherwise).
+            "solar_elevation_deg": (
+                None if arr_elev is None else round(float(arr_elev), 2)
+            ),
+            "live_compare_ok": _live_compare_ok_elev(arr_elev),
             # {"state": ok|stale|dark|none, "last_report": iso|None, "age_hours": float|None}
             # — surfaced on the card so a vendor-side reporting gap reads as a
             # SOURCE outage, not an app failure.

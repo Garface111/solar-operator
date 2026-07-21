@@ -43,10 +43,39 @@ _DOWN = {"dead", "fault", "comm_gap"}
 LIVE_FLOOR_W = 25.0            # below this (or 1% of rated) = idle, not producing
 LIVE_DARK_MAX_AGE_HOURS = 2.0  # only page on a dark reading from CURRENT data
 LIVE_DARK_GRACE_HOURS = 1      # confirm across two hourly sweeps before paging
+# Must match inverter_fleet.LIVE_COMPARE_MIN_ELEVATION_DEG — sun high enough that
+# sunset/dawn shading gradients don't fake "dark while neighbors produce".
+try:
+    from .inverter_fleet import LIVE_COMPARE_MIN_ELEVATION_DEG as _LIVE_COMPARE_MIN_ELEV
+except Exception:  # pragma: no cover
+    _LIVE_COMPARE_MIN_ELEV = 12.0
 
 
 def _now() -> datetime:
     return datetime.utcnow()
+
+
+def _live_compare_ok(col: dict) -> bool:
+    """True when this array is in solid daytime for live peer-compare alerts.
+
+    Soft night (is_daylight=False, elev ≲ -2°) always suppresses. The dusk/dawn
+    *shoulder* (sun still "up" for Sleeping UI but low in the sky) also
+    suppresses: at low elevation, orientation and site shading make one unit go
+    dark while neighbors still produce — physics, not a fault. Prefer
+    solar_elevation_deg / live_compare_ok from the fleet tree; fall back to
+    is_daylight for older callers/tests that omit elevation.
+    """
+    if col.get("is_daylight") is False:
+        return False
+    if "live_compare_ok" in col and col.get("live_compare_ok") is not None:
+        return bool(col.get("live_compare_ok"))
+    elev = col.get("solar_elevation_deg")
+    if elev is not None:
+        try:
+            return float(elev) >= float(_LIVE_COMPARE_MIN_ELEV)
+        except (TypeError, ValueError):
+            pass
+    return True
 
 
 def _live_floor_w(inv: dict) -> float:
@@ -162,8 +191,8 @@ def _live_dark_inverters(tree: dict) -> list[dict]:
     page on a stale snapshot or a partial capture's fill (see _has_fresh_real_reading)."""
     out = []
     for col in tree.get("columns", []):
-        if col.get("is_daylight") is False:
-            continue  # night: zero output is expected (Sleeping), not a fault
+        if not _live_compare_ok(col):
+            continue  # night OR dusk/dawn shoulder: peer gaps are untrustworthy
         src = col.get("source_status") or {}
         age = src.get("age_hours")
         # A "dark now" reading only means something if the array's telemetry is
@@ -218,8 +247,8 @@ def _live_low_inverters(tree: dict) -> list[dict]:
     capture's fill never pages."""
     out = []
     for col in tree.get("columns", []):
-        if col.get("is_daylight") is False:
-            continue
+        if not _live_compare_ok(col):
+            continue  # night OR dusk/dawn shoulder — same gate as live_dark
         src = col.get("source_status") or {}
         age = src.get("age_hours")
         if src.get("state") in (None, "none") or age is None or age > LIVE_DARK_MAX_AGE_HOURS:
