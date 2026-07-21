@@ -76,13 +76,67 @@ def test_daily_pull_never_overwrites_an_existing_location():
         "address": "Some Other Address, VT", "status": "Active",
     }) as mock_details:
         pull_all_inverters(days_back=1)
-        # site_details is never even called when the array already has a location —
-        # the backfill hook short-circuits before touching the network.
-        mock_details.assert_not_called()
+        # Location is set, but peak_power_kw is missing on the connection — so
+        # site_details is still called once to stamp capacity for the weather model.
+        mock_details.assert_called()
 
     arr = _array(arr_id)
     assert arr.latitude == 1.0 and arr.longitude == 2.0
     assert arr.geocode_source == "manual"
+
+
+def test_daily_pull_stamps_peak_power_when_location_already_set():
+    """Cover/Starlake class: geocoded but no inverter nameplate yet → stamp
+    peakPower from site_details onto the connection so the model can run."""
+    _tid, arr_id = _mk_solaredge_array(with_location=True)
+    with patch("api.inverters.solaredge.fetch_daily", return_value=[
+        {"day": date(2026, 6, 30), "kwh": 10.0},
+    ]), patch("api.jobs.inverter_pull._se.site_details", return_value={
+        "site_id": 99999, "name": "Cover Roof", "peak_kw": 10.0,
+        "address": "158 S Main St, White River Junction, VT", "status": "Active",
+    }):
+        pull_all_inverters(days_back=1)
+
+    from sqlalchemy import select
+    with SessionLocal() as db:
+        conn = db.execute(
+            select(InverterConnection).where(InverterConnection.array_id == arr_id)
+        ).scalar_one()
+        assert float((conn.config or {}).get("peak_power_kw") or 0) == 10.0
+    arr = _array(arr_id)
+    assert arr.latitude == 1.0  # never overwritten
+
+
+def test_daily_pull_skips_site_details_when_loc_and_peak_present():
+    tid = "ten_" + secrets.token_hex(6)
+    with SessionLocal() as db:
+        db.add(Tenant(
+            id=tid, name="SE Full", contact_email=f"{tid}@t.test",
+            tenant_key="k_" + secrets.token_hex(8), plan="standard", active=True,
+        ))
+        db.flush()
+        arr = Array(
+            tenant_id=tid, name="Complete SE",
+            latitude=1.0, longitude=2.0, geocode_source="manual",
+        )
+        db.add(arr)
+        db.flush()
+        db.add(InverterConnection(
+            array_id=arr.id, vendor="solaredge",
+            config={"api_key": "fake_key", "site_id": 99999, "peak_power_kw": 45.0},
+            status="ok",
+        ))
+        arr_id = arr.id
+        db.commit()
+
+    with patch("api.inverters.solaredge.fetch_daily", return_value=[
+        {"day": date(2026, 6, 30), "kwh": 10.0},
+    ]), patch("api.jobs.inverter_pull._se.site_details") as mock_details:
+        pull_all_inverters(days_back=1)
+        mock_details.assert_not_called()
+
+    arr = _array(arr_id)
+    assert arr.latitude == 1.0
 
 
 def test_site_details_failure_never_breaks_the_daily_pull():

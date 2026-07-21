@@ -363,10 +363,35 @@ def _localize_to_utc_iso(naive_ts: str | None, tzname: str | None) -> str | None
 
 
 def _nameplate_from_model(model: str | None) -> float | None:
-    """SolarEdge model strings encode nameplate, e.g. SE20K=20kW,
-    RSE33.3K-USR48BNU4=33.3kW. Return kW or None."""
-    m = _re.search(r"(\d+(?:\.\d+)?)K", model or "")
-    return float(m.group(1)) if m else None
+    """SolarEdge model strings encode nameplate. Two families:
+
+      * Commercial three-phase: ``SE##K`` / ``SE##.#K`` / ``RSE##K`` → kilowatts
+        (SE20K=20, SE33.3KUS=33.3, RSE33.3K-USR48BNU4=33.3).
+      * Residential single-phase: ``SE####`` → WATTS (SE10000=10 kW, SE7600=7.6,
+        SE10000H-US000BNU4=10). The old K-only regex left these as null, so
+        Starlake/Cover-class sites never stamped nameplate_kw on inventory and
+        showed "not modeled yet" until a separate fleet model-parse path ran.
+
+    Returns kW or None. Mirrors api.inverter_fleet._nameplate_from_model for
+    vendor=solaredge so inventory stamping and forecast denominators agree.
+    """
+    s = model or ""
+    # kW-form first so SE100KUS isn't misread as 100 W by the watt pattern.
+    mk = _re.search(r"(?:^|[^A-Za-z0-9])R?SE(\d{1,3}(?:\.\d+)?)K", s, _re.I)
+    if mk:
+        try:
+            kw = float(mk.group(1))
+        except (TypeError, ValueError):
+            kw = None
+        return kw if kw is not None and 0 < kw <= 1000 else None
+    mw = _re.search(r"(?:^|[^A-Za-z0-9])SE(\d{3,5})(?!\d)", s, _re.I)
+    if mw:
+        try:
+            kw = float(mw.group(1)) / 1000.0
+        except (TypeError, ValueError):
+            kw = None
+        return kw if kw is not None and 0 < kw <= 1000 else None
+    return None
 
 
 def fetch_inventory(api_key: str, site_id: int) -> list[dict]:

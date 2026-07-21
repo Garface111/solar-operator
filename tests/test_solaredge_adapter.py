@@ -14,7 +14,9 @@ import pytest
 from api.adapters.solaredge import (
     SolarEdgeAuthError,
     SolarEdgeError,
+    _nameplate_from_model,
     fetch_daily_energy,
+    fetch_inventory,
     list_sites,
     site_details,
 )
@@ -190,6 +192,52 @@ DETAILS_FIXTURE = {
         "location": {"address": "789 Lake Rd", "city": "Stowe", "state": "VT"},
     }
 }
+
+
+# ── nameplate from model (inventory stamping) ─────────────────────────────────
+
+def test_nameplate_residential_watt_models():
+    """SE#### residential models are WATTS — the K-only regex used to miss them."""
+    assert _nameplate_from_model("SE10000") == 10.0
+    assert _nameplate_from_model("SE5000") == 5.0
+    assert _nameplate_from_model("SE7600") == 7.6
+    assert _nameplate_from_model("SE10000H-US000BNU4") == 10.0
+    assert _nameplate_from_model("SE5000H-US000BNU4") == 5.0
+
+
+def test_nameplate_commercial_kilowatt_models():
+    assert _nameplate_from_model("SE20K") == 20.0
+    assert _nameplate_from_model("SE33.3K") == 33.3
+    assert _nameplate_from_model("SE33.3KUS") == 33.3
+    assert _nameplate_from_model("RSE33.3K-USR48BNU4") == 33.3
+    assert _nameplate_from_model("SE100KUS") == 100.0
+
+
+def test_nameplate_unknown_is_none():
+    assert _nameplate_from_model("Optimizer P850") is None
+    assert _nameplate_from_model("") is None
+    assert _nameplate_from_model(None) is None
+
+
+def test_fetch_inventory_stamps_residential_nameplate():
+    inv_body = {
+        "Inventory": {
+            "inverters": [
+                {"SN": "A1", "name": "Inv1", "model": "SE10000H-US000BNU4",
+                 "connectedOptimizers": 20},
+                {"SN": "A2", "name": "Inv2", "model": "SE5000",
+                 "connectedOptimizers": 10},
+                {"SN": "A3", "name": "Inv3", "model": "SE33.3KUS",
+                 "connectedOptimizers": 40},
+            ]
+        }
+    }
+    with patch("httpx.get", return_value=_mock_response(200, inv_body)):
+        inv = fetch_inventory("key", 99)
+    by_sn = {r["sn"]: r for r in inv}
+    assert by_sn["A1"]["nameplate_kw"] == 10.0
+    assert by_sn["A2"]["nameplate_kw"] == 5.0
+    assert by_sn["A3"]["nameplate_kw"] == 33.3
 
 
 def test_site_details_returns_expected_fields():

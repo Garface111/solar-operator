@@ -64,29 +64,54 @@ def _resolve_connections(db) -> list:
     return out
 
 
-def _backfill_solaredge_location(db, arr: Array, config: dict) -> None:
-    """SolarEdge's site address was only ever captured ONCE, at initial connect
-    (array_owners.py's _attach_solaredge) — an array connected before that existed,
-    or whose first capture missed it, is stuck on "set location" forever with no
-    other chance to pick it up (Ford, 2026-07-02: "still not working for ...
-    SolarEdge"). Piggyback on the daily pull, which already runs for every
-    connected array regardless of connect date, so this self-heals automatically.
-    Cheap: only fires when the array has no location yet (the common case is a
-    no-op check); never blocks or fails the actual daily energy pull."""
-    if arr.latitude is not None:
+def _backfill_solaredge_location(db, arr: Array, config: dict, row=None) -> None:
+    """Self-heal SolarEdge model inputs on the daily pull.
+
+    Location: SE site address was only ever captured ONCE at initial connect —
+    older arrays (or a first capture that missed address) stayed stuck on
+    "set location" (Ford, 2026-07-02). Geocode when lat is still missing.
+
+    Nameplate: SE's site peakPower is what the weather model needs when we have
+    no Inverter rows yet (or residential models never stamped nameplate_kw).
+    Stamp config.peak_power_kw from site_details when absent so Analysis leaves
+    "not modeled yet" without waiting for a fleet inventory sync
+    (Ford, 2026-07-20 — Cover/Starlake).
+
+    Cheap short-circuit when both location and peak are already present; never
+    blocks or fails the actual daily energy pull.
+    """
+    need_loc = arr.latitude is None
+    cfg = dict(config or {})
+    need_peak = not (cfg.get("peak_power_kw") or cfg.get("peak_kw"))
+    if not need_loc and not need_peak:
         return
     try:
-        api_key = config.get("api_key")
-        site_id = config.get("site_id")
+        api_key = cfg.get("api_key")
+        site_id = cfg.get("site_id")
         if not api_key or not site_id:
             return
         details = _se.site_details(api_key, int(site_id))
-        if details.get("address"):
+        if need_peak and details.get("peak_kw"):
+            try:
+                pk = float(details["peak_kw"])
+            except (TypeError, ValueError):
+                pk = None
+            if pk is not None and pk > 0:
+                cfg["peak_power_kw"] = pk
+                # Persist onto the real connection row when we have one; virtual
+                # legacy connections have no row to stamp (Array.solaredge_* only).
+                if row is not None:
+                    row.config = cfg
+                # Keep the in-memory config the pull is using in sync too.
+                if isinstance(config, dict):
+                    config["peak_power_kw"] = pk
+        if need_loc and details.get("address"):
             from .. import array_owners as _ao
             _ao._set_array_location(db, arr, address=details["address"],
                                     source_label="vendor:solaredge")
     except Exception:  # noqa: BLE001 — best-effort only, never break the daily pull
-        log.info("solaredge location backfill failed for array=%s", arr.id, exc_info=True)
+        log.info("solaredge location/nameplate backfill failed for array=%s",
+                 arr.id, exc_info=True)
 
 
 def _backfill_fronius_location(db, arr: Array, config: dict) -> None:
@@ -177,7 +202,7 @@ def pull_all_inverters(days_back: int = 90) -> dict:
                     c.row.last_error = None
                     c.row.last_sync_at = now()
                 if c.vendor == "solaredge":
-                    _backfill_solaredge_location(db, arr, c.config)
+                    _backfill_solaredge_location(db, arr, c.config, row=c.row)
                 elif c.vendor == "fronius":
                     _backfill_fronius_location(db, arr, c.config)
                 db.commit()

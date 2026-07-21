@@ -431,23 +431,44 @@ def _connect_inverter(db, arr: Array, vendor: str, config: dict) -> dict:
     """
     result = inverters.validate(vendor, config)  # raises before any write
 
+    # Stamp site peakPower onto the connection so the weather model has a
+    # nameplate before inventory/fleet creates Inverter rows (SolarEdge).
+    cfg = dict(config or {})
+    peak = result.get("peak_power_kw")
+    if peak is None:
+        peak = result.get("peak_kw")
+    try:
+        if peak is not None and float(peak) > 0:
+            cfg["peak_power_kw"] = float(peak)
+    except (TypeError, ValueError):
+        pass
+
     conn = db.execute(
         select(InverterConnection).where(InverterConnection.array_id == arr.id)
     ).scalar_one_or_none()
     if conn is None:
-        conn = InverterConnection(array_id=arr.id, vendor=vendor, config=config, status="ok")
+        conn = InverterConnection(array_id=arr.id, vendor=vendor, config=cfg, status="ok")
         db.add(conn)
     else:
         conn.vendor = vendor
-        conn.config = config
+        # Keep a prior peak if this vendor's validate didn't return one.
+        if "peak_power_kw" not in cfg:
+            prev = (conn.config or {}).get("peak_power_kw")
+            if prev is not None:
+                try:
+                    if float(prev) > 0:
+                        cfg["peak_power_kw"] = float(prev)
+                except (TypeError, ValueError):
+                    pass
+        conn.config = cfg
         conn.status = "ok"
         conn.last_error = None
 
     # Backward compat: mirror SolarEdge creds onto the legacy columns so the
     # daily-pull virtual-connection path and any legacy readers keep working.
     if vendor == "solaredge":
-        arr.solaredge_api_key = str(config.get("api_key") or "").strip()
-        arr.solaredge_site_id = int(config["site_id"])
+        arr.solaredge_api_key = str(cfg.get("api_key") or "").strip()
+        arr.solaredge_site_id = int(cfg["site_id"])
 
     db.commit()
     # Self-healing: pull the vendor's FULL multi-year daily history in the
@@ -2644,13 +2665,26 @@ def connect_locus(
 
 # ── account-level SolarEdge discovery ("paste one credential, attach all") ─────
 
-def _attach_solaredge(db, arr: Array, api_key: str, site_id: int) -> InverterConnection:
+def _attach_solaredge(
+    db, arr: Array, api_key: str, site_id: int, *, peak_power_kw: float | None = None,
+) -> InverterConnection:
     """Upsert a solaredge InverterConnection on `arr` WITHOUT a per-site validate
     call — the account-level key was already proven by discover(), so we don't
     burn one SolarEdge request per site. Mirrors the creds onto the legacy
     columns so the daily pull + virtual-connection path keep working.
+
+    `peak_power_kw` is SolarEdge's site peakPower (kWp) from /sites/list or
+    /site/{id}/details. Storing it on the connection lets the weather model run
+    even before inventory/fleet sync creates Inverter rows (Ford 2026-07-20:
+    Cover/Starlake showed "not modeled yet" with location but zero nameplate).
     """
-    config = {"api_key": api_key, "site_id": int(site_id)}
+    config: dict = {"api_key": api_key, "site_id": int(site_id)}
+    try:
+        pk = float(peak_power_kw) if peak_power_kw is not None else None
+    except (TypeError, ValueError):
+        pk = None
+    if pk is not None and pk > 0:
+        config["peak_power_kw"] = pk
     conn = db.execute(
         select(InverterConnection).where(InverterConnection.array_id == arr.id)
     ).scalar_one_or_none()
@@ -2661,6 +2695,15 @@ def _attach_solaredge(db, arr: Array, api_key: str, site_id: int) -> InverterCon
         db.add(conn)
     else:
         conn.vendor = "solaredge"
+        # Preserve a previously stamped peak when rediscover omits it.
+        if pk is None or pk <= 0:
+            prev = (conn.config or {}).get("peak_power_kw")
+            if prev is not None:
+                try:
+                    if float(prev) > 0:
+                        config["peak_power_kw"] = float(prev)
+                except (TypeError, ValueError):
+                    pass
         conn.config = config
         conn.status = "ok"
         conn.last_error = None
@@ -3116,8 +3159,9 @@ def solaredge_connect_account(
                 if len(name_hits) == 1:
                     target = arr_by_id[name_hits[0]]
 
+            _peak = site.get("peak_power_kw")
             if target is not None:
-                _attach_solaredge(db, target, api_key, sid)
+                _attach_solaredge(db, target, api_key, sid, peak_power_kw=_peak)
                 used.add(target.id)
                 entry["array_id"] = target.id
                 entry["name"] = target.name
@@ -3135,7 +3179,7 @@ def solaredge_connect_account(
                 )
                 db.add(new_arr)
                 db.flush()
-                _attach_solaredge(db, new_arr, api_key, sid)
+                _attach_solaredge(db, new_arr, api_key, sid, peak_power_kw=_peak)
                 used.add(new_arr.id)
                 names_lower.add(name.lower())
                 all_names_lower.add(name.lower())
@@ -5331,7 +5375,14 @@ def _array_nameplate_kw(db, arr) -> float:
     """Effective installed AC capacity for an array = Σ its inverters' nameplate,
     falling back to the rating parsed from the model code for nameplate-less
     vendors (Chint/SolarEdge), mirroring inverter_fleet._eff_nameplate_kw so the
-    forecast nameplate matches what the dashboard shows."""
+    forecast nameplate matches what the dashboard shows.
+
+    When no inverter rows exist yet (or none carry a parseable model) — common
+    right after SolarEdge connect, before fleet inventory sync — fall back to:
+      1. InverterConnection.config.peak_power_kw (stamped from SE site peakPower)
+      2. A ``NN kW`` token in the array name (e.g. "Starlake 45kW SolarEdge")
+    so weather modeling is not blocked on a second round-trip.
+    """
     from .inverter_fleet import _nameplate_from_model
     ivs = db.execute(
         select(Inverter).where(
@@ -5344,7 +5395,34 @@ def _array_nameplate_kw(db, arr) -> float:
         if npk is None:
             npk = _nameplate_from_model(iv.vendor, iv.model)
         total += float(npk or 0.0)
-    return total
+    if total > 0:
+        return total
+
+    # Site-level peakPower from SolarEdge (or other vendors that stamp it).
+    try:
+        conn = db.execute(
+            select(InverterConnection).where(InverterConnection.array_id == arr.id)
+        ).scalar_one_or_none()
+        if conn is not None:
+            pk = (conn.config or {}).get("peak_power_kw")
+            if pk is None:
+                pk = (conn.config or {}).get("peak_kw")
+            if pk is not None and float(pk) > 0:
+                return float(pk)
+    except Exception:
+        pass
+
+    # Last resort: capacity embedded in the array display name.
+    import re as _re
+    m = _re.search(r"(\d+(?:\.\d+)?)\s*kW\b", str(arr.name or ""), _re.I)
+    if m:
+        try:
+            kw = float(m.group(1))
+            if 0 < kw <= 10000:
+                return kw
+        except (TypeError, ValueError):
+            pass
+    return 0.0
 
 
 def _utility_oneline(db, arr) -> str | None:
