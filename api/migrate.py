@@ -1144,6 +1144,21 @@ def main():
             ))
             print("  + billing_report_subscriptions.budget_amount_usd")
 
+        # Annual true-up settlement: banked credit from overpaid budget years +
+        # last settled window end for idempotency (Ford 2026-07-21).
+        if not column_exists(conn, "billing_report_subscriptions", "pending_credit_usd"):
+            conn.execute(text(
+                "ALTER TABLE billing_report_subscriptions "
+                "ADD COLUMN pending_credit_usd DOUBLE PRECISION DEFAULT 0"
+            ))
+            print("  + billing_report_subscriptions.pending_credit_usd")
+        if not column_exists(conn, "billing_report_subscriptions", "last_trueup_window_end"):
+            conn.execute(text(
+                "ALTER TABLE billing_report_subscriptions "
+                "ADD COLUMN last_trueup_window_end DATE"
+            ))
+            print("  + billing_report_subscriptions.last_trueup_window_end")
+
         # Exactly-once-per-period send guard (#5): remembers the billing period of
         # the last invoice actually sent, so a late GMP bill / ops re-run can't
         # duplicate-bill the same period.

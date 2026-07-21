@@ -135,6 +135,10 @@ def _sub_dict(s: BillingReportSubscription, pricing_ctx=None) -> dict:
         "invoice_number_start": getattr(s, "invoice_number_start", None),
         "invoice_number_next": getattr(s, "invoice_number_next", None),
         "budget_amount_usd": getattr(s, "budget_amount_usd", None),
+        "pending_credit_usd": getattr(s, "pending_credit_usd", None) or 0,
+        "last_trueup_window_end": (
+            s.last_trueup_window_end.isoformat()
+            if getattr(s, "last_trueup_window_end", None) else None),
         # Resend delivery truth (webhook + send stamp). Distinct from last_sent_at
         # (mailer accept): delivered/bounced come only from Resend events.
         "last_resend_email_id": getattr(s, "last_resend_email_id", None),
@@ -4196,10 +4200,18 @@ def approve_draft(draft_id: int, authorization: Optional[str] = Header(default=N
         # attach). #3: pin the period the operator reviewed so a bill that landed
         # after review can't be sent unreviewed.
         gmp_override = bytes(d.gmp_invoice_pdf) if d.gmp_invoice_pdf is not None else None
+        is_trueup_draft = bool(
+            d.period_label and str(d.period_label).startswith("True-up "))
         try:
-            result = deliver_subscription(
-                db, sub, t, triggered_by="approval", is_test=False, note=d.note,
-                expected_period_label=d.period_label, gmp_pdf_override=gmp_override)
+            if is_trueup_draft:
+                from .delivery import deliver_trueup_subscription
+                result = deliver_trueup_subscription(
+                    db, sub, t, triggered_by="approval-trueup", is_test=False,
+                    force=True)
+            else:
+                result = deliver_subscription(
+                    db, sub, t, triggered_by="approval", is_test=False, note=d.note,
+                    expected_period_label=d.period_label, gmp_pdf_override=gmp_override)
         except Exception:
             d.status = "pending"      # release the claim so it can be retried
             db.commit()
@@ -4228,9 +4240,16 @@ def test_draft(draft_id: int, authorization: Optional[str] = Header(default=None
         # Attach the draft's GMP PDF for this test send only, passed through (never
         # written onto the sub) — same per-send scoping as approve (#4).
         gmp_override = bytes(d.gmp_invoice_pdf) if d.gmp_invoice_pdf is not None else None
-        result = deliver_subscription(db, sub, t, triggered_by="test",
-                                      is_test=True, note=d.note,
-                                      gmp_pdf_override=gmp_override)
+        is_trueup_draft = bool(
+            d.period_label and str(d.period_label).startswith("True-up "))
+        if is_trueup_draft:
+            from .delivery import deliver_trueup_subscription
+            result = deliver_trueup_subscription(
+                db, sub, t, triggered_by="test-trueup", is_test=True, force=True)
+        else:
+            result = deliver_subscription(db, sub, t, triggered_by="test",
+                                          is_test=True, note=d.note,
+                                          gmp_pdf_override=gmp_override)
         if not result.get("ok"):
             raise HTTPException(422, result.get("error", "test send failed"))
         return {"ok": True, "result": result}

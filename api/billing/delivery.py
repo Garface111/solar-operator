@@ -135,6 +135,21 @@ def build_match(sub, period_label: Optional[str] = None) -> BillingMatch:
         ci.setdefault("solar_credit_value", ci.get("amount_owed"))
         ci["amount_owed"] = float(budget)
         ci["budget_override"] = True
+    # Banked annual-true-up credit: reduce this period's amount due. The credit is
+    # only DEBITED from sub.pending_credit_usd when a send succeeds (see
+    # deliver_subscription) so a draft/preview never burns the balance.
+    if m is not None and getattr(m, "computed_invoice", None):
+        from .trueup import apply_pending_credit
+        ci = m.computed_invoice
+        pending = float(getattr(sub, "pending_credit_usd", None) or 0.0)
+        if pending > 0 and ci.get("amount_owed") is not None and not ci.get("is_trueup"):
+            new_due, applied, remaining = apply_pending_credit(
+                float(ci["amount_owed"]), pending)
+            if applied > 0:
+                ci["amount_before_credit"] = float(ci["amount_owed"])
+                ci["credit_applied"] = applied
+                ci["pending_credit_remaining"] = remaining
+                ci["amount_owed"] = new_due
     return m
 
 
@@ -2233,6 +2248,16 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
         # duplicate send of the same billing period (late bill / ops re-run).
         if cur_period_key:
             sub.last_sent_period_end = cur_period_key
+        # Debit banked true-up credit only after a successful non-test send.
+        try:
+            applied = float((_ci or {}).get("credit_applied") or 0.0)
+        except (TypeError, ValueError):
+            applied = 0.0
+        if applied > 0:
+            prev = float(getattr(sub, "pending_credit_usd", None) or 0.0)
+            sub.pending_credit_usd = round(max(0.0, prev - applied), 2)
+            result["credit_applied"] = applied
+            result["pending_credit_usd"] = sub.pending_credit_usd
         # Sequential numbering: this number is now used — advance the counter so the
         # next invoice gets start+1, start+2, …
         if getattr(sub, "invoice_number_next", None) is not None:
@@ -2415,3 +2440,229 @@ def draft_subscription(db, sub, tenant, *, triggered_by: str = "scheduled") -> d
     return {"ok": True, "drafted": True, "draft_id": draft.id,
             "operator_notified": notified, "to_review": op,
             "triggered_by": triggered_by}
+
+
+# ─── Annual true-up (budget vs actual settlement) ───────────────────────────
+
+def deliver_trueup_subscription(
+    db, sub, tenant, *, as_of: Optional[date] = None,
+    triggered_by: str = "sched-billing-trueup", is_test: bool = False,
+    force: bool = False,
+) -> dict:
+    """Year-end budget true-up: charge the underpayment or bank a credit.
+
+    When actual solar value for the trailing 12 months exceeds budgeted payments,
+    emails a true-up invoice for the difference. When the offtaker overpaid,
+    banks a credit on sub.pending_credit_usd (applied to the next regular bill)
+    and still notifies them with a $0 settlement statement so the math is visible.
+    """
+    from .trueup import compute_annual_trueup, build_trueup_match
+    from ..notify import _send_via_resend
+
+    if not getattr(sub, "annual_trueup", False) and not force:
+        return {"ok": False, "skipped": True,
+                "error": "annual_trueup is not enabled for this offtaker"}
+
+    settlement = compute_annual_trueup(sub, as_of=as_of)
+    if not settlement.ok:
+        # Already settled this window → benign skip; missing budget/months → skip.
+        return {"ok": False, "skipped": True, "error": settlement.error,
+                "trueup": settlement.to_dict()}
+
+    operator = (
+        _operator_company_name(getattr(tenant, "id", None))
+        or getattr(tenant, "company_name", None)
+        or getattr(tenant, "name", None)
+        or "Array Operator"
+    )
+    match = build_trueup_match(sub, settlement, operator=operator)
+    ci = match.computed_invoice or {}
+    cur_period_key = f"trueup:{settlement.window_end.isoformat()}"
+
+    if (not is_test) and (not force) and getattr(sub, "last_sent_period_end", None) == cur_period_key:
+        return {"ok": False, "skipped": True, "already_sent": True,
+                "error": f"True-up for {settlement.window_end.isoformat()} already sent",
+                "trueup": settlement.to_dict()}
+
+    # Recipients — same rules as regular delivery. Test mode forces to operator.
+    if is_test:
+        op = sub.operator_email or getattr(tenant, "contact_email", None)
+        to, cc, problems = ([op] if op else [], [],
+                            [] if op else ["No operator email on file."])
+    else:
+        to, cc, problems = resolve_recipients(sub, tenant)
+    if problems and not to:
+        return {"ok": False, "error": "; ".join(problems)}
+    if not to:
+        return {"ok": False, "error": "no recipient email configured"}
+
+    invoice_date = date.today()
+    formats = list(sub.formats or ["pdf"])
+    pay_url = None
+    payment_id = None
+    fee_cents = None
+    pay_skip_reason = None
+    # Only mint a pay link when there is a real charge.
+    if float(ci.get("amount_owed") or 0) >= 0.50:
+        try:
+            from . import payments as _pay
+            pay_res = _pay.create_offtaker_payment(
+                db, tenant=tenant, sub=sub, match=match, force=force)
+            if pay_res.get("ok") and pay_res.get("pay_url"):
+                pay_url = pay_res["pay_url"]
+                payment_id = pay_res.get("payment_id")
+                fee_cents = pay_res.get("fee_cents")
+            else:
+                pay_skip_reason = pay_res.get("error") or pay_res.get("skipped")
+        except Exception as exc:  # noqa: BLE001
+            pay_skip_reason = str(exc)[:200]
+            logger.warning("trueup pay-link failed sub=%s: %s", sub.id, exc)
+
+    with tempfile.TemporaryDirectory(prefix="ao-trueup-") as tmp:
+        try:
+            paths = generate_files(
+                match, formats, False, pathlib.Path(tmp),
+                invoice_date=invoice_date, sub=sub, pay_url=pay_url)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("trueup render failed")
+            return {"ok": False, "error": f"render failed: {e}"}
+        attachments = [_b64(p) for p in paths]
+        subject, html, text = _email_html(
+            match, sub, is_test, note=ci.get("trueup_note"),
+            attachment_names=[p.name for p in paths], pay_url=pay_url)
+
+        product = getattr(tenant, "product", "array_operator")
+        op_name = _operator_company_name(getattr(tenant, "id", None)) or getattr(tenant, "name", None)
+        op_email = getattr(tenant, "contact_email", None)
+        if getattr(tenant, "send_from_email", None):
+            from_addr = (f'"{op_name}" <{tenant.send_from_email}>' if op_name
+                         else tenant.send_from_email)
+        elif op_name:
+            from_addr = f'"{op_name}" <{_platform_from_email(product)}>'
+        else:
+            from_addr = None
+
+        ok = _send_via_resend(
+            to=to[0] if len(to) == 1 else to, subject=subject, html=html, text=text,
+            attachments=attachments, cc=cc or None, bcc=None,
+            from_addr=from_addr, reply_to=(op_email or None), product=product)
+        from ..notify import last_resend_id as _last_resend_id
+        resend_email_id = _last_resend_id() if ok else None
+
+    result = {
+        "ok": bool(ok), "to": to, "cc": cc, "bcc": bcc,
+        "attachments": [p.name for p in paths],
+        "invoice_number": ci.get("invoice_number"),
+        "amount_owed": ci.get("amount_owed"),
+        "triggered_by": triggered_by, "test": is_test,
+        "trueup": settlement.to_dict(),
+        "pay_url": pay_url, "payment_id": payment_id, "fee_cents": fee_cents,
+        "pay_skip_reason": pay_skip_reason,
+        "resend_email_id": resend_email_id if ok else None,
+        "is_trueup": True,
+    }
+    if ok and not is_test:
+        now = datetime.utcnow()
+        sub.last_sent_at = now
+        sub.last_invoice_number = result["invoice_number"]
+        try:
+            sub.last_sent_amount_usd = float(result["amount_owed"] or 0)
+        except (TypeError, ValueError):
+            sub.last_sent_amount_usd = 0.0
+        sub.last_sent_period_end = cur_period_key
+        sub.last_trueup_window_end = settlement.window_end
+        # Bank credit when they overpaid; charge already billed above.
+        if settlement.credit_usd > 0:
+            prev = float(getattr(sub, "pending_credit_usd", None) or 0.0)
+            sub.pending_credit_usd = round(prev + settlement.credit_usd, 2)
+            result["pending_credit_usd"] = sub.pending_credit_usd
+        if getattr(sub, "invoice_number_next", None) is not None:
+            sub.invoice_number_next = sub.invoice_number_next + 1
+        # Don't advance monthly next_send_at off the true-up cadence — true-up
+        # is a side schedule. Leave next_send_at alone.
+        db.commit()
+        result["delivery_status"] = "accepted"
+    elif ok:
+        result["delivery_status"] = "accepted"
+    return result
+
+
+def draft_trueup_subscription(
+    db, sub, tenant, *, as_of: Optional[date] = None,
+    triggered_by: str = "sched-draft-trueup", force: bool = False,
+) -> dict:
+    """Approval-mode annual true-up: draft for operator review (no customer send)."""
+    from ..models import ReportDraft
+    from .trueup import compute_annual_trueup, build_trueup_match
+    from ..notify import _send_via_resend
+
+    if not getattr(sub, "annual_trueup", False) and not force:
+        return {"ok": False, "skipped": True,
+                "error": "annual_trueup is not enabled for this offtaker"}
+
+    settlement = compute_annual_trueup(sub, as_of=as_of)
+    if not settlement.ok:
+        return {"ok": False, "skipped": True, "error": settlement.error,
+                "trueup": settlement.to_dict()}
+
+    cur_period_key = f"trueup:{settlement.window_end.isoformat()}"
+    if getattr(sub, "last_sent_period_end", None) == cur_period_key:
+        return {"ok": False, "skipped": True, "already_sent": True,
+                "error": f"True-up for {settlement.window_end.isoformat()} already sent",
+                "trueup": settlement.to_dict()}
+
+    operator = (
+        _operator_company_name(getattr(tenant, "id", None))
+        or getattr(tenant, "company_name", None)
+        or getattr(tenant, "name", None)
+        or "Array Operator"
+    )
+    match = build_trueup_match(sub, settlement, operator=operator)
+    ci = match.computed_invoice or {}
+    period_label = (
+        f"True-up {settlement.window_start.isoformat()} → "
+        f"{settlement.window_end.isoformat()}"
+    )
+
+    existing = db.execute(
+        select(ReportDraft).where(
+            ReportDraft.subscription_id == sub.id,
+            ReportDraft.status == "pending",
+            ReportDraft.period_label == period_label,
+        )
+    ).scalars().first()
+    draft = existing or ReportDraft(
+        tenant_id=sub.tenant_id, subscription_id=sub.id,
+        customer_name=sub.customer_name, status="pending")
+    draft.period_label = period_label
+    draft.array_total_kwh = 0.0
+    draft.allocation_pct = getattr(sub, "allocation_pct", None)
+    draft.customer_kwh = 0.0
+    draft.amount_usd = ci.get("amount_owed")
+    draft.invoice_number = ci.get("invoice_number")
+    if existing is None:
+        db.add(draft)
+    db.commit()
+
+    op = sub.operator_email or getattr(tenant, "contact_email", None)
+    notified = False
+    if op:
+        try:
+            subject, html, text = _operator_review_email(sub, tenant, draft)
+            from_addr = None
+            if getattr(tenant, "send_from_email", None):
+                nm = (getattr(tenant, "send_from_name", None)
+                      or getattr(tenant, "company_name", None))
+                from_addr = (f'"{nm}" <{tenant.send_from_email}>' if nm
+                             else tenant.send_from_email)
+            notified = bool(_send_via_resend(
+                to=op, subject=subject, html=html, text=text,
+                from_addr=from_addr, product="array_operator"))
+        except Exception:  # noqa: BLE001
+            notified = False
+    return {
+        "ok": True, "drafted": True, "draft_id": draft.id,
+        "operator_notified": notified, "to_review": op,
+        "triggered_by": triggered_by, "trueup": settlement.to_dict(),
+        "is_trueup": True,
+    }

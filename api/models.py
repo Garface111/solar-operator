@@ -1765,6 +1765,15 @@ class BillingReportSubscription(Base):
     # show on the invoice; only the total becomes this number. NULL = use the
     # calculated amount.
     budget_amount_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Annual true-up settlement (budget vs actual). After a true-up that leaves the
+    # offtaker OVERPAID (budgeted > actual), the credit is banked here and applied
+    # to subsequent regular invoices until exhausted. Charge true-ups bill as a
+    # one-shot invoice (amount due = actual − budgeted).
+    pending_credit_usd: Mapped[float | None] = mapped_column(
+        Float, nullable=True, default=0.0)
+    # Window end date of the last settled true-up (idempotency so Sept re-runs
+    # don't double-charge / double-credit the same year).
+    last_trueup_window_end: Mapped[date | None] = mapped_column(Date, nullable=True)
     # Offtaker invoice delivery truth (Resend). last_sent_at = we handed the mail
     # to Resend; these reflect what Resend reports actually happened to the
     # offtaker inbox (api/resend_webhook.py). last_resend_email_id is stamped on

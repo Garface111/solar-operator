@@ -23,14 +23,44 @@ DUE_DAYS = 28
 def invoice_for_period(match: BillingMatch, period: Period,
                        invoice_date: date) -> dict:
     """Assemble the full invoice payload for one period (dates + dollar math)."""
+    ci = match.computed_invoice or {}
+    # Annual true-up invoices are fully computed upstream (budget vs actual
+    # settlement) — don't re-derive dollars from a zero-kWh period.
+    if ci.get("is_trueup"):
+        inv = dict(ci)
+        due = invoice_date + timedelta(days=DUE_DAYS)
+        inv.setdefault("invoice_number",
+                       period.end.strftime("TU-%Y%m") if period.end
+                       else invoice_date.strftime("TU-%Y%m"))
+        inv["invoice_date"] = invoice_date.isoformat()
+        inv["due_date"] = due.isoformat()
+        inv.setdefault("period_start", period.start.isoformat() if period.start else None)
+        inv.setdefault("period_end", period.end.isoformat() if period.end else None)
+        inv.setdefault("month", period.month)
+        inv.setdefault("customer_name", match.customer.get("name"))
+        inv.setdefault("billing_model", match.billing_model)
+        inv.setdefault("allocation_pct", match.allocation_pct)
+        inv.setdefault("array_kwh", 0.0)
+        inv.setdefault("kwh", 0.0)
+        inv.setdefault("tariff", 0.0)
+        inv.setdefault("adder", 0.0)
+        inv.setdefault("billing_rate", 1.0)
+        inv["is_trueup"] = True
+        return inv
+
     inv = compute_invoice(
         period.customer_kwh, period.tariff, period.adder,
         match.billing_rate, match.billing_model,
         match.template.get("fixed_amount"),
     )
     due = invoice_date + timedelta(days=DUE_DAYS)
+    # Prefer the delivery-path amount (budget + banked true-up credit already applied).
+    if ci.get("amount_owed") is not None:
+        inv["amount_owed"] = ci["amount_owed"]
     inv.update({
-        "invoice_number": period.end.strftime("%Y-%m") if period.end else invoice_date.strftime("%Y-%m"),
+        "invoice_number": (ci.get("invoice_number")
+                           or (period.end.strftime("%Y-%m") if period.end
+                               else invoice_date.strftime("%Y-%m"))),
         "invoice_date": invoice_date.isoformat(),
         "due_date": due.isoformat(),
         "period_start": period.start.isoformat() if period.start else None,
@@ -45,33 +75,40 @@ def invoice_for_period(match: BillingMatch, period: Period,
         "array_kwh": period.array_kwh,
         # Provenance of the credit rate so the renderer can label the basis (excess
         # vs production) honestly and flag a banked-month reference estimate.
-        "net_rate_source": (match.computed_invoice or {}).get("net_rate_source"),
-        "net_rate_note": (match.computed_invoice or {}).get("net_rate_note"),
+        "net_rate_source": ci.get("net_rate_source"),
+        "net_rate_note": ci.get("net_rate_note"),
         # Provenance of the PRODUCTION figure (gmp_api | daily_csv | utility_bill |
         # bill_prorate, possibly '+'-joined across arrays) so the renderer can tell
         # the customer how their generation was measured vs estimated — honest data.
-        "kwh_source": (match.computed_invoice or {}).get("kwh_source"),
+        "kwh_source": ci.get("kwh_source"),
         "project_total_kwh": match.project_totals.get("total_customer_kwh"),
         "project_total_savings": match.project_totals.get("total_savings"),
         # Per-array breakdown for multi-array offtakers (one line per array). Lives
         # on project_totals/computed_invoice; surfaced here so the PDF can render it.
         "array_breakdown": match.project_totals.get("array_breakdown")
-            or (match.computed_invoice or {}).get("array_breakdown"),
-        # Budget billing: build_match put the operator's fixed final amount on
-        # computed_invoice.amount_owed (flagged budget_override) while preserving the
-        # CALCULATED credit. invoice_for_period recomputes the credit fresh, so surface
-        # the budget SEPARATELY here → the renderer shows BOTH the solar credit value
-        # and the budgeted amount, with AMOUNT DUE = the budget (the actual bill).
-        "budget_override": bool((match.computed_invoice or {}).get("budget_override")),
-        "budgeted_amount": ((match.computed_invoice or {}).get("amount_owed")
-                            if (match.computed_invoice or {}).get("budget_override") else None),
+            or ci.get("array_breakdown"),
+        # Budget billing + optional banked true-up credit.
+        "budget_override": bool(ci.get("budget_override")),
+        "budgeted_amount": None,  # filled below when budget_override
+        "credit_applied": ci.get("credit_applied"),
+        "amount_before_credit": ci.get("amount_before_credit"),
+        "solar_credit_value": ci.get("solar_credit_value"),
         # Quarterly coverage: which months this invoice sums, plus a human note
         # marking the covered range (esp. a mid-quarter service start) — the
         # renderers print it so a quarter is never mistaken for one month.
-        "billing_cadence": (match.computed_invoice or {}).get("billing_cadence"),
-        "period_months": (match.computed_invoice or {}).get("period_months"),
-        "period_note": (match.computed_invoice or {}).get("period_note"),
+        "billing_cadence": ci.get("billing_cadence"),
+        "period_months": ci.get("period_months"),
+        "period_note": ci.get("period_note"),
     })
+    if ci.get("budget_override"):
+        # Prefer pre-credit amount (the fixed budget) when a banked credit reduced due.
+        if ci.get("amount_before_credit") is not None:
+            inv["budgeted_amount"] = ci["amount_before_credit"]
+        elif ci.get("credit_applied"):
+            inv["budgeted_amount"] = round(
+                float(ci.get("amount_owed") or 0) + float(ci.get("credit_applied") or 0), 2)
+        else:
+            inv["budgeted_amount"] = ci.get("amount_owed")
     return inv
 
 
@@ -132,7 +169,12 @@ def render_invoice_xlsx(match: BillingMatch, out_path: pathlib.Path,
     # Budget billing: when the operator set a fixed amount, AMOUNT DUE is that budget
     # (the actual bill); the calculated solar credit value still shows as its own line.
     _budget_on = bool(inv.get("budget_override")) and inv.get("budgeted_amount") is not None
-    _final_due = inv["budgeted_amount"] if _budget_on else inv["amount_owed"]
+    # Post-credit amount_owed wins when a banked true-up credit applied; true-up
+    # settlements always bill amount_owed (the charge, possibly $0).
+    if inv.get("is_trueup") or inv.get("credit_applied"):
+        _final_due = inv["amount_owed"]
+    else:
+        _final_due = inv["budgeted_amount"] if _budget_on else inv["amount_owed"]
 
     wb = Workbook()
     ws = wb.active
@@ -191,6 +233,14 @@ def render_invoice_xlsx(match: BillingMatch, out_path: pathlib.Path,
         _notes.append("Note: credit banked this period — rate is a reference estimate (trued up annually).")
     if _budget_on:
         _notes.append("Amount owed is your fixed budgeted amount; the solar credit value above is the calculated reference.")
+    if inv.get("credit_applied"):
+        _notes.append(
+            f"True-up credit of {_money(inv['credit_applied'])} applied from a prior "
+            "annual settlement.")
+    if inv.get("is_trueup"):
+        note = inv.get("trueup_note")
+        if note:
+            _notes.append(str(note))
     if _notes:
         put("B19", "  ".join(_notes))
 
@@ -252,7 +302,12 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
     # Budget billing: when the operator set a fixed amount, AMOUNT DUE is that budget
     # (the actual bill); the calculated solar credit value still shows as its own line.
     _budget_on = bool(inv.get("budget_override")) and inv.get("budgeted_amount") is not None
-    _final_due = inv["budgeted_amount"] if _budget_on else inv["amount_owed"]
+    # Post-credit amount_owed wins when a banked true-up credit applied; true-up
+    # settlements always bill amount_owed (the charge, possibly $0).
+    if inv.get("is_trueup") or inv.get("credit_applied"):
+        _final_due = inv["amount_owed"]
+    else:
+        _final_due = inv["budgeted_amount"] if _budget_on else inv["amount_owed"]
 
     out_path = pathlib.Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -371,8 +426,26 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
         ["Your contractual payment share", _pct(inv["billing_rate"])],
         ["Solar credit value due", _money(inv["amount_owed"])],
     ]
-    if _budget_on:
+    if inv.get("is_trueup"):
+        rows = [
+            ["Year's actual solar value", _money(inv.get("trueup_actual_usd") or inv.get("solar_credit_value"))],
+            ["Year's budgeted payments", _money(inv.get("trueup_budgeted_usd"))],
+        ]
+        if float(inv.get("trueup_charge_usd") or 0) > 0:
+            rows.append(["True-up amount due", _money(inv.get("trueup_charge_usd") or inv.get("amount_owed"))])
+        elif float(inv.get("trueup_credit_usd") or 0) > 0:
+            rows.append(["True-up credit (applies to next bill)",
+                         _money(inv.get("trueup_credit_usd"))])
+        else:
+            rows.append(["True-up settlement", _money(0)])
+    if _budget_on and not inv.get("is_trueup"):
+        # Show calculated credit when available, then budget, then any credit applied.
+        if inv.get("solar_credit_value") is not None:
+            rows[3] = ["Solar credit value due", _money(inv["solar_credit_value"])]
         rows.append(["Budgeted amount (your fixed bill)", _money(inv["budgeted_amount"])])
+        if inv.get("credit_applied"):
+            rows.append(["True-up credit applied", f"-{_money(inv['credit_applied'])}"])
+            rows.append(["Amount due after credit", _money(inv["amount_owed"])])
     rt = Table(rows, colWidths=[4.4 * inch, 2.2 * inch])
     rt.setStyle(TableStyle([
         ("FONTSIZE", (0, 0), (-1, -1), 10),
