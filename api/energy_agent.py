@@ -1088,6 +1088,8 @@ def _queue_global_memory(db, tenant_id: str, key: str, value: str) -> dict:
 
 
 # ── tools ───────────────────────────────────────────────────────────────────
+from .energy_agent_mobile_tools import TOOL_DEFS_EXTRA as _MOBILE_TOOL_DEFS, run_mobile_tool
+
 TOOL_DEFS = [
     {
         "type": "function",
@@ -2773,6 +2775,9 @@ TOOL_DEFS = [
         },
     },
 ]
+
+# Mobile app capability tools (create offtaker, vacancy, demand, Stripe Connect).
+TOOL_DEFS = TOOL_DEFS + list(_MOBILE_TOOL_DEFS)
 
 
 def _slim_inverter(inv: dict) -> dict:
@@ -5698,13 +5703,25 @@ def _ea_judge_write(name: str, args: dict) -> dict | None:
     Hard-blocks anything that touches operator billing / Stripe money.
     """
     blob = json.dumps(args or {}, default=str).lower() + " " + (name or "").lower()
+    # Offtaker Stripe Connect (payouts for customer invoices) is allowed —
+    # only OPERATOR billing / platform money tools are hard-blocked.
+    if name in (
+        "start_payments_connect",
+        "payments_connect_status",
+        "billing_portal_link",
+    ):
+        return None
     banned = (
-        "stripe", "payment_method", "price_id", "subscription_item",
-        "charge", "invoice.pay", "billing_plan", "unit_amount",
+        "payment_method", "price_id", "subscription_item",
+        "invoice.pay", "billing_plan", "unit_amount",
         "sk_live", "sk_test", "cancel_subscription", "update_subscription",
         "add_payment", "setup_intent", "payment_intent",
     )
-    if any(b in blob for b in banned):
+    # "stripe" alone is too broad (blocks offtaker Connect); only ban operator money.
+    if any(b in blob for b in banned) or (
+        "stripe" in blob and name not in ("start_payments_connect", "payments_connect_status")
+        and "connect" not in (name or "")
+    ):
         return {
             "ok": False,
             "judged": "reject",
@@ -6855,6 +6872,13 @@ def _run_tool(
                     "message": f"That's part of '{reg.get('label', skill)}', which isn't turned "
                                "on for this account yet. I can enable it — want me to? "
                                "(call enable_skill)"}
+
+    # Mobile capability tools (create offtaker, vacancy, demand, Stripe Connect)
+    mobile_out = run_mobile_tool(
+        name, args, tenant, session, db, user_text=user_text or ""
+    )
+    if mobile_out is not None:
+        return mobile_out
 
     if name == "enable_skill":
         return _enable_skill_tool(db, tenant, args)

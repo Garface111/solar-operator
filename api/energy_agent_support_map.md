@@ -585,3 +585,23 @@ WHEN TO CALL WHAT
 | This account’s kWh / offtakers / arrays | Never web_search — use census / query / health tools |
 
 You do **not** have codebase shell access. You have this map + tenant tools + optional public web search/fetch.
+
+
+### Mobile / agent write tools (2026-07)
+
+When the owner is on the phone app and asks to **add offtakers**, **marketplace vacancy**,
+**capture demand**, or **Stripe Connect for offtaker pay**, the agent MUST use tools (not
+“go to desktop only”):
+
+| Tool | Use when |
+|------|----------|
+| `create_offtaker` | Add a subscriber (name required; email + share preferred) |
+| `list_offtakers` / `patch_offtaker` | List or edit existing |
+| `marketplace_vacancy` | Unallocated kWh/$ excess on THIS fleet |
+| `list_exchange_demand` / `create_exchange_demand` | Waitlist leads who want credits |
+| `payments_connect_status` / `start_payments_connect` | Offtaker online pay (Stripe Express) |
+| `setup_status` / `capture_health_detail` / `account_summary` | Connect feeds / auto-refresh |
+| `send_pipeline` / `list_recent_invoices` | Invoice pipeline pulse |
+
+Demo tenants: create/write tools return `demo_blocked` — explain and invite real signup.
+
