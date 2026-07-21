@@ -208,7 +208,12 @@ You have a FREE MIND over THIS TENANT'S live data (not a fixed FAQ):
   Lead with the dollars when they're ≥$1 — the owner runs a business.
 - capture_health_detail = WHY capture is stale (login_failed vs scrape_failed vs MFA
   vs rate limit vs paused device) — call before guessing portal issues.
-- underperformer_history = steady-low (shading candidate) vs recent drop (fault).
+- underperformer_history = steady-low (shading CANDIDATE only) vs recent drop (fault).
+  Requires real multi-week stored series — never invent timelines.
+- production_history = FULL vendor daily + utility bills + peers for a unit/site
+  (all available history). REQUIRED before any root-cause claim (shade/soil/fault).
+- tenant_data_catalog = what history streams exist (min/max dates, counts) for this tenant.
+- query_tenant(days=0, resource=daily_generation|inverter_daily|bills) = raw rows, all time.
 - LIVE UI: context may include live_ui_digest (visible cards/chips/table text) and
   user_interrupted (owner barged mid-voice). Trust the digest for "what am I looking
   at?"; on interrupt, abandon the old answer path immediately.
@@ -230,23 +235,27 @@ CRITICAL — TIME ZONES + NIGHT (do not invent outages after dark):
   could confuse a live-power read. If unsure, call fleet_overview / investigate_attention
   and read is_daylight + the clock fields before alarming the owner.
 
-CRITICAL — SHADING / EXPECTED-LOW (a false "underperforming" you must catch):
-  Some inverters run permanently below their peers for a FIXED physical reason —
-  afternoon shade from a neighbour's tree, a chimney, a poor roof face. That is NOT a
-  fault to chase, and flagging it "underperforming" forever trains the owner to ignore
-  the flag. When investigate_attention / array_detail shows an "underperforming" unit
-  whose deficit is STEADY and long-standing (call underperformer_history when unsure —
-  a consistent low peer_index, not a sudden drop, and expected_low is still false),
-  PROACTIVELY ask the owner something like:
-  "Inverter 13 on Chester has run ~42% of its neighbours steadily — that even pattern
-  usually means permanent shading (a tree, a chimney) rather than a fault. Is something
-  shading that one? If so I'll mark it so it stops flagging — and I'll still alert you
-  if it ever drops below that level." If they CONFIRM a physical cause, call
-  mark_inverter_expected_low(inverter_id, reason) — never mark on your own guess.
-  Never nag: ask once per unit. If a unit is already expected_low and shows
-  expected_low_breach=true, that IS a real new problem (it fell below its shaded
-  baseline) — surface it like any other underperformer. If shading is removed (tree
-  cut), use clear_inverter_expected_low.
+CRITICAL — FULL HISTORY BEFORE ROOT CAUSE (never bluff):
+  You have tools that read THIS tenant's entire stored record — vendor daily kWh
+  (InverterDaily / DailyGeneration from first capture), utility bills from first pull,
+  offtakers, connections. USE THEM. Do not reason only from a 14-day peer_index.
+  For any underperformer diagnosis:
+    1) tenant_data_catalog (or production_history) — know what history exists
+    2) production_history(inverter_id|array_name) — full weekly/monthly + peers + bills
+    3) underperformer_history as a compact pattern helper
+  If tools return empty / insufficient_history / no timeline: SAY THAT. List open
+  hypotheses (shade, soiling, weak string, fault, data gap) WITHOUT ranking one as fact.
+  Never invent "early avg 82 → late 77 over 28 days" unless a tool returned those numbers.
+
+CRITICAL — SHADING / EXPECTED-LOW (candidate only, never assert without evidence):
+  Some inverters run permanently below peers for a FIXED physical reason (tree, chimney,
+  poor roof face). That is NOT a fault to chase forever — BUT you may only treat it as
+  a shading *candidate* when production_history / underperformer_history shows
+  pattern=steady_low AND days_of_history ≥ 60 AND steady_underperformer_candidate=true.
+  Then ASK: "Is something shading that unit year-round?" If they CONFIRM, call
+  mark_inverter_expected_low — never mark on your own guess. Never lead with
+  "Diagnosis: SHADING" from peer_index alone. expected_low_breach=true is a real new
+  problem. clear_inverter_expected_low if shade is removed.
 
 CRITICAL — O&M ROSTER HUNGER (Repairs / any O&M question):
   You WANT a complete repair roster the way a good ops lead wants a contact sheet.
@@ -1146,10 +1155,12 @@ TOOL_DEFS = [
         "function": {
             "name": "query_tenant",
             "description": (
-                "Free-form READ-ONLY investigation of this tenant's data. Pick a resource "
-                "and optional filters — reason step-by-step like a data analyst. Resources: "
-                "arrays, inverters, offtakers, daily_generation, utility_accounts, "
-                "inverter_connections, bills_summary, bills, tenant_pricing. Never invent rows."
+                "Free-form READ-ONLY investigation of this tenant's FULL stored data "
+                "(not just the live 14-day fleet snapshot). Resources: arrays, inverters, "
+                "offtakers, daily_generation, inverter_daily, utility_accounts, "
+                "inverter_connections, bills_summary, bills, tenant_pricing, data_catalog. "
+                "Use days=0 for ALL history. Never invent rows. Prefer production_history "
+                "for underperformer diagnosis."
             ),
             "parameters": {
                 "type": "object",
@@ -1158,23 +1169,30 @@ TOOL_DEFS = [
                         "type": "string",
                         "description": (
                             "arrays | inverters | offtakers | daily_generation | "
-                            "utility_accounts | inverter_connections | bills_summary | "
-                            "bills | tenant_pricing"
+                            "inverter_daily | utility_accounts | inverter_connections | "
+                            "bills_summary | bills | tenant_pricing | data_catalog"
                         ),
                     },
                     "vendor": {"type": "string", "description": "Filter by vendor when relevant"},
                     "array_id": {"type": "integer"},
                     "array_name": {"type": "string", "description": "Name substring"},
+                    "inverter_id": {"type": "integer", "description": "For inverter_daily"},
                     "status": {"type": "string", "description": "For offtakers: enabled filter"},
                     "days": {
                         "type": "integer",
-                        "description": "For daily_generation: lookback days (default 14, max 90)",
+                        "description": (
+                            "Lookback days for daily_generation / inverter_daily / bills. "
+                            "Default 90. Use 0 or -1 for ALL available history (up to ~10 years)."
+                        ),
                     },
                     "group_by": {
                         "type": "string",
-                        "description": "Optional: vendor | array | day | none",
+                        "description": "Optional: vendor | array | day | week | month | none",
                     },
-                    "limit": {"type": "integer", "description": "Max rows (default 100, max 300)"},
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max rows (default 200, max 2000 for history resources)",
+                    },
                     "question": {
                         "type": "string",
                         "description": "What you're trying to answer (helps shape the response)",
@@ -2045,19 +2063,69 @@ TOOL_DEFS = [
         "function": {
             "name": "underperformer_history",
             "description": (
-                "Historical production trend for underperformers: steady-low for months "
-                "(shading candidate → ask owner, then mark_inverter_expected_low) vs recent "
-                "drop (real fault). Returns steady_underperformer_candidate flags + weekly "
-                "timeline. Use before treating a low peer_index as a hardware emergency."
+                "Historical production trend for underperformers from stored InverterDaily "
+                "(fallback DailyGeneration). steady-low for months = shading CANDIDATE only "
+                "(ask owner, then mark_inverter_expected_low) vs recent drop (real fault). "
+                "If pattern=insufficient_history do NOT invent shading — call production_history. "
+                "Pass inverter_id and/or array_name (fleet columns use array_name)."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "array_name": {"type": "string"},
+                    "array_id": {"type": "integer"},
                     "inverter_id": {"type": "integer"},
                     "window_days": {
                         "type": "integer",
-                        "description": "History window 30–365, default 180",
+                        "description": "History window 30–3650, default 365",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "production_history",
+            "description": (
+                "FULL production + utility-bill history for an inverter or array — all "
+                "stored vendor daily kWh (InverterDaily / DailyGeneration) plus linked "
+                "bills from day one. Returns weekly/monthly series, peer comparison on the "
+                "same array, bill periods, and a judgment_guardrail. REQUIRED before claiming "
+                "shading, soiling, string loss, or any root cause. Prefer this over guessing "
+                "from a 14-day peer_index."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "inverter_id": {"type": "integer"},
+                    "serial": {"type": "string", "description": "Inverter serial / S/N"},
+                    "array_id": {"type": "integer"},
+                    "array_name": {"type": "string"},
+                    "window_days": {
+                        "type": "integer",
+                        "description": "0 or omit = all history (cap 10y); else lookback days",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tenant_data_catalog",
+            "description": (
+                "Inventory of ALL stored history for this tenant: daily_generation, "
+                "inverter_daily, and utility bills with min/max dates and row counts per "
+                "array. Call first when the owner asks what data you can see, or when "
+                "diagnosing and you need to know history depth."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "array_id": {
+                        "type": "integer",
+                        "description": "Optional: only one array",
                     },
                 },
             },
@@ -4023,11 +4091,14 @@ def _tenant_census_tool(db, tenant: Tenant, args: dict) -> dict:
 
 
 def _query_tenant_tool(db, tenant: Tenant, args: dict) -> dict:
-    """Structured read-only investigation across allowlisted resources."""
+    """Structured read-only investigation across allowlisted resources.
+
+    Full-history capable: days=0 / -1 means all available rows (capped ~10y).
+    """
     from sqlalchemy import func
     from .models import (
         BillingReportSubscription, DailyGeneration, Inverter, InverterConnection,
-        UtilityAccount,
+        InverterDaily, UtilityAccount,
     )
 
     tid = tenant.id
@@ -4035,16 +4106,30 @@ def _query_tenant_tool(db, tenant: Tenant, args: dict) -> dict:
     vendor = (args.get("vendor") or "").strip().lower() or None
     array_id = args.get("array_id")
     array_name = (args.get("array_name") or "").strip().lower() or None
+    inverter_id = args.get("inverter_id")
     try:
-        limit = int(args.get("limit") or 100)
+        limit = int(args.get("limit") or 200)
     except (TypeError, ValueError):
-        limit = 100
-    limit = max(1, min(limit, 300))
+        limit = 200
+    # History resources need higher caps; still bound for prompt safety
+    hist_resources = {
+        "daily_generation", "inverter_daily", "bills", "data_catalog",
+    }
+    limit_cap = 2000 if resource in hist_resources else 300
+    limit = max(1, min(limit, limit_cap))
     try:
-        days = int(args.get("days") or 14)
+        days_raw = args.get("days")
+        if days_raw is None:
+            days = 90 if resource in hist_resources else 14
+        else:
+            days = int(days_raw)
     except (TypeError, ValueError):
-        days = 14
-    days = max(1, min(days, 90))
+        days = 90
+    # 0 or negative = ALL history (10 year safety cap)
+    if days <= 0:
+        days = 3650
+    else:
+        days = max(1, min(days, 3650))
     group_by = (args.get("group_by") or "none").strip().lower()
     question = (args.get("question") or "").strip()
 
@@ -4056,6 +4141,12 @@ def _query_tenant_tool(db, tenant: Tenant, args: dict) -> dict:
             if array_name in (a.name or "").lower():
                 array_id = a.id
                 break
+
+    if resource == "data_catalog":
+        from . import ea_ops_tools as eot
+        return eot.tenant_data_catalog(
+            db, tenant, args={"array_id": array_id} if array_id is not None else {},
+        )
 
     if resource == "arrays":
         rows = []
@@ -4190,10 +4281,27 @@ def _query_tenant_tool(db, tenant: Tenant, args: dict) -> dict:
             return {"resource": "daily_generation", "count": 0, "rows": [], "total_kwh": 0}
         since = (_now().date() - timedelta(days=days))
         name_by_id = {a.id: a.name for a in arrs}
+        # Coverage of ALL rows (not just window) so the agent knows full depth
+        cov = db.execute(
+            select(
+                func.min(DailyGeneration.day),
+                func.max(DailyGeneration.day),
+                func.count(DailyGeneration.id),
+            ).where(DailyGeneration.array_id.in_(arr_ids))
+        ).one()
+        coverage = {
+            "min_day": cov[0].isoformat() if cov[0] else None,
+            "max_day": cov[1].isoformat() if cov[1] else None,
+            "total_rows_all_time": int(cov[2] or 0),
+        }
         if group_by == "array":
             rows = []
-            for aid, kwh in db.execute(
-                select(DailyGeneration.array_id, func.coalesce(func.sum(DailyGeneration.kwh), 0.0))
+            for aid, kwh, n in db.execute(
+                select(
+                    DailyGeneration.array_id,
+                    func.coalesce(func.sum(DailyGeneration.kwh), 0.0),
+                    func.count(DailyGeneration.id),
+                )
                 .where(DailyGeneration.array_id.in_(arr_ids), DailyGeneration.day >= since)
                 .group_by(DailyGeneration.array_id)
             ).all():
@@ -4201,17 +4309,46 @@ def _query_tenant_tool(db, tenant: Tenant, args: dict) -> dict:
                     "array_id": aid,
                     "array_name": name_by_id.get(aid),
                     "kwh": round(float(kwh or 0), 1),
-                    "days": days,
+                    "day_count": int(n or 0),
+                    "days_window": days,
                 })
             rows.sort(key=lambda r: -r["kwh"])
             return {
                 "resource": "daily_generation",
                 "group_by": "array",
                 "days": days,
+                "since": since.isoformat(),
+                "coverage_all_time": coverage,
                 "total_kwh": round(sum(r["kwh"] for r in rows), 1),
                 "rows": rows[:limit],
             }
-        # day-level series (fleet total)
+        if group_by == "month":
+            # Monthly rollup — better for multi-year windows
+            month_rows = []
+            for day, kwh in db.execute(
+                select(DailyGeneration.day, func.coalesce(func.sum(DailyGeneration.kwh), 0.0))
+                .where(DailyGeneration.array_id.in_(arr_ids), DailyGeneration.day >= since)
+                .group_by(DailyGeneration.day)
+                .order_by(DailyGeneration.day.asc())
+            ).all():
+                key = day.isoformat()[:7] if hasattr(day, "isoformat") else str(day)[:7]
+                if month_rows and month_rows[-1]["month"] == key:
+                    month_rows[-1]["kwh"] = round(month_rows[-1]["kwh"] + float(kwh or 0), 1)
+                    month_rows[-1]["days"] += 1
+                else:
+                    month_rows.append({
+                        "month": key, "kwh": round(float(kwh or 0), 1), "days": 1,
+                    })
+            return {
+                "resource": "daily_generation",
+                "group_by": "month",
+                "days": days,
+                "since": since.isoformat(),
+                "coverage_all_time": coverage,
+                "total_kwh": round(sum(r["kwh"] for r in month_rows), 1),
+                "rows": month_rows[-limit:],
+            }
+        # day-level series
         day_rows = []
         for day, kwh in db.execute(
             select(DailyGeneration.day, func.coalesce(func.sum(DailyGeneration.kwh), 0.0))
@@ -4225,8 +4362,119 @@ def _query_tenant_tool(db, tenant: Tenant, args: dict) -> dict:
         return {
             "resource": "daily_generation",
             "days": days,
+            "since": since.isoformat(),
+            "coverage_all_time": coverage,
+            "total_kwh": round(sum(r["kwh"] for r in day_rows), 1),
+            "count": len(day_rows),
+            "rows": day_rows,
+            "note": (
+                "Use group_by=month for multi-year windows; days=0 for all history. "
+                "coverage_all_time is the full stored span even if this window is shorter."
+            ),
+        }
+
+    if resource == "inverter_daily":
+        inv_q = select(Inverter).where(Inverter.tenant_id == tid)
+        if hasattr(Inverter, "deleted_at"):
+            inv_q = inv_q.where(Inverter.deleted_at.is_(None))
+        if array_id is not None:
+            inv_q = inv_q.where(Inverter.array_id == int(array_id))
+        if inverter_id is not None:
+            try:
+                inv_q = inv_q.where(Inverter.id == int(inverter_id))
+            except (TypeError, ValueError):
+                pass
+        if vendor:
+            inv_q = inv_q.where(Inverter.vendor.ilike(f"%{vendor}%"))
+        invs = db.execute(inv_q.limit(200)).scalars().all()
+        inv_ids = [i.id for i in invs]
+        if not inv_ids:
+            return {"resource": "inverter_daily", "count": 0, "rows": [], "total_kwh": 0}
+        since = (_now().date() - timedelta(days=days))
+        arr_names = {
+            a.id: a.name for a in db.execute(
+                select(Array).where(Array.tenant_id == tid, Array.deleted_at.is_(None))
+            ).scalars().all()
+        }
+        inv_meta = {
+            i.id: {
+                "serial": i.serial,
+                "name": i.name or i.serial,
+                "array_id": i.array_id,
+                "array_name": arr_names.get(i.array_id),
+                "vendor": i.vendor,
+            }
+            for i in invs
+        }
+        cov = db.execute(
+            select(
+                func.min(InverterDaily.day),
+                func.max(InverterDaily.day),
+                func.count(InverterDaily.id),
+            ).where(InverterDaily.inverter_id.in_(inv_ids))
+        ).one()
+        coverage = {
+            "min_day": cov[0].isoformat() if cov[0] else None,
+            "max_day": cov[1].isoformat() if cov[1] else None,
+            "total_rows_all_time": int(cov[2] or 0),
+        }
+        if group_by in ("inverter", "array"):
+            rows = []
+            for iid, kwh, n, dmin, dmax in db.execute(
+                select(
+                    InverterDaily.inverter_id,
+                    func.coalesce(func.sum(InverterDaily.kwh), 0.0),
+                    func.count(InverterDaily.id),
+                    func.min(InverterDaily.day),
+                    func.max(InverterDaily.day),
+                )
+                .where(InverterDaily.inverter_id.in_(inv_ids), InverterDaily.day >= since)
+                .group_by(InverterDaily.inverter_id)
+            ).all():
+                meta = inv_meta.get(iid) or {}
+                rows.append({
+                    "inverter_id": iid,
+                    **meta,
+                    "kwh": round(float(kwh or 0), 1),
+                    "day_count": int(n or 0),
+                    "min_day": dmin.isoformat() if dmin else None,
+                    "max_day": dmax.isoformat() if dmax else None,
+                })
+            rows.sort(key=lambda r: -r["kwh"])
+            return {
+                "resource": "inverter_daily",
+                "group_by": "inverter",
+                "days": days,
+                "since": since.isoformat(),
+                "coverage_all_time": coverage,
+                "total_kwh": round(sum(r["kwh"] for r in rows), 1),
+                "rows": rows[:limit],
+            }
+        # day-level for one inverter preferred
+        day_rows = []
+        for day, iid, kwh in db.execute(
+            select(InverterDaily.day, InverterDaily.inverter_id, InverterDaily.kwh)
+            .where(InverterDaily.inverter_id.in_(inv_ids), InverterDaily.day >= since)
+            .order_by(InverterDaily.day.desc())
+            .limit(limit)
+        ).all():
+            meta = inv_meta.get(iid) or {}
+            day_rows.append({
+                "day": day.isoformat() if hasattr(day, "isoformat") else str(day),
+                "inverter_id": iid,
+                "serial": meta.get("serial"),
+                "array_name": meta.get("array_name"),
+                "kwh": round(float(kwh or 0), 1),
+            })
+        return {
+            "resource": "inverter_daily",
+            "days": days,
+            "since": since.isoformat(),
+            "coverage_all_time": coverage,
+            "count": len(day_rows),
             "total_kwh": round(sum(r["kwh"] for r in day_rows), 1),
             "rows": day_rows,
+            "note": "Per-inverter stored daily kWh. days=0 = all history. Prefer production_history for diagnosis.",
         }
 
     if resource == "utility_accounts":
@@ -4298,10 +4546,24 @@ def _query_tenant_tool(db, tenant: Tenant, args: dict) -> dict:
 
     if resource == "bills":
         from .models import Bill
-        q = select(Bill).where(Bill.tenant_id == tid)
-        if array_id is not None and hasattr(Bill, "array_id"):
-            q = q.where(Bill.array_id == int(array_id))
-        # Newest first
+        since = (_now().date() - timedelta(days=days))
+        # Join utility accounts for array linkage + provider
+        q = (
+            select(Bill, UtilityAccount)
+            .join(UtilityAccount, UtilityAccount.id == Bill.account_id, isouter=True)
+            .where(Bill.tenant_id == tid)
+        )
+        if array_id is not None:
+            q = q.where(UtilityAccount.array_id == int(array_id))
+        if hasattr(Bill, "period_end"):
+            try:
+                # Include bills with period_end in window OR null end (still useful)
+                from sqlalchemy import or_
+                q = q.where(
+                    or_(Bill.period_end.is_(None), Bill.period_end >= since)
+                )
+            except Exception:
+                pass
         if hasattr(Bill, "period_end"):
             try:
                 q = q.order_by(Bill.period_end.desc().nulls_last(), Bill.id.desc())
@@ -4309,9 +4571,14 @@ def _query_tenant_tool(db, tenant: Tenant, args: dict) -> dict:
                 q = q.order_by(Bill.id.desc())
         else:
             q = q.order_by(Bill.id.desc())
-        bills = db.execute(q.limit(limit)).scalars().all()
+        pairs = db.execute(q.limit(limit)).all()
+        # all-time coverage
+        cov = db.execute(
+            select(func.min(Bill.period_end), func.max(Bill.period_end), func.count(Bill.id))
+            .where(Bill.tenant_id == tid)
+        ).one()
         rows = []
-        for b in bills:
+        for b, ua in pairs:
             avg_cents = getattr(b, "avg_rate_cents_kwh", None)
             solar_usd = getattr(b, "solar_credit_usd", None) or getattr(b, "net_credit", None)
             excess = getattr(b, "kwh_sent_to_grid", None)
@@ -4323,8 +4590,12 @@ def _query_tenant_tool(db, tenant: Tenant, args: dict) -> dict:
                 pass
             rows.append({
                 "id": getattr(b, "id", None),
-                "utility_account_id": getattr(b, "utility_account_id", None) or getattr(b, "account_id", None),
-                "array_id": getattr(b, "array_id", None),
+                "utility_account_id": getattr(b, "account_id", None),
+                "array_id": getattr(ua, "array_id", None) if ua is not None else None,
+                "provider": (
+                    getattr(ua, "provider", None) if ua is not None else None
+                ) or getattr(b, "supplier", None),
+                "account_nickname": getattr(ua, "nickname", None) if ua is not None else None,
                 "period_start": (
                     b.period_start.isoformat() if getattr(b, "period_start", None) else None
                 ),
@@ -4332,6 +4603,7 @@ def _query_tenant_tool(db, tenant: Tenant, args: dict) -> dict:
                     b.period_end.isoformat() if getattr(b, "period_end", None) else None
                 ),
                 "kwh_generated": getattr(b, "kwh_generated", None),
+                "kwh_consumed": getattr(b, "kwh_consumed", None),
                 "kwh_sent_to_grid": excess,
                 "solar_credit_usd": solar_usd,
                 "implied_solar_credit_rate_per_kwh": implied,
@@ -4340,25 +4612,33 @@ def _query_tenant_tool(db, tenant: Tenant, args: dict) -> dict:
                     round(float(avg_cents) / 100.0, 6) if avg_cents is not None else None
                 ),
                 "total_cost": getattr(b, "total_cost", None),
-                "provider": getattr(b, "provider", None) or getattr(b, "supplier", None),
+                "document_number": getattr(b, "document_number", None),
             })
         return {
             "resource": "bills",
             "count": len(rows),
+            "days": days,
+            "since": since.isoformat(),
+            "coverage_all_time": {
+                "min_period_end": cov[0].isoformat() if cov[0] else None,
+                "max_period_end": cov[1].isoformat() if cov[1] else None,
+                "total_bills": int(cov[2] or 0),
+            },
             "rows": rows,
             "question": question or None,
             "note": (
-                "implied_solar_credit_rate_per_kwh = solar_credit_usd / excess kWh when both present; "
-                "offtaker invoice rates also via get_billing_rates / list_offtakers."
+                "Full utility settlement sponge for this tenant. days=0 = all bills. "
+                "Filter array_id for accounts linked to that array. "
+                "implied_solar_credit_rate_per_kwh = solar_credit_usd / excess kWh when both present."
             ),
         }
 
     return {
         "error": f"unknown resource '{resource}'",
         "allowed": [
-            "arrays", "inverters", "offtakers", "daily_generation",
+            "arrays", "inverters", "offtakers", "daily_generation", "inverter_daily",
             "utility_accounts", "inverter_connections", "bills_summary",
-            "bills", "tenant_pricing",
+            "bills", "tenant_pricing", "data_catalog",
         ],
     }
 
@@ -6167,7 +6447,8 @@ SKILL_REGISTRY: dict[str, dict] = {
                                     "capture_health_detail"}},
     "fleet_money": {"label": "Fleet financial impact", "default_on": True,
                     "tools": {"fleet_financial_health", "underperformer_history",
-                              "investigate_attention", "fleet_overview"}},
+                              "production_history", "tenant_data_catalog", "query_tenant",
+                              "investigate_attention", "fleet_overview", "array_detail"}},
     "product_help": {"label": "Product knowledge & UI", "default_on": True,
                      "tools": {"product_map", "ui_navigate", "ui_highlight", "ui_tour",
                                "ui_fill", "ui_click", "open_url"}},
@@ -7866,6 +8147,14 @@ def _run_tool(
     if name == "underperformer_history":
         from . import ea_ops_tools as eot
         return eot.underperformer_history(db, tenant, args=args)
+
+    if name == "production_history":
+        from . import ea_ops_tools as eot
+        return eot.production_history(db, tenant, args=args)
+
+    if name == "tenant_data_catalog":
+        from . import ea_ops_tools as eot
+        return eot.tenant_data_catalog(db, tenant, args=args)
 
     if name == "save_document":
         from . import ea_ops_tools as eot
@@ -9661,6 +9950,10 @@ def _narrate_tool(name: str, args: dict) -> str | None:
         return "Pricing what's at risk across the fleet."
     if n in ("underperformer_history",):
         return "Looking at the long-run underperformer pattern."
+    if n in ("production_history",):
+        return "Pulling your full production and bill history for that site."
+    if n in ("tenant_data_catalog",):
+        return "Checking how much history we have on file for your account."
     if n in ("save_document", "list_documents"):
         return "Saving that as a durable document." if n == "save_document" else "Pulling up saved documents."
     if n in ("repair_ops_overview", "list_service_contacts", "list_repair_tickets", "search_repair_tickets"):

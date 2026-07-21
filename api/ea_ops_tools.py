@@ -11,16 +11,21 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, func
 
 from .models import (
     AgentDocument,
     Array,
+    Bill,
+    DailyGeneration,
     HarvestRun,
+    Inverter,
+    InverterDaily,
     PortalCredential,
     PortalLoginStatus,
     RepairTicket,
     Tenant,
+    UtilityAccount,
     now,
 )
 
@@ -401,19 +406,41 @@ def _explain_capture_failure(
 
 # ── underperformer_history / steady candidate ────────────────────────────────
 
+def _col_array_name(col: dict) -> str:
+    """Fleet-tree columns use array_name (not name) — never invent either."""
+    return str(col.get("array_name") or col.get("name") or "")
+
+
+def _inv_pk(inv: dict) -> int | None:
+    for k in ("inverter_id", "id"):
+        v = inv.get(k)
+        if v is not None:
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
 def underperformer_history(db, tenant: Tenant, *, args: dict | None = None) -> dict:
     """Peer-index style timeline from daily kWh: steady-low vs recent drop.
 
     Flags steady_underperformer_candidate when a unit has been consistently low
     for many weeks (shading/orientation) vs a sudden cliff (real fault).
+
+    IMPORTANT: only sets steady_underperformer_candidate when there is real
+    multi-week InverterDaily / DailyGeneration history. Short 14d peer index
+    alone is NOT enough to claim shading.
     """
     args = args or {}
     from . import energy_agent as ea
 
     inv_id = args.get("inverter_id")
+    array_id = args.get("array_id")
     array_name = (args.get("array_name") or "").strip()
-    window_days = int(args.get("window_days") or 180)
-    window_days = max(30, min(365, window_days))
+    window_days = int(args.get("window_days") or 365)
+    # Allow full multi-year windows (was capped at 365; still clamp for safety)
+    window_days = max(30, min(int(window_days), 3650))
 
     try:
         columns, _summary = ea._fleet_tree_columns(db, tenant)
@@ -423,45 +450,66 @@ def underperformer_history(db, tenant: Tenant, *, args: dict | None = None) -> d
     columns = list(columns or [])
     units = []
     for col in columns:
-        name = col.get("name") or ""
-        if array_name and array_name.lower() not in name.lower():
+        cname = _col_array_name(col)
+        cid = col.get("array_id") or col.get("id")
+        if array_id is not None:
+            try:
+                if int(cid or 0) != int(array_id):
+                    continue
+            except (TypeError, ValueError):
+                continue
+        if array_name and array_name.lower() not in cname.lower():
             continue
         for inv in (col.get("inverters") or []):
-            if inv_id and int(inv.get("inverter_id") or inv.get("id") or 0) != int(inv_id):
-                continue
+            iid = _inv_pk(inv)
+            if inv_id is not None:
+                try:
+                    if iid is None or int(iid) != int(inv_id):
+                        continue
+                except (TypeError, ValueError):
+                    continue
             units.append((col, inv))
 
     if not units:
-        return {"ok": True, "units": [], "note": "no matching inverters"}
+        # Direct DB path when fleet tree naming fails
+        units = _units_from_db(db, tenant, inv_id=inv_id, array_id=array_id, array_name=array_name)
+        if not units:
+            return {
+                "ok": True,
+                "units": [],
+                "note": (
+                    "no matching inverters — pass inverter_id or array_name; "
+                    "check tenant_census for ids"
+                ),
+            }
 
     out = []
     for col, inv in units[:40]:
-        daily = list(inv.get("daily") or [])
-        # daily is typically last ~14-30d from fleet tree; for longer, pull InverterDaily
-        series = _daily_series_for_inv(db, inv, window_days)
-        if not series and daily:
-            series = [
-                {"date": d.get("date"), "kwh": float(d.get("kwh") or 0)}
-                for d in daily if d.get("date")
-            ]
-
-        peers = [i for i in (col.get("inverters") or []) if i is not inv]
+        series, series_source = _daily_series_for_inv(db, inv, window_days, col=col)
+        peers = [i for i in (col.get("inverters") or []) if _inv_pk(i) != _inv_pk(inv)]
         analysis = _trend_analysis(series, inv, peers, window_days)
         analysis.update({
-            "inverter_id": inv.get("inverter_id") or inv.get("id"),
-            "name": inv.get("name") or inv.get("sn"),
-            "array_name": col.get("name"),
+            "inverter_id": _inv_pk(inv),
+            "serial": inv.get("serial") or inv.get("sn"),
+            "name": inv.get("name") or inv.get("sn") or inv.get("serial"),
+            "array_name": _col_array_name(col),
             "array_id": col.get("array_id") or col.get("id"),
             "status_14d": inv.get("status"),
             "peer_index_14d": inv.get("peer_index"),
             "expected_low": bool(inv.get("expected_low")),
             "expected_low_reason": inv.get("expected_low_reason"),
             "expected_low_breach": bool(inv.get("expected_low_breach")),
+            "series_source": series_source,
+            "evidence_note": (
+                "Only claim shading when pattern=steady_low AND days_of_history>=60 "
+                "AND steady_underperformer_candidate=true. Otherwise list open hypotheses."
+            ),
         })
         out.append(analysis)
 
     candidates = [u for u in out if u.get("steady_underperformer_candidate")]
     recent_drops = [u for u in out if u.get("pattern") == "recent_drop"]
+    insufficient = [u for u in out if u.get("pattern") == "insufficient_history"]
 
     return {
         "ok": True,
@@ -469,34 +517,158 @@ def underperformer_history(db, tenant: Tenant, *, args: dict | None = None) -> d
         "units": out,
         "steady_underperformer_candidates": candidates,
         "recent_drop_units": recent_drops,
+        "insufficient_history_units": insufficient,
         "advice": (
-            "steady_underperformer_candidate → ask owner about shading/trees/snow; "
-            "if yes, mark_inverter_expected_low. recent_drop → treat as real fault / repair path."
+            "steady_underperformer_candidate → ASK owner about shading/trees (do not assert); "
+            "if they confirm, mark_inverter_expected_low. recent_drop → repair path. "
+            "insufficient_history → do NOT invent shading; use production_history + "
+            "query_tenant(inverter_daily|daily_generation|bills) for full record, or "
+            "send tech to inspect."
         ),
     }
 
 
-def _daily_series_for_inv(db, inv: dict, window_days: int) -> list[dict]:
-    from .models import InverterDaily
-    inv_id = inv.get("inverter_id") or inv.get("id")
-    if not inv_id:
-        return []
-    try:
-        since = (now().date() - timedelta(days=window_days))
-        rows = db.execute(
-            select(InverterDaily).where(
-                InverterDaily.inverter_id == int(inv_id),
-                InverterDaily.day >= since,
-            ).order_by(InverterDaily.day.asc())
-        ).scalars().all()
-        return [
-            {"date": r.day.isoformat() if hasattr(r.day, "isoformat") else str(r.day),
-             "kwh": float(r.kwh or 0)}
-            for r in rows
+def _units_from_db(
+    db,
+    tenant: Tenant,
+    *,
+    inv_id=None,
+    array_id=None,
+    array_name: str | None = None,
+) -> list[tuple[dict, dict]]:
+    """ORM fallback when fleet-tree filter misses (name key bugs, etc.)."""
+    q = select(Inverter).where(Inverter.tenant_id == tenant.id)
+    if hasattr(Inverter, "deleted_at"):
+        q = q.where(Inverter.deleted_at.is_(None))
+    if inv_id is not None:
+        try:
+            q = q.where(Inverter.id == int(inv_id))
+        except (TypeError, ValueError):
+            return []
+    if array_id is not None:
+        try:
+            q = q.where(Inverter.array_id == int(array_id))
+        except (TypeError, ValueError):
+            return []
+    invs = db.execute(q.limit(80)).scalars().all()
+    if array_name:
+        names = {
+            a.id: a.name
+            for a in db.execute(
+                select(Array).where(Array.tenant_id == tenant.id, Array.deleted_at.is_(None))
+            ).scalars().all()
+        }
+        invs = [
+            i for i in invs
+            if array_name.lower() in (names.get(i.array_id) or "").lower()
         ]
-    except Exception as e:
-        log.info("inverter daily load failed: %s", e)
-        return []
+    arr_ids = {i.array_id for i in invs if i.array_id}
+    arr_map = {
+        a.id: a
+        for a in db.execute(select(Array).where(Array.id.in_(arr_ids or [-1]))).scalars().all()
+    }
+    # group for peer lists
+    by_arr: dict[int, list] = {}
+    for i in invs:
+        by_arr.setdefault(i.array_id, []).append(i)
+    out = []
+    for i in invs:
+        arr = arr_map.get(i.array_id)
+        peers = [
+            {
+                "inverter_id": p.id,
+                "id": p.id,
+                "name": p.name or p.serial,
+                "serial": p.serial,
+                "nameplate_kw": getattr(p, "nameplate_kw", None),
+            }
+            for p in by_arr.get(i.array_id, [])
+        ]
+        col = {
+            "array_id": i.array_id,
+            "array_name": arr.name if arr else None,
+            "inverters": peers,
+        }
+        inv = {
+            "inverter_id": i.id,
+            "id": i.id,
+            "name": i.name or i.serial,
+            "serial": i.serial,
+            "nameplate_kw": getattr(i, "nameplate_kw", None),
+        }
+        out.append((col, inv))
+    return out
+
+
+def _daily_series_for_inv(
+    db, inv: dict, window_days: int, *, col: dict | None = None
+) -> tuple[list[dict], str]:
+    """Prefer InverterDaily (all history in window); fall back to fleet-tree daily
+    then array DailyGeneration (site total — marked as array_level)."""
+    inv_id = _inv_pk(inv)
+    since = (now().date() - timedelta(days=window_days))
+    if inv_id:
+        try:
+            rows = db.execute(
+                select(InverterDaily).where(
+                    InverterDaily.inverter_id == int(inv_id),
+                    InverterDaily.day >= since,
+                ).order_by(InverterDaily.day.asc())
+            ).scalars().all()
+            if rows:
+                return (
+                    [
+                        {
+                            "date": r.day.isoformat() if hasattr(r.day, "isoformat") else str(r.day),
+                            "kwh": float(r.kwh or 0),
+                            "source": getattr(r, "source", None),
+                        }
+                        for r in rows
+                    ],
+                    "inverter_daily",
+                )
+        except Exception as e:
+            log.info("inverter daily load failed: %s", e)
+
+    daily = list(inv.get("daily") or [])
+    if daily:
+        series = [
+            {"date": d.get("date"), "kwh": float(d.get("kwh") or 0)}
+            for d in daily
+            if d.get("date")
+        ]
+        if series:
+            return series, "fleet_tree_daily"
+
+    # Array-level DailyGeneration as last resort (site total, not per-inverter)
+    aid = None
+    if col:
+        aid = col.get("array_id") or col.get("id")
+    if aid is None and inv.get("array_id") is not None:
+        aid = inv.get("array_id")
+    if aid is not None:
+        try:
+            rows = db.execute(
+                select(DailyGeneration).where(
+                    DailyGeneration.array_id == int(aid),
+                    DailyGeneration.day >= since,
+                ).order_by(DailyGeneration.day.asc())
+            ).scalars().all()
+            if rows:
+                return (
+                    [
+                        {
+                            "date": r.day.isoformat() if hasattr(r.day, "isoformat") else str(r.day),
+                            "kwh": float(r.kwh or 0),
+                            "source": getattr(r, "source", None),
+                        }
+                        for r in rows
+                    ],
+                    "array_daily_generation",
+                )
+        except Exception as e:
+            log.info("array daily_generation load failed: %s", e)
+    return [], "none"
 
 
 def _trend_analysis(series: list[dict], inv: dict, peers: list[dict], window_days: int) -> dict:
@@ -596,6 +768,504 @@ def _trend_analysis(series: list[dict], inv: dict, peers: list[dict], window_day
             f"{n}d history; early avg {early_avg:.1f} kWh/d → late {late_avg:.1f} kWh/d "
             f"({late_vs_early:.0%} of early); pattern={pattern}"
         ),
+    }
+
+
+# ── Full tenant history (vendor days + utility bills) ────────────────────────
+
+def tenant_data_catalog(db, tenant: Tenant, *, args: dict | None = None) -> dict:
+    """Inventory of EVERY stored history stream for this tenant — what the agent
+    can actually reason over (not just the last 14 days of fleet-tree)."""
+    args = args or {}
+    tid = tenant.id
+    array_id = args.get("array_id")
+    try:
+        array_id = int(array_id) if array_id is not None else None
+    except (TypeError, ValueError):
+        array_id = None
+
+    arr_q = select(Array).where(Array.tenant_id == tid, Array.deleted_at.is_(None))
+    if array_id is not None:
+        arr_q = arr_q.where(Array.id == array_id)
+    arrays = db.execute(arr_q).scalars().all()
+    arr_ids = [a.id for a in arrays]
+
+    # DailyGeneration depth
+    dg = db.execute(
+        select(
+            func.min(DailyGeneration.day),
+            func.max(DailyGeneration.day),
+            func.count(DailyGeneration.id),
+            func.coalesce(func.sum(DailyGeneration.kwh), 0.0),
+        ).where(DailyGeneration.array_id.in_(arr_ids or [-1]))
+    ).one()
+
+    inv_q = select(Inverter).where(Inverter.tenant_id == tid)
+    if hasattr(Inverter, "deleted_at"):
+        inv_q = inv_q.where(Inverter.deleted_at.is_(None))
+    if array_id is not None:
+        inv_q = inv_q.where(Inverter.array_id == array_id)
+    invs = db.execute(inv_q).scalars().all()
+    inv_ids = [i.id for i in invs]
+
+    idaily = db.execute(
+        select(
+            func.min(InverterDaily.day),
+            func.max(InverterDaily.day),
+            func.count(InverterDaily.id),
+            func.coalesce(func.sum(InverterDaily.kwh), 0.0),
+        ).where(InverterDaily.inverter_id.in_(inv_ids or [-1]))
+    ).one()
+
+    bills = db.execute(
+        select(
+            func.min(Bill.period_end),
+            func.max(Bill.period_end),
+            func.count(Bill.id),
+            func.coalesce(func.sum(Bill.kwh_generated), 0.0),
+            func.coalesce(func.sum(Bill.solar_credit_usd), 0.0),
+        ).where(Bill.tenant_id == tid)
+    ).one()
+
+    ua_n = db.execute(
+        select(func.count()).select_from(UtilityAccount).where(
+            UtilityAccount.tenant_id == tid
+        )
+    ).scalar() or 0
+
+    # Per-array coverage (compact)
+    per_array = []
+    for a in arrays[:80]:
+        a_dg = db.execute(
+            select(
+                func.min(DailyGeneration.day),
+                func.max(DailyGeneration.day),
+                func.count(DailyGeneration.id),
+            ).where(DailyGeneration.array_id == a.id)
+        ).one()
+        a_invs = [i for i in invs if i.array_id == a.id]
+        a_iids = [i.id for i in a_invs]
+        a_idaily = (None, None, 0)
+        if a_iids:
+            a_idaily = db.execute(
+                select(
+                    func.min(InverterDaily.day),
+                    func.max(InverterDaily.day),
+                    func.count(InverterDaily.id),
+                ).where(InverterDaily.inverter_id.in_(a_iids))
+            ).one()
+        # bills linked via utility_accounts.array_id
+        a_bills = db.execute(
+            select(
+                func.min(Bill.period_end),
+                func.max(Bill.period_end),
+                func.count(Bill.id),
+            )
+            .select_from(Bill)
+            .join(UtilityAccount, UtilityAccount.id == Bill.account_id)
+            .where(UtilityAccount.tenant_id == tid, UtilityAccount.array_id == a.id)
+        ).one()
+        per_array.append({
+            "array_id": a.id,
+            "array_name": a.name,
+            "inverter_count": len(a_invs),
+            "daily_generation": {
+                "min": _dstr(a_dg[0]), "max": _dstr(a_dg[1]), "days": int(a_dg[2] or 0),
+            },
+            "inverter_daily": {
+                "min": _dstr(a_idaily[0]), "max": _dstr(a_idaily[1]),
+                "rows": int(a_idaily[2] or 0),
+            },
+            "bills_linked": {
+                "min": _dstr(a_bills[0]), "max": _dstr(a_bills[1]),
+                "count": int(a_bills[2] or 0),
+            },
+        })
+
+    return {
+        "ok": True,
+        "tenant_id": tid,
+        "streams": {
+            "daily_generation": {
+                "min": _dstr(dg[0]), "max": _dstr(dg[1]),
+                "rows": int(dg[2] or 0), "total_kwh": round(float(dg[3] or 0), 1),
+                "note": "Per-array vendor/utility daily kWh — primary long history",
+            },
+            "inverter_daily": {
+                "min": _dstr(idaily[0]), "max": _dstr(idaily[1]),
+                "rows": int(idaily[2] or 0), "total_kwh": round(float(idaily[3] or 0), 1),
+                "note": "Per-inverter daily kWh — required for unit-level peer trends",
+            },
+            "bills": {
+                "min": _dstr(bills[0]), "max": _dstr(bills[1]),
+                "count": int(bills[2] or 0),
+                "sum_kwh_generated": int(bills[3] or 0),
+                "sum_solar_credit_usd": round(float(bills[4] or 0), 2),
+                "utility_accounts": int(ua_n),
+                "note": "Utility settlement periods — offtaker invoice source of truth",
+            },
+            "arrays": len(arrays),
+            "inverters": len(invs),
+        },
+        "per_array": per_array,
+        "how_to_read": (
+            "Call production_history(array_name|inverter_id) for full series + peers + bills. "
+            "query_tenant(resource=daily_generation|inverter_daily|bills, days=0) for raw rows. "
+            "days=0 means ALL available history (no 90-day cap)."
+        ),
+    }
+
+
+def _dstr(v) -> str | None:
+    if v is None:
+        return None
+    if hasattr(v, "isoformat"):
+        return v.isoformat()[:10] if hasattr(v, "year") else v.isoformat()
+    return str(v)[:32]
+
+
+def production_history(db, tenant: Tenant, *, args: dict | None = None) -> dict:
+    """Full production + bill history for diagnosis — not the 14-day peer snapshot.
+
+    Pulls ALL available InverterDaily / DailyGeneration in the window (default all
+    history up to 10y), peer weekly series on the same array, and linked utility bills.
+    Use this before claiming shading, soiling, string loss, or a real fault.
+    """
+    args = args or {}
+    tid = tenant.id
+    inv_id = args.get("inverter_id")
+    array_id = args.get("array_id")
+    array_name = (args.get("array_name") or "").strip()
+    serial = (args.get("serial") or args.get("sn") or "").strip()
+    try:
+        window_days = int(args.get("window_days") if args.get("window_days") is not None else 0)
+    except (TypeError, ValueError):
+        window_days = 0
+    # 0 = all history (cap 10 years for safety)
+    if window_days <= 0:
+        window_days = 3650
+    window_days = max(14, min(window_days, 3650))
+    since = now().date() - timedelta(days=window_days)
+
+    # Resolve inverter / array
+    inv_row = None
+    if inv_id is not None:
+        try:
+            inv_row = db.get(Inverter, int(inv_id))
+        except (TypeError, ValueError):
+            inv_row = None
+        if inv_row and inv_row.tenant_id != tid:
+            inv_row = None
+    if inv_row is None and serial:
+        inv_row = db.execute(
+            select(Inverter).where(
+                Inverter.tenant_id == tid,
+                Inverter.serial.ilike(f"%{serial}%"),
+            ).limit(1)
+        ).scalars().first()
+
+    arr = None
+    if array_id is not None:
+        try:
+            arr = db.get(Array, int(array_id))
+        except (TypeError, ValueError):
+            arr = None
+        if arr and arr.tenant_id != tid:
+            arr = None
+    if arr is None and array_name:
+        arr = db.execute(
+            select(Array).where(
+                Array.tenant_id == tid,
+                Array.deleted_at.is_(None),
+                Array.name.ilike(f"%{array_name}%"),
+            ).limit(1)
+        ).scalars().first()
+    if arr is None and inv_row is not None:
+        arr = db.get(Array, inv_row.array_id) if inv_row.array_id else None
+
+    if arr is None and inv_row is None:
+        return {
+            "ok": False,
+            "error": "pass inverter_id, serial, array_id, or array_name",
+            "hint": "tenant_data_catalog lists every array and history depth",
+        }
+
+    # All inverters on array for peers
+    peer_invs = []
+    if arr is not None:
+        peer_invs = list(db.execute(
+            select(Inverter).where(
+                Inverter.tenant_id == tid,
+                Inverter.array_id == arr.id,
+            )
+        ).scalars().all())
+        if hasattr(Inverter, "deleted_at"):
+            peer_invs = [p for p in peer_invs if not getattr(p, "deleted_at", None)]
+
+    if inv_row is None and peer_invs:
+        # Site-level request — analyze array total + each inverter summary
+        inv_row = None
+
+    def _series_inv(iid: int) -> list[dict]:
+        rows = db.execute(
+            select(InverterDaily).where(
+                InverterDaily.inverter_id == iid,
+                InverterDaily.day >= since,
+            ).order_by(InverterDaily.day.asc())
+        ).scalars().all()
+        return [
+            {"date": r.day.isoformat(), "kwh": float(r.kwh or 0),
+             "source": getattr(r, "source", None)}
+            for r in rows
+        ]
+
+    def _series_array(aid: int) -> list[dict]:
+        rows = db.execute(
+            select(DailyGeneration).where(
+                DailyGeneration.array_id == aid,
+                DailyGeneration.day >= since,
+            ).order_by(DailyGeneration.day.asc())
+        ).scalars().all()
+        return [
+            {
+                "date": r.day.isoformat(),
+                "kwh": float(r.kwh or 0),
+                "source": getattr(r, "source", None),
+            }
+            for r in rows
+        ]
+
+    def _weekly(series: list[dict]) -> list[dict]:
+        weekly = []
+        for i in range(0, len(series), 7):
+            chunk = series[i:i + 7]
+            if not chunk:
+                continue
+            avg = sum(float(p.get("kwh") or 0) for p in chunk) / len(chunk)
+            weekly.append({
+                "week_start": chunk[0].get("date"),
+                "avg_kwh_day": round(avg, 2),
+                "days": len(chunk),
+                "total_kwh": round(sum(float(p.get("kwh") or 0) for p in chunk), 1),
+            })
+        return weekly
+
+    def _monthly(series: list[dict]) -> list[dict]:
+        buckets: dict[str, list[float]] = {}
+        for p in series:
+            d = str(p.get("date") or "")[:7]
+            if len(d) < 7:
+                continue
+            buckets.setdefault(d, []).append(float(p.get("kwh") or 0))
+        out = []
+        for m in sorted(buckets.keys()):
+            vals = buckets[m]
+            out.append({
+                "month": m,
+                "days": len(vals),
+                "total_kwh": round(sum(vals), 1),
+                "avg_kwh_day": round(sum(vals) / len(vals), 2) if vals else 0,
+            })
+        return out
+
+    # Subject series
+    subject = {}
+    if inv_row is not None:
+        s = _series_inv(inv_row.id)
+        src = "inverter_daily"
+        if not s and arr is not None:
+            s = _series_array(arr.id)
+            src = "array_daily_generation_fallback"
+        analysis = _trend_analysis(
+            s,
+            {
+                "inverter_id": inv_row.id,
+                "nameplate_kw": getattr(inv_row, "nameplate_kw", None),
+                "status": None,
+                "peer_index": None,
+            },
+            [],
+            window_days,
+        )
+        subject = {
+            "kind": "inverter",
+            "inverter_id": inv_row.id,
+            "serial": inv_row.serial,
+            "name": inv_row.name or inv_row.serial,
+            "nameplate_kw": getattr(inv_row, "nameplate_kw", None),
+            "vendor": inv_row.vendor,
+            "series_source": src,
+            "days_of_history": len(s),
+            "first_day": s[0]["date"] if s else None,
+            "last_day": s[-1]["date"] if s else None,
+            "total_kwh": round(sum(float(p["kwh"]) for p in s), 1),
+            "weekly": _weekly(s)[-104:],  # ~2y
+            "monthly": _monthly(s),
+            "trend": analysis,
+            # raw daily only if short enough for the model
+            "daily": s if len(s) <= 120 else None,
+            "daily_omitted_count": 0 if len(s) <= 120 else len(s),
+        }
+    elif arr is not None:
+        s = _series_array(arr.id)
+        analysis = _trend_analysis(
+            s, {"status": None, "peer_index": None}, [], window_days,
+        )
+        subject = {
+            "kind": "array",
+            "array_id": arr.id,
+            "array_name": arr.name,
+            "series_source": "daily_generation",
+            "days_of_history": len(s),
+            "first_day": s[0]["date"] if s else None,
+            "last_day": s[-1]["date"] if s else None,
+            "total_kwh": round(sum(float(p["kwh"]) for p in s), 1),
+            "weekly": _weekly(s)[-104:],
+            "monthly": _monthly(s),
+            "trend": analysis,
+            "daily": s if len(s) <= 120 else None,
+            "daily_omitted_count": 0 if len(s) <= 120 else len(s),
+        }
+
+    # Peer inverter summaries on same array
+    peers_out = []
+    for p in peer_invs:
+        if inv_row is not None and p.id == inv_row.id:
+            continue
+        ps = _series_inv(p.id)
+        if not ps:
+            continue
+        peers_out.append({
+            "inverter_id": p.id,
+            "serial": p.serial,
+            "name": p.name or p.serial,
+            "nameplate_kw": getattr(p, "nameplate_kw", None),
+            "days_of_history": len(ps),
+            "total_kwh": round(sum(float(x["kwh"]) for x in ps), 1),
+            "avg_kwh_day": round(
+                sum(float(x["kwh"]) for x in ps) / len(ps), 2
+            ) if ps else 0,
+            "monthly": _monthly(ps)[-24:],
+            "weekly_tail": _weekly(ps)[-12:],
+        })
+
+    # Peer ratio: subject avg / peer mean avg (when both have data)
+    peer_ratio = None
+    if subject.get("days_of_history") and peers_out:
+        sub_avg = subject["total_kwh"] / max(subject["days_of_history"], 1)
+        peer_avgs = [p["avg_kwh_day"] for p in peers_out if p["avg_kwh_day"] > 0]
+        if peer_avgs and sub_avg > 0:
+            peer_mean = sum(peer_avgs) / len(peer_avgs)
+            if peer_mean > 0:
+                peer_ratio = round(sub_avg / peer_mean, 3)
+
+    # Utility bills for this array (and tenant-wide sample if none linked)
+    bill_rows = []
+    if arr is not None:
+        bq = (
+            select(Bill, UtilityAccount)
+            .join(UtilityAccount, UtilityAccount.id == Bill.account_id)
+            .where(
+                Bill.tenant_id == tid,
+                UtilityAccount.array_id == arr.id,
+            )
+            .order_by(Bill.period_end.desc().nulls_last())
+            .limit(120)
+        )
+        for b, ua in db.execute(bq).all():
+            bill_rows.append(_bill_row(b, ua))
+    if not bill_rows:
+        # Tenant bills (newest 60) — agent still sees settlement history
+        bq = (
+            select(Bill, UtilityAccount)
+            .join(UtilityAccount, UtilityAccount.id == Bill.account_id)
+            .where(Bill.tenant_id == tid)
+            .order_by(Bill.period_end.desc().nulls_last())
+            .limit(60)
+        )
+        for b, ua in db.execute(bq).all():
+            bill_rows.append(_bill_row(b, ua))
+        bill_scope = "tenant_all"
+    else:
+        bill_scope = "array_linked"
+
+    # Honest judgment scaffolding for the model
+    trend_pat = (subject.get("trend") or {}).get("pattern")
+    days_h = int(subject.get("days_of_history") or 0)
+    if days_h < 21:
+        judgment = (
+            "INSUFFICIENT_HISTORY — do not claim shading or permanent defect. "
+            "State peer_index if any, list open hypotheses, offer portal check or tech visit."
+        )
+    elif trend_pat == "recent_drop":
+        judgment = (
+            "RECENT_DROP pattern in stored kWh — treat as possible fault/soiling/outage, "
+            "not long-term shading."
+        )
+    elif trend_pat == "steady_low" and days_h >= 60:
+        judgment = (
+            "STEADY_LOW with multi-month history — shading/orientation is a *candidate* only. "
+            "Ask the owner; do not assert. Compare peers monthly below."
+        )
+    elif trend_pat == "underperforming_unclear":
+        judgment = (
+            "UNDERPERFORMING but pattern unclear — need owner context or more series. "
+            "Do not lead with shading."
+        )
+    else:
+        judgment = f"pattern={trend_pat}; days={days_h}; report numbers, not a single root cause."
+
+    return {
+        "ok": True,
+        "window_days": window_days,
+        "since": since.isoformat(),
+        "array": (
+            {"id": arr.id, "name": arr.name} if arr is not None else None
+        ),
+        "subject": subject,
+        "peers_on_array": peers_out,
+        "subject_vs_peer_avg_ratio": peer_ratio,
+        "bills": {
+            "scope": bill_scope,
+            "count": len(bill_rows),
+            "rows": bill_rows,
+        },
+        "judgment_guardrail": judgment,
+        "evidence_rules": [
+            "Never say 'it is shading' — only 'steady-low pattern consistent with permanent "
+            "shade IF owner confirms a physical cause'.",
+            "14-day peer_index alone is not multi-year proof.",
+            "Utility bills settle site totals (not per-inverter) — use them for array health "
+            "and offtaker $, not unit #2 alone.",
+            "If inverter_daily is empty, say so and use array daily_generation + peers carefully.",
+        ],
+    }
+
+
+def _bill_row(b: Bill, ua: UtilityAccount | None = None) -> dict:
+    solar = getattr(b, "solar_credit_usd", None) or getattr(b, "net_credit", None)
+    excess = getattr(b, "kwh_sent_to_grid", None)
+    implied = None
+    try:
+        if solar is not None and excess and float(excess) > 0:
+            implied = round(float(solar) / float(excess), 6)
+    except Exception:
+        pass
+    return {
+        "id": b.id,
+        "utility_account_id": getattr(b, "account_id", None),
+        "array_id": getattr(ua, "array_id", None) if ua is not None else None,
+        "provider": getattr(ua, "provider", None) if ua is not None else None,
+        "account_nickname": getattr(ua, "nickname", None) if ua is not None else None,
+        "period_start": _dstr(getattr(b, "period_start", None)),
+        "period_end": _dstr(getattr(b, "period_end", None)),
+        "kwh_generated": getattr(b, "kwh_generated", None),
+        "kwh_consumed": getattr(b, "kwh_consumed", None),
+        "kwh_sent_to_grid": excess,
+        "solar_credit_usd": solar,
+        "implied_rate_per_kwh": implied,
+        "total_cost": getattr(b, "total_cost", None),
+        "document_number": getattr(b, "document_number", None),
     }
 
 
