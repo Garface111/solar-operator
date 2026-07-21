@@ -1739,25 +1739,37 @@ def _b64(path: pathlib.Path) -> dict:
             "content": base64.b64encode(path.read_bytes()).decode()}
 
 
-def _offtaker_email_fields(tenant_id) -> dict:
+def _offtaker_email_fields(tenant_id, *, subscription_id=None) -> dict:
     """One fetch of the tenant fields the offtaker invoice email letter needs:
     the mass template (subject/body), the shared sign-off, and the operator
-    identity. Empty dict when the tenant can't be resolved."""
+    identity. Applies any active temporary override (Energy Agent schedule).
+    Empty dict when the tenant can't be resolved."""
     from ..db import SessionLocal
     from ..models import Tenant
+    from .. import email_copy_overrides as eco
     if not tenant_id:
         return {}
     with SessionLocal() as db:
         t = db.get(Tenant, tenant_id)
         if not t:
             return {}
+        resolved = eco.resolve_templates(
+            db, t, "offtaker",
+            scope_kind="subscription" if subscription_id else None,
+            scope_id=str(subscription_id) if subscription_id is not None else None,
+        )
+        body_t = eco.apply_body_append(
+            resolved.get("body_template"), resolved.get("body_append"), html=True,
+        )
         return {
-            "subject_t": getattr(t, "offtaker_email_subject_template", None),
-            "body_t": getattr(t, "offtaker_email_body_template", None),
-            "signoff_t": getattr(t, "email_signoff", None),
+            "subject_t": resolved.get("subject_template"),
+            "body_t": body_t,
+            "signoff_t": resolved.get("signoff"),
             "tenant_name": (t.company_name or t.operator_name or t.name),
             "tenant_email": (t.contact_email or ""),
             "signoff_name": (t.send_from_name or t.operator_name),
+            "email_copy_override_id": resolved.get("override_id"),
+            "email_copy_source": resolved.get("source"),
         }
 
 
@@ -1801,7 +1813,10 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
     # (Ford, 2026-07-03: "the email should automatically say hi <offtaker name>
     # and be a little longer" — the letter is now merge-tag templated, editable
     # in the AO email studio, with the same engine as the NEPOOL customizer.)
-    fields = _offtaker_email_fields(getattr(sub, "tenant_id", None))
+    fields = _offtaker_email_fields(
+        getattr(sub, "tenant_id", None),
+        subscription_id=getattr(sub, "id", None),
+    )
     operator = fields.get("tenant_name") or "your solar provider"
     if attachment_names is not None:
         # Real send: derive from the actual files going out — never overclaim.
@@ -2147,6 +2162,7 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
             logger.exception("offtaker pay-link creation crashed for sub=%s",
                              getattr(sub, "id", "?"))
 
+    _eco_fields: dict = {}
     with tempfile.TemporaryDirectory(prefix="ao-bill-") as tmp:
         try:
             paths = generate_files(match, formats, sub.include_summary,
@@ -2157,6 +2173,11 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
             logger.exception("billing render failed")
             return {"ok": False, "error": f"render failed: {e}"}
         attachments = [_b64(p) for p in paths]
+        # Snapshot override id before send so one-shot overrides can expire.
+        _eco_fields = _offtaker_email_fields(
+            getattr(tenant, "id", None) or getattr(sub, "tenant_id", None),
+            subscription_id=getattr(sub, "id", None),
+        )
         subject, html, text = _email_html(match, sub, is_test, note=note,
                                           attachment_names=[p.name for p in paths],
                                           pay_url=pay_url)
@@ -2193,7 +2214,8 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
               "pay_url": pay_url, "payment_id": payment_id, "fee_cents": fee_cents,
               "pay_skip_reason": pay_skip_reason,
               # Mailer accepted — NOT inbox-delivered. Webhook stamps delivered.
-              "resend_email_id": resend_email_id if ok else None}
+              "resend_email_id": resend_email_id if ok else None,
+              "email_copy_override_id": (_eco_fields or {}).get("email_copy_override_id")}
     if ok:
         result["delivery_status"] = "accepted"
     if ok and not is_test:
@@ -2216,6 +2238,12 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
         if getattr(sub, "invoice_number_next", None) is not None:
             sub.invoice_number_next = sub.invoice_number_next + 1
         sub.next_send_at = next_send_at(sub.cadence, now)
+        # Expire one-shot / max_sends email-copy overrides after a real send.
+        try:
+            from .. import email_copy_overrides as _eco
+            _eco.record_send(db, result.get("email_copy_override_id"))
+        except Exception:  # noqa: BLE001
+            logger.exception("email_copy_override record_send failed")
         # Delivery-truth: stamp Resend id so webhook can match by email_id.
         # Do NOT set last_delivered_at here — that requires email.delivered.
         if resend_email_id:

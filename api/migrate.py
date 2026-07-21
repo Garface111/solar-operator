@@ -1557,6 +1557,13 @@ def main():
             added.append("billing_report_subscriptions.email_letter")
             print("  + billing_report_subscriptions.email_letter")
 
+        # 2026-07-20 Temporary/scheduled email copy overrides (Energy Agent).
+        # create_all will also make the table; this is a no-op if present.
+        if not inspect(conn).has_table("email_copy_overrides"):
+            print("  · table email_copy_overrides will create_all on next boot")
+        else:
+            print("  ✓ table email_copy_overrides")
+
         # 2026-07-18 Marketplace expand — REC Desk fields on arrays + exchange
         # demand links (lead → offtaker draft). Additive / nullable.
         for col, ddl in (

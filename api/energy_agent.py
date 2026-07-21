@@ -186,6 +186,10 @@ You have a FREE MIND over THIS TENANT'S live data (not a fixed FAQ):
   For "how is my fleet?" ALWAYS call investigate_attention (or fleet_overview with
   needs_attention_only) and report TOTALS + every attention array — not one example.
 - repair_ops_overview / list_service_contacts / list_repair_tickets = O&M healing.
+- get_email_copy / set_email_copy / schedule_email_copy = offtaker invoice letter
+  AND generation-report client email copy. Permanent master = set_email_copy.
+  Temporary one-month line / one send round = schedule_email_copy (body_append +
+  max_sends=1 default), then auto-reverts. Always get_email_copy first.
   search_repair_tickets = history by site / date range / keyword ("Chester in May").
   update_repair_ticket(checkin_interval_hours=N) = recurring check-in cadence
   (e.g. 72 = every 3 days until resolved; auto-sends need trusted contact / tenant auto).
@@ -1738,6 +1742,168 @@ TOOL_DEFS = [
                     },
                     "limit": {"type": "integer", "description": "Max rows (1-30, default 12)"},
                 },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_email_copy",
+            "description": (
+                "Show the CURRENT email letter for offtaker invoices OR generation-report "
+                "client emails: permanent master subject/body, plus any active or scheduled "
+                "temporary overrides (one-shot lines, timed rewrites). Call this before "
+                "editing copy. channel=offtaker | generation_report."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "channel": {
+                        "type": "string",
+                        "enum": ["offtaker", "generation_report"],
+                        "description": "Which email product",
+                    },
+                },
+                "required": ["channel"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_email_copy",
+            "description": (
+                "Set the PERMANENT master email copy for offtaker invoices or generation "
+                "reports (until changed again). Use schedule_email_copy for temporary "
+                "one-month lines that auto-revert. Pass reset_to_default=true to clear "
+                "custom permanent copy back to system defaults. supports merge tags."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "channel": {
+                        "type": "string",
+                        "enum": ["offtaker", "generation_report"],
+                    },
+                    "subject_template": {
+                        "type": "string",
+                        "description": "Permanent subject (merge tags OK). Omit to leave subject.",
+                    },
+                    "body_template": {
+                        "type": "string",
+                        "description": "Permanent body/letter (HTML or plain with merge tags). Omit to leave body.",
+                    },
+                    "reset_to_default": {
+                        "type": "boolean",
+                        "description": "If true, clear permanent custom copy (system default).",
+                    },
+                    "needs_confirm": {
+                        "type": "boolean",
+                        "default": True,
+                        "description": "Confirm with owner before writing (default true).",
+                    },
+                },
+                "required": ["channel"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "schedule_email_copy",
+            "description": (
+                "TEMPORARY email copy override that auto-reverts. Use when the owner wants "
+                "a different letter for one month / one send round, or to ADD a line only "
+                "for the next invoices then go back to normal. Defaults to max_sends=1 "
+                "(one send cycle) if no ends_at/duration given. Can start in the future "
+                "(starts_at ISO datetime). body_append adds a line without rewriting the whole letter."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "channel": {
+                        "type": "string",
+                        "enum": ["offtaker", "generation_report"],
+                    },
+                    "body_append": {
+                        "type": "string",
+                        "description": "Extra paragraph/line for this window only (e.g. holiday note).",
+                    },
+                    "body_template": {
+                        "type": "string",
+                        "description": "Full temporary body rewrite for this window (optional).",
+                    },
+                    "subject_template": {
+                        "type": "string",
+                        "description": "Temporary subject rewrite (optional).",
+                    },
+                    "starts_at": {
+                        "type": "string",
+                        "description": "ISO datetime when override becomes active (default now). e.g. 2026-08-01T00:00:00",
+                    },
+                    "ends_at": {
+                        "type": "string",
+                        "description": "ISO datetime when override expires (optional).",
+                    },
+                    "duration_hours": {
+                        "type": "number",
+                        "description": "Expire this many hours after starts_at (optional).",
+                    },
+                    "max_sends": {
+                        "type": "integer",
+                        "description": "Expire after this many real sends (default 1 = next round only).",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Short note for the owner (e.g. 'January rate-change notice').",
+                    },
+                    "needs_confirm": {
+                        "type": "boolean",
+                        "default": True,
+                    },
+                },
+                "required": ["channel"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_email_copy_overrides",
+            "description": "List scheduled/active/recent temporary email-copy overrides for a channel.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "channel": {
+                        "type": "string",
+                        "enum": ["offtaker", "generation_report"],
+                    },
+                    "include_exhausted": {
+                        "type": "boolean",
+                        "description": "Include already-used or cancelled overrides (default false).",
+                    },
+                },
+                "required": ["channel"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_email_copy_override",
+            "description": "Cancel a temporary email-copy override by id so permanent master copy applies again.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "override_id": {"type": "integer"},
+                    "needs_confirm": {"type": "boolean", "default": True},
+                },
+                "required": ["override_id"],
                 "additionalProperties": False,
             },
         },
@@ -5821,10 +5987,16 @@ SKILL_REGISTRY: dict[str, dict] = {
     "offtaker_billing": {"label": "Offtaker invoices & rates", "default_on": True,
                          "tools": {"list_offtakers", "get_offtaker", "patch_offtaker",
                                    "get_billing_rates", "set_billing_rates",
-                                   "list_recent_invoices", "send_pipeline", "billing_portal_link"}},
+                                   "list_recent_invoices", "send_pipeline", "billing_portal_link",
+                                   "get_email_copy", "set_email_copy",
+                                   "schedule_email_copy", "cancel_email_copy_override",
+                                   "list_email_copy_overrides"}},
     "generation_reports": {"label": "Generation-report clients", "default_on": True,
                            "tools": {"list_gen_clients", "get_gen_client", "create_gen_client",
-                                     "patch_gen_client", "patch_gen_array"}},
+                                     "patch_gen_client", "patch_gen_array",
+                                     "get_email_copy", "set_email_copy",
+                                     "schedule_email_copy", "cancel_email_copy_override",
+                                     "list_email_copy_overrides"}},
     "repairs": {"label": "Repair coordination", "default_on": True,
                 "tools": {"repair_ops_overview", "list_service_contacts", "upsert_service_contact",
                           "assign_service_contact", "open_repair_ticket", "update_repair_ticket",
@@ -6419,6 +6591,244 @@ def _enrich_repair_tickets(db, tid: str, tickets, ro) -> dict:
     }
 
 
+def _email_copy_tool(name: str, db, tenant: Tenant, args: dict,
+                     user_text: str = "") -> dict:
+    """Energy Agent tools for permanent + temporary offtaker/gen-report email copy."""
+    from . import email_copy_overrides as eco
+    from .email_templates import (
+        DEFAULT_BODY_TEMPLATE, DEFAULT_SUBJECT_TEMPLATE,
+        DEFAULT_OFFTAKER_BODY_TEMPLATE, DEFAULT_OFFTAKER_SUBJECT_TEMPLATE,
+    )
+
+    channel = (args.get("channel") or "").strip().lower()
+    if name != "cancel_email_copy_override" and channel not in eco.CHANNELS:
+        return {
+            "error": "channel must be 'offtaker' (invoice emails) or "
+                     "'generation_report' (client generation-report emails)",
+        }
+
+    tid = tenant.id
+    t = db.get(Tenant, tid) or tenant
+
+    if name == "get_email_copy":
+        eco.expire_stale(db, tid)
+        perm = eco.permanent_templates(t, channel)
+        resolved = eco.resolve_templates(db, t, channel)
+        if channel == "offtaker":
+            def_subj, def_body = DEFAULT_OFFTAKER_SUBJECT_TEMPLATE, DEFAULT_OFFTAKER_BODY_TEMPLATE
+        else:
+            def_subj, def_body = DEFAULT_SUBJECT_TEMPLATE, DEFAULT_BODY_TEMPLATE
+        overrides = eco.list_overrides(db, tid, channel=channel, include_exhausted=False)
+        return {
+            "ok": True,
+            "channel": channel,
+            "channel_label": (
+                "Offtaker invoice emails" if channel == "offtaker"
+                else "Generation-report client emails"
+            ),
+            "permanent": {
+                "subject_template": perm["subject_template"],
+                "body_template": perm["body_template"],
+                "is_default_subject": perm["subject_template"] is None,
+                "is_default_body": perm["body_template"] is None,
+            },
+            "effective_now": {
+                "source": resolved["source"],
+                "subject_template": resolved["subject_template"] or def_subj,
+                "body_template": resolved["body_template"] or def_body,
+                "body_append": resolved.get("body_append"),
+                "override_id": resolved.get("override_id"),
+            },
+            "system_defaults": {
+                "subject_template": def_subj,
+                "body_template": def_body[:400] + ("…" if len(def_body) > 400 else ""),
+            },
+            "active_or_scheduled_overrides": overrides,
+            "merge_tags_hint": (
+                "{{greeting}}, {{offtaker_first_name}}, {{offtaker_name}}, {{period}}, "
+                "{{kwh}}, {{amount}}, {{invoice_number}}, {{signoff}}"
+                if channel == "offtaker" else
+                "{{client_name}}, {{tenant_name}}, {{quarter}}, {{period_start}}, "
+                "{{period_end}}, {{arrays_count}}, {{signoff}}"
+            ),
+            "how_to_temporary": (
+                "Use schedule_email_copy with body_append for a one-line notice, "
+                "or body_template for a full rewrite. Default expires after 1 send "
+                "(next invoice/report round). Or set starts_at / ends_at / duration_hours."
+            ),
+        }
+
+    if name == "list_email_copy_overrides":
+        eco.expire_stale(db, tid)
+        rows = eco.list_overrides(
+            db, tid, channel=channel,
+            include_exhausted=bool(args.get("include_exhausted")),
+        )
+        return {"ok": True, "channel": channel, "overrides": rows, "count": len(rows)}
+
+    if name == "set_email_copy":
+        needs = bool(args.get("needs_confirm", True))
+        if needs and _user_clearly_directed(user_text, {
+            "channel": channel, "subject": args.get("subject_template"),
+            "body": (args.get("body_template") or "")[:40],
+        }):
+            needs = False
+        reset = bool(args.get("reset_to_default"))
+        payload = {
+            "channel": channel,
+            "subject_template": args.get("subject_template"),
+            "body_template": args.get("body_template"),
+            "reset_to_default": reset,
+            "needs_confirm": False,
+        }
+        if needs:
+            what = "reset permanent email copy to system defaults" if reset else (
+                "update the permanent master email copy"
+            )
+            return {
+                "status": "pending_confirm",
+                "pending": {"tool": name, "args": payload},
+                "message": (
+                    f"Confirm: {what} for "
+                    f"{'offtaker invoices' if channel == 'offtaker' else 'generation reports'}? "
+                    "This stays until you change it again (temporary one-month lines use "
+                    "schedule_email_copy instead)."
+                ),
+                "needs_confirm": True,
+            }
+        try:
+            if reset:
+                perm = eco.set_permanent(
+                    db, t, channel, clear_subject=True, clear_body=True,
+                )
+            else:
+                perm = eco.set_permanent(
+                    db, t, channel,
+                    subject_template=args.get("subject_template"),
+                    body_template=args.get("body_template"),
+                )
+            db.commit()
+            return {
+                "ok": True,
+                "channel": channel,
+                "permanent": perm,
+                "message": (
+                    "Permanent email copy reset to system defaults."
+                    if reset else
+                    "Permanent master email copy saved. Temporary overrides still "
+                    "win while they're active."
+                ),
+            }
+        except Exception as e:
+            db.rollback()
+            return {"ok": False, "error": str(e)}
+
+    if name == "schedule_email_copy":
+        needs = bool(args.get("needs_confirm", True))
+        if needs and _user_clearly_directed(user_text, {
+            "channel": channel,
+            "append": (args.get("body_append") or "")[:30],
+        }):
+            needs = False
+        payload = {
+            "channel": channel,
+            "subject_template": args.get("subject_template"),
+            "body_template": args.get("body_template"),
+            "body_append": args.get("body_append"),
+            "starts_at": args.get("starts_at"),
+            "ends_at": args.get("ends_at"),
+            "duration_hours": args.get("duration_hours"),
+            "max_sends": args.get("max_sends"),
+            "reason": args.get("reason"),
+            "needs_confirm": False,
+        }
+        if needs:
+            bits = []
+            if args.get("body_append"):
+                bits.append("add a temporary line")
+            if args.get("body_template"):
+                bits.append("use a temporary full letter")
+            if args.get("subject_template"):
+                bits.append("use a temporary subject")
+            when = "for the next send only"
+            if args.get("max_sends"):
+                when = f"for the next {args['max_sends']} send(s)"
+            if args.get("ends_at"):
+                when = f"until {args['ends_at']}"
+            if args.get("starts_at"):
+                when = f"starting {args['starts_at']}, {when}"
+            return {
+                "status": "pending_confirm",
+                "pending": {"tool": name, "args": payload},
+                "message": (
+                    f"Confirm: {', '.join(bits) or 'schedule temporary email copy'} "
+                    f"on {'offtaker invoices' if channel == 'offtaker' else 'generation reports'} "
+                    f"{when}, then auto-revert to the permanent master?"
+                ),
+                "needs_confirm": True,
+            }
+        try:
+            ov = eco.schedule_override(
+                db, tid, channel,
+                subject_template=args.get("subject_template"),
+                body_template=args.get("body_template"),
+                body_append=args.get("body_append"),
+                starts_at=eco._parse_dt(args.get("starts_at")),
+                ends_at=eco._parse_dt(args.get("ends_at")),
+                duration_hours=args.get("duration_hours"),
+                max_sends=args.get("max_sends"),
+                reason=args.get("reason"),
+                created_by="energy_agent",
+            )
+            db.commit()
+            return {
+                "ok": True,
+                "override": eco._serialize(ov, active=eco._is_active(ov, eco._utcnow())),
+                "message": (
+                    f"Temporary email copy scheduled (id {ov.id}). "
+                    f"It will auto-revert after "
+                    + (
+                        f"{ov.max_sends} send(s)"
+                        if ov.max_sends is not None
+                        else (f"ends_at {ov.ends_at.isoformat()}Z" if ov.ends_at else "its window")
+                    )
+                    + ". Permanent master copy is unchanged."
+                ),
+            }
+        except Exception as e:
+            db.rollback()
+            return {"ok": False, "error": str(e)}
+
+    if name == "cancel_email_copy_override":
+        oid = args.get("override_id")
+        if not oid:
+            return {"error": "override_id required"}
+        needs = bool(args.get("needs_confirm", True))
+        if needs and _user_clearly_directed(user_text, {"override_id": oid}):
+            needs = False
+        if needs:
+            return {
+                "status": "pending_confirm",
+                "pending": {
+                    "tool": name,
+                    "args": {"override_id": int(oid), "needs_confirm": False},
+                },
+                "message": f"Cancel temporary email override #{oid} and go back to permanent master?",
+                "needs_confirm": True,
+            }
+        out = eco.cancel_override(db, tid, int(oid))
+        if out is None:
+            return {"ok": False, "error": f"override #{oid} not found"}
+        db.commit()
+        return {
+            "ok": True,
+            "override": out,
+            "message": f"Override #{oid} cancelled. Permanent master email copy applies again.",
+        }
+
+    return {"error": f"unknown email copy tool {name}"}
+
+
 def _run_tool(
     name: str,
     args: dict,
@@ -6466,6 +6876,12 @@ def _run_tool(
         return _patch_gen_client_tool(db, tenant, args, user_text=user_text)
     if name == "patch_gen_array":
         return _patch_gen_array_tool(db, tenant, args, user_text=user_text)
+
+    if name in (
+        "get_email_copy", "set_email_copy", "schedule_email_copy",
+        "list_email_copy_overrides", "cancel_email_copy_override",
+    ):
+        return _email_copy_tool(name, db, tenant, args, user_text=user_text)
 
     if name == "tenant_census":
         return _tenant_census_tool(db, tenant, args)

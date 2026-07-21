@@ -264,9 +264,26 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
         send_from_name = tenant.send_from_name
         from_header = resolve_from_header(
             effective_from_email, send_from_name, tenant_name)
-        subject_template = tenant.email_subject_template
-        body_template = tenant.email_body_template
-        signoff_template = tenant.email_signoff
+        # Permanent templates + any active Energy Agent schedule/one-shot override
+        try:
+            from . import email_copy_overrides as _eco
+            _resolved = _eco.resolve_templates(
+                db, tenant, "generation_report",
+                scope_kind="client", scope_id=str(client_id) if client_id else None,
+            )
+            subject_template = _resolved.get("subject_template")
+            body_template = _eco.apply_body_append(
+                _resolved.get("body_template"), _resolved.get("body_append"),
+                html=True,
+            )
+            signoff_template = _resolved.get("signoff") or tenant.email_signoff
+            _email_copy_override_id = _resolved.get("override_id")
+        except Exception:  # noqa: BLE001 — never block a report send on override bugs
+            logger.exception("email_copy_override resolve failed; using permanent templates")
+            subject_template = tenant.email_subject_template
+            body_template = tenant.email_body_template
+            signoff_template = tenant.email_signoff
+            _email_copy_override_id = None
         # Provisional count for the {{arrays_count}} merge tag (not soft-
         # deleted, not excluded). After the workbook is built this is replaced
         # by the attachment's real sheet count, since the writers also omit
@@ -428,6 +445,12 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
             t = db.get(Tenant, tenant_id)
             if t:
                 t.last_delivery_at = now()
+            # One-shot / max_sends email-copy overrides expire after a real send.
+            try:
+                from . import email_copy_overrides as _eco
+                _eco.record_send(db, locals().get("_email_copy_override_id"))
+            except Exception:  # noqa: BLE001
+                logger.exception("email_copy_override record_send failed")
             db.commit()
 
     # Metered billing ($15/client/quarter): a report actually went out for this
@@ -448,6 +471,7 @@ def deliver_for_client(client_id: int, *, year: Optional[int] = None,
         "recipient": recipients[0] if recipients else "",
         "recipients": recipients,
         "triggered_by": triggered_by,
+        "email_copy_override_id": locals().get("_email_copy_override_id"),
     }
 
 

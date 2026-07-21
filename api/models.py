@@ -1939,6 +1939,45 @@ class CaptureEvent(Base):
     )
 
 
+class EmailCopyOverride(Base):
+    """Temporary / scheduled email copy for offtaker invoices or generation reports.
+
+    Permanent templates stay on Tenant.email_* / offtaker_email_*. This row is a
+    time-boxed or one-shot override Energy Agent (or the API) can create so an
+    operator can e.g. add a holiday line for the next invoice round only, then
+    auto-revert to the permanent master copy.
+
+    channel: offtaker | generation_report
+    status: scheduled | active | exhausted | expired | cancelled
+    """
+    __tablename__ = "email_copy_overrides"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    channel: Mapped[str] = mapped_column(String(32), index=True)
+    subject_template: Mapped[str | None] = mapped_column(Text, nullable=True)
+    body_template: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Extra paragraph/line injected into the body (in addition to body_template
+    # or the permanent body). Ideal for "add one line this month only".
+    body_append: Mapped[str | None] = mapped_column(Text, nullable=True)
+    starts_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+    ends_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    max_sends: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sends_used: Mapped[int] = mapped_column(Integer, default=0)
+    last_send_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Optional scope: offtaker subscription id or gen-report client id; null = all
+    scope_kind: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    scope_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_email_copy_overrides_tenant_channel", "tenant_id", "channel"),
+    )
+
+
 class SiteFile(Base):
     """A document attached to an array/site — the Analysis-tab "Files" feature
     (PowerTrack's per-site document storage). Stored as a DB blob (bounded by an
