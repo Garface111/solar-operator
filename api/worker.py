@@ -164,11 +164,13 @@ def _pull_via_json(db, tenant_id: str, account: UtilityAccount,
             created += 1
         else:
             updated += 1
-    # The JSON path persists bill METRICS for all history but no PDF. Capture
-    # the CURRENT bill's PDF bytes durably onto its bill row so auto-attach has
-    # the real utility PDF for the latest period. Best-effort: never fail the
-    # pull over a PDF fetch (auth/format issues surface in the result).
+    # Metrics: every period from the utility's bill history API (full sponge).
+    # PDFs: aggressively backfill missing statement PDFs for as many periods as
+    # the portal exposes via /transactions (not just the current bill). Cap per
+    # run so a 15-year account doesn't hang the worker — the 6h scheduler fills
+    # the rest. Best-effort: never fail the pull over a PDF fetch.
     pdf_capture = _capture_current_bill_pdf(db, tenant_id, account, adapter, jwt)
+    pdf_backfill = _backfill_missing_bill_pdfs(db, tenant_id, account, adapter, jwt)
     return {
         "account": account.account_number, "nickname": account.nickname,
         "status": "ok", "source": "json",
@@ -176,6 +178,113 @@ def _pull_via_json(db, tenant_id: str, account: UtilityAccount,
         "created": created, "updated": updated,
         "no_generation": no_generation,
         "pdf_capture": pdf_capture,
+        "pdf_backfill": pdf_backfill,
+    }
+
+
+# How many missing statement PDFs to fetch per account per pull. Aggressive
+# but bounded so a 15-year account doesn't block the worker for hours — the
+# 6h scheduler + on-demand pulls keep filling until the archive is full.
+PDF_BACKFILL_MAX_PER_PULL = 48
+# How far back to ask the portal for statement documents (years).
+PDF_BACKFILL_LOOKBACK_DAYS = 365 * 12
+
+
+def _txn_doc_date(t) -> "datetime.date | None":
+    ds = str((t or {}).get("date") or "")[:10]
+    try:
+        return datetime(int(ds[0:4]), int(ds[5:7]), int(ds[8:10])).date()
+    except Exception:
+        return None
+
+
+def _match_txn_doc_for_bill(bill: Bill, docs: list) -> dict | None:
+    """Pick the best transactions[] document for a bill row (statement after period close)."""
+    from datetime import timedelta
+    if not docs:
+        return None
+    floor = (bill.period_end.date() - timedelta(days=1)) if bill.period_end else None
+    # Prefer docs issued on/after period end (real statement), not prior months.
+    cands = [t for t in docs if floor is None or (_txn_doc_date(t) and _txn_doc_date(t) >= floor)]
+    if not cands:
+        return None
+    # Cap: statement more than ~90d after period_end is almost certainly a later bill.
+    if bill.period_end:
+        pe = bill.period_end.date()
+        tight = [t for t in cands if _txn_doc_date(t) and (_txn_doc_date(t) - pe).days <= 90]
+        if tight:
+            cands = tight
+    tgt = bill.bill_date or bill.period_end
+    target = tgt.date() if tgt else datetime.utcnow().date()
+    return min(cands, key=lambda t: abs((_txn_doc_date(t) - target).days) if _txn_doc_date(t) else 10 ** 6)
+
+
+def _backfill_missing_bill_pdfs(db, tenant_id: str, account: UtilityAccount,
+                                adapter, jwt: str | None = None) -> dict:
+    """Aggressively attach statement PDFs to bill rows that lack pdf_bytes.
+
+    Uses the portal /transactions document list (full lookback) and downloads
+    up to PDF_BACKFILL_MAX_PER_PULL PDFs per pull. Idempotent: skips rows that
+    already have durable bytes. Best-effort — never raises into the pull."""
+    if not jwt:
+        return {"saved": 0, "reason": "no jwt"}
+    if not (hasattr(adapter, "fetch_transactions") and hasattr(adapter, "fetch_bill_pdf_binary")):
+        return {"saved": 0, "reason": "adapter cannot fetch statement PDFs"}
+    from datetime import timedelta
+    # Newest-first so the utility-bill archive + offtaker invoices fill first.
+    missing = db.execute(
+        select(Bill).where(
+            Bill.account_id == account.id,
+            Bill.pdf_bytes.is_(None),
+        ).order_by(Bill.period_end.desc().nullslast(), Bill.bill_date.desc().nullslast())
+        .limit(PDF_BACKFILL_MAX_PER_PULL * 2)  # match pool larger than fetch cap
+    ).scalars().all()
+    if not missing:
+        return {"saved": 0, "reason": "all bills already have PDFs", "missing": 0}
+    try:
+        txns = adapter.fetch_transactions(
+            account.account_number, jwt,
+            datetime.utcnow() - timedelta(days=PDF_BACKFILL_LOOKBACK_DAYS),
+            datetime.utcnow() + timedelta(days=1),
+            timeout=60,
+        )
+    except Exception as e:  # noqa: BLE001
+        return {"saved": 0, "reason": f"transactions fetch failed: {type(e).__name__}: {e}",
+                "missing": len(missing)}
+    docs = [t for t in (txns or []) if isinstance(t, dict) and t.get("urlBinary")]
+    if not docs:
+        return {"saved": 0, "reason": "no statement documents in portal window",
+                "missing": len(missing), "txns": len(txns or [])}
+    saved = 0
+    tried = 0
+    errors = 0
+    for bill in missing:
+        if saved >= PDF_BACKFILL_MAX_PER_PULL:
+            break
+        chosen = _match_txn_doc_for_bill(bill, docs)
+        if not chosen:
+            continue
+        tried += 1
+        try:
+            data, ctype = adapter.fetch_bill_pdf_binary(chosen["urlBinary"])
+            if not data or data[:4] != b"%PDF":
+                errors += 1
+                continue
+            bill.pdf_bytes = data
+            bill.pdf_content_type = ctype or "application/pdf"
+            saved += 1
+        except Exception:  # noqa: BLE001 — one bad doc never aborts the rest
+            errors += 1
+            continue
+    return {
+        "saved": saved,
+        "tried": tried,
+        "errors": errors,
+        "missing_before": len(missing),
+        "docs_available": len(docs),
+        "via": "transactions-backfill",
+        "lookback_days": PDF_BACKFILL_LOOKBACK_DAYS,
+        "cap": PDF_BACKFILL_MAX_PER_PULL,
     }
 
 
@@ -188,7 +297,10 @@ def _capture_current_bill_pdf(db, tenant_id: str, account: UtilityAccount,
     the GMP /transactions endpoint hands a per-bill PDF link (`urlBinary`) for any
     account the operator's JWT can see. FALLBACK: the account's own stored
     currentBillUrl (present only for the operator's primary accounts). Best-effort
-    — never raises into the pull. Returns a small status dict."""
+    — never raises into the pull. Returns a small status dict.
+
+    Historical periods without PDFs are filled by `_backfill_missing_bill_pdfs`
+    (aggressive multi-year backfill, capped per run)."""
     from datetime import timedelta
     # Newest bill row for this account is where the current PDF belongs.
     bill = db.execute(
@@ -207,6 +319,7 @@ def _capture_current_bill_pdf(db, tenant_id: str, account: UtilityAccount,
     # ── PRIMARY: transactions → urlBinary (works for managed/offtaker accounts) ──
     if jwt and hasattr(adapter, "fetch_transactions") and hasattr(adapter, "fetch_bill_pdf_binary"):
         try:
+            # Current-bill window only (full history is the backfill path).
             txns = adapter.fetch_transactions(
                 account.account_number, jwt,
                 datetime.utcnow() - timedelta(days=400), datetime.utcnow() + timedelta(days=1))
@@ -214,26 +327,10 @@ def _capture_current_bill_pdf(db, tenant_id: str, account: UtilityAccount,
                 [t for t in txns if isinstance(t, dict) and t.get("urlBinary")],
                 key=lambda t: t.get("date") or "", reverse=True)
             if docs:
-                def _dd(t):
-                    ds = str(t.get("date") or "")[:10]
-                    try:
-                        return datetime(int(ds[0:4]), int(ds[5:7]), int(ds[8:10])).date()
-                    except Exception:
-                        return None
-                # A statement is issued ON/AFTER its period closes, so any doc dated BEFORE
-                # this bill's period_end cannot be its statement — that's exactly how an
-                # older month's PDF got stamped onto a newer bill row (May's 05-27 doc onto
-                # the June row). Require date >= period_end (1-day tz slack); among those,
-                # take the one closest to the bill's own date. If none qualify, the real
-                # statement isn't published yet → capture NOTHING (don't attach a stale one).
-                floor = (bill.period_end.date() - timedelta(days=1)) if bill.period_end else None
-                cands = [t for t in docs if floor is None or (_dd(t) and _dd(t) >= floor)]
-                if not cands:
+                chosen = _match_txn_doc_for_bill(bill, docs)
+                if not chosen:
                     return {"saved": False, "reason": "no statement issued for this period yet",
                             "bill_id": bill.id}
-                tgt = bill.bill_date or bill.period_end
-                target = tgt.date() if tgt else datetime.utcnow().date()
-                chosen = min(cands, key=lambda t: abs((_dd(t) - target).days) if _dd(t) else 10 ** 6)
                 data, ctype = adapter.fetch_bill_pdf_binary(chosen["urlBinary"])
                 if not data or data[:4] != b"%PDF":
                     return {"saved": False, "reason": "not a PDF (auth redirect?)", "bill_id": bill.id}
