@@ -182,10 +182,10 @@ def _pull_via_json(db, tenant_id: str, account: UtilityAccount,
     }
 
 
-# How many missing statement PDFs to fetch per account per pull. Aggressive
-# but bounded so a 15-year account doesn't block the worker for hours — the
-# 6h scheduler + on-demand pulls keep filling until the archive is full.
-PDF_BACKFILL_MAX_PER_PULL = 48
+# How many missing statement PDFs to fetch per account per pull.
+# ~12y of monthly statements ≈ 150; 300 covers long histories in ONE pass so the
+# utility-bill archive fills completely instead of trickling over many 6h ticks.
+PDF_BACKFILL_MAX_PER_PULL = 300
 # How far back to ask the portal for statement documents (years).
 PDF_BACKFILL_LOOKBACK_DAYS = 365 * 12
 
@@ -219,69 +219,143 @@ def _match_txn_doc_for_bill(bill: Bill, docs: list) -> dict | None:
     return min(cands, key=lambda t: abs((_txn_doc_date(t) - target).days) if _txn_doc_date(t) else 10 ** 6)
 
 
+def _periods_with_pdf(db, account_id: int) -> set:
+    """period_end values that already have durable PDF bytes on ANY bill row."""
+    rows = db.execute(
+        select(Bill.period_end).where(
+            Bill.account_id == account_id,
+            Bill.pdf_bytes.isnot(None),
+            Bill.period_end.isnot(None),
+        ).distinct()
+    ).scalars().all()
+    return set(rows)
+
+
+def _pick_missing_period_bills(db, account_id: int, limit: int) -> list:
+    """One representative bill row per period_end that still has no PDF on file.
+
+    Capture sprawl created many duplicate (account, period_end) rows; downloading
+    the same statement N times wastes portal calls and still leaves siblings bare.
+    We attach to the freshest row (highest id) and propagate to siblings after."""
+    have = _periods_with_pdf(db, account_id)
+    # Newest periods first — archive + offtaker invoices care about recent first.
+    candidates = db.execute(
+        select(Bill).where(
+            Bill.account_id == account_id,
+            Bill.pdf_bytes.is_(None),
+            Bill.period_end.isnot(None),
+        ).order_by(Bill.period_end.desc(), Bill.id.desc())
+        .limit(max(limit * 8, 500))  # dupe-heavy accounts need a wide pool
+    ).scalars().all()
+    seen: set = set()
+    out: list = []
+    for b in candidates:
+        pe = b.period_end
+        if pe in have or pe in seen:
+            continue
+        seen.add(pe)
+        out.append(b)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _attach_pdf_to_period(db, account_id: int, period_end, data: bytes,
+                          content_type: str | None, primary: Bill | None = None) -> int:
+    """Write PDF bytes onto every bill row for this (account, period_end).
+
+    Returns how many rows were updated. Includes `primary` even if the session
+    hasn't flushed yet so we never miss the matched row."""
+    ctype = content_type or "application/pdf"
+    rows = list(db.execute(
+        select(Bill).where(
+            Bill.account_id == account_id,
+            Bill.period_end == period_end,
+            Bill.pdf_bytes.is_(None),
+        )
+    ).scalars().all())
+    if primary is not None and not primary.pdf_bytes and primary not in rows:
+        rows.insert(0, primary)
+    n = 0
+    for s in rows:
+        if s.pdf_bytes:
+            continue
+        s.pdf_bytes = data
+        s.pdf_content_type = ctype
+        n += 1
+    return n
+
+
 def _backfill_missing_bill_pdfs(db, tenant_id: str, account: UtilityAccount,
                                 adapter, jwt: str | None = None) -> dict:
-    """Aggressively attach statement PDFs to bill rows that lack pdf_bytes.
+    """Aggressively attach statement PDFs for every period the portal still serves.
 
-    Uses the portal /transactions document list (full lookback) and downloads
-    up to PDF_BACKFILL_MAX_PER_PULL PDFs per pull. Idempotent: skips rows that
-    already have durable bytes. Best-effort — never raises into the pull."""
+    Uses /transactions over PDF_BACKFILL_LOOKBACK_DAYS, downloads up to
+    PDF_BACKFILL_MAX_PER_PULL distinct periods per pull (one PDF per period),
+    and stamps ALL duplicate bill rows for that period. Idempotent. Best-effort
+    — never raises into the pull."""
     if not jwt:
         return {"saved": 0, "reason": "no jwt"}
     if not (hasattr(adapter, "fetch_transactions") and hasattr(adapter, "fetch_bill_pdf_binary")):
         return {"saved": 0, "reason": "adapter cannot fetch statement PDFs"}
     from datetime import timedelta
-    # Newest-first so the utility-bill archive + offtaker invoices fill first.
-    missing = db.execute(
-        select(Bill).where(
-            Bill.account_id == account.id,
-            Bill.pdf_bytes.is_(None),
-        ).order_by(Bill.period_end.desc().nullslast(), Bill.bill_date.desc().nullslast())
-        .limit(PDF_BACKFILL_MAX_PER_PULL * 2)  # match pool larger than fetch cap
-    ).scalars().all()
+    missing = _pick_missing_period_bills(db, account.id, PDF_BACKFILL_MAX_PER_PULL)
     if not missing:
-        return {"saved": 0, "reason": "all bills already have PDFs", "missing": 0}
+        return {"saved": 0, "reason": "all periods already have PDFs", "missing_periods": 0}
     try:
         txns = adapter.fetch_transactions(
             account.account_number, jwt,
             datetime.utcnow() - timedelta(days=PDF_BACKFILL_LOOKBACK_DAYS),
             datetime.utcnow() + timedelta(days=1),
-            timeout=60,
+            timeout=90,
         )
     except Exception as e:  # noqa: BLE001
         return {"saved": 0, "reason": f"transactions fetch failed: {type(e).__name__}: {e}",
-                "missing": len(missing)}
+                "missing_periods": len(missing)}
     docs = [t for t in (txns or []) if isinstance(t, dict) and t.get("urlBinary")]
     if not docs:
         return {"saved": 0, "reason": "no statement documents in portal window",
-                "missing": len(missing), "txns": len(txns or [])}
-    saved = 0
+                "missing_periods": len(missing), "txns": len(txns or [])}
+    # Cache downloads by urlBinary so two periods never re-fetch the same document.
+    pdf_cache: dict[str, tuple[bytes, str]] = {}
+    saved = 0           # distinct periods filled
+    rows_stamped = 0    # includes sibling dupes
     tried = 0
     errors = 0
+    unmatched = 0
     for bill in missing:
         if saved >= PDF_BACKFILL_MAX_PER_PULL:
             break
         chosen = _match_txn_doc_for_bill(bill, docs)
         if not chosen:
+            unmatched += 1
             continue
+        url = chosen["urlBinary"]
         tried += 1
         try:
-            data, ctype = adapter.fetch_bill_pdf_binary(chosen["urlBinary"])
-            if not data or data[:4] != b"%PDF":
-                errors += 1
-                continue
-            bill.pdf_bytes = data
-            bill.pdf_content_type = ctype or "application/pdf"
-            saved += 1
+            if url not in pdf_cache:
+                data, ctype = adapter.fetch_bill_pdf_binary(url)
+                if not data or data[:4] != b"%PDF":
+                    errors += 1
+                    continue
+                pdf_cache[url] = (data, ctype or "application/pdf")
+            data, ctype = pdf_cache[url]
+            n = _attach_pdf_to_period(db, account.id, bill.period_end, data, ctype, primary=bill)
+            if n:
+                saved += 1
+                rows_stamped += n
         except Exception:  # noqa: BLE001 — one bad doc never aborts the rest
             errors += 1
             continue
     return {
         "saved": saved,
+        "rows_stamped": rows_stamped,
         "tried": tried,
         "errors": errors,
-        "missing_before": len(missing),
+        "unmatched": unmatched,
+        "missing_periods_before": len(missing),
         "docs_available": len(docs),
+        "unique_pdfs_fetched": len(pdf_cache),
         "via": "transactions-backfill",
         "lookback_days": PDF_BACKFILL_LOOKBACK_DAYS,
         "cap": PDF_BACKFILL_MAX_PER_PULL,

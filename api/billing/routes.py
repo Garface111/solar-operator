@@ -2523,7 +2523,10 @@ def utility_bill_archive_manifest(authorization: Optional[str] = Header(default=
 
     Collapsible "Utility bill archive" next to the invoice archive on Offtakers.
     Each row is a real Bill.pdf_bytes; download via /files/gmp-bill/{id} (name
-    is historical — works for GMP, VEC, and any provider we store)."""
+    is historical — works for GMP, VEC, and any provider we store).
+
+    One entry per (account, period_end) so capture-sprawl dupes don't flood the
+    UI. Cap is high enough for multi-year × multi-array fleets (was 500 — too low)."""
     t = tenant_from_session(authorization)
     from ..models import Bill, UtilityAccount, Array
     bills_out: list[dict] = []
@@ -2538,9 +2541,15 @@ def utility_bill_archive_manifest(authorization: Optional[str] = Header(default=
                 Bill.bill_date.desc().nullslast(),
                 Bill.id.desc(),
             )
-            .limit(500)
+            .limit(20000)
         ).all()
+        # Dedupe: freshest bill row wins per (account_id, period_end|bill_date).
+        seen_keys: set = set()
         for b, ua, arr in rows:
+            key = (b.account_id, b.period_end or b.bill_date or b.id)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
             pe = b.period_end
             ps = b.period_start
             bd = b.bill_date
