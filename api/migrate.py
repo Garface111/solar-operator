@@ -1592,6 +1592,24 @@ def main():
         else:
             print("  · table exchange_demand will create_all on next boot")
 
+        # 2026-07-21 Performance verification — monthly report pack + deviation
+        # threshold (Sunreport parity). Default enabled for AO fleets; threshold
+        # null → engine DEFAULT_DEVIATION_THRESHOLD (0.05).
+        if not column_exists(conn, "tenants", "verification_reports_enabled"):
+            conn.execute(text(
+                "ALTER TABLE tenants ADD COLUMN verification_reports_enabled "
+                "BOOLEAN DEFAULT true NOT NULL"
+            ))
+            added.append("verification_reports_enabled")
+            print("  + tenants.verification_reports_enabled")
+        if not column_exists(conn, "tenants", "verification_deviation_threshold"):
+            conn.execute(text(
+                "ALTER TABLE tenants ADD COLUMN verification_deviation_threshold "
+                "DOUBLE PRECISION"
+            ))
+            added.append("verification_deviation_threshold")
+            print("  + tenants.verification_deviation_threshold")
+
     print("=== Migration complete ===")
 
 

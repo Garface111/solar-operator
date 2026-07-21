@@ -236,6 +236,16 @@ class Tenant(Base):
         Boolean, default=True, server_default="true", nullable=False
     )
 
+    # ── Performance verification (Array Operator, Jul 2026) ────────────────
+    # Monthly PI/PR report pack + deviation classifier. Opt-out and threshold
+    # for persistence labels (sudden / persistent). See api/perf_verification/.
+    verification_reports_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="true", nullable=False
+    )
+    verification_deviation_threshold: Mapped[float | None] = mapped_column(
+        Float, nullable=True
+    )
+
     # ── Billing rate (Array Operator, Jun 2026) ──────────────────────────
     # The operator's GLOBAL default $/kWh used to price a customer's produced
     # generation when that customer has no per-customer override
