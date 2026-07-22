@@ -52,6 +52,32 @@ _ALLOC_TOL_KWH = 2.0
 # the size of the mis-allocation, often cents). Surfaced per row and summed.
 GMP_BILLING_ERROR_CREDIT_USD = 25.0
 
+# Bill audit (allocation cross-check + sandbox + invoice-time flag) is a GMP
+# group-net-metering product. Offtakers bound to VEC / WEC / SmartHub / etc.
+# never enter the flagged set — their utility bills are not GMP sub-allocations.
+_GMP_PROVIDER = "gmp"
+
+
+def offtaker_utility_provider(db: Session, sub: BillingReportSubscription) -> Optional[str]:
+    """Provider code of the offtaker's bound UtilityAccount, or None if unbound."""
+    oa_id = getattr(sub, "utility_account_id", None)
+    if oa_id is None:
+        return None
+    return db.execute(
+        select(UtilityAccount.provider).where(UtilityAccount.id == int(oa_id))
+    ).scalars().first()
+
+
+def is_gmp_offtaker(db: Session, sub: BillingReportSubscription) -> bool:
+    """True only when this offtaker is bound to a GMP utility account.
+
+    The bill-audit feature ($25 allocation catch, sandbox, draft crosscheck,
+    auto-send hold) fires exclusively for these. Non-GMP offtakers (VEC, WEC,
+    SmartHub coops, unbound) are excluded — never flagged as a GMP bill error.
+    """
+    prov = (offtaker_utility_provider(db, sub) or "").strip().lower()
+    return prov == _GMP_PROVIDER
+
 
 def _bill_for_array_period(
     db: Session, array_id: int, start: Optional[date], end: Optional[date]
@@ -313,6 +339,10 @@ def reconcile_subscription(db: Session, sub: BillingReportSubscription) -> dict:
     Returns {customer_name, sub_id, arrays:[{array_id, array_name, our_kwh,
     gmp_kwh, status, delta_kwh, delta_pct, period}], overall_status}.
     Per-array so a multi-array offtaker shows one row per array.
+
+    The allocation cross-check ($25 bill audit) only runs when the offtaker is
+    bound to a GMP utility account — non-GMP offtakers get allocation.status=
+    not_gmp and never enter the flagged set.
     """
     # Lazy import to avoid a cycle (delivery imports models/this package).
     from .delivery import build_match, _normalized_allocations
@@ -441,13 +471,24 @@ def reconcile_subscription(db: Session, sub: BillingReportSubscription) -> dict:
         overall = "no_invoice_data"
 
     # Anna/Bruce's allocation cross-check (share × array-total vs GMP's own credit).
-    inv_label = (match.computed_invoice or {}).get("month") if match is not None else None
-    try:
-        allocation = _allocation_check(
-            db, sub, aids, share_by_array, array_bill_by_aid, inv_label)
-    except Exception:  # never let the cross-check break the reconciliation report
-        allocation = {"status": "error",
-                      "note": "Allocation cross-check could not run for this offtaker."}
+    # GMP-ONLY: offtakers on VEC/WEC/coop accounts never enter the $25 audit set.
+    if not is_gmp_offtaker(db, sub):
+        prov = offtaker_utility_provider(db, sub)
+        allocation = {
+            "status": "not_gmp",
+            "note": (
+                "Bill audit runs only for offtakers bound to a GMP utility "
+                f"account — this offtaker's account is {(prov or 'unbound')}."
+            ),
+        }
+    else:
+        inv_label = (match.computed_invoice or {}).get("month") if match is not None else None
+        try:
+            allocation = _allocation_check(
+                db, sub, aids, share_by_array, array_bill_by_aid, inv_label)
+        except Exception:  # never let the cross-check break the reconciliation report
+            allocation = {"status": "error",
+                          "note": "Allocation cross-check could not run for this offtaker."}
 
     return {
         "sub_id": sub.id,
@@ -460,6 +501,7 @@ def reconcile_subscription(db: Session, sub: BillingReportSubscription) -> dict:
         # Per-offtaker GMP-allocation audit — flags when the excess GMP credited
         # this offtaker doesn't match their share of the array's group excess.
         "allocation": allocation,
+        "provider": offtaker_utility_provider(db, sub),
     }
 
 
@@ -506,12 +548,17 @@ def generation_crosscheck(db: Session, sub: BillingReportSubscription) -> Option
     schedule comparison here — the bill's own scraped credit rate is the billing
     truth (the GMP schedule stays a passive reference on the setup form).
 
+    GMP-ONLY: offtakers bound to a non-GMP utility (or unbound) return None —
+    the draft still generates, no fabricated "GMP error" flag.
+
     Reuses reconcile_subscription — the SAME engine behind /reconcile-bills and
     the audit sandbox — so the numbers can never drift between surfaces. Fail-
     soft BY DESIGN: any state where the check can't run honestly (no settled
     bill, no entered share, single-meter setup, no offtaker account/bill)
     returns None; generation is never blocked and no verdict is fabricated.
     """
+    if not is_gmp_offtaker(db, sub):
+        return None
     try:
         rep = reconcile_subscription(db, sub)
     except Exception:  # noqa: BLE001 — the cross-check must never break generation
@@ -553,7 +600,11 @@ def generation_crosscheck(db: Session, sub: BillingReportSubscription) -> Option
 
 
 def reconcile_tenant(db: Session, tenant_id: str) -> dict:
-    """Reconcile every active subscription for a tenant. Summary + per-sub rows."""
+    """Reconcile every active subscription for a tenant. Summary + per-sub rows.
+
+    Allocation flags (bill audit) only count GMP-bound offtakers; non-GMP
+    offtakers get allocation.status=not_gmp and never inflate allocation_flagged.
+    """
     subs = db.execute(
         select(BillingReportSubscription).where(
             BillingReportSubscription.tenant_id == tenant_id,
@@ -565,16 +616,20 @@ def reconcile_tenant(db: Session, tenant_id: str) -> dict:
     counts: dict[str, int] = {}
     alloc_counts: dict[str, int] = {}
     alloc_dollars = 0.0
+    gmp_offtakers = 0
     for r in results:
         counts[r["overall_status"]] = counts.get(r["overall_status"], 0) + 1
         a = r.get("allocation") or {}
         ast = a.get("status", "n/a")
         alloc_counts[ast] = alloc_counts.get(ast, 0) + 1
+        if ast != "not_gmp":
+            gmp_offtakers += 1
         if ast == "mismatch" and a.get("delta_dollars"):
             alloc_dollars += float(a["delta_dollars"])
     return {
         "ok": True,
         "subscription_count": len(results),
+        "gmp_offtaker_count": gmp_offtakers,
         "status_counts": counts,
         # How many offtakers GMP's allocation cross-check flagged, + $ in play.
         "allocation_counts": alloc_counts,
@@ -603,6 +658,9 @@ def audit_by_array(db: Session, tenant_id: str) -> dict:
     SHOULD be by the math, the delta, and a flag when GMP got it wrong), grouped
     into per-utility sub-tabs. Reuses the exact per-offtaker allocation math from
     reconcile_subscription so the sandbox and the invoice cross-check never drift.
+
+    GMP offtakers only: offtakers whose bound utility_account.provider ≠ gmp
+    (VEC, WEC, SmartHub coops, unbound) are omitted from the sandbox entirely.
 
     Returns {utilities:[{provider, arrays:[{array_id, array_name, group_excess_kwh,
     credit_rate, period, flagged, offtakers:[{sub_id, customer_name, share_pct,
@@ -637,6 +695,9 @@ def audit_by_array(db: Session, tenant_id: str) -> dict:
         return host_bill_cache[aid]
 
     for sub in subs:
+        # Bill audit is GMP group-net-metering only — skip VEC/WEC/coop offtakers.
+        if not is_gmp_offtaker(db, sub):
+            continue
         aid = getattr(sub, "array_id", None)
         allocs = _normalized_allocations(sub)
         if aid is None and allocs:

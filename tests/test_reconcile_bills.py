@@ -242,3 +242,92 @@ def test_audit_by_array_groups_master_and_offtakers(monkeypatch):
     assert by_name["Brooks House"]["gmp_credited_kwh"] == 7343.0
     assert abs(by_name["Brooks House"]["should_be_kwh"] - 7345.5) < 0.3
     assert by_name["Norwich Inn"]["status"] == "match"
+
+
+def test_bill_audit_skips_non_gmp_offtakers(monkeypatch):
+    """Bill audit (sandbox + allocation flag + draft crosscheck) fires only for
+    offtakers bound to a GMP utility account — VEC/WEC/coop offtakers are out."""
+    from api.billing.reconcile_bills import generation_crosscheck, is_gmp_offtaker
+
+    tid = "ten_nongmp_" + secrets.token_hex(3)
+    with SessionLocal() as db:
+        db.add(Tenant(id=tid, tenant_key=secrets.token_hex(8), name="NonGmp",
+                      contact_email=f"{tid}@e.com", active=True, product="array_operator"))
+        db.flush()
+        arr = Array(tenant_id=tid, name="Chester", region="VT"); db.add(arr); db.flush()
+        host = UtilityAccount(tenant_id=tid, provider="gmp", account_number="HOST",
+                              array_id=arr.id)
+        db.add(host); db.flush()
+        db.add(Bill(tenant_id=tid, account_id=host.id, period_start=datetime(2026, 6, 1),
+                    period_end=datetime(2026, 6, 30), kwh_generated=10000,
+                    kwh_sent_to_grid=9000.0, is_net_metered=True))
+
+        # GMP offtaker — should appear in audit and be cross-checkable.
+        gmp_ua = UtilityAccount(tenant_id=tid, provider="gmp", account_number="GMPOFF")
+        db.add(gmp_ua); db.flush()
+        db.add(Bill(tenant_id=tid, account_id=gmp_ua.id, period_start=datetime(2026, 6, 1),
+                    period_end=datetime(2026, 6, 30), kwh_sent_to_grid=4500.0,
+                    is_net_metered=True))
+        c1 = Client(tenant_id=tid, name="Gmp Off", active=True); db.add(c1); db.flush()
+        gmp_sub = BillingReportSubscription(
+            tenant_id=tid, client_id=c1.id, customer_name="Gmp Off", array_id=arr.id,
+            allocation_pct=1.0, array_share_pct=0.50, utility_account_id=gmp_ua.id,
+            billing_model="percent_of_array", cadence="monthly")
+        db.add(gmp_sub)
+
+        # VEC offtaker with a "wrong" share that WOULD flag if audit ran.
+        vec_ua = UtilityAccount(tenant_id=tid, provider="vec", account_number="VECOFF")
+        db.add(vec_ua); db.flush()
+        db.add(Bill(tenant_id=tid, account_id=vec_ua.id, period_start=datetime(2026, 6, 1),
+                    period_end=datetime(2026, 6, 30), kwh_sent_to_grid=100.0,
+                    is_net_metered=True))
+        c2 = Client(tenant_id=tid, name="Vec Off", active=True); db.add(c2); db.flush()
+        vec_sub = BillingReportSubscription(
+            tenant_id=tid, client_id=c2.id, customer_name="Vec Off", array_id=arr.id,
+            allocation_pct=1.0, array_share_pct=0.50, utility_account_id=vec_ua.id,
+            billing_model="percent_of_array", cadence="monthly")
+        db.add(vec_sub)
+        db.commit()
+        gmp_sid, vec_sid = gmp_sub.id, vec_sub.id
+
+    # Stub excess resolver so both offtakers have "credited" numbers.
+    with SessionLocal() as db:
+        from api.models import UtilityAccount as _UA
+        credit = {}
+        for acc in db.execute(select(_UA).where(_UA.tenant_id == tid,
+                                                _UA.array_id.is_(None))).scalars():
+            credit[acc.id] = (100.0 if (acc.provider or "") == "vec" else 4500.0,
+                              16.0, 0.16, None, None, "2026-06", "bill_cash")
+        import api.rate_schedule as _rs
+        monkeypatch.setattr(_rs, "resolve_offtaker_excess_credit",
+                            lambda db, acct_id, label=None: credit.get(acct_id))
+
+        gmp = db.get(BillingReportSubscription, gmp_sid)
+        vec = db.get(BillingReportSubscription, vec_sid)
+        assert is_gmp_offtaker(db, gmp) is True
+        assert is_gmp_offtaker(db, vec) is False
+
+        audit = reconcile_bills.audit_by_array(db, tid)
+        names = []
+        for util in audit["utilities"]:
+            for a in util["arrays"]:
+                names.extend(o["customer_name"] for o in a["offtakers"])
+        assert "Gmp Off" in names
+        assert "Vec Off" not in names
+        assert audit["totals"]["offtakers"] == 1
+
+        rep = reconcile_bills.reconcile_tenant(db, tid)
+        by_name = {r["customer_name"]: r for r in rep["subscriptions"]}
+        assert by_name["Gmp Off"]["allocation"]["status"] in ("match", "mismatch")
+        assert by_name["Vec Off"]["allocation"]["status"] == "not_gmp"
+        # VEC never contributes a mismatch flag (even with a rigged 100 kWh credit).
+        assert by_name["Vec Off"]["allocation"].get("status") != "mismatch"
+        assert "not_gmp" in (rep.get("allocation_counts") or {})
+
+        # Draft-time crosscheck is null for non-GMP offtakers.
+        assert generation_crosscheck(db, vec) is None
+        # GMP offtaker may match cleanly (4500 = 50% of 9000) → non-null unflagged,
+        # or return a dict; either way it is allowed to run.
+        xc_gmp = generation_crosscheck(db, gmp)
+        if xc_gmp is not None:
+            assert "flagged" in xc_gmp

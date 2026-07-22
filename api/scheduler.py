@@ -486,7 +486,10 @@ def _auto_send_should_hold(db, sub) -> bool:
     check at all, so this only ever ADDS a hold for the known-flagged. Manual/approval
     sends never reach here, so a human "Approve & send" can always override."""
     try:
-        from .billing.reconcile_bills import reconcile_subscription
+        from .billing.reconcile_bills import reconcile_subscription, is_gmp_offtaker
+        # Bill audit / auto-send hold is GMP group-net-metering only.
+        if not is_gmp_offtaker(db, sub):
+            return False
         rec = reconcile_subscription(db, sub)
     except Exception:  # noqa: BLE001 — never let the safety check break the run
         return False
