@@ -54,6 +54,7 @@ def test_fronius_model_kw():
     # the leading DC Wp (Lester Middlebury → $17k/mo bug, Ford 2026-07-22).
     assert npm("fronius", "21330 WDC Primo 01 15.0") == 15.0
     assert npm("fronius", "17775 WDC Primo 04 12.5 ") == 12.5
+    assert npm("fronius", "17775 WDC Primo 02 12.5-1 ") == 12.5
     assert npm("fronius", "10665 WDC Primo 10 7.6") == 7.6
     # Unknown / no rating → blank (not a guess).
     assert npm("fronius", "Primo 208-240") is None

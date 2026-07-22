@@ -217,9 +217,9 @@
       const kw = parseFloat(m[1]);
       if (kw > 0 && kw <= 1000) return Math.round(kw * 10) / 10;
     }
-    // "… WDC Primo 01 15.0" / "Primo 15.0" — AC kW after optional unit index
+    // "… WDC Primo 01 15.0" / "Primo 02 12.5-1" — AC kW after optional unit index
     m = displayName.match(
-      /\b(?:Primo|Symo|Galvo|Eco|Tauro|Verto)(?:\s+GEN24)?(?:\s+\d+)?\s+(\d+(?:\.\d+)?)\s*$/i);
+      /\b(?:Primo|Symo|Galvo|Eco|Tauro|Verto)(?:\s+GEN24)?(?:\s+\d+)?\s+(\d+(?:\.\d+)?)(?:-\d+)?\s*$/i);
     if (m) {
       const kw = parseFloat(m[1]);
       if (kw > 0 && kw <= 1000) return Math.round(kw * 10) / 10;

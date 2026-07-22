@@ -71,7 +71,7 @@ _FRONIUS_MODEL_KW = re.compile(
 # prefix + unit index + AC kW at the end. Must NOT take the leading WDC number.
 _FRONIUS_WDC_TRAIL_KW = re.compile(
     r"\b(?:Primo|Symo|Galvo|Eco|Tauro|Verto)(?:\s+GEN24)?(?:\s+\d+)?\s+"
-    r"(\d{1,3}(?:\.\d+)?)\s*$",
+    r"(\d{1,3}(?:\.\d+)?)(?:-\d+)?\s*$",
     re.IGNORECASE)
 # Single-inverter AC nameplates above this are almost never real on AO fleets
 # (would be utility-scale). Stored values above it are usually WDC watts.

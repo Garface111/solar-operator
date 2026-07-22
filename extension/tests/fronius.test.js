@@ -22,6 +22,7 @@ test("nameplateFromModel parses AC kW, never leading WDC watts", () => {
   // Lester Middlebury: '21330 WDC Primo 01 15.0' must NOT return 21330.
   assert.equal(F.nameplateFromModel("21330 WDC Primo 01 15.0"), 15.0);
   assert.equal(F.nameplateFromModel("17775 WDC Primo 04 12.5 "), 12.5);
+  assert.equal(F.nameplateFromModel("17775 WDC Primo 02 12.5-1 "), 12.5);
   assert.equal(F.nameplateFromModel("10665 WDC Primo 10 7.6"), 7.6);
   assert.equal(F.nameplateFromModel("Gen24"), null);
   assert.equal(F.nameplateFromModel("Inverter"), null);

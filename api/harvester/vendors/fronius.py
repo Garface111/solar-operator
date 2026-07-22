@@ -243,10 +243,10 @@ def _nameplate(model: str) -> float | None:
     )
     if m:
         return float(m.group(1))
-    # '… WDC Primo 01 15.0' — optional unit index, AC kW at end
+    # '… WDC Primo 01 15.0' / '… Primo 02 12.5-1' — optional unit index, AC kW
     m = re.search(
         r"\b(?:Primo|Symo|Galvo|Eco|Tauro|Verto|IG)(?:\s+GEN24)?(?:\s+\d+)?\s+"
-        r"(\d+(?:\.\d+)?)\s*$",
+        r"(\d+(?:\.\d+)?)(?:-\d+)?\s*$",
         model.strip(),
         re.I,
     )
