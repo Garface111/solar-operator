@@ -2396,6 +2396,22 @@ def _run_energy_agent_sovereign_jobs() -> None:
         from .db import SessionLocal
         from .energy_agent_sovereign_worker import code_live_enabled, drain_jobs
         from .energy_agent_sovereign_watchdog import mark_jobs_inflight, note_primary
+
+        # Rocket thrust BEFORE pool/single-flight guards — only queues a DB job
+        # (no Claude Code). Pool-hot was starving the engine entirely.
+        try:
+            with SessionLocal() as db:
+                from .energy_agent_sovereign_rocket import maybe_thrust
+
+                thrust = maybe_thrust(db)
+                if thrust.get("thrust"):
+                    logger.info("sovereign_rocket_thrust: %s", thrust)
+                    db.commit()
+                else:
+                    db.rollback()
+        except Exception as te:  # noqa: BLE001
+            logger.warning("sovereign_rocket_thrust failed: %s", te)
+
         if not code_live_enabled():
             return
         if _sov_guard_skip("jobs"):
@@ -2406,20 +2422,6 @@ def _run_energy_agent_sovereign_jobs() -> None:
         mark_jobs_inflight(True)
         try:
             with SessionLocal() as db:
-                # Rocket: if sandbox force + empty queue, inject one chamber ship
-                try:
-                    from .energy_agent_sovereign_rocket import maybe_thrust
-
-                    thrust = maybe_thrust(db)
-                    if thrust.get("thrust"):
-                        logger.info("sovereign_rocket_thrust: %s", thrust)
-                        db.commit()
-                except Exception as te:  # noqa: BLE001
-                    logger.warning("sovereign_rocket_thrust failed: %s", te)
-                    try:
-                        db.rollback()
-                    except Exception:
-                        pass
                 # Energy Agent Prime: one project at a time (default drain 1).
                 # Cap 2 even if env is higher — never batch thrash the site.
                 try:
