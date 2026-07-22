@@ -120,6 +120,9 @@ def _nameplate_from_model(vendor, model):
                     kw = float(mt.group(1))
                 except (TypeError, ValueError):
                     kw = None
+                # 'Primo 208-240' is a voltage range, not a 208 kW inverter.
+                if kw in (208.0, 240.0, 277.0, 400.0, 480.0, 600.0, 800.0):
+                    kw = None
     if kw is None:
         return None
     return kw if 0 < kw <= 1000 else None
