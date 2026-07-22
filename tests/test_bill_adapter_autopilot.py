@@ -43,10 +43,11 @@ def test_classify_vec_is_smarthub_automatic():
     assert "smarthub" in (p.login_host or "") or p.login_host is None or True
 
 
-def test_classify_unknown_needs_har():
+def test_classify_unknown_is_discoverable():
     p = classify_login("acme_municipal", "bills.acme.example")
     assert p.family == "unknown"
     assert p.automatic is False
+    # classify() still reports needs_har; on_credential_saved upgrades to explore.
     assert p.action == "needs_har"
 
 
@@ -66,7 +67,9 @@ def test_on_save_arms_gmp_and_vec_not_unknown():
         tenant_id="ten_t", provider="acme", username="a@b.com",
         login_host="portal.acme.example", enabled=True)
     assert u["armed"] is False
-    assert u["plan"]["action"] == "needs_har"
+    # Fully automatic: unknown portals queue bounded browser discovery.
+    assert u["plan"]["action"] == "explore"
+    assert u.get("discovery") is not None
 
 
 def test_gmp_extractor_works():
