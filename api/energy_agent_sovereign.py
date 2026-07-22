@@ -2557,7 +2557,14 @@ def execute_brain_actions(db, actions: list[dict], *, tick_id: str) -> list[dict
         elif atype == "code_hire":
             # Sandbox free-run: pass sandbox flags into brief_json via act_code_hire kind
             kind = raw.get("kind") or "draft_pr_brief"
-            if raw.get("sandbox") or raw.get("mind_sandbox"):
+            force_sandbox = False
+            try:
+                from .energy_agent_sovereign_mind_sandbox import mind_sandbox_force, get_active_run
+
+                force_sandbox = bool(mind_sandbox_force())
+            except Exception:
+                force_sandbox = False
+            if raw.get("sandbox") or raw.get("mind_sandbox") or force_sandbox:
                 kind = "sandbox_job"
             res = act_code_hire(
                 db,
@@ -2566,7 +2573,9 @@ def execute_brain_actions(db, actions: list[dict], *, tick_id: str) -> list[dict
                 kind=kind,
             )
             # Tag brief with sandbox metadata for worker
-            if res.get("ok") and (raw.get("sandbox") or raw.get("mind_sandbox") or kind == "sandbox_job"):
+            if res.get("ok") and (
+                raw.get("sandbox") or raw.get("mind_sandbox") or kind == "sandbox_job" or force_sandbox
+            ):
                 try:
                     job = db.get(EaSovereignJob, res.get("job_id"))
                     if job:
@@ -2575,14 +2584,19 @@ def execute_brain_actions(db, actions: list[dict], *, tick_id: str) -> list[dict
                         except Exception:
                             b = {}
                         b["sandbox"] = True
+                        b["mind_sandbox"] = True
+                        if force_sandbox:
+                            b["sandbox_forced"] = True
+                        try:
+                            active = get_active_run(db)
+                            if active and not raw.get("sandbox_run_id"):
+                                b["sandbox_run_id"] = active.get("id")
+                        except Exception:
+                            pass
                         if raw.get("sandbox_run_id"):
                             b["sandbox_run_id"] = raw["sandbox_run_id"]
-                        else:
-                            from .energy_agent_sovereign_mind_sandbox import get_active_run
-                            ar = get_active_run(db)
-                            if ar:
-                                b["sandbox_run_id"] = ar.get("id")
                         job.brief_json = json.dumps(b, default=str)[:50_000]
+                        job.kind = "sandbox_job"
                         db.flush()
                 except Exception as e:  # noqa: BLE001
                     log.warning("sandbox brief tag failed: %s", e)

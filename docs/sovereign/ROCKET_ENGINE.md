@@ -143,3 +143,31 @@ Chamber = the burn.
 ## Success criterion (one sentence)
 
 **A psychotic, curious mind, locked in a perfect fake Array Operator, produces a site Ford prefers to production—without ever holding the keys to production.**
+
+## Operator HUD (what Ford watches — not the desk)
+
+| Surface | URL / place | Why |
+|---------|-------------|-----|
+| **Chamber** | https://chamber--array-operator-ea.netlify.app | The product the engine is burning |
+| **Prod** | https://arrayoperator.com | Baseline for comparison |
+| **Score** | Portal → Score tab (`127.0.0.1:7701`) | L4 health + taste vote |
+| **Jobs** | `GET /admin/sovereign/jobs` | Queue must not stay empty under thrust |
+| **Reality** | `docs/sovereign/reality/CHANGELOG.jsonl` | Cold ships only |
+
+Ignore desk monologue. If chamber doesn't move and Score stays `idle`, the engine is not running.
+
+### Engine-on env (worker)
+
+```
+SOVEREIGN_ENABLED=1
+SOVEREIGN_PAUSE=0
+SOVEREIGN_ACT_ENABLED=1          # without this, code_hire is denied → monologue only
+SOVEREIGN_CODE_LIVE=1
+SOVEREIGN_CODE_PUSH=0
+SOVEREIGN_CODE_DEPLOY=0
+SOVEREIGN_MIND_SANDBOX_FORCE=1   # all code → sandbox
+SOVEREIGN_CHAMBER_DEPLOY=1
+SOVEREIGN_ROCKET_THRUST=1        # idle queue auto-injects chamber ship (~15m cooldown)
+```
+
+Thrust: `api/energy_agent_sovereign_rocket.py` — called from jobs scheduler before drain.
