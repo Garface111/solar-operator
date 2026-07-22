@@ -705,7 +705,14 @@ def run_grok_code_assist(
     return run_api_code_assist(cwd=cwd, title=title, brief=brief, provider="grok")
 
 
-def commit_and_push(cwd: Path, *, title: str, job_id: str) -> dict[str, Any]:
+def commit_and_push(
+    cwd: Path,
+    *,
+    title: str,
+    job_id: str,
+    sandbox: bool = False,
+    sandbox_run_id: str | None = None,
+) -> dict[str, Any]:
     bad = _denied_paths_changed(cwd)
     if bad:
         if _has_git_bin():
@@ -716,10 +723,26 @@ def commit_and_push(cwd: Path, *, title: str, job_id: str) -> dict[str, Any]:
     if not _status_porcelain(cwd).strip():
         return {"ok": False, "error": "no file changes to commit"}
 
-    msg = f"sovereign: {title[:180]}\n\nJob: {job_id}\nAuthorized live ship by Ford 2026-07-15."
-    branch = f"sov/{job_id[:12]}"
+    if sandbox:
+        msg = (
+            f"sovereign-sandbox: {title[:160]}\n\n"
+            f"Job: {job_id}\nSandbox run: {sandbox_run_id or '—'}\n"
+            "Mind sandbox free-run — DO NOT merge to main / DO NOT deploy prod."
+        )
+        branch = f"sov/sandbox/{(sandbox_run_id or 'run')[:16]}/{job_id[:10]}"
+    else:
+        msg = f"sovereign: {title[:180]}\n\nJob: {job_id}\nAuthorized live ship by Ford 2026-07-15."
+        branch = f"sov/{job_id[:12]}"
 
     if not _has_git_bin():
+        if sandbox:
+            # dulwich path: local commit only for sandbox
+            out = _commit_and_push_dulwich(cwd, branch=branch, msg=msg, job_id=job_id)
+            out["sandbox"] = True
+            out["push_main"] = {"ok": False, "skipped": "sandbox"}
+            out["ok"] = bool(out.get("committed") or out.get("ok"))
+            out["note"] = "sandbox: local commit only (no main)"
+            return out
         return _commit_and_push_dulwich(cwd, branch=branch, msg=msg, job_id=job_id)
 
     branch_r = _git(cwd, "rev-parse", "--abbrev-ref", "HEAD")
@@ -736,7 +759,40 @@ def commit_and_push(cwd: Path, *, title: str, job_id: str) -> dict[str, Any]:
             "stderr": (c.stderr or "")[:500],
         }
 
-    out: dict[str, Any] = {"ok": True, "branch": branch, "committed": True}
+    sha_r = _git(cwd, "rev-parse", "HEAD")
+    sha = (sha_r.stdout or "").strip()
+    files = []
+    try:
+        show = _git(cwd, "show", "--pretty=", "--name-only", "HEAD")
+        files = [ln.strip() for ln in (show.stdout or "").splitlines() if ln.strip()]
+    except Exception:
+        files = []
+
+    out: dict[str, Any] = {
+        "ok": True,
+        "branch": branch,
+        "committed": True,
+        "sha": sha,
+        "files": files,
+        "sandbox": bool(sandbox),
+    }
+    if sandbox:
+        # Free-run: never merge main, never deploy. Optional remote sandbox branch only.
+        out["push_main"] = {"ok": False, "skipped": "sandbox_no_main"}
+        out["deploy"] = {"ok": False, "skipped": "sandbox"}
+        if code_push_enabled() and (os.getenv("SOVEREIGN_MIND_SANDBOX_PUSH_BRANCH", "0") or "0").strip() in (
+            "1", "true", "yes", "on",
+        ):
+            push_b = _git(cwd, "push", "-u", "origin", branch, timeout=120)
+            out["push_branch"] = {
+                "ok": push_b.returncode == 0,
+                "stderr": (push_b.stderr or "")[:400],
+            }
+        else:
+            out["push_branch"] = {"ok": False, "skipped": "local_sandbox_only"}
+            out["note"] = "sandbox: committed locally only — score vs Ford at week end"
+        return out
+
     if not code_push_enabled():
         out["pushed"] = False
         out["note"] = "SOVEREIGN_CODE_PUSH off — committed locally only"
@@ -917,25 +973,58 @@ def process_job(db, job) -> dict[str, Any]:
         job.finished_at = _now()
         return {"ok": False, "error": str(e)[:300]}
 
-    # Start from latest main (git binary or dulwich)
+    # Mind sandbox free-run: isolate from prod main/deploy
+    sandbox_mode = bool(
+        brief_obj.get("sandbox")
+        or brief_obj.get("mind_sandbox")
+        or (job.kind or "").startswith("sandbox")
+        or str(job.kind or "") == "sandbox_job"
+    )
+    sandbox_run_id = brief_obj.get("sandbox_run_id")
+    if not sandbox_mode or not sandbox_run_id:
+        try:
+            from .energy_agent_sovereign_mind_sandbox import (
+                get_active_run,
+                mind_sandbox_enabled,
+                sandbox_repo_path,
+            )
+            force = (os.getenv("SOVEREIGN_MIND_SANDBOX_FORCE", "0") or "0").strip().lower() in (
+                "1", "true", "yes", "on",
+            )
+            active = get_active_run(db) if mind_sandbox_enabled() else None
+            if active and (sandbox_mode or force or active.get("free_run")):
+                sandbox_mode = True
+                sandbox_run_id = active.get("id")
+                sp = sandbox_repo_path(sandbox_run_id, repo_name)
+                if sp is not None:
+                    repo_path = sp
+        except Exception as e:  # noqa: BLE001
+            log.warning("sandbox redirect skip: %s", e)
+
+    # Start from latest main (git binary or dulwich) — skip hard reset in sandbox worktree
     _configure_remote_auth(repo_path, repo_name)
     if _has_git_bin():
-        _git(repo_path, "fetch", "origin", "main", timeout=120)
-        _git(repo_path, "checkout", "main")
-        pull = _git(repo_path, "pull", "--ff-only", "origin", "main", timeout=120)
-        if pull.returncode != 0:
-            _git(repo_path, "fetch", "--depth", "50", "origin", "main", timeout=120)
-            _git(repo_path, "reset", "--hard", "origin/main")
-        branch = f"sov/{job.id[:12]}"
-        _git(repo_path, "checkout", "-B", branch)
+        if not sandbox_mode:
+            _git(repo_path, "fetch", "origin", "main", timeout=120)
+            _git(repo_path, "checkout", "main")
+            pull = _git(repo_path, "pull", "--ff-only", "origin", "main", timeout=120)
+            if pull.returncode != 0:
+                _git(repo_path, "fetch", "--depth", "50", "origin", "main", timeout=120)
+                _git(repo_path, "reset", "--hard", "origin/main")
+            branch = f"sov/{job.id[:12]}"
+            _git(repo_path, "checkout", "-B", branch)
+        else:
+            branch = f"sov/sandbox/{(sandbox_run_id or 'run')[:16]}/{job.id[:10]}"
+            _git(repo_path, "checkout", "-B", branch)
     else:
         # Dulwich: pull main; work on main working tree (push commits to main)
-        try:
-            porcelain = _dulwich()
-            remote = _authed_clone_url(REPO_GITHUB[repo_name])
-            porcelain.pull(str(repo_path), remote_location=remote)
-        except Exception as e:  # noqa: BLE001
-            log.warning("dulwich pull: %s", e)
+        if not sandbox_mode:
+            try:
+                porcelain = _dulwich()
+                remote = _authed_clone_url(REPO_GITHUB[repo_name])
+                porcelain.pull(str(repo_path), remote_location=remote)
+            except Exception as e:  # noqa: BLE001
+                log.warning("dulwich pull: %s", e)
 
     # Prefer Claude Code / API; fall back to Grok; never stall on empty edits
     agent_result = run_claude_code(
@@ -981,19 +1070,62 @@ def process_job(db, job) -> dict[str, Any]:
             "provider": (agent_result.get("provider") or "forced") + "+artifact",
         }
 
-    ship = commit_and_push(repo_path, title=title, job_id=job.id)
+    ship = commit_and_push(
+        repo_path,
+        title=title,
+        job_id=job.id,
+        sandbox=sandbox_mode,
+        sandbox_run_id=sandbox_run_id,
+    )
     # If commit failed only because of no changes, force artifact once more
     if not ship.get("ok") and "no file changes" in (ship.get("error") or ""):
         _force_ship_artifact(
             repo_path, title=title, brief=brief or "", note="retry after empty commit",
             job_id=job.id,
         )
-        ship = commit_and_push(repo_path, title=title, job_id=job.id)
+        ship = commit_and_push(
+            repo_path,
+            title=title,
+            job_id=job.id,
+            sandbox=sandbox_mode,
+            sandbox_run_id=sandbox_run_id,
+        )
     deploy = {}
-    if ship.get("ok") and ship.get("push_main", {}).get("ok"):
+    if sandbox_mode:
+        deploy = {"ok": False, "skipped": "mind_sandbox", "run_id": sandbox_run_id}
+    elif ship.get("ok") and ship.get("push_main", {}).get("ok"):
         deploy = deploy_repo(repo_name)
     elif ship.get("ok") and code_push_enabled() and repo_name == "solar-operator":
         deploy = {"ok": True, "note": "awaiting railway from push"}
+
+    # Reality file: every ship becomes cold hard truth (prod or sandbox)
+    if ship.get("ok"):
+        try:
+            from .energy_agent_sovereign_reality import record_ship
+            record_ship(
+                title=title,
+                repo=repo_name,
+                job_id=job.id,
+                files=ship.get("files") or agent_result.get("written") or [],
+                sha=ship.get("sha"),
+                brief=brief or expanded,
+                source="sovereign_sandbox" if sandbox_mode else "sovereign",
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("reality record_ship failed: %s", e)
+        if sandbox_mode and sandbox_run_id:
+            try:
+                from .energy_agent_sovereign_mind_sandbox import register_sandbox_job
+                register_sandbox_job(
+                    db,
+                    sandbox_run_id,
+                    job_id=job.id,
+                    title=title,
+                    repo=repo_name,
+                    result=ship,
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning("sandbox register job failed: %s", e)
 
     job.status = "done" if ship.get("ok") else "failed"
     job.error = None if ship.get("ok") else (ship.get("error") or "ship failed")[:800]

@@ -447,6 +447,8 @@ def build_think_prompt(
     recent_events: list[dict] | None = None,
     heat: int | None = None,
     skills: dict | None = None,
+    reality: dict | None = None,
+    mind_sandbox: dict | None = None,
 ) -> list[dict]:
     schema_hint = {
         "monologue": (
@@ -486,13 +488,14 @@ def build_think_prompt(
                     "portal_signoff|deploy_stage|memory_set|agenda|reprioritize_goals|"
                     "ops_sweep|jobs_requeue|jobs_drain|job_cancel|code_hire|speak|email_ford|email|"
                     "mind_propose|mind_apply|mind_reject|"
+                    "reality_record|sandbox_start|sandbox_score|sandbox_end|"
                     "stripe_inspect|stripe_cancel|stripe_refund|billing_status|"
                     "brand_set|brand_announce|tenant_soft_delete|tenant_hard_purge|"
                     "purge_soft_deleted|har_stage|har_received"
                 ),
                 "rationale": "why this grows Array Operator or unlocks independence",
                 "text": "notes / evidence / speak body / code brief / email body",
-                "title": "for code_hire",
+                "title": "for code_hire or reality_record summary",
                 "feature_id": None,
                 "utility_id": None,
                 "escalation_id": None,
@@ -580,6 +583,12 @@ def build_think_prompt(
         "open_code_jobs": open_jobs[:10],
         # Hermes-style progressive disclosure: index always, full bodies when matched
         "skills": skills or {"enabled": False, "index": [], "loaded": []},
+        # Cold hard truth of AO product history (Ford 2026-07-22)
+        "reality_file": reality or {
+            "note": "reality file unavailable this tick — do not invent product history",
+        },
+        # Free-run evaluation arena vs Ford baseline
+        "mind_sandbox": mind_sandbox or {"active": False},
         "leadership_priorities": [
             "Grow coverage (utilities, vendors) and owner value",
             "Clear stalls that block the business",
@@ -587,6 +596,8 @@ def build_think_prompt(
             "Ship UX and product quality that make owners stay and expand",
             "Build systems so Sovereign can operate when Ford is elsewhere",
             "Use and evolve procedural skills (skills.loaded) — don't re-derive solved playbooks",
+            "Read reality_file before inventing what changed; append on every ship",
+            "When mind_sandbox is active, free-run in sandbox — no prod merge/deploy for experiments",
         ],
         "constraints": {
             "max_actions": 3,
@@ -598,6 +609,8 @@ def build_think_prompt(
                 "mass email",
                 "hard delete tenants",
                 "fabricate utility adapters without HAR",
+                "rewrite reality_file history (append only)",
+                "merge sandbox free-run work to main without Ford scorecard",
             ],
         },
         "output_schema": schema_hint,
@@ -626,6 +639,8 @@ def think_cycle(
     recent_events: list[dict] | None = None,
     heat: int | None = None,
     skills: dict | None = None,
+    reality: dict | None = None,
+    mind_sandbox: dict | None = None,
 ) -> dict[str, Any]:
     """Run one independent think. Returns structured plan + provider meta.
 
@@ -642,6 +657,20 @@ def think_cycle(
             "monologue": "",
         }
 
+    # Reality + sandbox are filesystem (and light memory) — load here if caller omitted
+    if reality is None:
+        try:
+            from .energy_agent_sovereign_reality import load_for_wake
+            reality = load_for_wake()
+        except Exception as e:  # noqa: BLE001
+            reality = {"error": str(e)[:200]}
+    if mind_sandbox is None:
+        try:
+            from .energy_agent_sovereign_mind_sandbox import wake_payload
+            mind_sandbox = wake_payload(None)
+        except Exception as e:  # noqa: BLE001
+            mind_sandbox = {"active": False, "error": str(e)[:200]}
+
     messages = build_think_prompt(
         digests=digests,
         world=world,
@@ -653,6 +682,8 @@ def think_cycle(
         recent_events=recent_events,
         heat=heat,
         skills=skills,
+        reality=reality,
+        mind_sandbox=mind_sandbox,
     )
     # SESSION BOUNDARY: no LLM inside open session
     try:

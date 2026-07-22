@@ -18,6 +18,13 @@ Plans, research notes, and **standing survival policy** for the Sovereign Mind.
 | `2026-07-16-sovereign-durability-watchdog.md` | Dual-channel watchdog / storm breaker |
 | `2026-07-16-sovereign-skill-evolution.md` | Hermes-style skill evolution |
 
+## Reality file + Mind sandbox (2026-07-22)
+
+| Doc | Why |
+|-----|-----|
+| **[reality/](./reality/)** | Cold hard truth of every AO FE/BE change — cortex reads on wake; ships append |
+| **[mind_sandbox/](./mind_sandbox/)** | Free-run arena vs Ford; weekly scorecard (no prod merge/deploy) |
+
 ## This directory
 
 Job artifacts and research writeups (utility adapters, HAR plans, etc.) land here as `*.md` files from code-hire / expand work. **Do not** overwrite `HOW_NOT_TO_CRASH.md` or this README with one-off research.
