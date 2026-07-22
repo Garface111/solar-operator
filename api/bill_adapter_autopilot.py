@@ -219,7 +219,59 @@ def on_credential_saved(
             "bill-autopilot arm family=%s provider=%s tenant=%s",
             plan.family, plan.provider, tenant_id,
         )
-        # Still record a discovery job as skipped_known (audit trail, no login).
+        # Rearm Cloud Capture so harvest starts on the next tick (or ASAP).
+        capture_start = None
+        try:
+            from .db import SessionLocal
+            from .models import PortalCredential, now as _now
+            from sqlalchemy import select
+            from sqlalchemy.orm import defer
+            with SessionLocal() as db:
+                rows = db.execute(
+                    select(PortalCredential).options(
+                        defer(PortalCredential.secret_enc),
+                        defer(PortalCredential.session_state_enc),
+                    ).where(
+                        PortalCredential.tenant_id == tenant_id,
+                        PortalCredential.provider == (provider or "").strip().lower(),
+                        PortalCredential.username_lc == (username or "").strip().lower(),
+                    )
+                ).scalars().all()
+                for r in rows:
+                    r.cloud_capture_enabled = True
+                    r.last_harvest_at = None
+                    r.harvest_fails = 0
+                    r.updated_at = _now()
+                db.commit()
+                rearmed = len(rows)
+            # GMP: also kick the JWT bill pull immediately when sessions exist.
+            pull = None
+            if plan.family == "gmp":
+                try:
+                    from .worker import pull_bills_for_tenant
+                    pull = pull_bills_for_tenant(tenant_id)
+                except Exception as e:
+                    pull = {"error": f"{type(e).__name__}: {e}"[:200]}
+            # SmartHub / others: queue one harvest attempt.
+            harvest = None
+            if plan.family in ("smarthub", "eversource", "cmp", "gmp"):
+                try:
+                    from .bill_discovery_engine import _trigger_harvest_async
+                    harvest = _trigger_harvest_async(
+                        tenant_id, provider, (username or "").strip().lower())
+                except Exception as e:
+                    harvest = {"error": str(e)[:200]}
+            capture_start = {
+                "ok": True,
+                "credentials_rearmed": rearmed,
+                "pull": pull,
+                "harvest": harvest,
+            }
+        except Exception as e:
+            log.warning("arm_known capture start failed: %s", e)
+            capture_start = {"ok": False, "error": str(e)[:200]}
+        result["capture_start"] = capture_start
+        # Still record a discovery job as skipped_known (audit trail, no explore).
         try:
             from .bill_discovery_engine import enqueue_discovery
             discovery = enqueue_discovery(

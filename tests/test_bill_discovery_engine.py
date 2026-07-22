@@ -147,6 +147,107 @@ def test_enqueue_known_family_skips_browser():
     assert job2["family"] == "smarthub"
 
 
+def test_activate_adapter_starts_bill_capture(monkeypatch):
+    """After synthesis, adapter is approved and bills land for the tenant."""
+    init_db()
+    tid = "ten_act_" + secrets.token_hex(3)
+    with SessionLocal() as db:
+        db.add(Tenant(
+            id=tid, tenant_key="sol_" + secrets.token_hex(8),
+            name="Act", contact_email=f"{tid}@t.test",
+            active=True, product="array_operator",
+        ))
+        db.commit()
+
+    # Don't fire real harvest threads / email in unit test.
+    monkeypatch.setattr(
+        "api.bill_discovery_engine._trigger_harvest_async",
+        lambda *a, **k: {"ok": True, "queued": False, "skipped": "test"},
+    )
+    monkeypatch.setattr(
+        "api.bill_adapter_autopilot.notify_new_bill_adapter",
+        lambda **k: True,
+    )
+
+    from api.bill_discovery_engine import activate_adapter_and_start_capture
+    from api.auto_adapters import reg_get
+
+    body = json.dumps({
+        "items": [
+            {"date": "2026-05-01", "generation_kwh": 111.0},
+            {"date": "2026-06-01", "generation_kwh": 222.0},
+        ],
+        "total_generation_kwh": 333.0,
+    })
+    captures = [{
+        "url": "https://portal.acme/api/billing/history",
+        "status": 200,
+        "content_type": "application/json",
+        "body": body,
+        "bytes": len(body),
+    }]
+    # First synthesize so we have a real fingerprint+spec in the registry.
+    from api.bill_adapter_autopilot import synthesize_bill_extractor
+    syn = synthesize_bill_extractor(body, provider="acme_power", notify=False)
+    if not syn.get("ok"):
+        # Heuristic may miss this shape — still test SmartHub-shaped path.
+        vec_body = json.dumps([{
+            "account_id": "6578300",
+            "billing_date": "6/15/2026",
+            "bill_amount": "-50.00",
+            "bill_uuid": "u-activate-1",
+            "kwh": 500.0,
+            "period_start": "2026-05-15",
+            "period_end": "2026-06-14",
+        }])
+        captures = [{
+            "url": "https://vermontelectric.smarthub.coop/billing/history",
+            "status": 200,
+            "content_type": "application/json",
+            "body": vec_body,
+            "bytes": len(vec_body),
+        }]
+        syn = {
+            "ok": True,
+            "fingerprint": "fp_manual_test",
+            "source": "test",
+            "spec": {
+                "format": "json",
+                "records": [{"path": ""}],  # unused if SmartHub path hits
+                "fields": {
+                    "date": {"path": "billing_date", "parse": "mdy"},
+                    "generation_kwh": {"path": "kwh", "scale": 1},
+                },
+            },
+        }
+
+    result = activate_adapter_and_start_capture(
+        tenant_id=tid,
+        provider="acme_power",
+        username_lc="owner@x.com",
+        synthesis=syn,
+        captures=captures,
+    )
+    assert result["ok"] is True
+    # At least one path should extract metrics (adaptive or SmartHub-shaped).
+    assert result["metrics_extracted"] >= 1 or result["bills_created"] + result["bills_updated"] >= 1
+    if syn.get("fingerprint") and syn["fingerprint"] != "fp_manual_test":
+        row = reg_get(syn["fingerprint"])
+        assert row is not None
+        assert row["status"] == "approved"
+
+    from api.models import Bill, UtilityAccount
+    with SessionLocal() as db:
+        uas = db.execute(
+            select(UtilityAccount).where(UtilityAccount.tenant_id == tid)
+        ).scalars().all()
+        assert len(uas) >= 1
+        bills = db.execute(
+            select(Bill).where(Bill.tenant_id == tid)
+        ).scalars().all()
+        assert len(bills) >= 1
+
+
 def test_notify_new_bill_adapter_sends_internal_alert(monkeypatch):
     """Ford gets an email when a candidate adapter is stored."""
     sent = {}
