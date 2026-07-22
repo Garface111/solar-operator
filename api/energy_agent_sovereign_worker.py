@@ -723,6 +723,17 @@ def commit_and_push(
     if not _status_porcelain(cwd).strip():
         return {"ok": False, "error": "no file changes to commit"}
 
+    # Global kill-switch: FORCE mode can never merge main even if caller forgets sandbox=
+    try:
+        from .energy_agent_sovereign_mind_sandbox import mind_sandbox_force
+        if mind_sandbox_force():
+            sandbox = True
+    except Exception:
+        if (os.getenv("SOVEREIGN_MIND_SANDBOX_FORCE", "0") or "0").strip().lower() in (
+            "1", "true", "yes", "on",
+        ):
+            sandbox = True
+
     if sandbox:
         msg = (
             f"sovereign-sandbox: {title[:160]}\n\n"
@@ -974,6 +985,7 @@ def process_job(db, job) -> dict[str, Any]:
         return {"ok": False, "error": str(e)[:300]}
 
     # Mind sandbox free-run: isolate from prod main/deploy
+    # SOVEREIGN_MIND_SANDBOX_FORCE=1 → ALWAYS sandbox (never main / never deploy)
     sandbox_mode = bool(
         brief_obj.get("sandbox")
         or brief_obj.get("mind_sandbox")
@@ -981,25 +993,51 @@ def process_job(db, job) -> dict[str, Any]:
         or str(job.kind or "") == "sandbox_job"
     )
     sandbox_run_id = brief_obj.get("sandbox_run_id")
-    if not sandbox_mode or not sandbox_run_id:
-        try:
-            from .energy_agent_sovereign_mind_sandbox import (
-                get_active_run,
-                mind_sandbox_enabled,
-                sandbox_repo_path,
-            )
-            force = (os.getenv("SOVEREIGN_MIND_SANDBOX_FORCE", "0") or "0").strip().lower() in (
-                "1", "true", "yes", "on",
-            )
+    try:
+        from .energy_agent_sovereign_mind_sandbox import (
+            ensure_active_run,
+            get_active_run,
+            mind_sandbox_force,
+            mind_sandbox_enabled,
+            sandbox_repo_path,
+            _prepare_worktrees,
+        )
+        force = mind_sandbox_force()
+        if force:
+            sandbox_mode = True
+            active = ensure_active_run(db, days=7)
+        else:
             active = get_active_run(db) if mind_sandbox_enabled() else None
-            if active and (sandbox_mode or force or active.get("free_run")):
+            if active and (sandbox_mode or active.get("free_run")):
                 sandbox_mode = True
-                sandbox_run_id = active.get("id")
-                sp = sandbox_repo_path(sandbox_run_id, repo_name)
-                if sp is not None:
-                    repo_path = sp
-        except Exception as e:  # noqa: BLE001
-            log.warning("sandbox redirect skip: %s", e)
+        if sandbox_mode and active:
+            sandbox_run_id = sandbox_run_id or active.get("id")
+            # Ensure worktrees exist for this run
+            try:
+                _prepare_worktrees(sandbox_run_id)
+            except Exception as e:  # noqa: BLE001
+                log.warning("sandbox worktrees: %s", e)
+            sp = sandbox_repo_path(sandbox_run_id, repo_name)
+            if sp is not None:
+                repo_path = sp
+            elif force:
+                # Refuse to touch live trees when FORCE is on
+                job.status = "failed"
+                job.error = (
+                    f"sandbox-only mode: no worktree for {repo_name} under run "
+                    f"{sandbox_run_id} — refusing live repo"
+                )
+                job.finished_at = _now()
+                return {"ok": False, "error": job.error, "sandbox_forced": True}
+    except Exception as e:  # noqa: BLE001
+        log.warning("sandbox redirect: %s", e)
+        if (os.getenv("SOVEREIGN_MIND_SANDBOX_FORCE", "0") or "0").strip().lower() in (
+            "1", "true", "yes", "on",
+        ):
+            job.status = "failed"
+            job.error = f"sandbox-only mode failed to isolate: {e}"[:500]
+            job.finished_at = _now()
+            return {"ok": False, "error": job.error, "sandbox_forced": True}
 
     # Start from latest main (git binary or dulwich) — skip hard reset in sandbox worktree
     _configure_remote_auth(repo_path, repo_name)

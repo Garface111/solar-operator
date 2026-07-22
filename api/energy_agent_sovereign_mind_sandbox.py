@@ -32,10 +32,16 @@ AO_ROOT = Path(
     or (SO_ROOT.parent / "array-operator")
 ).resolve()
 
+# Default /tmp so Railway worker can write; local host may override to /root/…
 SANDBOX_ROOT = Path(
-    os.getenv("SOVEREIGN_MIND_SANDBOX_ROOT") or "/root/sovereign-sandbox"
+    os.getenv("SOVEREIGN_MIND_SANDBOX_ROOT")
+    or os.getenv("SOVEREIGN_REPO_CACHE", "/tmp/sovereign-repos") + "/sandbox"
 ).resolve()
-RUNS_META = SO_ROOT / "docs" / "sovereign" / "mind_sandbox" / "runs"
+# Meta may live in sandbox root when repo docs/ is not writable (prod worker)
+RUNS_META = Path(
+    os.getenv("SOVEREIGN_MIND_SANDBOX_META")
+    or str(SANDBOX_ROOT / "runs_meta")
+).resolve()
 ACTIVE_KEY = "mind_sandbox_active_run"
 HISTORY_KEY = "mind_sandbox_run_history"
 
@@ -51,6 +57,32 @@ def mind_sandbox_enabled() -> bool:
     return (os.getenv("SOVEREIGN_MIND_SANDBOX", "1") or "1").strip().lower() not in (
         "0", "false", "no", "off",
     )
+
+
+def mind_sandbox_force() -> bool:
+    """When true, ALL code jobs are sandbox-only (no main / no prod deploy)."""
+    return (os.getenv("SOVEREIGN_MIND_SANDBOX_FORCE", "0") or "0").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def ensure_active_run(db=None, *, days: int = 7) -> dict[str, Any] | None:
+    """Return open run; auto-start one when FORCE mode needs isolation."""
+    active = get_active_run(db)
+    if active and active.get("status") == "open":
+        return active
+    if not mind_sandbox_force() and not mind_sandbox_enabled():
+        return None
+    if not mind_sandbox_force():
+        return None
+    out = start_run(
+        db,
+        days=days,
+        title="Auto free-run (sandbox-only mode)",
+        goal="SOVEREIGN_MIND_SANDBOX_FORCE=1 — all code work stays off main/prod.",
+        free_run=True,
+    )
+    return out.get("run") if out.get("ok") else load_run((out.get("run") or {}).get("id") or "")
 
 
 def _utcnow() -> datetime:
@@ -222,18 +254,51 @@ def start_run(
     return {"ok": True, "run": run}
 
 
+def _resolve_src_repo(name: str) -> Path | None:
+    """Prefer worker cache / explicit roots, then monorepo neighbors."""
+    cache = Path(os.getenv("SOVEREIGN_REPO_CACHE", "/tmp/sovereign-repos")).expanduser()
+    candidates = []
+    if name == "array-operator":
+        candidates = [
+            Path(os.getenv("SOVEREIGN_AO_REPO", "") or "").expanduser(),
+            Path(os.getenv("ARRAY_OPERATOR_ROOT", "") or "").expanduser(),
+            AO_ROOT,
+            cache / "array-operator",
+            Path("/root/array-operator"),
+        ]
+    else:
+        candidates = [
+            Path(os.getenv("SOVEREIGN_SO_REPO", "") or "").expanduser(),
+            Path(os.getenv("SOVEREIGN_REPO_ROOT", "") or "").expanduser(),
+            SO_ROOT,
+            cache / "solar-operator",
+            Path("/root/solar-operator"),
+        ]
+    for p in candidates:
+        if not p or str(p) in (".", ""):
+            continue
+        try:
+            pr = p.resolve()
+        except Exception:
+            continue
+        if (pr / ".git").exists() or (pr / ".git").is_file() or (pr / "api").is_dir() or (pr / "public").is_dir():
+            return pr
+    return None
+
+
 def _prepare_worktrees(run_id: str) -> dict[str, Any]:
-    """Create sandbox workdirs (copy or worktree) for AO + SO."""
+    """Create sandbox workdirs (worktree or shallow copy) for AO + SO."""
     rd = run_dir(run_id)
     rd.mkdir(parents=True, exist_ok=True)
     out: dict[str, Any] = {}
-    for name, src in (("array-operator", AO_ROOT), ("solar-operator", SO_ROOT)):
+    for name in ("array-operator", "solar-operator"):
         dest = rd / name
         if dest.exists():
             out[name] = {"ok": True, "path": str(dest), "note": "exists"}
             continue
-        if not src.exists():
-            out[name] = {"ok": False, "error": f"source missing: {src}"}
+        src = _resolve_src_repo(name)
+        if src is None:
+            out[name] = {"ok": False, "error": f"source missing for {name}"}
             continue
         # Prefer git worktree add
         try:
@@ -250,6 +315,7 @@ def _prepare_worktrees(run_id: str) -> dict[str, Any]:
                     "path": str(dest),
                     "branch": branch,
                     "method": "worktree",
+                    "src": str(src),
                 }
                 continue
             # branch may exist — try without -b
@@ -264,14 +330,31 @@ def _prepare_worktrees(run_id: str) -> dict[str, Any]:
                     "ok": True,
                     "path": str(dest),
                     "method": "worktree_detached",
+                    "src": str(src),
+                }
+                continue
+            # Last resort: clone from local path (isolated, no link to main WT)
+            r3 = subprocess.run(
+                ["git", "clone", "--local", str(src), str(dest)],
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+            if r3.returncode == 0:
+                out[name] = {
+                    "ok": True,
+                    "path": str(dest),
+                    "method": "clone_local",
+                    "src": str(src),
                 }
                 continue
             out[name] = {
                 "ok": False,
-                "error": (r.stderr or r2.stderr or "worktree failed")[:400],
+                "error": (r.stderr or r2.stderr or r3.stderr or "worktree failed")[:400],
+                "src": str(src),
             }
         except Exception as e:  # noqa: BLE001
-            out[name] = {"ok": False, "error": str(e)[:400]}
+            out[name] = {"ok": False, "error": str(e)[:400], "src": str(src)}
     (rd / "worktrees.json").write_text(json.dumps(out, indent=2), encoding="utf-8")
     return out
 
