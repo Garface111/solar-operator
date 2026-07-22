@@ -4204,6 +4204,45 @@ def sovereign_mind_sandbox_end(
         return out
 
 
+# ── Chamber L2 (false-real AO branch deploy — never prod) ──────────────────
+
+@router.get("/admin/sovereign/chamber")
+def sovereign_chamber_status(authorization: str | None = Header(default=None)):
+    """Always-on chamber URL + last deploy meta (mission control outside the room)."""
+    _require_sovereign_or_admin(authorization)
+    from .energy_agent_sovereign_chamber import get_chamber_status
+    with SessionLocal() as db:
+        return get_chamber_status(db)
+
+
+@router.post("/admin/sovereign/chamber/deploy")
+def sovereign_chamber_deploy(
+    body: dict | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """Deploy AO public/ (sandbox worktree if open, else baseline) to chamber branch.
+
+    Never publishes arrayoperator.com. Safe REST branch deploy only.
+    """
+    _require_sovereign_or_admin(authorization)
+    body = body or {}
+    from .energy_agent_sovereign_chamber import deploy_chamber
+    from .energy_agent_sovereign_mind_sandbox import get_active_run
+
+    with SessionLocal() as db:
+        run = get_active_run(db)
+        run_id = body.get("run_id") or (run.get("id") if run else None)
+        out = deploy_chamber(
+            public_dir=body.get("public_dir"),
+            run_id=run_id,
+            job_id=body.get("job_id"),
+            title=body.get("title") or "manual chamber deploy",
+            db=db,
+        )
+        db.commit()
+        return out
+
+
 # ── Local Sovereign Portal (loopback UI — no AO account) ───────────────────
 
 @router.get("/admin/sovereign/portal")
@@ -4212,6 +4251,7 @@ def sovereign_portal_dashboard(authorization: str | None = Header(default=None))
     _require_sovereign_or_admin(authorization)
     from .energy_agent_sovereign_reality import status as reality_status, read_entries
     from .energy_agent_sovereign_mind_sandbox import status as sandbox_status
+    from .energy_agent_sovereign_chamber import get_chamber_status
     with SessionLocal() as db:
         state = world_get(db)
         jobs = [
@@ -4265,6 +4305,11 @@ def sovereign_portal_dashboard(authorization: str | None = Header(default=None))
         except Exception as e:  # noqa: BLE001
             desk_msgs = []
             desk_err = str(e)[:200]
+        try:
+            chamber = get_chamber_status(db)
+        except Exception as e:  # noqa: BLE001
+            chamber = {"ok": False, "error": str(e)[:200]}
+        sandbox = sandbox_status(db)
     return {
         "ok": True,
         "channel": "admin_portal",
@@ -4287,7 +4332,8 @@ def sovereign_portal_dashboard(authorization: str | None = Header(default=None))
             **reality_status(),
             "tail": read_entries(limit=50),
         },
-        "mind_sandbox": sandbox_status(None),
+        "mind_sandbox": sandbox,
+        "chamber": chamber,
     }
 
 

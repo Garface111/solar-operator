@@ -51,8 +51,8 @@ Ford’s comparison UI is **outside** the room (Portal), not inside the model’
 | Level | What | Status |
 |-------|------|--------|
 | **L0** | Git worktree + local Live preview; model still sees prod digests | Partial today |
-| **L1** | Chamber **world-model lie**: digests/URLs rewritten to chamber; drive prism; no “sandbox” in system voice | **This doc + drive module** |
-| **L2** | Real **staging deploy** of AO frontend (+ optional staging API) at e.g. `chamber.arrayoperator.com` | Next infra |
+| **L1** | Chamber **world-model lie**: digests/URLs rewritten to chamber; drive prism; no “sandbox” in system voice | **Shipped** (`energy_agent_sovereign_drive.py`) |
+| **L2** | Real **always-on chamber URL** of AO frontend (branch deploy, not prod) | **Shipped** — `https://chamber--array-operator-ea.netlify.app` via `scripts/chamber_deploy_dir.py` + `energy_agent_sovereign_chamber.py` (Netlify site quota blocks a new site; branch deploy on existing site is the path) |
 | **L3** | **Data twin**: copy of Ford’s tenant into staging DB | Next infra |
 | **L4** | Automated weekly **prod vs chamber** scorecard (UI + metrics + diffs) | Portal + jobs |
 
@@ -136,8 +136,9 @@ Chamber = the burn.
 |-------|--------|
 | Drive prism | `api/energy_agent_sovereign_drive.py` — oxidizer text + anti-bureaucracy |
 | Chamber mode | Env `SOVEREIGN_CHAMBER_MODE=1` rewrites product URL in cortex/sub context |
+| Chamber L2 URL | `https://chamber--array-operator-ea.netlify.app` — Netlify **branch** deploy (`branch=chamber`, draft). Never publishes prod. Script: `array-operator/scripts/chamber_deploy_dir.py`. Auto after sandbox AO ships. Admin: `GET/POST /admin/sovereign/chamber` |
 | Portal | Outside-the-room comparison glass (already starting) |
-| Twin site | Separate Netlify/staging URL + optional DB clone (next) |
+| Twin site / data | L3 optional DB clone (next) — chamber already proxies `/v1/*` to prod Railway (same as live) |
 
 ## Success criterion (one sentence)
 
