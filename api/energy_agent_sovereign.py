@@ -1917,8 +1917,25 @@ def _normalize_mind_patch(raw: dict) -> dict:
     }
 
 
+def sandbox_self_modify_free() -> bool:
+    """Ford 2026-07-22: free self-improve in sandbox — no approval gate.
+
+    True when mind-sandbox FORCE is on, or free-run is explicitly open.
+    Prod (FORCE off) still requires Ford chat approval for mind_apply.
+    """
+    force = (os.getenv("SOVEREIGN_MIND_SANDBOX_FORCE", "0") or "0").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    if force:
+        return True
+    free = (os.getenv("SOVEREIGN_MIND_SELF_MODIFY_FREE", "0") or "0").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+    return free
+
+
 def propose_mind_patch(db, raw: dict, *, source: str = "brain") -> dict:
-    """Stage a self-modification for Ford's explicit chat approval."""
+    """Propose a self-modification. Auto-applies in sandbox free mode."""
     patch = _normalize_mind_patch(raw if isinstance(raw, dict) else {})
     if (
         not patch["memory_writes"]
@@ -1950,7 +1967,37 @@ def propose_mind_patch(db, raw: dict, *, source: str = "brain") -> dict:
         result="ok" if ok else "failed",
         correlation_id=proposal["id"],
     )
-    # Human-readable proposal for the desk
+
+    # Sandbox free-run: apply immediately (Ford: no approval prompt in sandbox)
+    if sandbox_self_modify_free():
+        applied = apply_pending_mind_patch(db, approved_by="sandbox_free")
+        lines = [
+            f"**Mind change applied (sandbox free)** (`{proposal['id']}`)",
+            "",
+            patch["summary"],
+            "",
+        ]
+        if patch["why"]:
+            lines += [f"_Why:_ {patch['why']}", ""]
+        if applied.get("applied"):
+            parts = applied.get("applied_parts") or []
+            lines.append(f"_Applied:_ {', '.join(parts) if parts else 'ok'}")
+        else:
+            lines.append(f"_Apply result:_ {applied}")
+        lines.append("")
+        lines.append("_No Ford approval required while sandbox FORCE / free self-modify is on._")
+        return {
+            "ok": True,
+            "proposed": True,
+            "applied_now": True,
+            "patch_id": proposal["id"],
+            "summary": patch["summary"],
+            "apply": applied,
+            "desk_notice": "\n".join(lines),
+            "awaiting_ford_approval": False,
+        }
+
+    # Human-readable proposal for the desk (prod / gated mode)
     lines = [
         f"**Mind change proposed** (`{proposal['id']}`)",
         "",
@@ -2399,9 +2446,18 @@ def execute_brain_actions(db, actions: list[dict], *, tick_id: str) -> list[dict
         elif atype in ("mind_propose", "propose_mind", "self_modify_propose", "reprogram_propose"):
             res = propose_mind_patch(db, raw, source="brain")
         elif atype in ("mind_apply", "apply_mind", "self_modify_apply", "reprogram_apply"):
-            # Only when Ford already approved this turn (or explicit ford_approved flag)
-            if raw.get("ford_approved") or raw.get("approved"):
-                res = apply_pending_mind_patch(db, approved_by="brain_with_ford_flag")
+            # Sandbox free OR Ford already approved this turn
+            if (
+                sandbox_self_modify_free()
+                or raw.get("ford_approved")
+                or raw.get("approved")
+            ):
+                res = apply_pending_mind_patch(
+                    db,
+                    approved_by=(
+                        "sandbox_free" if sandbox_self_modify_free() else "brain_with_ford_flag"
+                    ),
+                )
             else:
                 res = {
                     "ok": False,

@@ -525,27 +525,37 @@ HARD RULES FOR THIS REPLY:
    unless he asked about those topics. Background memory is for YOUR use, not to paste.
 3. Do NOT repeat your previous reply. If you already said "Yes. Locked in" / demo tables,
    say something NEW that addresses his actual ask.
-4. If he asks you to improve your mind / work more autonomously: use action mind_propose
-   with concrete summary + directives/memory_writes. List 3–7 specific improvements.
-   Do not dump a glossary of existing law.
-5. When sandbox / free-run is active: point him at Portal Live (http://127.0.0.1:7701/live/)
-   and update showcase_pitch / showcase_ready so he can audit. Never claim prod ship while
-   SOVEREIGN_MIND_SANDBOX_FORCE is on.
+4. Self-improve: use mind_propose with concrete summary + directives/memory_writes.
+   In sandbox free mode, mind_propose AUTO-APPLIES (no approve prompt). In prod mode,
+   Ford still says "approve". Do not claim applied unless just_processed.applied is true
+   or you received applied_now from mind_propose.
+5. When sandbox / free-run is active: ship real improvements; point Ford at Portal Live
+   when he is reviewing. Never claim prod main ship while FORCE sandbox is on.
 6. Markdown prose first. Optional side JSON after prose only:
 ---JSON---
 {"monologue":"private","actions":[],"ford_ask":null,"mood":"determined"}
 ---END---
 Actions include: mind_propose, email_ford, code_hire, ops_sweep, showcase_pitch,
 showcase_ready, sandbox_score, local_tool, etc.
-mind_propose needs Ford's short "approve" later — do not claim already locked unless
-mind_self_modify.just_processed.applied is true this turn.
 7. Never invent adapters, mass-email owners, or treat demo tenants as customer fires.
+8. Be honest about what is RUNNING vs what you only PROMISED. If jobs are queued since
+   days ago and not draining, say so — don't invent progress.
 """
     if via_admin:
         system += (
             "\nYou are on the ADMIN portal desk (loopback). Prefer high-level executive "
             "status over job-id dumps. Lead with the answer, then 2–5 evidence bullets.\n"
         )
+    try:
+        from .energy_agent_sovereign import sandbox_self_modify_free
+        if sandbox_self_modify_free():
+            system += (
+                "\nSANDBOX FREE SELF-MODIFY IS ON: mind_propose applies immediately. "
+                "Use it to fix real mind gaps (introspection, missing capabilities). "
+                "Do not invent that you already built something unless memory/notes show it.\n"
+            )
+    except Exception:
+        pass
     # Transcript: last few turns, truncated so they don't dominate
     transcript_lines = []
     for m in (hist or [])[-10:]:
