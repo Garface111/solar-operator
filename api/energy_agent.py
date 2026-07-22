@@ -2881,6 +2881,43 @@ TOOL_DEFS = [
 TOOL_DEFS = TOOL_DEFS + list(_MOBILE_TOOL_DEFS)
 
 
+# --- Command Center (fleet) mode -------------------------------------------
+# The Portfolio Command Center hosts the Energy Agent as a READ-ONLY fleet
+# analyst. When a turn arrives with context.mode == "command_center" the agent
+# is restricted to this allowlist — every tool below is read-only and hard
+# scoped to the authenticated tenant (via build_fleet_tree / ORM). This is the
+# sandbox boundary: nothing that writes, sends, spends, or self-escalates is
+# reachable here, so a prompt-injected array name (array names originate in
+# utility portals — untrusted) cannot climb out into an action. Keep this list
+# tight and auditable; add only read tools, never a write or a meta/skill tool.
+COMMAND_CENTER_TOOLS: frozenset[str] = frozenset({
+    "fleet_overview",          # health snapshot, same verdicts as the UI
+    "investigate_attention",   # why arrays need a human
+    "array_detail",            # per-array / per-inverter drilldown
+    "fleet_trends_summary",    # trailing production trends
+    "fleet_financial_health",  # $/mo at risk, recoverable-if-fixed
+    "underperformer_history",  # per-inverter loss history
+    "tenant_census",           # ground-truth array/inverter counts
+    "product_map",             # explain the product surface (read-only)
+    "escalate_to_ford",        # human-handoff safety valve
+})
+
+
+def _tool_defs_for(mode: str | None) -> list[dict]:
+    """Tool schemas visible to the LLM for this turn.
+
+    Command Center mode narrows the registry to the fleet read allowlist so the
+    model is never even offered a write tool; the dispatch gate in _run_tool is
+    the belt-and-suspenders enforcement (see there).
+    """
+    if mode == "command_center":
+        return [
+            t for t in TOOL_DEFS
+            if ((t.get("function") or {}).get("name")) in COMMAND_CENTER_TOOLS
+        ]
+    return TOOL_DEFS
+
+
 def _slim_inverter(inv: dict) -> dict:
     """Compact inverter row for agent tools (no sparkline series)."""
     return {
@@ -7298,9 +7335,29 @@ def _run_tool(
     session: EaSession,
     db,
     user_text: str = "",
+    mode: str | None = None,
 ) -> dict:
     args = args or {}
     tid = tenant.id
+
+    # Command Center (fleet) mode — hard read-only sandbox. This is the security
+    # boundary, not a hint: anything outside the fleet allowlist is refused here,
+    # INCLUDING meta/skill tools (enable_skill etc.), so nothing can self-grant a
+    # write. The LLM is only offered these tools (see _tool_defs_for), but we
+    # re-check at dispatch in case a model hallucinates a name or a stale tool
+    # call replays. Reads in the allowlist skip the per-tenant skill gate below —
+    # command_center mode IS their authorization.
+    if mode == "command_center" and name not in COMMAND_CENTER_TOOLS:
+        return {
+            "status": "tool_unavailable",
+            "mode": "command_center",
+            "message": (
+                "In the Command Center I'm read-only over your fleet — I can report "
+                "health, dollars at risk, and per-array or per-inverter detail, but I "
+                "can't take that action from here. Ask me in the main assistant to "
+                "change something, or I can flag it for Ford."
+            ),
+        }
 
     # Judge gate — hard reject billing/money writes before anything else
     blocked = _ea_judge_write(name, args)
@@ -7308,8 +7365,9 @@ def _run_tool(
         return blocked
 
     # Skill gate — a tool in a dormant (not-enabled) skill is locked until the
-    # agent enables it. Meta tools are always allowed.
-    if name not in ("enable_skill", "list_skills", "request_capability", "escalate_to_ford"):
+    # agent enables it. Meta tools are always allowed. Command Center reads are
+    # pre-authorized by the allowlist above, so they bypass the per-tenant gate.
+    if mode != "command_center" and name not in ("enable_skill", "list_skills", "request_capability", "escalate_to_ford"):
         allowed, skill = _tool_allowed(db, tid, name)
         if not allowed:
             reg = SKILL_REGISTRY.get(skill) or {}
@@ -9210,8 +9268,18 @@ def _alert_primary_llm_down(provider: str, err: str) -> None:
         log.error("primary-LLM-down alert email failed: %s", e)
 
 
-def _call_llm(messages: list[dict], *, max_tokens: int | None = None) -> dict:
-    """Grok (Build OIDC / API key) first when ready; Claude cloth fallback."""
+def _call_llm(
+    messages: list[dict],
+    *,
+    max_tokens: int | None = None,
+    tools: list[dict] | None = None,
+) -> dict:
+    """Grok (Build OIDC / API key) first when ready; Claude cloth fallback.
+
+    ``tools`` lets a caller narrow the tool registry for the turn (e.g. Command
+    Center fleet mode); defaults to the full ``TOOL_DEFS``.
+    """
+    tool_defs = tools if tools is not None else TOOL_DEFS
     primary = (os.getenv("ENERGY_AGENT_LLM_PRIMARY") or "grok").strip().lower()
     order = []
     if primary in ("claude", "anthropic", "cloth"):
@@ -9224,9 +9292,9 @@ def _call_llm(messages: list[dict], *, max_tokens: int | None = None) -> dict:
         is_primary = who == order[0]
         try:
             if who == "grok" and _xai_ready():
-                return _call_grok(messages, TOOL_DEFS, max_tokens=max_tokens)
+                return _call_grok(messages, tool_defs, max_tokens=max_tokens)
             if who == "claude" and ANTHROPIC_API_KEY:
-                return _call_anthropic(messages, TOOL_DEFS, max_tokens=max_tokens)
+                return _call_anthropic(messages, tool_defs, max_tokens=max_tokens)
             if is_primary:
                 _alert_primary_llm_down(who, "not configured (missing key/credential)")
         except Exception as e:
@@ -10041,7 +10109,15 @@ def _agent_turn(
     _is_voice_any = (source or "") in ("voice", "voice_consult") or bool(
         _ctx.get("voice_weave") or _ctx.get("voice_active") or _ctx.get("voice_source")
     )
-    if not assets and not _is_voice_any:
+    # Command Center (fleet) mode: the owner is talking to the Energy Agent from
+    # the Portfolio Command Center. Restrict to read-only fleet tools and answer
+    # as a fleet analyst (see _tool_defs_for / _run_tool). Sticky-safe: the client
+    # re-sends mode every turn, so leaving Command Center clears it.
+    cc_mode = _ctx.get("mode") == "command_center"
+    _turn_mode = "command_center" if cc_mode else None
+    # In fleet mode a question like "why is this array red?" is a real fleet ask,
+    # not a UI-polish request — never divert it into the visual-fix shortcut.
+    if not assets and not _is_voice_any and not cc_mode:
         # Visual polish: short ack + quiet pipeline (skip multi-tool design lectures)
         try:
             fast = _visual_fix_fast_path(db, tenant, session, user_text, context)
@@ -10112,6 +10188,21 @@ def _agent_turn(
             system += _access_surface_block(context if isinstance(context, dict) else {})
         except Exception as _ase:
             log.info("access surface inject skipped: %s", _ase)
+        if cc_mode:
+            system += (
+                "\n\nCOMMAND CENTER (FLEET) MODE — you are answering from the Portfolio "
+                "Command Center as a READ-ONLY fleet analyst. Your job: report fleet "
+                "health, which arrays/inverters need a human, dollars leaking, and "
+                "per-array/inverter detail — worst-first, lead with the single most "
+                "important thing. Your tools are limited to fleet reads (fleet_overview, "
+                "investigate_attention, array_detail, fleet_trends_summary, "
+                "fleet_financial_health, underperformer_history, tenant_census, "
+                "product_map). You CANNOT change settings, send anything, edit data, or "
+                "run any action here — if the owner asks for one, say it's not available "
+                "in the Command Center and point them to the main assistant, or offer to "
+                "flag it for Ford (escalate_to_ford). Call product_map(topic=surface_fleet_triage) "
+                "if you need to explain this view."
+            )
         system += "\n\nUI context:\n" + json.dumps(ctx_for_prompt, default=str)[:2000]
         if live_dom is not None:
             system += (
@@ -10335,6 +10426,9 @@ def _agent_turn(
     # give them the larger budget (not just source=voice turns).
     llm_max_tokens = voice_max if voice_active else default_max
 
+    # Command Center mode only offers the fleet read allowlist to the model.
+    active_tools = _tool_defs_for(_turn_mode)
+
     _round = 0
     _call_counts: dict = {}
     _unbounded = MAX_TOOL_ROUNDS <= 0
@@ -10359,7 +10453,7 @@ def _agent_turn(
             db.commit()
         except Exception:
             db.rollback()
-        result = _call_llm(messages, max_tokens=llm_max_tokens)
+        result = _call_llm(messages, max_tokens=llm_max_tokens, tools=active_tools)
         provider = result.get("provider")
         total_cost += _usage_cost(result.get("usage") or {})
         msg = result["message"]
@@ -10389,7 +10483,7 @@ def _agent_turn(
                         on_event({"type": "thinking", "text": phrase, "tool": tname})
                     except Exception:
                         pass
-            out = _run_tool(tname, targs, tenant, session, db, user_text=user_text)
+            out = _run_tool(tname, targs, tenant, session, db, user_text=user_text, mode=_turn_mode)
             tool_trace.append({"name": tname, "args": targs, "result": out})
 
             if isinstance(out, dict) and out.get("status") == "pending_confirm":
@@ -10401,7 +10495,7 @@ def _agent_turn(
                 if retriable and _user_clearly_directed(user_text, body_preview):
                     targs2 = dict(targs)
                     targs2["needs_confirm"] = False
-                    out2 = _run_tool(tname, targs2, tenant, session, db, user_text=user_text)
+                    out2 = _run_tool(tname, targs2, tenant, session, db, user_text=user_text, mode=_turn_mode)
                     tool_trace.append({"name": tname, "args": targs2, "result": out2})
                     out = out2
                     pending = None
