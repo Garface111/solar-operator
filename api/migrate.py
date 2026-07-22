@@ -1144,6 +1144,21 @@ def main():
             ))
             print("  + billing_report_subscriptions.budget_amount_usd")
 
+        # Annual true-up settlement: banked credit from overpaid budget years +
+        # last settled window end for idempotency (Ford 2026-07-21).
+        if not column_exists(conn, "billing_report_subscriptions", "pending_credit_usd"):
+            conn.execute(text(
+                "ALTER TABLE billing_report_subscriptions "
+                "ADD COLUMN pending_credit_usd DOUBLE PRECISION DEFAULT 0"
+            ))
+            print("  + billing_report_subscriptions.pending_credit_usd")
+        if not column_exists(conn, "billing_report_subscriptions", "last_trueup_window_end"):
+            conn.execute(text(
+                "ALTER TABLE billing_report_subscriptions "
+                "ADD COLUMN last_trueup_window_end DATE"
+            ))
+            print("  + billing_report_subscriptions.last_trueup_window_end")
+
         # Exactly-once-per-period send guard (#5): remembers the billing period of
         # the last invoice actually sent, so a late GMP bill / ops re-run can't
         # duplicate-bill the same period.
@@ -1591,6 +1606,24 @@ def main():
                     print(f"  + exchange_demand.{col}")
         else:
             print("  · table exchange_demand will create_all on next boot")
+
+        # 2026-07-21 Performance verification — monthly report pack + deviation
+        # threshold (Sunreport parity). Default enabled for AO fleets; threshold
+        # null → engine DEFAULT_DEVIATION_THRESHOLD (0.05).
+        if not column_exists(conn, "tenants", "verification_reports_enabled"):
+            conn.execute(text(
+                "ALTER TABLE tenants ADD COLUMN verification_reports_enabled "
+                "BOOLEAN DEFAULT true NOT NULL"
+            ))
+            added.append("verification_reports_enabled")
+            print("  + tenants.verification_reports_enabled")
+        if not column_exists(conn, "tenants", "verification_deviation_threshold"):
+            conn.execute(text(
+                "ALTER TABLE tenants ADD COLUMN verification_deviation_threshold "
+                "DOUBLE PRECISION"
+            ))
+            added.append("verification_deviation_threshold")
+            print("  + tenants.verification_deviation_threshold")
 
     print("=== Migration complete ===")
 

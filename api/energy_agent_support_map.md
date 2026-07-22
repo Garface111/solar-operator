@@ -7,7 +7,7 @@ Coding agents editing the product still load skill **`solar-operator-energyagent
 When product behavior changes, update **this file** (regenerate with the **product-map-cartographer** agent, or edit by hand).
 
 Topics = `## heading` ids below. Call `product_map(topic=<id>)` before explaining that area.
-Available topics: `tabs · system · fleet · capture · vendors · analysis · health · offtakers · generation_reports · billing · plans · onboarding · resources · status · agent · api · datamodel · glossary · security · tools · surface · product_spine · surface_* · surface_mobile · product_spine_mobile · surface_mobile_*`.
+Available topics: `tabs · system · fleet · capture · vendors · analysis · health · verification · offtakers · generation_reports · billing · plans · onboarding · resources · status · agent · api · datamodel · glossary · security · tools · surface · product_spine · surface_* · surface_mobile · product_spine_mobile · surface_mobile_*`.
 
 **Page-level understanding** (macro / meso / micro):
 - **Desktop:** `product_map(topic=surface)` or `surface_fleet` / `surface_marketplace` /
@@ -208,7 +208,8 @@ ANALYSIS TAB (`#analysis`) — a PowerTrack-style fleet NOC. It loads FleetStore
 | Portfolio | 7-tile KPI strip; measured KPIs always populated, weather KPIs show “—” with no forecast | mixed |
 | Through time | Trailing 12 months vs last year vs 3-yr avg (links to Trends) | fleet-trends |
 | Sites | Sortable one-row-per-site table with an Actual-vs-Expected bar | mixed |
-| Performance | Performance Index (weather-adjusted PR; needs forecast) ⇄ Capacity Factor (measured ÷ nameplate; works in demo) | mixed |
+| Performance | Performance Index (weather-adjusted PR; needs forecast) ⇄ Capacity Factor (measured ÷ nameplate; works in demo). Optional Meter/Inverter/Mixed boundary badge when verification data is present | mixed + verification |
+| Verification | Portfolio PI (meter-primary measured energy), deviation labels (sudden/persistent), priority ranking, download monthly PDF pack + auditor ZIP | verification engine |
 | Operations / Events | Live alarm rollup + O&M ticket ledger | fleet columns |
 | Hardware | Inverter device tree by site (14-day peer + live overlay) | fleet-tree |
 
@@ -217,6 +218,37 @@ TRENDS (sub-view `#trends`, under Analysis — **not** a top tab): six renderers
 FORECAST / predicted-vs-actual is weather-aware: it integrates real tilted-plane irradiance at each array’s lat/lng/tilt/azimuth, so cloudy days lower the expectation. **Critical gotcha: azimuth 0° = SOUTH, ±180° = north** (south-facing, the northern-hemisphere optimum, is `0`, not `180`). In the UI: South = 0, North = 180.
 
 Honesty rules: sections never fabricate — with no forecast (demo/anon or un-modelable arrays) the expectation is simply absent. When summing measured kWh the backend **excludes `bill_prorate`** rows (a monthly bill smeared flat = an estimate, not a meter reading) and buckets by fleet-local day. Always name the window (“last N days”) when quoting a number.
+
+Monthly **verification pack** (1st of month): prior-calendar-month PI/PR PDF + email for opted-in AO fleets (`verification_reports_enabled`, default on). Same honesty: meter-primary boundary, no bill_prorate in PI. Method doc: `docs/knowledge/performance-verification-method.md`.
+
+---
+
+## verification
+
+PERFORMANCE VERIFICATION (Array Operator) — continuous measured-vs-expected layer, distinct from peer health and from NEPOOL workbook “verify accuracy.”
+
+**What it is:** Portfolio and per-array Performance Index (PI = measured ÷ weather-expected over matched days), boundary badges (meter / inverter / mixed), deviation classification (sudden / persistent / seasonal), priority score, optional post-repair recovery check, monthly PDF pack + auditor ZIP export.
+
+**Measurement boundary (hard):** Prefer utility real meter days (`gmp_api`, `gmp_portal_scrape`, `smarthub`); else inverter/telemetry measured sources. **Never** use `bill_prorate` / estimate smears for PI.
+
+**Expected energy:** Same POA weather model as Analysis forecast (`api.forecasting`); default PR 0.84 unless owner-set. Do not invent degradation or measured kWh.
+
+**Standards language:** “Methods consistent with IEC 61724-1 / 61724-3” — operational layer, **not** third-party certification. Footer + method: `GET /v1/array-owners/verification/method` and `docs/knowledge/performance-verification-method.md`.
+
+**API (session or tenant-key auth):**
+- `GET …/verification/summary?window_days=30` — portfolio rollup
+- `GET …/verification/arrays/{id}` — one array
+- `GET …/verification/report?period=YYYY-MM` — JSON month pack
+- `GET …/verification/report.pdf?period=YYYY-MM` — PDF
+- `GET …/verification/auditor-export?start=&end=` — ZIP (assumptions.json, daily.csv, summary.json)
+- `GET/PUT …/verification/settings` — `enabled`, `deviation_threshold` (default 0.05)
+- `GET …/verification/interventions/{repair_ticket_id}` — PI before/after resolution (on-read)
+
+**UI:** Analysis tab **Verification** section (download links) + optional boundary badge on **Performance**.
+
+**Scheduler:** `verification_monthly_reports` — day=1 hour=13 UTC.
+
+**Not this:** workbook accuracy upload (`api/verification.py`), peer_index health, offtaker invoices. P2 stubs only: O&M multi-tenant, SLA packaging (`perf_verification/p2_stubs.py`).
 
 ---
 

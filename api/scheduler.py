@@ -499,11 +499,18 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
     BillingReportSubscription whose cadence matches (or, for the annual run,
     every sub with annual_trueup set).
 
+    Annual true-up (trueup_only=True) uses the real budget-vs-actual settlement
+    path (api.billing.trueup): charge underpayment or bank credit for the next
+    bill — not a single month's invoice mislabeled as a true-up.
+
     Mirrors _deliver_clients_with_frequency: skips subs of inactive non-comped
     tenants, internal-alerts on failure, exactly-once stamping happens inside
     deliver_subscription (it sets last_sent_at / next_send_at on success only)."""
     from .models import BillingReportSubscription
-    from .billing.delivery import deliver_subscription, draft_subscription
+    from .billing.delivery import (
+        deliver_subscription, draft_subscription,
+        deliver_trueup_subscription, draft_trueup_subscription,
+    )
 
     sent: list[int] = []
     drafted: list[int] = []
@@ -541,21 +548,34 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
             if getattr(tenant, "sending_paused", False):
                 skipped.append(sid)
                 continue
-            # #18: annual true-up has no real banked-vs-cashed reconciliation for
-            # utility-bill offtakers — the normal delivery path would send a single
-            # MONTH's invoice mislabeled as an annual true-up (and burn an invoice
-            # number). Skip them (honest no-op) until a real annual reconciliation
-            # exists, rather than imply a capability that isn't there.
-            if trueup_only and getattr(sub, "utility_account_id", None) is not None:
-                logger.info(
-                    "annual true-up skipped for utility-bill offtaker sub %s — no "
-                    "annual reconciliation implemented (would mis-send one month)", sid)
-                continue
             # Per-customer choice: "approval" (default) drafts into the operator's
             # inbox for review-and-send; "auto" sends straight to the recipient.
             mode = getattr(sub, "delivery_mode", "approval") or "approval"
             try:
-                if mode == "auto":
+                if trueup_only:
+                    # Real year-end settlement (budget vs actual). Works for
+                    # utility-bill offtakers too — that was the #18 gap.
+                    if mode == "auto":
+                        result = deliver_trueup_subscription(
+                            db, sub, tenant,
+                            triggered_by="sched-billing-trueup")
+                        if result.get("ok"):
+                            sent.append(sid)
+                        elif result.get("skipped"):
+                            skipped.append(sid)
+                        else:
+                            failed.append(sid)
+                    else:
+                        result = draft_trueup_subscription(
+                            db, sub, tenant,
+                            triggered_by="sched-draft-trueup")
+                        if result.get("ok"):
+                            drafted.append(sid)
+                        elif result.get("skipped"):
+                            skipped.append(sid)
+                        else:
+                            failed.append(sid)
+                elif mode == "auto":
                     # SAFETY (sim #5b): never auto-FIRE an invoice that doesn't reconcile
                     # against GMP's own bill. The genuine "doesn't match GMP" allocation
                     # flag the operator sees in the pipeline HOLDS the unattended send until
@@ -570,7 +590,7 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
                         continue
                     result = deliver_subscription(
                         db, sub, tenant,
-                        triggered_by=f"sched-billing-{'trueup' if trueup_only else cadence}")
+                        triggered_by=f"sched-billing-{cadence}")
                     if result.get("ok"):
                         sent.append(sid)
                     elif result.get("skipped"):
@@ -580,7 +600,7 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
                 else:
                     result = draft_subscription(
                         db, sub, tenant,
-                        triggered_by=f"sched-draft-{'trueup' if trueup_only else cadence}")
+                        triggered_by=f"sched-draft-{cadence}")
                     if result.get("ok"):
                         drafted.append(sid)
                     elif result.get("skipped"):
@@ -1752,6 +1772,15 @@ def start():
         # never sends twice.
         misfire_grace_time=3600, coalesce=True,
     )
+    # 1st of each month 13:00 UTC: Performance Verification monthly report pack
+    # (prior calendar month PI/PR PDF + email) for AO tenants with
+    # verification_reports_enabled. See api/jobs/verification_monthly.py.
+    scheduler.add_job(
+        _run_verification_monthly_reports,
+        CronTrigger(day=1, hour=13, minute=0),
+        id="verification_monthly_reports", replace_existing=True,
+        misfire_grace_time=3600, coalesce=True,
+    )
     # Daily at 15:00 UTC: watchdog. If the noon digest did NOT run today (missed
     # trigger, crash before the heartbeat), turn that invisible miss into a visible
     # internal alert instead of silence. Reads the KVFlag heartbeat below.
@@ -2714,6 +2743,23 @@ def _run_morning_fleet_digest() -> None:
         send_internal_alert(
             "Morning fleet digest: unhandled exception",
             f"The morning fleet-health digest job raised an unexpected error:\n{exc}",
+        )
+
+
+def _run_verification_monthly_reports() -> None:
+    """1st-of-month Performance Verification pack for Array Operator owners."""
+    try:
+        from .jobs.verification_monthly import run_monthly_verification_reports
+        result = run_monthly_verification_reports()
+        logger.info(
+            "verification_monthly_reports: sent=%d skipped=%d errors=%d",
+            len(result.get("sent", [])), result.get("skipped", 0),
+            len(result.get("errors", [])),
+        )
+    except Exception as exc:
+        send_internal_alert(
+            "Monthly verification reports: unhandled exception",
+            f"The verification_monthly_reports job raised an unexpected error:\n{exc}",
         )
 
 

@@ -354,3 +354,25 @@ def test_sync_payment_updates_byo_generation_sheet(monkeypatch):
     wb3 = load_workbook(io.BytesIO(out))
     # period 2026-05 still Paid with collected
     assert wb3.active.cell(2, 4).value == "Paid"
+
+
+def test_build_default_ledger_sorts_by_period_not_payment_id():
+    """Payments created out of calendar order must still land as Mar → Apr → May rows."""
+    from api.billing.invoice_ledger import build_default_ledger
+    t = _tenant()
+    sid = _sub(t.id)
+    # Create May FIRST (lower id), then March, then April — id-order is wrong calendar
+    _pay(t.id, sid, status="paid", amount_cents=5000, fee_cents=25,
+         period_key="2026-05-31", invoice_number="2026-05",
+         paid_at=datetime(2026, 6, 2, 12, 0, 0))
+    _pay(t.id, sid, status="paid", amount_cents=3000, fee_cents=15,
+         period_key="2026-03-31", invoice_number="2026-03",
+         paid_at=datetime(2026, 4, 2, 12, 0, 0))
+    _pay(t.id, sid, status="open", amount_cents=4000, fee_cents=20,
+         period_key="2026-04-30", invoice_number="2026-04", paid_at=None)
+    with SessionLocal() as db:
+        sub = db.get(BillingReportSubscription, sid)
+        blob, mapping = build_default_ledger(db, sub)
+    wb = load_workbook(io.BytesIO(blob))
+    periods = [wb.active.cell(r, 1).value for r in range(2, 5)]
+    assert periods == ["2026-03", "2026-04", "2026-05"], periods

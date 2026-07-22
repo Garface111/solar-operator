@@ -3045,7 +3045,12 @@ def _same_peer_inv(a: dict, b: dict) -> bool:
     return False
 
 
-def _ui_live_verdict(inv: dict, peers: list[dict], is_daylight: bool | None) -> str:
+def _ui_live_verdict(
+    inv: dict,
+    peers: list[dict],
+    is_daylight: bool | None,
+    solar_elev: float | None = None,
+) -> str:
     """Mirror FleetStore.liveVerdict — what Spreadsheet / cards count as attention.
 
     Returns: ok | dark | low | stale
@@ -3055,6 +3060,17 @@ def _ui_live_verdict(inv: dict, peers: list[dict], is_daylight: bool | None) -> 
         return "ok"
     if is_daylight is False:
         return "ok"
+    # Dusk/dawn shoulder: same gate as alert sweep / FleetStore (elev < 12°).
+    if solar_elev is not None:
+        try:
+            from .inverter_fleet import LIVE_COMPARE_MIN_ELEVATION_DEG as _min_elev
+        except Exception:
+            _min_elev = 12.0
+        try:
+            if float(solar_elev) < float(_min_elev):
+                return "ok"
+        except (TypeError, ValueError):
+            pass
     peers = peers or []
     if _is_producing_now(inv):
         lit = [p for p in peers if not _same_peer_inv(p, inv) and _is_producing_now(p)]
@@ -3096,13 +3112,22 @@ def _column_live_anomalies(col: dict) -> list[dict]:
     """Per-inverter live dark/low flags for one array column (UI parity)."""
     invs = list(col.get("inverters") or [])
     is_day = col.get("is_daylight")
+    elev = col.get("solar_elevation_deg")
+    if elev is not None:
+        try:
+            elev = float(elev)
+        except (TypeError, ValueError):
+            elev = None
+    # Prefer explicit live_compare_ok from fleet tree when present
+    if col.get("live_compare_ok") is False:
+        return []
     out: list[dict] = []
     for inv in invs:
         st = inv.get("status") or "ok"
         # Live overlay only applies when 14-day health still says ok (UI rule)
         if st not in ("ok", None):
             continue
-        lv = _ui_live_verdict(inv, invs, is_day)
+        lv = _ui_live_verdict(inv, invs, is_day, elev)
         if lv in ("dark", "low"):
             out.append({
                 "name": inv.get("name") or inv.get("sn") or "inverter",

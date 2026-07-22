@@ -162,3 +162,80 @@ def test_ai_parser_validates_and_rejects():
     assert ai._parse('{"header_row":1,"columns":{"generation":1},"confidence":0.2}', 5, 5) is None  # low confidence
     assert ai._parse('{"header_row":1,"columns":{"generation":99},"confidence":0.9}', 5, 5) is None # out of range
     assert ai._parse("not json", 5, 5) is None
+
+
+# ── Chronological append (regression: model emit order / ISO labels / month names) ──
+
+def test_append_ai_rows_sorts_iso_period_labels_not_model_order():
+    """ISO 'YYYY-MM' period cells are NOT full dates — old row_period returned None
+    for every row, so sort was a no-op and rows kept the model's May/June/April order."""
+    blob = _make_xlsx([
+        ["Month", "kWh", "Tariff"],
+        ["2025-04", 100, 0.18],
+        ["2025-05", 110, 0.18],
+    ])
+    m = st.detect_structure(blob, "t.xlsx")
+    # Model emits out of order + includes a month already on the sheet
+    ai_rows = [
+        {0: "2025-07", 1: 130, 2: 0.18},
+        {0: "2025-04", 1: 100, 2: 0.18},  # already present
+        {0: "2025-06", 1: 120, 2: 0.18},
+        {0: "2025-03", 1: 90, 2: 0.18},
+    ]
+    new, appended = st.append_ai_rows(blob, m, ai_rows, present={"2025-04", "2025-05"})
+    assert len(appended) == 3
+    periods = [r[0] for r in openpyxl.load_workbook(io.BytesIO(new)).active.iter_rows(values_only=True)]
+    # existing April/May stay put; new rows land chronological after them
+    assert periods == ["Month", "2025-04", "2025-05", "2025-03", "2025-06", "2025-07"] or \
+           periods[3:] == ["2025-03", "2025-06", "2025-07"]
+    # The NEW rows must be chronological among themselves regardless of existing
+    new_only = [p for p in periods if p in ("2025-03", "2025-06", "2025-07")]
+    assert new_only == ["2025-03", "2025-06", "2025-07"]
+
+
+def test_append_ai_rows_sorts_bare_month_names():
+    """Sheets styled with bare month names ('April') used to all sort as '9999-99'."""
+    blob = _make_xlsx([
+        ["Month", "kWh", "Tariff"],
+        ["April", 100, 0.18],
+        ["May", 110, 0.18],
+    ])
+    m = st.detect_structure(blob, "t.xlsx")
+    ai_rows = [
+        {0: "June", 1: 120, 2: 0.18},
+        {0: "March", 1: 90, 2: 0.18},
+        {0: "July", 1: 130, 2: 0.18},
+    ]
+    new, appended = st.append_ai_rows(blob, m, ai_rows, present={"April", "May"})
+    assert len(appended) == 3
+    periods = [r[0] for r in openpyxl.load_workbook(io.BytesIO(new)).active.iter_rows(values_only=True)]
+    new_only = [p for p in periods if p in ("March", "June", "July")]
+    assert new_only == ["March", "June", "July"], periods
+
+
+def test_append_ai_rows_dedups_bare_month_present_against_iso_row():
+    """Sheet says 'April'; AI proposes 2025-04 → must not duplicate."""
+    blob = _make_xlsx([
+        ["Month", "kWh"],
+        ["April", 100],
+        ["May", 110],
+    ])
+    m = st.detect_structure(blob, "t.xlsx")
+    ai_rows = [
+        {0: "2025-04", 1: 100},
+        {0: "2025-06", 1: 120},
+    ]
+    new, appended = st.append_ai_rows(blob, m, ai_rows, present={"April", "May"})
+    assert len(appended) == 1
+    periods = [r[0] for r in openpyxl.load_workbook(io.BytesIO(new)).active.iter_rows(values_only=True)]
+    assert periods.count("2025-04") == 0 or "April" in periods  # no second April
+    assert "2025-06" in periods
+
+
+def test_row_period_key_handles_formats():
+    assert st._row_period_key({0: "2025-06", 1: 10}) == "2025-06"
+    assert st._row_period_key({0: "June 2025", 1: 10}) == "2025-06"
+    assert st._row_period_key({0: "6/30/2025", 1: 10}) == "2025-06"
+    assert st._row_period_key({0: "June", 1: 10}) == "0000-06"
+    # period end wins over start when both present
+    assert st._row_period_key({0: "5/1/2025", 1: "5/31/2025"}) == "2025-05"

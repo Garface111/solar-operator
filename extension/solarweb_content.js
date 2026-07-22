@@ -365,7 +365,16 @@
         const nm = String(s.name || "");
         if (!/Total Power\s*\|/.test(nm)) continue;     // per-device only
         const disp = nm.replace(/^.*\|\s*/, "").trim();
-        const kwh = integrateKwh(s.data);
+        // SAME watts→kW normalization as captureInverters (devwork is WATTS).
+        // Without this, history integrate treated W as kW (~1000×), tripped the
+        // backend plausibility ceiling, and left sparklines empty/near-zero while
+        // site EnergyTodayInkWh (correct kWh) filled the array "Today" column.
+        // Waterford 150kW symptom (2026-07-21): array 315–1200 kWh/day, each
+        // Primo sparkline stuck at ~5 kWh flatline.
+        const kwData = (s.data || []).map((p) =>
+          (Array.isArray(p) && p.length === 2 && typeof p[1] === "number")
+            ? [p[0], p[1] / 1000] : p);
+        const kwh = integrateKwh(kwData);
         dayKwh += kwh; any = true;
         (byDevice[disp] = byDevice[disp] || []).push({ date: iso, kwh: Math.round(kwh * 100) / 100 });
       }

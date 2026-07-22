@@ -193,6 +193,7 @@ from .nepool_assign import router as nepool_router
 from .resend_webhook import router as resend_webhook_router
 from .sandbox import router as sandbox_router
 from .verification import router as verification_router
+from .perf_verification.routes import router as perf_verification_router
 from .dev_sandbox import router as dev_sandbox_router, DEV_ENABLED as _SO_DEV_ENABLED
 from .dev_captures import router as dev_captures_router
 from .events import router as events_router, broadcast as _sse_broadcast
@@ -413,6 +414,9 @@ app.include_router(resend_webhook_router)
 app.include_router(sandbox_router)
 # Verify accuracy: operator uploads their records to compare against SO workbook.
 app.include_router(verification_router)
+# Performance Verification (Sunreport parity): PI/PR, deviation, monthly pack.
+# Distinct from workbook accuracy verification above.
+app.include_router(perf_verification_router)
 # SSE live-push: streams capture.landed events to the sandbox canvas.
 app.include_router(events_router)
 # Dev-only sandbox helpers. Mounted but each route guards on SO_DEV_ENABLED;
@@ -2063,6 +2067,84 @@ def admin_unlink_tenant(body: dict, _: None = Depends(_require_admin)):
 @app.post("/admin/jobs/run")
 def admin_run_jobs(_: None = Depends(_require_admin)):
     return {"ran": run_pending_jobs()}
+
+
+@app.post("/admin/backfill-bill-pdfs")
+def admin_backfill_bill_pdfs(
+    body: dict | None = None,
+    _: None = Depends(_require_admin),
+):
+    """Force statement-PDF backfill so the utility-bill archive fills.
+
+    Body:
+      tenant_id  — one tenant (required unless all_with_sessions)
+      all_with_sessions — if true, pull every non-demo tenant that has a
+                         utility_session (can take a long time)
+      background — if true (default), run in a daemon thread and return 202-ish
+                   immediately with a kickoff ack; else block until done
+
+    Each pull uses the aggressive per-period PDF backfill in worker.py
+    (up to 300 distinct periods/account/pass). Re-run until saved≈0."""
+    from threading import Thread
+    body = body or {}
+    tid = (body.get("tenant_id") or "").strip() or None
+    all_sess = bool(body.get("all_with_sessions"))
+    background = body.get("background", True)
+    if not tid and not all_sess:
+        raise HTTPException(400, "tenant_id required (or all_with_sessions=true)")
+
+    def _run(targets: list[str]) -> dict:
+        out = []
+        for t in targets:
+            try:
+                r = pull_bills_for_tenant(t)
+                # Summarize PDF progress without dumping full bill lists.
+                results = r.get("results") or []
+                saved = sum(int((x.get("pdf_backfill") or {}).get("saved") or 0) for x in results if isinstance(x, dict))
+                out.append({
+                    "tenant_id": t,
+                    "status": r.get("status") or r.get("skipped") or "ok",
+                    "accounts": r.get("accounts_processed") or r.get("accounts") or len(results),
+                    "pdf_periods_saved": saved,
+                    "results": [
+                        {
+                            "account": x.get("account"),
+                            "nickname": x.get("nickname"),
+                            "status": x.get("status"),
+                            "pdf_capture": x.get("pdf_capture"),
+                            "pdf_backfill": x.get("pdf_backfill"),
+                        }
+                        for x in results if isinstance(x, dict)
+                    ][:80],
+                })
+            except Exception as e:  # noqa: BLE001
+                out.append({"tenant_id": t, "status": "failed",
+                            "error": f"{type(e).__name__}: {e}"})
+        return {"ok": True, "tenants": out}
+
+    targets: list[str] = []
+    if tid:
+        targets = [tid]
+    else:
+        with SessionLocal() as db:
+            sess_tids = select(UtilitySession.tenant_id).distinct()
+            rows = db.execute(
+                select(Tenant.id).where(
+                    Tenant.active.is_(True),
+                    Tenant.is_demo.is_(False),
+                    Tenant.id.in_(sess_tids),
+                )
+            ).scalars().all()
+            targets = list(rows)
+
+    if not targets:
+        return {"ok": True, "started": False, "tenants": [], "message": "no matching tenants"}
+
+    if background:
+        Thread(target=_run, args=(targets,), daemon=True, name="admin-pdf-backfill").start()
+        return {"ok": True, "started": True, "background": True, "tenants": targets,
+                "message": "PDF backfill started; re-check bill archive / admin after a few minutes"}
+    return _run(targets)
 
 
 @app.post("/admin/vendor-cred-encryption")

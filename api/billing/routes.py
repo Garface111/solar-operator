@@ -135,6 +135,10 @@ def _sub_dict(s: BillingReportSubscription, pricing_ctx=None) -> dict:
         "invoice_number_start": getattr(s, "invoice_number_start", None),
         "invoice_number_next": getattr(s, "invoice_number_next", None),
         "budget_amount_usd": getattr(s, "budget_amount_usd", None),
+        "pending_credit_usd": getattr(s, "pending_credit_usd", None) or 0,
+        "last_trueup_window_end": (
+            s.last_trueup_window_end.isoformat()
+            if getattr(s, "last_trueup_window_end", None) else None),
         # Resend delivery truth (webhook + send stamp). Distinct from last_sent_at
         # (mailer accept): delivered/bounced come only from Resend events.
         "last_resend_email_id": getattr(s, "last_resend_email_id", None),
@@ -2517,6 +2521,80 @@ def invoice_archive_manifest(authorization: Optional[str] = Header(default=None)
     return s["result"]
 
 
+@router.get("/utility-bill-archive")
+def utility_bill_archive_manifest(authorization: Optional[str] = Header(default=None)):
+    """All captured utility-bill PDFs on file for this operator (newest first).
+
+    Collapsible "Utility bill archive" next to the invoice archive on Offtakers.
+    Each row is a real Bill.pdf_bytes; download via /files/gmp-bill/{id} (name
+    is historical — works for GMP, VEC, and any provider we store).
+
+    One entry per (account, period_end) so capture-sprawl dupes don't flood the
+    UI. Cap is high enough for multi-year × multi-array fleets (was 500 — too low)."""
+    t = tenant_from_session(authorization)
+    from ..models import Bill, UtilityAccount, Array
+    bills_out: list[dict] = []
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(Bill, UtilityAccount, Array)
+            .join(UtilityAccount, Bill.account_id == UtilityAccount.id)
+            .outerjoin(Array, UtilityAccount.array_id == Array.id)
+            .where(Bill.tenant_id == t.id, Bill.pdf_bytes.isnot(None))
+            .order_by(
+                Bill.period_end.desc().nullslast(),
+                Bill.bill_date.desc().nullslast(),
+                Bill.id.desc(),
+            )
+            .limit(20000)
+        ).all()
+        # Dedupe: freshest bill row wins per (account_id, period_end|bill_date).
+        seen_keys: set = set()
+        for b, ua, arr in rows:
+            key = (b.account_id, b.period_end or b.bill_date or b.id)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            pe = b.period_end
+            ps = b.period_start
+            bd = b.bill_date
+            pe_s = pe.strftime("%Y-%m-%d") if pe is not None else None
+            ps_s = ps.strftime("%Y-%m-%d") if ps is not None else None
+            bd_s = bd.strftime("%Y-%m-%d") if bd is not None else None
+            month = None
+            if pe is not None:
+                month = pe.strftime("%Y-%m")
+            elif bd is not None:
+                month = bd.strftime("%Y-%m")
+            provider = (ua.provider or "utility").strip().lower()
+            prov_lab = provider.upper() if len(provider) <= 6 else provider.title()
+            nick = (ua.nickname or "").strip()
+            arr_name = (arr.name if arr is not None else None) or None
+            acct_num = (ua.account_number or "").strip()
+            label = nick or arr_name or (f"{prov_lab} {acct_num}" if acct_num else f"{prov_lab} account")
+            per_slug = month or "bill"
+            safe_label = _re.sub(r"[^A-Za-z0-9._-]+", "-", label).strip("-") or "account"
+            fname = f"{provider}_bill_{safe_label}_{per_slug}.pdf"
+            size = len(b.pdf_bytes) if b.pdf_bytes else 0
+            bills_out.append({
+                "id": b.id,
+                "account_id": b.account_id,
+                "provider": provider,
+                "provider_label": prov_lab,
+                "account_label": label,
+                "account_number": acct_num or None,
+                "array_name": arr_name,
+                "period_start": ps_s,
+                "period_end": pe_s,
+                "bill_date": bd_s,
+                "month": month,
+                "kwh_generated": b.kwh_generated,
+                "size": size,
+                "filename": fname,
+                "download": f"/v1/array-operator/billing/files/gmp-bill/{b.id}",
+            })
+    return {"ok": True, "bills": bills_out, "count": len(bills_out)}
+
+
 @router.get("/invoice-archive.zip")
 def invoice_archive_zip(authorization: Optional[str] = Header(default=None),
                         month: Optional[str] = Query(default=None)):
@@ -4122,10 +4200,18 @@ def approve_draft(draft_id: int, authorization: Optional[str] = Header(default=N
         # attach). #3: pin the period the operator reviewed so a bill that landed
         # after review can't be sent unreviewed.
         gmp_override = bytes(d.gmp_invoice_pdf) if d.gmp_invoice_pdf is not None else None
+        is_trueup_draft = bool(
+            d.period_label and str(d.period_label).startswith("True-up "))
         try:
-            result = deliver_subscription(
-                db, sub, t, triggered_by="approval", is_test=False, note=d.note,
-                expected_period_label=d.period_label, gmp_pdf_override=gmp_override)
+            if is_trueup_draft:
+                from .delivery import deliver_trueup_subscription
+                result = deliver_trueup_subscription(
+                    db, sub, t, triggered_by="approval-trueup", is_test=False,
+                    force=True)
+            else:
+                result = deliver_subscription(
+                    db, sub, t, triggered_by="approval", is_test=False, note=d.note,
+                    expected_period_label=d.period_label, gmp_pdf_override=gmp_override)
         except Exception:
             d.status = "pending"      # release the claim so it can be retried
             db.commit()
@@ -4154,9 +4240,16 @@ def test_draft(draft_id: int, authorization: Optional[str] = Header(default=None
         # Attach the draft's GMP PDF for this test send only, passed through (never
         # written onto the sub) — same per-send scoping as approve (#4).
         gmp_override = bytes(d.gmp_invoice_pdf) if d.gmp_invoice_pdf is not None else None
-        result = deliver_subscription(db, sub, t, triggered_by="test",
-                                      is_test=True, note=d.note,
-                                      gmp_pdf_override=gmp_override)
+        is_trueup_draft = bool(
+            d.period_label and str(d.period_label).startswith("True-up "))
+        if is_trueup_draft:
+            from .delivery import deliver_trueup_subscription
+            result = deliver_trueup_subscription(
+                db, sub, t, triggered_by="test-trueup", is_test=True, force=True)
+        else:
+            result = deliver_subscription(db, sub, t, triggered_by="test",
+                                          is_test=True, note=d.note,
+                                          gmp_pdf_override=gmp_override)
         if not result.get("ok"):
             raise HTTPException(422, result.get("error", "test send failed"))
         return {"ok": True, "result": result}
@@ -4770,16 +4863,25 @@ def get_workbook_file(sub_id: int, authorization: Optional[str] = Header(default
 
 @router.get("/files/gmp-bill/{bill_id}")
 def get_gmp_bill_file(bill_id: int, authorization: Optional[str] = Header(default=None)):
-    """Stream a captured GMP utility-bill PDF (inline view / download)."""
+    """Stream a captured utility-bill PDF (GMP/VEC/… — download or inline)."""
     t = tenant_from_session(authorization)
-    from ..models import Bill
+    from ..models import Bill, UtilityAccount
     with SessionLocal() as db:
         b = db.get(Bill, bill_id)
         if not b or b.tenant_id != t.id or not b.pdf_bytes:
-            raise HTTPException(404, "No GMP bill PDF on file")
-        return StreamingResponse(io.BytesIO(b.pdf_bytes),
+            raise HTTPException(404, "No utility bill PDF on file")
+        ua = db.get(UtilityAccount, b.account_id) if b.account_id else None
+        provider = ((ua.provider if ua else None) or "utility").strip().lower()
+        pe = b.period_end or b.bill_date
+        per = pe.strftime("%Y-%m") if pe is not None else "bill"
+        nick = (ua.nickname if ua else None) or ""
+        safe = _re.sub(r"[^A-Za-z0-9._-]+", "-", nick).strip("-") or "account"
+        fname = f"{provider}_bill_{safe}_{per}.pdf"
+        return StreamingResponse(
+            io.BytesIO(b.pdf_bytes),
             media_type=b.pdf_content_type or "application/pdf",
-            headers={"Content-Disposition": "inline; filename=gmp_bill.pdf"})
+            headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+        )
 
 
 # ─── Offtaker invoice email — MASS TEMPLATE studio (Anna-scale ask) ──────────

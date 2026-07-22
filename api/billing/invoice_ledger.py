@@ -161,8 +161,15 @@ def build_default_ledger(db, sub) -> tuple[bytes, dict]:
     from openpyxl.utils import get_column_letter
 
     payments = list_payment_rows(db, sub)
-    # oldest first for spreadsheet chronology
-    payments = list(reversed(payments))
+    # Chronological by billing period (NOT payment-id order). Creating May before
+    # March in Stripe used to reverse()-to-id-asc and leave rows out of calendar order.
+    def _period_sort(p):
+        pl = str(p.get("period_label") or p.get("period_key") or "")
+        # Prefer YYYY-MM / ISO prefix; fall back to full string so unknowns group stably
+        if len(pl) >= 7 and pl[4] == "-" and pl[:4].isdigit():
+            return pl[:7]
+        return pl or "9999-99"
+    payments = sorted(payments, key=_period_sort)
 
     wb = Workbook()
     ws = wb.active

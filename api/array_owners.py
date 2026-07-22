@@ -4128,6 +4128,77 @@ _CAPTURE_VENDORS = {"fronius", "chint", "sma"}
 _ABS_ARRAY_DAILY_KWH_CEILING = 100_000.0
 _ABS_INVERTER_DAILY_KWH_CEILING = 10_000.0
 
+# When per-inverter integrated energy is < this fraction of site EnergyToday,
+# re-allocate the site total across inverters (Fronius Waterford sparkline bug).
+_FRONIUS_INV_SUM_SITE_RATIO = 0.50
+
+
+def _rebalance_fronius_inverter_dailies(
+    db,
+    *,
+    tenant_id: str,
+    array_id: int,
+    site_days: dict,
+    inv_rows: list,
+) -> int:
+    """If sum(InverterDaily) << site DailyGeneration for a day, allocate site kWh.
+
+    Returns number of inverter-day rows written/updated.
+    """
+    if not site_days or not inv_rows:
+        return 0
+    inv_ids = [iv.id for iv in inv_rows]
+    # Nameplate weights (heal missing nameplate from model string)
+    from .inverter_fleet import _nameplate_from_model
+    weights: list[tuple] = []
+    for iv in inv_rows:
+        np = iv.nameplate_kw
+        if not np and (iv.model or iv.name):
+            np = _nameplate_from_model("fronius", iv.model or iv.name or "")
+            if np and not iv.nameplate_kw:
+                iv.nameplate_kw = np
+        weights.append((iv, float(np) if np and np > 0 else 1.0))
+    wsum = sum(w for _, w in weights) or float(len(weights))
+    n_fixed = 0
+    for day, site_kwh in site_days.items():
+        if not site_kwh or site_kwh <= 0:
+            continue
+        existing = {
+            r.inverter_id: r for r in db.execute(
+                select(InverterDaily).where(
+                    InverterDaily.inverter_id.in_(inv_ids),
+                    InverterDaily.day == day,
+                )
+            ).scalars().all()
+        }
+        inv_sum = sum(float(r.kwh or 0) for r in existing.values())
+        if inv_sum >= float(site_kwh) * _FRONIUS_INV_SUM_SITE_RATIO:
+            continue  # inverter series already agrees with site
+        # Allocate site total by nameplate share
+        for iv, w in weights:
+            share = float(site_kwh) * (w / wsum)
+            # Cap at nameplate×24
+            cap = (float(iv.nameplate_kw) * 24.0) if iv.nameplate_kw else _ABS_INVERTER_DAILY_KWH_CEILING
+            share = min(share, cap)
+            share = round(share, 3)
+            row = existing.get(iv.id)
+            if row is None:
+                _insert_inverter_daily_race_safe(
+                    db, tenant_id=tenant_id, inverter_id=iv.id,
+                    day=day, kwh=share)
+                n_fixed += 1
+            elif share > float(row.kwh or 0):
+                row.kwh = share
+                row.uploaded_at = now()
+                n_fixed += 1
+        if n_fixed:
+            log.info(
+                "inverter-capture: rebalanced Fronius array=%s day=%s site=%.1f "
+                "inv_sum_was=%.1f → allocated by nameplate across %d units",
+                array_id, day, site_kwh, inv_sum, len(weights),
+            )
+    return n_fixed
+
 
 # ── race-safe daily upserts (2026-07-04, Anna's uq_daily_array_day 500) ────────
 # The capture handler reads existing (array, day) rows and then inserts the
@@ -4738,6 +4809,30 @@ def _inverter_capture_for_tenant(tenant: Tenant, provider: str, body: "InverterC
                             row.kwh = v
                             row.uploaded_at = now()
                 inv_persisted += 1
+
+            # ── Site/inverter energy rebalance (Fronius Waterford class) ─────
+            # Site DailyGeneration often comes from Solar.web EnergyTodayInkWh
+            # (authoritative kWh). Per-inverter InverterDaily comes from integrating
+            # the devwork power chart — which freezes low on morning-only harvests
+            # and used to miss watts→kW on history backfill. Result: array "Today"
+            # looks right (hundreds of kWh) while every Primo sparkline is a flat
+            # ~5 kWh stub. When the inverter sum is far below the site day, allocate
+            # the site total across inverters by nameplate so sparklines match
+            # reality. Never invent energy above the site total; never shrink a
+            # higher already-correct inverter sum.
+            if provider == "fronius" and want_arr:
+                _db_invs = db.execute(
+                    select(Inverter).where(
+                        Inverter.array_id == arr.id,
+                        Inverter.deleted_at.is_(None),
+                        Inverter.vendor == "fronius",
+                    )
+                ).scalars().all()
+                if _db_invs:
+                    _rebalance_fronius_inverter_dailies(
+                        db, tenant_id=tenant.id, array_id=arr.id,
+                        site_days=want_arr, inv_rows=_db_invs,
+                    )
 
             results.append({
                 "site_id": site.site_id,

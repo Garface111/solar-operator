@@ -219,5 +219,23 @@ def _integrate_kwh(kw_series: list) -> float | None:
 
 
 def _nameplate(model: str) -> float | None:
-    m = re.search(r"(\d+(?:\.\d+)?)\s*k", model, re.I)
+    """Parse Fronius display names like 'Primo 12.5-1 208-240 (7)' → 12.5.
+
+    Prefer an explicit '…kW' / '…k ' token; else the first number after a family
+    word (Primo/Symo/Galvo/…). The old ``\\d+\\s*k`` pattern missed '12.5-1'
+    (no letter k), leaving nameplate_kw NULL on Waterford Primos.
+    """
+    if not model:
+        return None
+    m = re.search(r"(\d+(?:\.\d+)?)\s*k(?:w|wp)?\b", model, re.I)
+    if m:
+        return float(m.group(1))
+    m = re.search(
+        r"(?:Primo|Symo|Galvo|Eco|IG|Pr|Sy)\s+(\d+(?:\.\d+)?)",
+        model,
+        re.I,
+    )
+    if m:
+        return float(m.group(1))
+    m = re.search(r"\b(\d+(?:\.\d+)?)\b", model)
     return float(m.group(1)) if m else None
