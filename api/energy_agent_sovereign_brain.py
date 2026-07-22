@@ -489,6 +489,7 @@ def build_think_prompt(
                     "ops_sweep|jobs_requeue|jobs_drain|job_cancel|code_hire|speak|email_ford|email|"
                     "mind_propose|mind_apply|mind_reject|"
                     "reality_record|sandbox_start|sandbox_score|sandbox_end|"
+                    "showcase_pitch|showcase_ready|showcase_note|showcase_demo_html|"
                     "stripe_inspect|stripe_cancel|stripe_refund|billing_status|"
                     "brand_set|brand_announce|tenant_soft_delete|tenant_hard_purge|"
                     "purge_soft_deleted|har_stage|har_received"
@@ -598,6 +599,7 @@ def build_think_prompt(
             "Use and evolve procedural skills (skills.loaded) — don't re-derive solved playbooks",
             "Read reality_file before inventing what changed; append on every ship",
             "When mind_sandbox is active, free-run in sandbox — no prod merge/deploy for experiments",
+            "Convince Ford you're ready for main: ship visible sandbox AO changes + showcase_pitch + showcase_ready; he reviews at /live/",
         ],
         "constraints": {
             "max_actions": 3,

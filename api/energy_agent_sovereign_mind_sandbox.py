@@ -706,13 +706,80 @@ def status(db=None) -> dict[str, Any]:
     }
 
 
+def write_showcase_note(
+    *,
+    title: str,
+    body: str,
+    kind: str = "note",
+    run_id: str | None = None,
+    db=None,
+) -> dict[str, Any]:
+    """Sovereign writes PITCH.md / READY.md / notes so Ford can audit in Portal Live."""
+    active = load_run(run_id) if run_id else get_active_run(db)
+    if not active and mind_sandbox_force():
+        active = ensure_active_run(db)
+    if not active:
+        return {"ok": False, "error": "no open sandbox run"}
+    rid = active["id"]
+    d = run_dir(rid) / "showcase"
+    d.mkdir(parents=True, exist_ok=True)
+    kind = (kind or "note").lower()
+    if kind == "pitch":
+        path = d / "PITCH.md"
+    elif kind in ("ready", "ready_for_main"):
+        path = d / "READY.md"
+    elif kind == "demo_html":
+        path = d / "demo.html"
+    else:
+        safe = "".join(c if c.isalnum() or c in "-_" else "-" for c in (title or "note"))[:50]
+        path = d / f"{_iso()[:19].replace(':', '')}_{safe}.md"
+    if kind == "demo_html":
+        path.write_text(body or "", encoding="utf-8")
+    else:
+        path.write_text(
+            f"# {title}\n\n_Updated {_iso()}_\n\n{(body or '').strip()}\n",
+            encoding="utf-8",
+        )
+    # also mirror pitch into run.json for portal discovery
+    active = load_run(rid) or active
+    show = dict(active.get("showcase") or {})
+    show[kind] = {
+        "path": str(path),
+        "title": title,
+        "updated_at": _iso(),
+        "excerpt": (body or "")[:400],
+    }
+    active["showcase"] = show
+    save_run(active)
+    return {
+        "ok": True,
+        "run_id": rid,
+        "path": str(path),
+        "kind": kind,
+        "preview_url": "http://127.0.0.1:7701/live/",
+        "portal_pitch_url": "http://127.0.0.1:7701/api/live/pitch",
+        "hint": (
+            "Ford reviews at Sovereign Portal → Live. Keep updating PITCH.md + READY.md "
+            "until he agrees this can go to main."
+        ),
+    }
+
+
 def wake_payload(db=None) -> dict[str, Any]:
     """Inject into cortex so it knows when free-run is active."""
     st = status(db)
     active = st.get("active")
+    if not active and mind_sandbox_force():
+        # Ensure FORCE mode always has a run for showcase tools
+        try:
+            active = ensure_active_run(db)
+            st = status(db)
+        except Exception:
+            active = None
     if not active:
         return {
             "active": False,
+            "force": mind_sandbox_force(),
             "doctrine": (
                 "Mind sandbox is idle. You may propose starting a free-run evaluation "
                 "via admin/mind-sandbox or memory, but do not claim a sandbox is open."
@@ -720,16 +787,30 @@ def wake_payload(db=None) -> dict[str, Any]:
         }
     return {
         "active": True,
+        "force": mind_sandbox_force(),
         "run_id": active.get("id"),
         "title": active.get("title"),
         "ends_at": active.get("ends_at"),
         "goal": active.get("goal"),
         "jobs_so_far": len(active.get("sovereign_jobs") or []),
+        "ford_preview": {
+            "portal": "http://127.0.0.1:7701/",
+            "live_ao_clone": "http://127.0.0.1:7701/live/",
+            "pitch_json": "http://127.0.0.1:7701/api/live/pitch",
+            "diff": "http://127.0.0.1:7701/api/live/diff",
+            "instruction": (
+                "Ford has a LIVE VIEW of your Array Operator clone. Your job includes "
+                "convincing him this is ready for main: ship visible improvements in the "
+                "sandbox, write showcase pitch (action showcase_pitch) and ready-for-main "
+                "brief (showcase_ready), and point him at /live/ + specific diffs."
+            ),
+        },
         "doctrine": (
-            "MIND SANDBOX is OPEN. Free-run: prefer sandbox jobs "
-            "(sandbox:true / kind sandbox_job). Do NOT merge main or deploy prod "
-            "for experimental work. Compete with Ford's real ships this week — "
-            "substance over thrash. After ends_at, expect a scorecard."
+            "MIND SANDBOX is OPEN (FORCE may be on — never merge main / never deploy prod). "
+            "Ford audits your work at http://127.0.0.1:7701/live/ (live AO clone + file diffs). "
+            "You MUST sell readiness: use showcase_pitch + showcase_ready after meaningful ships. "
+            "Build demos (showcase_demo_html) if a static walkthrough helps. Substance over thrash."
         ),
         "worktree": str(run_dir(active["id"])),
+        "showcase": active.get("showcase") or {},
     }

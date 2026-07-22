@@ -2442,6 +2442,27 @@ def execute_brain_actions(db, actions: list[dict], *, tick_id: str) -> list[dict
         elif atype in ("sandbox_end", "mind_sandbox_end"):
             from .energy_agent_sovereign_mind_sandbox import end_run
             res = end_run(db, run_id=raw.get("run_id"), score=raw.get("score", True) is not False)
+        elif atype in (
+            "showcase_pitch", "showcase_ready", "showcase_note",
+            "showcase_demo", "showcase_demo_html", "showcase_write",
+        ):
+            from .energy_agent_sovereign_mind_sandbox import write_showcase_note
+            kind = "note"
+            if "pitch" in atype:
+                kind = "pitch"
+            elif "ready" in atype:
+                kind = "ready"
+            elif "demo" in atype:
+                kind = "demo_html"
+            elif raw.get("kind"):
+                kind = str(raw.get("kind"))
+            res = write_showcase_note(
+                title=str(raw.get("title") or raw.get("summary") or "Showcase")[:200],
+                body=str(raw.get("text") or raw.get("body") or raw.get("rationale") or ""),
+                kind=kind,
+                run_id=raw.get("run_id"),
+                db=db,
+            )
         elif atype in ("agenda", "goal_upsert", "reprioritize_goals"):
             from .energy_agent_sovereign_ops import own_agenda, reprioritize_goals
             if raw.get("updates") or atype == "reprioritize_goals":
