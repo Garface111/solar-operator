@@ -2214,6 +2214,42 @@ class HarvestRun(Base):
     )
 
 
+class BillDiscoveryJob(Base):
+    """Automatic bill-adapter discovery for a Cloud Capture utility login.
+
+    Fully automatic, safety-bounded: one login attempt, short explore budget,
+    hard abort on MFA/CAPTCHA, never promotes a synthesised extractor without
+    validation. See api/bill_discovery_engine.py.
+    """
+    __tablename__ = "bill_discovery_job"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    username_lc: Mapped[str] = mapped_column(String(200))
+    login_host: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # queued | running | succeeded | failed | aborted_safe | skipped_known
+    status: Mapped[str] = mapped_column(String(24), default="queued", index=True)
+    # mfa | captcha | login_failed | max_steps | timeout | no_payload | no_creds | …
+    abort_reason: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    family: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    action: Mapped[str | None] = mapped_column(String(24), nullable=True)  # arm_known | explore | …
+    captures_count: Mapped[int] = mapped_column(Integer, default=0)
+    # Compact JSON: [{url, status, content_type, bytes, body_preview}]
+    captures_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Synthesis result JSON (spec fingerprint, source, ok)
+    synthesis_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fingerprint: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_bill_discovery_lookup", "tenant_id", "provider", "created_at"),
+        Index("ix_bill_discovery_queue", "status", "created_at"),
+    )
+
+
 class ServiceContact(Base):
     """A person/company on the operator's O&M / repair team.
 

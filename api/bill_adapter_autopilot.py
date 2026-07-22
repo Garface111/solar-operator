@@ -208,6 +208,7 @@ def on_credential_saved(
         result["detail"] = "Credential saved but cloud capture disabled — not armed."
         return result
 
+    discovery = None
     if plan.action == "arm_known":
         result["armed"] = True
         result["detail"] = (
@@ -218,6 +219,19 @@ def on_credential_saved(
             "bill-autopilot arm family=%s provider=%s tenant=%s",
             plan.family, plan.provider, tenant_id,
         )
+        # Still record a discovery job as skipped_known (audit trail, no login).
+        try:
+            from .bill_discovery_engine import enqueue_discovery
+            discovery = enqueue_discovery(
+                tenant_id=tenant_id,
+                provider=provider,
+                username=username,
+                login_host=login_host,
+                force_explore=False,
+            )
+        except Exception as e:
+            log.warning("enqueue discovery (known) failed: %s", e)
+        result["discovery"] = discovery
         return result
 
     # Unknown platform — try synthesis if caller supplied a sample payload.
@@ -235,9 +249,32 @@ def on_credential_saved(
             result["plan"] = plan.to_dict()
         else:
             result["detail"] = syn.get("error") or "Synthesis failed."
+        result["discovery"] = None
         return result
 
-    result["detail"] = plan.detail
+    # Fully automatic: queue bounded browser discovery for unknown portals.
+    try:
+        from .bill_discovery_engine import enqueue_discovery
+        discovery = enqueue_discovery(
+            tenant_id=tenant_id,
+            provider=provider,
+            username=username,
+            login_host=login_host,
+            force_explore=False,
+        )
+        result["discovery"] = discovery
+        result["detail"] = (
+            "Unknown platform — automatic discovery queued: bounded browser "
+            "session will capture billing traffic and synthesize an extractor "
+            f"(job #{discovery.get('id')}, status={discovery.get('status')}). "
+            "Hard-aborts on MFA/CAPTCHA; one login attempt only."
+        )
+        plan.action = "explore"
+        result["plan"] = plan.to_dict()
+    except Exception as e:
+        log.warning("enqueue discovery failed: %s", e)
+        result["detail"] = plan.detail
+        result["discovery"] = {"ok": False, "error": str(e)[:200]}
     return result
 
 
@@ -437,9 +474,20 @@ def verify_autopilot_matrix() -> dict[str, Any]:
         },
         "scalable_thesis": (
             "Do not hand-write one adapter per utility. Arm platform families "
-            "(GMP JWT, SmartHub NISC, …) on login; for unknowns synthesize "
-            "extractors from captured billing JSON (auto_adapters) after HAR."
+            "(GMP JWT, SmartHub NISC, …) on login; for unknowns run automatic "
+            "bounded browser discovery (one login, MFA/CAPTCHA abort) then "
+            "synthesize extractors from captured JSON (auto_adapters)."
         ),
+        "discovery": {
+            "engine": "api.bill_discovery_engine",
+            "safety": [
+                "one password login attempt per job",
+                "hard abort on MFA/CAPTCHA/lockout text",
+                "max wall clock / navigations / captures",
+                "refuse if harvest_fails already at lockout pause",
+                "known families skip browser (skipped_known)",
+            ],
+        },
     }
 
 
@@ -539,3 +587,61 @@ def verify_public() -> dict:
     """Unauthenticated smoke for CI / health — no tenant secrets, fixture only."""
     # Intentionally public-ish for deploy smoke; no credentials touched.
     return verify_autopilot_matrix()
+
+
+class ExploreIn(BaseModel):
+    provider: str
+    username: str
+    login_host: Optional[str] = None
+    force_explore: bool = False
+
+
+@router.post("/v1/bill-autopilot/explore")
+def explore_now(body: ExploreIn, authorization: Optional[str] = Header(default=None)) -> dict:
+    """Queue (or re-queue) automatic bounded discovery for a vaulted login.
+
+    Fully automatic after enqueue: the discovery worker logs in once (if needed),
+    captures bill-ish JSON, synthesizes an extractor, and stores a candidate.
+    Safe aborts on MFA/CAPTCHA; never retries a failed password.
+    """
+    t = _tenant_from_auth(authorization)
+    from .bill_discovery_engine import enqueue_discovery
+    job = enqueue_discovery(
+        tenant_id=t.id,
+        provider=body.provider,
+        username=body.username,
+        login_host=body.login_host,
+        force_explore=bool(body.force_explore),
+    )
+    return {"ok": True, "job": job}
+
+
+@router.get("/v1/bill-autopilot/discovery/{job_id}")
+def discovery_status(job_id: int, authorization: Optional[str] = Header(default=None)) -> dict:
+    t = _tenant_from_auth(authorization)
+    from .db import SessionLocal
+    from .models import BillDiscoveryJob
+    with SessionLocal() as db:
+        job = db.get(BillDiscoveryJob, job_id)
+        if job is None or job.tenant_id != t.id:
+            raise HTTPException(404, "discovery job not found")
+        from .bill_discovery_engine import _job_dict
+        return {"ok": True, "job": _job_dict(job)}
+
+
+@router.get("/v1/bill-autopilot/discoveries")
+def list_discoveries(authorization: Optional[str] = Header(default=None),
+                     limit: int = 20) -> dict:
+    t = _tenant_from_auth(authorization)
+    from .db import SessionLocal
+    from .models import BillDiscoveryJob
+    from sqlalchemy import select
+    from .bill_discovery_engine import _job_dict
+    lim = max(1, min(int(limit or 20), 100))
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(BillDiscoveryJob).where(
+                BillDiscoveryJob.tenant_id == t.id
+            ).order_by(BillDiscoveryJob.id.desc()).limit(lim)
+        ).scalars().all()
+        return {"ok": True, "jobs": [_job_dict(j) for j in rows]}

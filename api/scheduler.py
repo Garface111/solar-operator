@@ -1738,6 +1738,14 @@ def start():
         id="cloud_capture_lockout_watchdog", replace_existing=True,
         next_run_time=datetime.utcnow() + timedelta(minutes=3),
     )
+    # Every 2 min: drain automatic bill-adapter discovery jobs (unknown utility
+    # logins). Bounded browser explore + synthesis; known families short-circuit.
+    scheduler.add_job(
+        _run_bill_discovery_drain,
+        IntervalTrigger(minutes=2),
+        id="bill_discovery_drain", replace_existing=True,
+        next_run_time=datetime.utcnow() + timedelta(seconds=45),
+    )
     # Daily at 04:00 UTC: report Array Operator per-kWh usage to Stripe (LEGACY
     # metered billing). Self-skips subs with no metered line (i.e. nameplate subs),
     # so it's a harmless no-op once a tenant is migrated to per-kW nameplate.
@@ -2592,6 +2600,17 @@ def _run_cloud_capture_lockout_watchdog() -> None:
             "Cloud Capture lockout watchdog: unhandled exception",
             f"The Cloud Capture login lockout watchdog raised an error:\n{exc}",
         )
+
+
+def _run_bill_discovery_drain() -> None:
+    """Process queued bill-adapter discovery jobs (automatic portal explore)."""
+    try:
+        from .bill_discovery_engine import process_queued
+        result = process_queued(limit=2)
+        if result.get("processed"):
+            logger.info("bill_discovery_drain: %s", result)
+    except Exception as exc:
+        logger.warning("bill_discovery_drain failed: %s", exc)
 
 
 def _run_usage_report() -> None:
