@@ -1196,17 +1196,55 @@ def process_job(db, job) -> dict[str, Any]:
             except Exception as e:  # noqa: BLE001
                 log.warning("sandbox register job failed: %s", e)
 
-    job.status = "done" if ship.get("ok") else "failed"
-    job.error = None if ship.get("ok") else (ship.get("error") or "ship failed")[:800]
-    job.result_json = json.dumps(
+    final_status = "done" if ship.get("ok") else "failed"
+    final_error = None if ship.get("ok") else (ship.get("error") or "ship failed")[:800]
+    final_result = json.dumps(
         {"agent": agent_result, "ship": ship, "deploy": deploy, "repo": repo_name},
         default=str,
     )[:50_000]
-    job.finished_at = _now()
+    finished = _now()
+
+    # Long code jobs often outlive the DB SSL connection. Persist status on a
+    # fresh session so a dead pool connection cannot mark a real ship as failed.
+    def _persist_job_row(session) -> None:
+        from .energy_agent_sovereign import EaSovereignJob as _Job
+
+        row = session.get(_Job, job.id)
+        if not row:
+            return
+        row.status = final_status
+        row.error = final_error
+        row.result_json = final_result
+        row.finished_at = finished
+
+    try:
+        _persist_job_row(db)
+        db.flush()
+    except Exception as e:  # noqa: BLE001
+        log.warning("job status flush failed (will reconnect): %s", e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        try:
+            from .db import SessionLocal as _SL
+
+            with _SL() as db2:
+                _persist_job_row(db2)
+                db2.commit()
+            # Use a live session for trailing notes when original is dead
+            db = db2  # type: ignore[assignment]
+        except Exception as e2:  # noqa: BLE001
+            log.error("job status reconnect persist failed: %s", e2)
+
+    job.status = final_status
+    job.error = final_error
+    job.result_json = final_result
+    job.finished_at = finished
 
     # Auto-mark feature shipped when job succeeds (Ford: ship authority).
     # Use savepoints so a schema/ops glitch never poisons the job transaction.
-    if job.status == "done":
+    if final_status == "done":
         try:
             m = re.search(r"feature\s*#?\s*(\d+)", f"{title}\n{brief}", re.I)
             if m:
@@ -1240,14 +1278,17 @@ def process_job(db, job) -> dict[str, Any]:
         except Exception as e:  # noqa: BLE001
             log.warning("utility note outer failed: %s", e)
 
-    write_note(
-        db,
-        kind="decision",
-        title=f"code job {job.status}: {title[:80]}",
-        body=json.dumps({"job_id": job.id, "ship": ship, "deploy": deploy}, default=str)[:8000],
-        provider=str(agent_result.get("provider") or "worker"),
-        meta={"job_id": job.id},
-    )
+    try:
+        write_note(
+            db,
+            kind="decision",
+            title=f"code job {final_status}: {title[:80]}",
+            body=json.dumps({"job_id": job.id, "ship": ship, "deploy": deploy}, default=str)[:8000],
+            provider=str(agent_result.get("provider") or "worker"),
+            meta={"job_id": job.id},
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("write_note after job failed: %s", e)
     # Skill evolution hook: codify win/fail playbooks (Hermes closed loop)
     try:
         from .energy_agent_sovereign_skills import skills_enabled, upsert_skill
