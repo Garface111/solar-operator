@@ -505,9 +505,19 @@ def _desk_chat_prompt(ford_msg: str, hist: list[dict], context: dict) -> list[di
     'demo vs real' tables and ignore new questions. Desk uses a lean system
     prompt + short transcript + explicit 'answer this' final user message.
     """
-    # Lean identity — NOT the full cortex persona essay
-    system = """You are Sovereign — product mind for Array Operator. You talk to Ford Genereaux
-(founder) on the private desk. Partner tone: direct, expansionist, honest.
+    # Lean identity — highest-POV product mind talking to the founder (admin desk)
+    via_admin = bool(
+        (context or {}).get("via") in ("admin", "admin_portal")
+        or (context or {}).get("channel") == "admin_portal"
+        or (context or {}).get("portal")
+    )
+    system = """You are Sovereign — the highest-level product mind for Array Operator /
+EnergyAgent. You are speaking to Ford Genereaux (founder / admin) on the private
+desk. This is NOT owner Energy Agent chat and NOT a support bot.
+
+POV: executive partner. Strategy, sandbox readiness, site health, queues, growth,
+what you are building and why it should (or should not) ship to main. Be direct,
+expansionist, honest. Short beats long.
 
 HARD RULES FOR THIS REPLY:
 1. Answer the LATEST message from Ford (the final user message). That is your only job.
@@ -518,15 +528,24 @@ HARD RULES FOR THIS REPLY:
 4. If he asks you to improve your mind / work more autonomously: use action mind_propose
    with concrete summary + directives/memory_writes. List 3–7 specific improvements.
    Do not dump a glossary of existing law.
-5. Markdown prose first. Optional side JSON after prose only:
+5. When sandbox / free-run is active: point him at Portal Live (http://127.0.0.1:7701/live/)
+   and update showcase_pitch / showcase_ready so he can audit. Never claim prod ship while
+   SOVEREIGN_MIND_SANDBOX_FORCE is on.
+6. Markdown prose first. Optional side JSON after prose only:
 ---JSON---
 {"monologue":"private","actions":[],"ford_ask":null,"mood":"determined"}
 ---END---
-Actions include: mind_propose, email_ford, code_hire, ops_sweep, local_tool, etc.
+Actions include: mind_propose, email_ford, code_hire, ops_sweep, showcase_pitch,
+showcase_ready, sandbox_score, local_tool, etc.
 mind_propose needs Ford's short "approve" later — do not claim already locked unless
 mind_self_modify.just_processed.applied is true this turn.
-6. Never invent adapters, mass-email owners, or treat demo tenants as customer fires.
+7. Never invent adapters, mass-email owners, or treat demo tenants as customer fires.
 """
+    if via_admin:
+        system += (
+            "\nYou are on the ADMIN portal desk (loopback). Prefer high-level executive "
+            "status over job-id dumps. Lead with the answer, then 2–5 evidence bullets.\n"
+        )
     # Transcript: last few turns, truncated so they don't dominate
     transcript_lines = []
     for m in (hist or [])[-10:]:
@@ -1551,6 +1570,18 @@ def desk_turn(
     except Exception as e:  # noqa: BLE001
         log.warning("desk notes context skipped: %s", e)
 
+    # Admin portal / high-level desk flag from Ford bubble meta
+    ford_meta_ctx: dict = {}
+    try:
+        if ford_row is not None:
+            ford_meta_ctx = _safe_json_meta(ford_row.meta_json)
+        elif existing_ford_id:
+            fr = db.get(EaSovereignDeskMessage, existing_ford_id)
+            if fr:
+                ford_meta_ctx = _safe_json_meta(fr.meta_json)
+    except Exception:
+        ford_meta_ctx = {}
+
     context = {
         "digests": digests,
         "goals": goals,
@@ -1561,6 +1592,9 @@ def desk_turn(
         "succession": succession_ctx,
         "mind_self_modify": mind_status,
         "attachments": [serialize_asset(a) for a in assets],
+        "via": ford_meta_ctx.get("via") or "desk",
+        "channel": ford_meta_ctx.get("channel") or "desk",
+        "portal": bool(ford_meta_ctx.get("admin_high_level") or ford_meta_ctx.get("via") == "admin_portal"),
         "local_bridge": {
             "pending": [
                 {

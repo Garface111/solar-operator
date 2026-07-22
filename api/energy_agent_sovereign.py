@@ -4277,6 +4277,27 @@ def admin_desk_chat(
     if isinstance(out, dict):
         out["via"] = "admin"
         out["portal"] = True
+        # Tag ford bubble for high-level admin desk framing on drain
+        try:
+            ford_id = out.get("ford_message_id") or (
+                (out.get("ford_message") or {}).get("id")
+            )
+            if ford_id:
+                with SessionLocal() as db:
+                    from .energy_agent_sovereign_desk import EaSovereignDeskMessage
+                    row = db.get(EaSovereignDeskMessage, ford_id)
+                    if row:
+                        try:
+                            meta = json.loads(row.meta_json or "{}")
+                        except Exception:
+                            meta = {}
+                        meta["via"] = "admin_portal"
+                        meta["channel"] = "desk"
+                        meta["admin_high_level"] = True
+                        row.meta_json = json.dumps(meta, default=str)[:4000]
+                        db.commit()
+        except Exception as e:  # noqa: BLE001
+            log.debug("admin desk meta tag skipped: %s", e)
     return out
 
 
