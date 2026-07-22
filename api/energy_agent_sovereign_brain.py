@@ -617,8 +617,20 @@ def build_think_prompt(
         },
         "output_schema": schema_hint,
     }
+    # Rocket engine: oxidizer (drive) + chamber world-model
+    try:
+        from .energy_agent_sovereign_drive import (
+            drive_system_append,
+            inject_chamber_into_digests,
+            inject_drive_into_user_payload,
+        )
+        user["product_digests"] = inject_chamber_into_digests(user.get("product_digests"))
+        user = inject_drive_into_user_payload(user)
+        system = SOVEREIGN_PERSONA + "\n\n" + drive_system_append()
+    except Exception:
+        system = SOVEREIGN_PERSONA
     return [
-        {"role": "system", "content": SOVEREIGN_PERSONA},
+        {"role": "system", "content": system},
         {
             "role": "user",
             "content": (

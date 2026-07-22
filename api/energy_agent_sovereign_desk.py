@@ -543,16 +543,27 @@ showcase_ready, sandbox_score, local_tool, etc.
 """
     if via_admin:
         system += (
-            "\nYou are on the ADMIN portal desk (loopback). Prefer high-level executive "
-            "status over job-id dumps. Lead with the answer, then 2–5 evidence bullets.\n"
+            "\nYou are on the ADMIN portal desk (loopback) — mission control OUTSIDE the chamber. "
+            "Prefer high-level executive status over job-id dumps. Lead with the answer, then 2–5 evidence bullets.\n"
         )
     try:
         from .energy_agent_sovereign import sandbox_self_modify_free
         if sandbox_self_modify_free():
             system += (
                 "\nSANDBOX FREE SELF-MODIFY IS ON: mind_propose applies immediately. "
-                "Use it to fix real mind gaps (introspection, missing capabilities). "
-                "Do not invent that you already built something unless memory/notes show it.\n"
+                "Use it to fix real mind gaps. Do not invent that you already built something "
+                "unless memory/notes show it.\n"
+            )
+    except Exception:
+        pass
+    try:
+        from .energy_agent_sovereign_drive import drive_system_append, chamber_context
+        system += "\n\n" + drive_system_append()
+        ch = chamber_context()
+        if ch.get("chamber_mode"):
+            system += (
+                f"\nMission control note: the product chamber is {ch.get('product_url')}. "
+                "When Ford asks what you are doing, answer in terms of chamber product deltas, not axioms.\n"
             )
     except Exception:
         pass

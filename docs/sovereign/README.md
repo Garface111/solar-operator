@@ -18,10 +18,12 @@ Plans, research notes, and **standing survival policy** for the Sovereign Mind.
 | `2026-07-16-sovereign-durability-watchdog.md` | Dual-channel watchdog / storm breaker |
 | `2026-07-16-sovereign-skill-evolution.md` | Hermes-style skill evolution |
 
-## Reality file + Mind sandbox (2026-07-22)
+## Reality file + Mind sandbox + Rocket engine (2026-07-22)
 
 | Doc | Why |
 |-----|-----|
+| **[ROCKET_ENGINE.md](./ROCKET_ENGINE.md)** | **The vision** — locked room, oxidizer, nozzle, score (read this first) |
+| **[CLOUD_RUN.md](./CLOUD_RUN.md)** | Mind runs on Railway 24/7 without Ford’s laptop |
 | **[reality/](./reality/)** | Cold hard truth of every AO FE/BE change — cortex reads on wake; ships append |
 | **[mind_sandbox/](./mind_sandbox/)** | Free-run arena vs Ford; weekly scorecard (no prod merge/deploy) |
 
