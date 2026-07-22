@@ -283,10 +283,16 @@ def synthesize_bill_extractor(
     *,
     fmt: str = "json",
     provider: str = "unknown",
+    notify: bool = True,
+    tenant_id: Optional[str] = None,
+    username: Optional[str] = None,
+    job_id: Optional[int] = None,
 ) -> dict[str, Any]:
     """Run the existing auto_adapters synthesizer on a billing/generation payload.
 
     Returns {ok, source, fingerprint?, spec?, reconcile?, error?}.
+    When ok and notify=True, emails Ford (INTERNAL_ALERT_TO) about the candidate.
+    Discovery jobs set notify=False and send a richer job-level email on finalize.
     """
     from . import auto_adapters as aa
 
@@ -320,7 +326,7 @@ def synthesize_bill_extractor(
     except Exception as e:
         log.warning("bill-autopilot reg_upsert failed: %s", e)
 
-    return {
+    out = {
         "ok": True,
         "fingerprint": fp,
         "source": source,
@@ -329,6 +335,66 @@ def synthesize_bill_extractor(
         "provider_hint": provider,
         "status": "candidate",
     }
+    if notify:
+        notify_new_bill_adapter(
+            provider=provider,
+            fingerprint=fp,
+            source=source,
+            reconcile=delta,
+            tenant_id=tenant_id,
+            username=username,
+            job_id=job_id,
+            detail="Synthesized from captured portal payload (auto_adapters).",
+        )
+    return out
+
+
+def notify_new_bill_adapter(
+    *,
+    provider: str,
+    fingerprint: Optional[str] = None,
+    source: Optional[str] = None,
+    reconcile: Any = None,
+    tenant_id: Optional[str] = None,
+    username: Optional[str] = None,
+    job_id: Optional[int] = None,
+    detail: Optional[str] = None,
+    source_url: Optional[str] = None,
+) -> bool:
+    """Email Ford when a new bill-adapter candidate is built.
+
+    Uses the internal alert channel (INTERNAL_ALERT_TO / Resend). Fail-soft:
+    never raise into discovery/synthesis paths.
+    """
+    try:
+        from .notify import send_internal_alert
+        subj = f"[EnergyAgent] New bill adapter candidate · {provider or 'unknown'}"
+        lines = [
+            "A new bill-adapter extractor was synthesized and stored as a candidate.",
+            "",
+            f"Provider:     {provider or '—'}",
+            f"Fingerprint:  {fingerprint or '—'}",
+            f"Source:       {source or '—'}",
+            f"Reconcile Δ:  {reconcile if reconcile is not None else '—'}",
+            f"Tenant:       {tenant_id or '—'}",
+            f"Login:        {username or '—'}",
+            f"Discovery #:  {job_id if job_id is not None else '—'}",
+            f"Sample URL:   {(source_url or '—')[:300]}",
+            "",
+            detail or "",
+            "",
+            "Next: review the candidate (auto_adapters registry). Approve before",
+            "it drives production bill harvest for unknown portals. Known families",
+            "(GMP / SmartHub) already harvest via platform modules.",
+            "",
+            "Status: GET /v1/bill-autopilot/discoveries  (session auth)",
+            f"Job:    GET /v1/bill-autopilot/discovery/{job_id}" if job_id else "",
+        ]
+        body = "\n".join(ln for ln in lines if ln is not None)
+        return bool(send_internal_alert(subj, body))
+    except Exception as e:
+        log.warning("notify_new_bill_adapter failed: %s", e)
+        return False
 
 
 # ── Verification: prove GMP + VEC bill extractors still work ──────────────────

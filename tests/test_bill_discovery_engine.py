@@ -147,6 +147,34 @@ def test_enqueue_known_family_skips_browser():
     assert job2["family"] == "smarthub"
 
 
+def test_notify_new_bill_adapter_sends_internal_alert(monkeypatch):
+    """Ford gets an email when a candidate adapter is stored."""
+    sent = {}
+
+    def _fake_alert(subject, body, to=None):
+        sent["subject"] = subject
+        sent["body"] = body
+        sent["to"] = to
+        return True
+
+    monkeypatch.setattr("api.notify.send_internal_alert", _fake_alert)
+    from api.bill_adapter_autopilot import notify_new_bill_adapter
+    ok = notify_new_bill_adapter(
+        provider="acme_power",
+        fingerprint="fp_test_123",
+        source="heuristic",
+        tenant_id="ten_x",
+        username="owner@x.com",
+        job_id=42,
+        detail="unit test",
+    )
+    assert ok is True
+    assert "acme_power" in sent["subject"]
+    assert "fp_test_123" in sent["body"]
+    assert "ten_x" in sent["body"]
+    assert "42" in sent["body"]
+
+
 def test_enqueue_unknown_queues_explore():
     init_db()
     tid = "ten_unk_" + secrets.token_hex(3)

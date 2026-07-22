@@ -275,6 +275,7 @@ def run_discovery_from_captures(
 
 
 def _finalize_job(job_id: int, result: dict) -> dict[str, Any]:
+    notify_payload = None
     with SessionLocal() as db:
         job = db.get(BillDiscoveryJob, job_id)
         if job is None:
@@ -300,9 +301,31 @@ def _finalize_job(job_id: int, result: dict) -> dict[str, Any]:
             job.synthesis_json = json.dumps(syn)[:8000]
             job.fingerprint = syn.get("fingerprint")
         job.finished_at = now()
+        # Capture fields for post-commit email (never hold the session open).
+        if (job.status == "succeeded" and syn and syn.get("ok")
+                and syn.get("fingerprint")):
+            notify_payload = {
+                "provider": job.provider,
+                "fingerprint": syn.get("fingerprint"),
+                "source": syn.get("source"),
+                "reconcile": syn.get("reconcile"),
+                "tenant_id": job.tenant_id,
+                "username": job.username_lc,
+                "job_id": job.id,
+                "detail": job.detail,
+                "source_url": syn.get("_source_url") or (compact[0]["url"] if compact else None),
+            }
         db.commit()
         db.refresh(job)
-        return _job_dict(job)
+        out = _job_dict(job)
+
+    if notify_payload:
+        try:
+            from .bill_adapter_autopilot import notify_new_bill_adapter
+            notify_new_bill_adapter(**notify_payload)
+        except Exception as e:
+            log.warning("adapter-built email failed job=%s: %s", job_id, e)
+    return out
 
 
 # ── Safety page checks ───────────────────────────────────────────────────────
@@ -347,7 +370,9 @@ def _synthesize_from_captures(captures: list[dict], *, provider: str) -> dict[st
         if len(body) < 40:
             continue
         tried += 1
-        syn = synthesize_bill_extractor(body, fmt="json", provider=provider)
+        # notify=False — job finalize sends one email with full context.
+        syn = synthesize_bill_extractor(
+            body, fmt="json", provider=provider, notify=False)
         if syn.get("ok"):
             # Prefer larger / billish URLs.
             score = len(body)
