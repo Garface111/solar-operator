@@ -4090,6 +4090,175 @@ def sovereign_mind_sandbox_end(
         return out
 
 
+# ── Local Sovereign Portal (loopback UI — no AO account) ───────────────────
+
+@router.get("/admin/sovereign/portal")
+def sovereign_portal_dashboard(authorization: str | None = Header(default=None)):
+    """One payload for the localhost Sovereign Portal: work, queues, reality, sandbox."""
+    _require_sovereign_or_admin(authorization)
+    from .energy_agent_sovereign_reality import status as reality_status, read_entries
+    from .energy_agent_sovereign_mind_sandbox import status as sandbox_status
+    with SessionLocal() as db:
+        state = world_get(db)
+        jobs = [
+            {
+                "id": j.id,
+                "kind": j.kind,
+                "status": j.status,
+                "title": j.title,
+                "created_at": j.created_at.isoformat() + "Z" if j.created_at else None,
+                "finished_at": j.finished_at.isoformat() + "Z" if j.finished_at else None,
+                "error": (j.error or "")[:300] or None,
+            }
+            for j in db.execute(
+                select(EaSovereignJob).order_by(EaSovereignJob.created_at.desc()).limit(40)
+            ).scalars().all()
+        ]
+        notes = recent_notes(db, limit=20)
+        mem = memory_get_all(db, limit=30)
+        goals = [
+            {
+                "id": g.id,
+                "title": g.title,
+                "priority": g.priority,
+                "status": g.status,
+            }
+            for g in db.execute(
+                select(EaSovereignGoal)
+                .where(EaSovereignGoal.status == "open")
+                .order_by(EaSovereignGoal.priority.desc())
+                .limit(20)
+            ).scalars().all()
+        ]
+        try:
+            from .energy_agent_sovereign_ops import (
+                ops_summary, list_features, list_utilities, list_escalations,
+            )
+            ops = {
+                "summary": ops_summary(db),
+                "features_building": list_features(db, status="building", limit=15),
+                "features_reviewed": list_features(db, status="reviewed", limit=15),
+                "utilities": list_utilities(db, status="all", limit=15),
+                "escalations": list_escalations(db, status="needs_ford", limit=15),
+            }
+        except Exception as e:  # noqa: BLE001
+            ops = {"error": str(e)[:200]}
+        desk_err = None
+        try:
+            from .energy_agent_sovereign_desk import history as desk_history_fn, ensure_tables as desk_tables
+            desk_tables()
+            desk_msgs = desk_history_fn(db, limit=40)
+        except Exception as e:  # noqa: BLE001
+            desk_msgs = []
+            desk_err = str(e)[:200]
+    return {
+        "ok": True,
+        "channel": "admin_portal",
+        "note": "Localhost portal — not Array Operator account. Admin key only.",
+        "world": {
+            "mode": state.get("mode"),
+            "last_tick_at": state.get("last_tick_at"),
+            "last_mood": state.get("last_mood"),
+            "revision": state.get("revision"),
+            "last_monologue_excerpt": (state.get("last_monologue_excerpt") or "")[:500],
+        },
+        "jobs": jobs,
+        "goals": goals,
+        "notes": notes,
+        "memory": mem,
+        "ops": ops,
+        "desk_messages": desk_msgs,
+        "desk_error": desk_err,
+        "reality": {
+            **reality_status(),
+            "tail": read_entries(limit=50),
+        },
+        "mind_sandbox": sandbox_status(None),
+    }
+
+
+@router.get("/admin/sovereign/desk/history")
+def admin_desk_history(
+    authorization: str | None = Header(default=None),
+    limit: int = 80,
+):
+    """Desk transcript via admin key — no Array Operator login."""
+    _require_sovereign_or_admin(authorization)
+    from .energy_agent_sovereign_desk import history as desk_history_fn, ensure_tables as desk_tables
+    desk_tables()
+    with SessionLocal() as db:
+        return {
+            "ok": True,
+            "via": "admin",
+            "messages": desk_history_fn(db, limit=min(max(int(limit or 80), 1), 200)),
+        }
+
+
+@router.post("/admin/sovereign/desk/chat")
+def admin_desk_chat(
+    body: dict | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """Send a desk message as Ford via admin key (localhost portal).
+
+    Always uses the durable enqueue path (worker answers) — never requires
+    an Array Operator session cookie.
+    """
+    _require_sovereign_or_admin(authorization)
+    body = body or {}
+    msg = (body.get("message") or body.get("text") or "").strip()
+    if not msg and not body.get("poll_only"):
+        raise HTTPException(400, "message required")
+    crid = (body.get("client_request_id") or "").strip()[:80] or None
+    tenant_id = (
+        (body.get("tenant_id") or "").strip()
+        or (os.getenv("SOVEREIGN_DESK_TENANT_ID") or "ten_aaad29f08dbe9943").strip()
+    )
+    from .energy_agent_sovereign_desk import (
+        enqueue_desk_message,
+        lookup_turn_by_client_request_id,
+        ensure_tables as desk_tables,
+        _format_turn_response,
+    )
+    desk_tables()
+    if crid:
+        with SessionLocal() as db:
+            hit = lookup_turn_by_client_request_id(db, crid)
+            if hit and hit.get("complete"):
+                return _format_turn_response(
+                    ford=hit["ford"], sov=hit["sov"], pending=False,
+                    client_request_id=crid, extra={"idempotent": True, "via": "admin"},
+                )
+            if hit and not hit.get("complete"):
+                return _format_turn_response(
+                    ford=hit["ford"], sov=None, pending=True,
+                    client_request_id=crid,
+                    extra={"idempotent": True, "via": "admin", "offloaded": True},
+                )
+        if body.get("poll_only"):
+            return {
+                "ok": True,
+                "pending": True,
+                "poll": True,
+                "client_request_id": crid,
+                "via": "admin",
+            }
+
+    if body.get("poll_only"):
+        raise HTTPException(400, "poll_only requires client_request_id")
+
+    out = enqueue_desk_message(
+        tenant_id=tenant_id,
+        message=msg,
+        attachment_ids=list(body.get("attachment_ids") or [])[:12],
+        client_request_id=crid,
+    )
+    if isinstance(out, dict):
+        out["via"] = "admin"
+        out["portal"] = True
+    return out
+
+
 @router.post("/admin/sovereign/jobs/requeue")
 def sovereign_jobs_requeue(authorization: str | None = Header(default=None)):
     """Re-queue jobs that failed for missing repo access (after worker unlock)."""
