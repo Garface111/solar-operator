@@ -1582,6 +1582,35 @@ def build_weekly_digest(db) -> dict[str, Any]:
     lines.extend(["", "Agenda (top)", ""])
     for g in goals[:5]:
         lines.append(f"• {g.title}")
+    # L4 chamber scorecard snapshot (if any)
+    chamber_bits = []
+    try:
+        from .energy_agent_sovereign_chamber_score import latest_scorecard_summary
+        from .energy_agent_sovereign_chamber import default_chamber_url
+
+        ch = latest_scorecard_summary(db)
+        chamber_bits = [
+            "",
+            "Chamber vs prod (rocket score)",
+            f"• Chamber URL: {default_chamber_url()}",
+        ]
+        if ch.get("ok"):
+            chamber_bits.append(
+                f"• Last scorecard: `{ch.get('verdict')}` overall {ch.get('overall')}/100"
+                f" (taste={ch.get('taste') or 'no vote'})"
+            )
+            chamber_bits.append(
+                "• Spend 10 minutes in chamber vs prod, then cast taste: "
+                "POST /admin/sovereign/chamber/taste preference=chamber|prod|tie"
+            )
+        else:
+            chamber_bits.append(
+                "• No scorecard yet — run POST /admin/sovereign/chamber/score this week."
+            )
+    except Exception:
+        chamber_bits = []
+
+    lines.extend(chamber_bits)
     lines.extend([
         "",
         "Operating rules (your grant)",
@@ -4243,6 +4272,57 @@ def sovereign_chamber_deploy(
         return out
 
 
+@router.get("/admin/sovereign/chamber/scorecard")
+def sovereign_chamber_scorecard_get(
+    authorization: str | None = Header(default=None),
+    days: int = 7,
+):
+    """L4 prod vs chamber scorecard (live compute; does not force persist)."""
+    _require_sovereign_or_admin(authorization)
+    from .energy_agent_sovereign_chamber_score import build_chamber_scorecard
+
+    with SessionLocal() as db:
+        card = build_chamber_scorecard(db, days=days)
+        return {"ok": True, "scorecard": card}
+
+
+@router.post("/admin/sovereign/chamber/score")
+def sovereign_chamber_score_run(
+    body: dict | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """Generate + persist L4 scorecard (disk + memory + note)."""
+    _require_sovereign_or_admin(authorization)
+    body = body or {}
+    from .energy_agent_sovereign_chamber_score import run_and_persist_scorecard
+
+    with SessionLocal() as db:
+        out = run_and_persist_scorecard(db, days=int(body.get("days") or 7))
+        db.commit()
+        return out
+
+
+@router.post("/admin/sovereign/chamber/taste")
+def sovereign_chamber_taste(
+    body: dict | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """Ford taste vote: preference=chamber|prod|tie|abstain."""
+    _require_sovereign_or_admin(authorization)
+    body = body or {}
+    from .energy_agent_sovereign_chamber_score import set_taste_vote
+
+    with SessionLocal() as db:
+        out = set_taste_vote(
+            db,
+            preference=str(body.get("preference") or body.get("vote") or ""),
+            note=body.get("note") or body.get("text"),
+            voter=str(body.get("voter") or body.get("author") or "Ford"),
+        )
+        db.commit()
+        return out
+
+
 # ── Local Sovereign Portal (loopback UI — no AO account) ───────────────────
 
 @router.get("/admin/sovereign/portal")
@@ -4309,6 +4389,12 @@ def sovereign_portal_dashboard(authorization: str | None = Header(default=None))
             chamber = get_chamber_status(db)
         except Exception as e:  # noqa: BLE001
             chamber = {"ok": False, "error": str(e)[:200]}
+        try:
+            from .energy_agent_sovereign_chamber_score import latest_scorecard_summary
+
+            chamber_score = latest_scorecard_summary(db)
+        except Exception as e:  # noqa: BLE001
+            chamber_score = {"ok": False, "error": str(e)[:200]}
         sandbox = sandbox_status(db)
     return {
         "ok": True,
@@ -4334,6 +4420,7 @@ def sovereign_portal_dashboard(authorization: str | None = Header(default=None))
         },
         "mind_sandbox": sandbox,
         "chamber": chamber,
+        "chamber_score": chamber_score,
     }
 
 

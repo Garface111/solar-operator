@@ -6,15 +6,23 @@ on the existing production site. Never publishes arrayoperator.com.
 Stable URL (default branch name ``chamber``):
   https://chamber--array-operator-ea.netlify.app
 
-See docs/sovereign/ROCKET_ENGINE.md (L2).
+Deploy is **self-contained** (inline Netlify REST) so Railway workers do not
+need array-operator/scripts on disk. Optional external script still preferred
+when present (local laptop).
+
+See docs/sovereign/ROCKET_ENGINE.md (L2 / L4).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import subprocess
 import tempfile
+import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -30,7 +38,10 @@ AO_ROOT = Path(
 ).resolve()
 
 DEFAULT_CHAMBER_URL = "https://chamber--array-operator-ea.netlify.app"
+DEFAULT_PROD_URL = "https://arrayoperator.com"
+PROD_SITE_ID = "966cb1f5-944e-41fd-855b-10053edc5d18"
 CHAMBER_META_KEY = "sovereign_chamber"
+NETLIFY_API = "https://api.netlify.com/api/v1"
 
 
 def chamber_enabled() -> bool:
@@ -46,13 +57,28 @@ def default_chamber_url() -> str:
     ).rstrip("/")
 
 
+def default_prod_url() -> str:
+    return (os.getenv("AO_APP_URL") or DEFAULT_PROD_URL).rstrip("/")
+
+
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _netlify_token() -> str | None:
+    t = (os.getenv("NETLIFY_AUTH_TOKEN") or os.getenv("NETLIFY_TOKEN") or "").strip()
+    if t:
+        return t
+    p = Path.home() / ".hermes" / "secrets" / "netlify_token"
+    if p.is_file():
+        return p.read_text(encoding="utf-8").strip()
+    return None
 
 
 def _find_deploy_script() -> Path | None:
     candidates = [
         Path(os.getenv("CHAMBER_DEPLOY_SCRIPT") or ""),
+        SO_ROOT / "scripts" / "chamber_deploy_dir.py",
         AO_ROOT / "scripts" / "chamber_deploy_dir.py",
         Path("/root/array-operator/scripts/chamber_deploy_dir.py"),
         SO_ROOT.parent / "array-operator" / "scripts" / "chamber_deploy_dir.py",
@@ -61,6 +87,152 @@ def _find_deploy_script() -> Path | None:
         if p and p.is_file():
             return p
     return None
+
+
+def _http_req(
+    method: str,
+    url: str,
+    *,
+    body: bytes | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: int = 120,
+) -> tuple[int, bytes]:
+    hdrs = dict(headers or {})
+    r = urllib.request.Request(url, data=body, headers=hdrs, method=method)
+    try:
+        with urllib.request.urlopen(r, timeout=timeout) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+    except Exception as e:  # noqa: BLE001
+        return 0, str(e).encode()
+
+
+def _walk_public_files(root: Path) -> dict[str, tuple[str, bytes]]:
+    out: dict[str, tuple[str, bytes]] = {}
+    for dirpath, _dirs, names in os.walk(root):
+        for n in names:
+            full = Path(dirpath) / n
+            rel = "/" + str(full.relative_to(root)).replace(os.sep, "/")
+            data = full.read_bytes()
+            out[rel] = (hashlib.sha1(data).hexdigest(), data)
+    return out
+
+
+def _inline_netlify_branch_deploy(public_dir: Path) -> dict[str, Any]:
+    """Deploy public/ as Netlify draft+branch (never production context)."""
+    token = _netlify_token()
+    if not token:
+        return {"ok": False, "error": "no NETLIFY_AUTH_TOKEN / netlify_token"}
+
+    site = os.getenv("NETLIFY_CHAMBER_SITE_ID") or PROD_SITE_ID
+    branch = (os.getenv("NETLIFY_CHAMBER_BRANCH") or "chamber").strip() or "chamber"
+
+    if (public_dir / "netlify.toml").exists():
+        return {"ok": False, "error": "netlify.toml in deploy dir — refuse"}
+    if (public_dir / "netlify").is_dir() or (public_dir / "edge-functions").is_dir():
+        return {"ok": False, "error": "edge-functions/netlify dir present — refuse"}
+
+    files = _walk_public_files(public_dir)
+    banned = [
+        p
+        for p in files
+        if "edge-functions" in p or p.endswith("/gate.ts") or p.endswith("netlify.toml")
+    ]
+    if banned:
+        return {"ok": False, "error": f"banned paths: {banned[:3]}"}
+    if not files:
+        return {"ok": False, "error": "no files"}
+
+    auth = {
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "sovereign-chamber/1.0",
+        "Content-Type": "application/json",
+    }
+    digest = {p: sha for p, (sha, _) in files.items()}
+    payload = {
+        "files": digest,
+        "draft": True,
+        "branch": branch,
+        "title": f"sovereign-chamber {branch}",
+    }
+    st, body = _http_req(
+        "POST",
+        f"{NETLIFY_API}/sites/{site}/deploys",
+        body=json.dumps(payload).encode(),
+        headers=auth,
+    )
+    if st not in (200, 201):
+        return {"ok": False, "error": f"create deploy {st}: {body[:300]!r}"}
+    dep = json.loads(body)
+    if dep.get("context") == "production":
+        return {"ok": False, "error": "FATAL: deploy context production — aborted"}
+    dep_id = dep["id"]
+    required = set(dep.get("required") or [])
+    uploaded = 0
+    for path, (sha, data) in files.items():
+        if sha not in required:
+            continue
+        st, b = _http_req(
+            "PUT",
+            f"{NETLIFY_API}/deploys/{dep_id}/files{path}",
+            body=data,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "User-Agent": "sovereign-chamber/1.0",
+                "Content-Type": "application/octet-stream",
+            },
+        )
+        if st not in (200, 201):
+            return {"ok": False, "error": f"upload {path} {st}: {b[:200]!r}"}
+        uploaded += 1
+
+    final = dep
+    for _ in range(60):
+        st, b = _http_req(
+            "GET",
+            f"{NETLIFY_API}/deploys/{dep_id}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "User-Agent": "sovereign-chamber/1.0",
+            },
+        )
+        if st != 200:
+            time.sleep(2)
+            continue
+        final = json.loads(b)
+        if final.get("state") == "ready":
+            break
+        if final.get("state") == "error":
+            return {"ok": False, "error": f"deploy error: {b[:300]!r}"}
+        time.sleep(2)
+
+    if final.get("context") == "production":
+        return {"ok": False, "error": "FATAL: finished as production"}
+    if final.get("edge_functions_present") is True:
+        return {"ok": False, "error": "edge_functions_present on chamber deploy"}
+
+    url = (
+        final.get("deploy_ssl_url")
+        or final.get("deploy_url")
+        or f"https://{branch}--array-operator-ea.netlify.app"
+    ).replace("http://", "https://").rstrip("/")
+    if url in (DEFAULT_PROD_URL, "https://arrayoperator.com"):
+        url = f"https://{branch}--array-operator-ea.netlify.app"
+
+    return {
+        "ok": True,
+        "deploy_id": dep_id,
+        "context": final.get("context"),
+        "branch": final.get("branch") or branch,
+        "state": final.get("state"),
+        "chamber_url": url,
+        "files": len(files),
+        "uploaded": uploaded,
+        "site_id": site,
+        "provider": "inline_netlify",
+        "note": "branch/draft deploy — production arrayoperator.com untouched",
+    }
 
 
 def resolve_public_dir(
@@ -129,58 +301,71 @@ def deploy_chamber(
     if src is None:
         return {"ok": False, "error": "no public/ dir found for chamber"}
 
-    script = _find_deploy_script()
-    if script is None:
-        return {
-            "ok": False,
-            "error": "chamber_deploy_dir.py not found",
-            "hint": "expected array-operator/scripts/chamber_deploy_dir.py",
-        }
-
     staged = _stage_public(src)
-    out_json = staged.parent / "chamber_result.json"
-    env = os.environ.copy()
-    env["CHAMBER_URL_OUT"] = str(out_json)
-    # Ensure token available in worker if only hermes secret exists
-    if not env.get("NETLIFY_AUTH_TOKEN") and not env.get("NETLIFY_TOKEN"):
-        tok_path = Path.home() / ".hermes" / "secrets" / "netlify_token"
-        if tok_path.is_file():
-            env["NETLIFY_AUTH_TOKEN"] = tok_path.read_text(encoding="utf-8").strip()
-
-    try:
-        r = subprocess.run(
-            ["python3", str(script), str(staged)],
-            capture_output=True,
-            text=True,
-            timeout=int(os.getenv("SOVEREIGN_CHAMBER_DEPLOY_TIMEOUT", "600")),
-            env=env,
-        )
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "chamber deploy timeout"}
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "error": str(e)[:400]}
-
     result: dict[str, Any] = {
-        "ok": r.returncode == 0,
-        "returncode": r.returncode,
         "public_src": str(src),
         "run_id": run_id,
         "job_id": job_id,
         "title": title,
         "at": _utcnow_iso(),
     }
-    if out_json.is_file():
-        try:
-            result.update(json.loads(out_json.read_text(encoding="utf-8")))
-        except Exception as e:  # noqa: BLE001
-            result["parse_warn"] = str(e)[:200]
-    if r.returncode != 0:
-        result["ok"] = False
-        result["stderr"] = (r.stderr or "")[-1500:]
-        result["stdout"] = (r.stdout or "")[-1500:]
-        log.warning("chamber deploy failed: %s", result.get("stderr") or result)
-        return result
 
+    # Prefer external script when available (local host); else inline REST (Railway).
+    script = _find_deploy_script()
+    used = "inline"
+    if script is not None and (os.getenv("SOVEREIGN_CHAMBER_INLINE", "0") or "0").strip() not in (
+        "1", "true", "yes", "on",
+    ):
+        out_json = staged.parent / "chamber_result.json"
+        env = os.environ.copy()
+        env["CHAMBER_URL_OUT"] = str(out_json)
+        if not env.get("NETLIFY_AUTH_TOKEN") and not env.get("NETLIFY_TOKEN"):
+            tok = _netlify_token()
+            if tok:
+                env["NETLIFY_AUTH_TOKEN"] = tok
+        try:
+            r = subprocess.run(
+                ["python3", str(script), str(staged)],
+                capture_output=True,
+                text=True,
+                timeout=int(os.getenv("SOVEREIGN_CHAMBER_DEPLOY_TIMEOUT", "600")),
+                env=env,
+            )
+            used = "script"
+            result["returncode"] = r.returncode
+            if out_json.is_file():
+                try:
+                    result.update(json.loads(out_json.read_text(encoding="utf-8")))
+                except Exception as e:  # noqa: BLE001
+                    result["parse_warn"] = str(e)[:200]
+            if r.returncode != 0:
+                result["ok"] = False
+                result["stderr"] = (r.stderr or "")[-1500:]
+                result["stdout"] = (r.stdout or "")[-1500:]
+                # Fall through to inline if script failed
+                log.warning("chamber script failed, trying inline: %s", result.get("stderr"))
+                used = "inline_fallback"
+            else:
+                result["ok"] = True
+        except subprocess.TimeoutExpired:
+            result["ok"] = False
+            result["error"] = "chamber deploy timeout"
+            used = "inline_fallback"
+        except Exception as e:  # noqa: BLE001
+            result["ok"] = False
+            result["error"] = str(e)[:400]
+            used = "inline_fallback"
+
+    if used != "script" or not result.get("ok"):
+        inline = _inline_netlify_branch_deploy(staged)
+        result.update(inline)
+        result["provider"] = inline.get("provider") or "inline_netlify"
+        if not inline.get("ok"):
+            log.warning("chamber deploy failed: %s", inline)
+            result["ok"] = False
+            return result
+
+    result["deploy_via"] = used if used == "script" else result.get("provider", "inline")
     url = (result.get("chamber_url") or default_chamber_url()).rstrip("/")
     result["chamber_url"] = url
     result["ok"] = True

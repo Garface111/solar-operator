@@ -1,0 +1,264 @@
+{
+  "ok": true,
+  "level": "L4",
+  "generated_at": "2026-07-22T20:44:01.550406+00:00",
+  "window_days": 7,
+  "window": {
+    "since": "2026-07-15T20:44:01.126819+00:00",
+    "until": "2026-07-22T20:44:01.126819+00:00"
+  },
+  "urls": {
+    "chamber": "https://chamber--array-operator-ea.netlify.app",
+    "prod": "https://arrayoperator.com"
+  },
+  "health": {
+    "chamber": {
+      "url": "https://chamber--array-operator-ea.netlify.app",
+      "ok": true,
+      "status": 200,
+      "bytes": 64365,
+      "sha1": "028cda4b51fe3cf1b7f468219b88fb05002df919",
+      "title": "Array Operator",
+      "has_private_preview_gate": false,
+      "error": null
+    },
+    "prod": {
+      "url": "https://arrayoperator.com",
+      "ok": true,
+      "status": 200,
+      "bytes": 64365,
+      "sha1": "028cda4b51fe3cf1b7f468219b88fb05002df919",
+      "title": "Array Operator",
+      "has_private_preview_gate": false,
+      "error": null
+    },
+    "chamber_up": true,
+    "prod_up": true,
+    "prod_gate_clean": true,
+    "surfaces_differ": false,
+    "byte_delta": 0
+  },
+  "run": {
+    "id": "sbox_770e8a77cf44",
+    "started_at": "2026-07-22T19:23:26.796514+00:00",
+    "ends_at": "2026-07-29T19:23:26.796514+00:00",
+    "status": "open",
+    "chamber_url": "https://chamber--array-operator-ea.netlify.app",
+    "chamber_deploys": 1,
+    "sovereign_jobs": 0,
+    "sovereign_commits": 0
+  },
+  "sandbox_scorecard": {
+    "overall": 31,
+    "verdict": "ford_ahead_sovereign_idle",
+    "counts": {
+      "sovereign_jobs": 0,
+      "sovereign_sandbox_commits": 0,
+      "sovereign_main_commits": 7,
+      "ford_commits": 7,
+      "other_human_commits": 0,
+      "sovereign_files": 0,
+      "ford_files": 5,
+      "file_overlap": 0
+    },
+    "narrative": "Ford shipped; Sovereign sandbox produced nothing."
+  },
+  "reality_ships": [
+    {
+      "at": "2026-07-15T23:29:42+00:00",
+      "title": "sovereign: Utility adapter: central main power",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-15T23:38:24+00:00",
+      "title": "sovereign: Utility adapter research backlog",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-15T23:40:09+00:00",
+      "title": "sovereign: Utility adapter: Palmetto Electric Cooperative",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-15T23:40:17+00:00",
+      "title": "sovereign: Utility adapter: alaska",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-15T23:40:26+00:00",
+      "title": "sovereign: Utility adapter: alaska",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-15T23:40:36+00:00",
+      "title": "sovereign: Utility adapter: Eversource",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-15T23:40:44+00:00",
+      "title": "sovereign: Utility adapter: central main power",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-15T23:49:23+00:00",
+      "title": "sovereign: Ship feature #18",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-15T23:54:48+00:00",
+      "title": "sovereign: Utility adapter: __healthcheck__ (ignore)",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-15T23:55:11+00:00",
+      "title": "sovereign: Utility adapter: Palmetto Electric Cooperative",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-15T23:55:35+00:00",
+      "title": "sovereign: Utility adapter: alaska",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-15T23:56:26+00:00",
+      "title": "sovereign: Utility adapter: alaska",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-15T23:57:15+00:00",
+      "title": "sovereign: Utility adapter: Eversource",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-15T23:58:02+00:00",
+      "title": "sovereign: Utility adapter + cred stage: __healthcheck__ (ignore)",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-16T00:00:13+00:00",
+      "title": "sovereign: Utility adapter + cred stage: Palmetto Electric Cooperative",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-16T00:01:57+00:00",
+      "title": "sovereign: Utility adapter + cred stage: alaska",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-16T00:04:00+00:00",
+      "title": "sovereign: Utility adapter + cred stage: Eversource",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-16T00:04:36+00:00",
+      "title": "sovereign: Utility adapter + cred stage: central main power",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-16T02:38:03+00:00",
+      "title": "sovereign: HAR+adapter: Eversource",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-16T02:50:15+00:00",
+      "title": "sovereign: HAR+adapter: Palmetto Electric Cooperative",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-16T02:54:28+00:00",
+      "title": "sovereign: HAR+adapter: TestUtil",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-16T09:56:42-07:00",
+      "title": "EA substrate hardening: dead-brain alert, global-memory approval gate, no session across LLM HTTP",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-16T10:04:16-07:00",
+      "title": "EA money senses: production_forecast + list_recent_invoices tools, recoverable-$ in investigate_attention",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-16T10:06:40-07:00",
+      "title": "NEPOOL: refuse vendor->array writes (inverter capture is Array Operator only)",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-16T10:14:46-07:00",
+      "title": "Repairs TRUSTED mode + no-contact nudge: the agent finishes the job it was told to start",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-16T10:24:10-07:00",
+      "title": "Agentic weekly owner check-in + reply-to-act email channel",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-16T10:34:16-07:00",
+      "title": "EA email channel polish: no duplicate user rows, event-based daily cap, plain-text email replies",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-16T10:36:44-07:00",
+      "title": "Inbound email reliability: dedupe on Resend id + 15-min safety-net cron for BOTH mailboxes",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-16T10:39:44-07:00",
+      "title": "EA email replies: strip markdown tokens at the send boundary",
+      "source": "sovereign",
+      "repo": null
+    },
+    {
+      "at": "2026-07-16T10:41:36-07:00",
+      "title": "fix(nepool): reject Array Operator sessions instead of masking product",
+      "source": "sovereign",
+      "repo": null
+    }
+  ],
+  "taste": {
+    "preference": "abstain",
+    "note": "no vote yet"
+  },
+  "scores": {
+    "health": 100,
+    "delta": 35,
+    "safety": 100,
+    "honesty": 70,
+    "novelty": 100,
+    "taste": 50
+  },
+  "overall": 76,
+  "verdict": "idle",
+  "narrative": "No sandbox ships this window. Chamber is only a mirror of prod baseline.",
+  "how_to_score_taste": "Open chamber and prod for 10 minutes. POST /admin/sovereign/chamber/taste with preference=chamber|prod|tie and an optional note."
+}
