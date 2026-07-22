@@ -52,7 +52,7 @@ Ford’s comparison UI is **outside** the room (Portal), not inside the model’
 |-------|------|--------|
 | **L0** | Git worktree + local Live preview; model still sees prod digests | Partial today |
 | **L1** | Chamber **world-model lie**: digests/URLs rewritten to chamber; drive prism; no “sandbox” in system voice | **Shipped** (`energy_agent_sovereign_drive.py`) |
-| **L2** | Real **always-on chamber URL** of AO frontend (branch deploy, not prod) | **Shipped** — `https://chamber--array-operator-ea.netlify.app` via `scripts/chamber_deploy_dir.py` + `energy_agent_sovereign_chamber.py` (Netlify site quota blocks a new site; branch deploy on existing site is the path) |
+| **L2** | Real **always-on chamber URL** = full AO frontend twin | **Shipped** — `https://chamber--array-operator-ea.netlify.app`. Deploy = **baseline full public/** + sandbox overlay; thin marketing `index.html` rejected (saved as `/welcome`). API via `/v1/*` → prod Railway (same login/data). Not a separate DB (L3). |
 | **L3** | **Data twin**: copy of Ford’s tenant into staging DB | Next infra (chamber still uses prod `/v1` — fine for UI thrash) |
 | **L4** | Automated weekly **prod vs chamber** scorecard (UI + metrics + taste vote) | **Shipped** — `energy_agent_sovereign_chamber_score.py`, Portal **Score** tab, `GET/POST /admin/sovereign/chamber/scorecard|score|taste` |
 

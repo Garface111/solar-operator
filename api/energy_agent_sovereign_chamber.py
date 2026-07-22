@@ -260,10 +260,81 @@ def resolve_public_dir(
     for cand in (
         AO_ROOT / "public",
         Path("/root/array-operator/public"),
+        Path("/tmp/sovereign-repos/array-operator/public"),
     ):
         if cand.is_dir():
             return cand
     return None
+
+
+def resolve_baseline_public() -> Path | None:
+    """Full prod-shaped AO public/ used as chamber foundation (never a thin landing)."""
+    for cand in (
+        Path(os.getenv("SOVEREIGN_CHAMBER_BASELINE_PUBLIC") or ""),
+        AO_ROOT / "public",
+        Path("/root/array-operator/public"),
+        Path("/tmp/sovereign-repos/array-operator/public"),
+    ):
+        if cand and str(cand) not in (".", "") and cand.is_dir():
+            idx = cand / "index.html"
+            if idx.is_file() and _looks_like_ao_spa(idx.read_text(encoding="utf-8", errors="replace")):
+                return cand
+    return resolve_public_dir()  # last resort
+
+
+def _looks_like_ao_spa(html: str) -> bool:
+    """True when index is the real Array Operator owner SPA, not a marketing stub."""
+    if not html or len(html) < 20_000:
+        return False
+    h = html.lower()
+    # Real app shell markers (all should be present on prod index)
+    need = ("so_session", "app.js", "array operator")
+    if not all(n in h for n in need):
+        return False
+    # Thin hero landings Sovereign keeps inventing
+    if "solar fleet command" in h and "so_session" not in h:
+        return False
+    if h.count("<script") < 3 and "hero-logo" in h:
+        return False
+    return True
+
+
+REQUIRED_CHAMBER_FILES = (
+    "index.html",
+    "login.html",
+    "app.js",
+    "styles.css",
+    "session-tabscope.js",
+    "_redirects",
+)
+
+
+def validate_chamber_tree(root: Path) -> dict[str, Any]:
+    """Ensure chamber tree is a full functional AO frontend twin."""
+    missing = [f for f in REQUIRED_CHAMBER_FILES if not (root / f).is_file()]
+    idx = root / "index.html"
+    index_html = ""
+    if idx.is_file():
+        index_html = idx.read_text(encoding="utf-8", errors="replace")
+    spa_ok = _looks_like_ao_spa(index_html)
+    redirects = (root / "_redirects").read_text(encoding="utf-8", errors="replace") if (root / "_redirects").is_file() else ""
+    has_v1_proxy = "/v1/*" in redirects and "railway.app" in redirects
+    n_files = sum(1 for _p, _d, fs in os.walk(root) for _ in fs)
+    ok = not missing and spa_ok and has_v1_proxy and n_files >= 80
+    return {
+        "ok": ok,
+        "missing": missing,
+        "spa_ok": spa_ok,
+        "index_bytes": len(index_html.encode("utf-8")),
+        "has_v1_proxy": has_v1_proxy,
+        "file_count": n_files,
+        "errors": (
+            (["missing:" + ",".join(missing)] if missing else [])
+            + (["index_not_spa"] if not spa_ok else [])
+            + (["no_v1_proxy_redirects"] if not has_v1_proxy else [])
+            + ([f"too_few_files:{n_files}"] if n_files < 80 else [])
+        ),
+    }
 
 
 def _stage_public(src: Path) -> Path:
@@ -285,6 +356,127 @@ def _stage_public(src: Path) -> Path:
     return dest
 
 
+def build_full_chamber_tree(
+    *,
+    run_id: str | None = None,
+    public_dir: str | Path | None = None,
+) -> tuple[Path | None, dict[str, Any]]:
+    """Build a **full functional twin** of arrayoperator.com frontend.
+
+    1. Start from baseline AO public/ (complete prod-shaped tree + _redirects)
+    2. Overlay sandbox public/ changes on top (Sovereign's thrash)
+    3. If sandbox replaced index.html with a thin marketing page, keep SPA as
+       index.html and save the marketing page as /welcome.html instead
+    4. Validate required files + SPA markers before deploy
+    """
+    import shutil
+
+    meta: dict[str, Any] = {"overlay": False, "rescued_index": False}
+    baseline = resolve_baseline_public()
+    overlay = None
+    if public_dir:
+        op = Path(public_dir).expanduser().resolve()
+        if op.is_dir():
+            overlay = op
+    if overlay is None and run_id:
+        overlay = resolve_public_dir(run_id=run_id)
+        # Don't double-use baseline as overlay
+        if overlay and baseline and overlay.resolve() == baseline.resolve():
+            overlay = None
+    elif overlay is None:
+        # Explicit public_dir none — still try sandbox active
+        try:
+            from .energy_agent_sovereign_mind_sandbox import get_active_run
+
+            active = get_active_run(None)
+            if active:
+                overlay = resolve_public_dir(run_id=active.get("id"))
+                if overlay and baseline and overlay.resolve() == baseline.resolve():
+                    overlay = None
+        except Exception:
+            pass
+
+    if baseline is None and overlay is None:
+        return None, {"ok": False, "error": "no baseline or overlay public/"}
+
+    td = Path(tempfile.mkdtemp(prefix="ao-chamber-full-"))
+    dest = td / "public"
+    dest.mkdir(parents=True)
+
+    # Foundation: full baseline
+    foundation = baseline or overlay
+    assert foundation is not None
+    shutil.copytree(
+        foundation,
+        dest,
+        dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns(
+            "netlify.toml", "edge-functions", ".git", "__pycache__", "*.pyc"
+        ),
+    )
+    meta["baseline"] = str(foundation)
+
+    # Overlay sandbox deltas (preserve full twin)
+    if overlay and baseline and overlay.resolve() != baseline.resolve():
+        meta["overlay"] = True
+        meta["overlay_src"] = str(overlay)
+        for dirpath, _dirs, names in os.walk(overlay):
+            for n in names:
+                if n in ("netlify.toml",) or n.endswith(".pyc"):
+                    continue
+                full = Path(dirpath) / n
+                rel = full.relative_to(overlay)
+                target = dest / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                # Special-case index.html: never replace SPA with thin landing
+                if rel.as_posix() == "index.html":
+                    try:
+                        new_html = full.read_text(encoding="utf-8", errors="replace")
+                    except Exception:
+                        continue
+                    if _looks_like_ao_spa(new_html):
+                        shutil.copy2(full, target)
+                    else:
+                        # Rescue: marketing experiment lives at /welcome
+                        welcome = dest / "welcome.html"
+                        shutil.copy2(full, welcome)
+                        meta["rescued_index"] = True
+                        meta["welcome_bytes"] = len(new_html)
+                        log.warning(
+                            "chamber: refused thin index.html overlay (%s bytes); "
+                            "kept SPA index, wrote welcome.html",
+                            len(new_html),
+                        )
+                    continue
+                shutil.copy2(full, target)
+
+    # Ensure _redirects from baseline if overlay wiped them
+    if not (dest / "_redirects").is_file() and baseline and (baseline / "_redirects").is_file():
+        shutil.copy2(baseline / "_redirects", dest / "_redirects")
+    if not (dest / "_headers").is_file() and baseline and (baseline / "_headers").is_file():
+        shutil.copy2(baseline / "_headers", dest / "_headers")
+
+    # Final SPA rescue from baseline if index still broken
+    idx = dest / "index.html"
+    if not idx.is_file() or not _looks_like_ao_spa(idx.read_text(encoding="utf-8", errors="replace")):
+        if baseline and (baseline / "index.html").is_file():
+            if idx.is_file():
+                shutil.copy2(idx, dest / "welcome.html")
+                meta["rescued_index"] = True
+            shutil.copy2(baseline / "index.html", idx)
+            meta["restored_spa_index"] = True
+
+    if (dest / "netlify.toml").exists():
+        (dest / "netlify.toml").unlink()
+
+    check = validate_chamber_tree(dest)
+    meta["validate"] = check
+    if not check.get("ok"):
+        return dest, {"ok": False, "error": "chamber_tree_invalid", **meta}
+    meta["ok"] = True
+    return dest, meta
+
+
 def deploy_chamber(
     *,
     public_dir: str | Path | None = None,
@@ -293,17 +485,21 @@ def deploy_chamber(
     title: str | None = None,
     db=None,
 ) -> dict[str, Any]:
-    """Deploy AO public/ as chamber branch deploy. Never touches prod publish."""
+    """Deploy full AO frontend twin as chamber branch. Never touches prod publish."""
     if not chamber_enabled():
         return {"ok": False, "skipped": True, "reason": "SOVEREIGN_CHAMBER_DEPLOY off"}
 
-    src = resolve_public_dir(run_id=run_id, public_dir=public_dir)
-    if src is None:
-        return {"ok": False, "error": "no public/ dir found for chamber"}
+    staged, build_meta = build_full_chamber_tree(run_id=run_id, public_dir=public_dir)
+    if staged is None or not build_meta.get("ok"):
+        return {
+            "ok": False,
+            "error": (build_meta or {}).get("error") or "chamber build failed",
+            "build": build_meta,
+        }
 
-    staged = _stage_public(src)
     result: dict[str, Any] = {
-        "public_src": str(src),
+        "public_src": build_meta.get("overlay_src") or build_meta.get("baseline"),
+        "build": build_meta,
         "run_id": run_id,
         "job_id": job_id,
         "title": title,
@@ -420,7 +616,8 @@ def deploy_chamber(
                 title=f"Chamber ship {result.get('deploy_id') or ''}".strip(),
                 body=(
                     f"Chamber URL: {url}\n"
-                    f"Source public/: {src}\n"
+                    f"Source public/: {result.get('public_src')}\n"
+                    f"Build: {json.dumps(build_meta, default=str)[:1500]}\n"
                     f"Run: {run_id or '—'}\n"
                     f"Job: {job_id or '—'}\n"
                     f"Title: {title or '—'}\n"
