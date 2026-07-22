@@ -794,22 +794,23 @@ def wake_payload(db=None) -> dict[str, Any]:
         "goal": active.get("goal"),
         "jobs_so_far": len(active.get("sovereign_jobs") or []),
         "ford_preview": {
-            "portal": "http://127.0.0.1:7701/",
-            "live_ao_clone": "http://127.0.0.1:7701/live/",
-            "pitch_json": "http://127.0.0.1:7701/api/live/pitch",
-            "diff": "http://127.0.0.1:7701/api/live/diff",
+            "portal": (os.getenv("SOVEREIGN_PORTAL_URL") or "http://127.0.0.1:7701").rstrip("/") + "/",
+            "live_ao_clone": (os.getenv("SOVEREIGN_PORTAL_URL") or "http://127.0.0.1:7701").rstrip("/") + "/live/",
+            "pitch_json": (os.getenv("SOVEREIGN_PORTAL_URL") or "http://127.0.0.1:7701").rstrip("/") + "/api/live/pitch",
+            "diff": (os.getenv("SOVEREIGN_PORTAL_URL") or "http://127.0.0.1:7701").rstrip("/") + "/api/live/diff",
+            "mind_runs_in_cloud": True,
             "instruction": (
-                "Ford has a LIVE VIEW of your Array Operator clone. Your job includes "
-                "convincing him this is ready for main: ship visible improvements in the "
-                "sandbox, write showcase pitch (action showcase_pitch) and ready-for-main "
-                "brief (showcase_ready), and point him at /live/ + specific diffs."
+                "You run on the Railway WORKER 24/7 — keep thinking and sandbox-shipping even "
+                "when Ford's laptop is off. When he is online, Portal Live shows the AO clone. "
+                "Convince him for main: visible sandbox improvements + showcase_pitch + "
+                "showcase_ready + diffs."
             ),
         },
         "doctrine": (
             "MIND SANDBOX is OPEN (FORCE may be on — never merge main / never deploy prod). "
-            "Ford audits your work at http://127.0.0.1:7701/live/ (live AO clone + file diffs). "
-            "You MUST sell readiness: use showcase_pitch + showcase_ready after meaningful ships. "
-            "Build demos (showcase_demo_html) if a static walkthrough helps. Substance over thrash."
+            "You are cloud-hosted on the Railway worker; Ford's laptop is optional review UI only. "
+            "Sell readiness with showcase_pitch + showcase_ready after meaningful ships. "
+            "Substance over thrash."
         ),
         "worktree": str(run_dir(active["id"])),
         "showcase": active.get("showcase") or {},
