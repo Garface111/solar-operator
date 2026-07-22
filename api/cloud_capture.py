@@ -373,8 +373,29 @@ def save_credential(body: CredentialIn, request: Request,
                 log.warning("ensure_client_for_login failed for %s/%s", t.id, provider,
                             exc_info=True)
         db.commit()
-    return {"ok": True, "provider": provider, "username": body.username.strip(),
-            "enabled": bool(body.enable), "encryption_ready": cc.crypto_ready()}
+    # Bill Adapter Autopilot: classify platform family + arm known bill pull
+    # (GMP JWT / SmartHub harvester) the moment a login is saved in Accounts.
+    autopilot: dict = {}
+    try:
+        from .bill_adapter_autopilot import on_credential_saved
+        autopilot = on_credential_saved(
+            tenant_id=t.id,
+            provider=provider,
+            username=body.username.strip(),
+            login_host=body.login_host,
+            enabled=bool(body.enable),
+        )
+    except Exception:  # noqa: BLE001 — never fail a credential save on autopilot
+        log.warning("bill-adapter-autopilot failed for %s/%s", t.id, provider, exc_info=True)
+        autopilot = {"ok": False, "error": "autopilot_unavailable"}
+    return {
+        "ok": True,
+        "provider": provider,
+        "username": body.username.strip(),
+        "enabled": bool(body.enable),
+        "encryption_ready": cc.crypto_ready(),
+        "bill_autopilot": autopilot,
+    }
 
 
 @router.post("/v1/cloud-capture/toggle")

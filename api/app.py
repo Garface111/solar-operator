@@ -458,6 +458,8 @@ app.include_router(cloud_capture_router)
 # Auto-adapter engine: self-improving declarative adapters (synth -> validate -> registry)
 from .auto_adapters import router as auto_adapters_router
 app.include_router(auto_adapters_router)
+from .bill_adapter_autopilot import router as bill_autopilot_router
+app.include_router(bill_autopilot_router)
 
 # Energy Agent — voice-first tenant operator (orb + tools + dual memory)
 from .energy_agent import router as energy_agent_router
