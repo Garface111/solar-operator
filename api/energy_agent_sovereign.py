@@ -1391,6 +1391,22 @@ _OPERATING_AGREEMENT = {
         "Monitor yourself: pool pressure, web /health, job concurrency, auto-pause.\n"
         "If you are the cause of downtime, stop and cool down — never 'push harder'."
     ),
+    # Cold hard truth (Ford 2026-07-22)
+    "reality_file_doctrine": (
+        "REALITY FILE (docs/sovereign/reality/CHANGELOG.jsonl) is the cold hard truth of "
+        "every Array Operator frontend + backend change, in order. You load it on every "
+        "cortex wake (INDEX + recent tail). When you ship, the worker appends automatically. "
+        "You may also reality_record a human/Ford change you observed. Never rewrite past "
+        "lines. Prefer this timeline over inventing product history — git is raw; reality "
+        "is reasoned product memory for your mind."
+    ),
+    "mind_sandbox_doctrine": (
+        "MIND SANDBOX: a free-run arena vs Ford. When a run is open, experimental code jobs "
+        "go to sandbox worktrees only — no main merge, no prod deploy. After ~a week, a "
+        "scorecard compares what you built to what Ford shipped. Use free-run to prove you "
+        "can out-ship and out-think human ops — substance over thrash. Start/score via "
+        "admin mind-sandbox endpoints or sandbox_start/sandbox_score actions."
+    ),
 }
 
 
@@ -2394,6 +2410,38 @@ def execute_brain_actions(db, actions: list[dict], *, tick_id: str) -> list[dict
                 }
         elif atype in ("mind_reject", "reject_mind"):
             res = reject_pending_mind_patch(db, reason=str(raw.get("rationale") or "brain"))
+        elif atype in ("reality_record", "record_reality", "reality_append"):
+            from .energy_agent_sovereign_reality import append_entry
+            files = raw.get("files") or []
+            if isinstance(files, str):
+                files = [files]
+            repos = raw.get("repos") or raw.get("repo") or []
+            if isinstance(repos, str):
+                repos = [repos]
+            res = append_entry(
+                summary=str(raw.get("title") or raw.get("text") or raw.get("summary") or "change")[:500],
+                source=str(raw.get("source") or "sovereign")[:40],
+                repos=list(repos)[:8],
+                files=list(files)[:80],
+                why=str(raw.get("why") or raw.get("rationale") or "")[:600] or None,
+                author=str(raw.get("author") or "Sovereign")[:120],
+                job_id=str(raw.get("job_id") or "")[:80] or None,
+            )
+        elif atype in ("sandbox_start", "mind_sandbox_start"):
+            from .energy_agent_sovereign_mind_sandbox import start_run
+            res = start_run(
+                db,
+                days=int(raw.get("days") or raw.get("limit") or 7),
+                title=raw.get("title"),
+                goal=raw.get("text") or raw.get("goal") or raw.get("rationale"),
+                free_run=raw.get("free_run", True) is not False,
+            )
+        elif atype in ("sandbox_score", "mind_sandbox_score"):
+            from .energy_agent_sovereign_mind_sandbox import score_active
+            res = score_active(db, run_id=raw.get("run_id"))
+        elif atype in ("sandbox_end", "mind_sandbox_end"):
+            from .energy_agent_sovereign_mind_sandbox import end_run
+            res = end_run(db, run_id=raw.get("run_id"), score=raw.get("score", True) is not False)
         elif atype in ("agenda", "goal_upsert", "reprioritize_goals"):
             from .energy_agent_sovereign_ops import own_agenda, reprioritize_goals
             if raw.get("updates") or atype == "reprioritize_goals":
@@ -2401,12 +2449,37 @@ def execute_brain_actions(db, actions: list[dict], *, tick_id: str) -> list[dict
             else:
                 res = own_agenda(db, raw.get("agenda") or [raw])
         elif atype == "code_hire":
+            # Sandbox free-run: pass sandbox flags into brief_json via act_code_hire kind
+            kind = raw.get("kind") or "draft_pr_brief"
+            if raw.get("sandbox") or raw.get("mind_sandbox"):
+                kind = "sandbox_job"
             res = act_code_hire(
                 db,
                 title=raw.get("title") or "Sovereign code hire",
                 brief=raw.get("text") or raw.get("brief") or raw.get("rationale") or "",
-                kind=raw.get("kind") or "draft_pr_brief",
+                kind=kind,
             )
+            # Tag brief with sandbox metadata for worker
+            if res.get("ok") and (raw.get("sandbox") or raw.get("mind_sandbox") or kind == "sandbox_job"):
+                try:
+                    job = db.get(EaSovereignJob, res.get("job_id"))
+                    if job:
+                        try:
+                            b = json.loads(job.brief_json or "{}")
+                        except Exception:
+                            b = {}
+                        b["sandbox"] = True
+                        if raw.get("sandbox_run_id"):
+                            b["sandbox_run_id"] = raw["sandbox_run_id"]
+                        else:
+                            from .energy_agent_sovereign_mind_sandbox import get_active_run
+                            ar = get_active_run(db)
+                            if ar:
+                                b["sandbox_run_id"] = ar.get("id")
+                        job.brief_json = json.dumps(b, default=str)[:50_000]
+                        db.flush()
+                except Exception as e:  # noqa: BLE001
+                    log.warning("sandbox brief tag failed: %s", e)
         elif atype == "speak":
             # Route to Sovereign Desk (Ford only) — never Energy Agent chat
             speak = (raw.get("text") or raw.get("speak") or "").strip()
@@ -3888,12 +3961,133 @@ def sovereign_seed_operating_agreement(authorization: str | None = Header(defaul
                 "authority_ship", "checkin_cadence", "job_budget",
                 "weekly_digest", "ford_operating_agreement",
                 "demo_vs_real", "people_testers",
+                "reality_file_doctrine", "mind_sandbox_doctrine",
             ) or (m.get("key") or "").startswith("authority")
             or (m.get("key") or "").startswith("demo")
             or (m.get("key") or "").startswith("people")
+            or (m.get("key") or "").startswith("reality")
+            or (m.get("key") or "").startswith("mind_sandbox")
         ],
         "max_jobs_per_day": MAX_JOBS_PER_DAY,  # 0 = unlimited
     }
+
+
+# ── Reality file + Mind sandbox (Ford 2026-07-22) ──────────────────────────
+
+@router.get("/admin/sovereign/reality")
+def sovereign_reality_status(
+    authorization: str | None = Header(default=None),
+    tail: int = 30,
+):
+    """Cold hard truth status + recent CHANGELOG tail."""
+    _require_sovereign_or_admin(authorization)
+    from .energy_agent_sovereign_reality import status, read_entries, load_for_wake
+    return {
+        "ok": True,
+        "status": status(),
+        "tail": read_entries(limit=max(1, min(int(tail or 30), 200))),
+        "wake_preview_keys": list(load_for_wake().keys()),
+    }
+
+
+@router.post("/admin/sovereign/reality/seed")
+def sovereign_reality_seed(
+    authorization: str | None = Header(default=None),
+    since: str = "2026-05-01",
+    force: bool = False,
+):
+    """Bootstrap CHANGELOG.jsonl from git history of array-operator + solar-operator."""
+    _require_sovereign_or_admin(authorization)
+    from .energy_agent_sovereign_reality import seed_from_git
+    return seed_from_git(since=since, force=force)
+
+
+@router.post("/admin/sovereign/reality/append")
+def sovereign_reality_append(
+    body: dict | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """Manually append a reality line (Ford / operator)."""
+    _require_sovereign_or_admin(authorization)
+    body = body or {}
+    from .energy_agent_sovereign_reality import append_entry
+    files = body.get("files") or []
+    if isinstance(files, str):
+        files = [files]
+    repos = body.get("repos") or body.get("repo") or []
+    if isinstance(repos, str):
+        repos = [repos]
+    return append_entry(
+        summary=str(body.get("summary") or body.get("title") or body.get("text") or "")[:500],
+        source=str(body.get("source") or "ford")[:40],
+        repos=list(repos)[:8],
+        files=list(files)[:80],
+        why=str(body.get("why") or "")[:600] or None,
+        author=str(body.get("author") or "Ford")[:120],
+        sha=body.get("sha"),
+        job_id=body.get("job_id"),
+    )
+
+
+@router.get("/admin/sovereign/mind-sandbox")
+def sovereign_mind_sandbox_status(authorization: str | None = Header(default=None)):
+    _require_sovereign_or_admin(authorization)
+    from .energy_agent_sovereign_mind_sandbox import status
+    with SessionLocal() as db:
+        return {"ok": True, **status(db)}
+
+
+@router.post("/admin/sovereign/mind-sandbox/start")
+def sovereign_mind_sandbox_start(
+    body: dict | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """Open a free-run evaluation window (default 7 days)."""
+    _require_sovereign_or_admin(authorization)
+    body = body or {}
+    from .energy_agent_sovereign_mind_sandbox import start_run
+    with SessionLocal() as db:
+        out = start_run(
+            db,
+            days=int(body.get("days") or 7),
+            title=body.get("title"),
+            goal=body.get("goal") or body.get("text"),
+            free_run=body.get("free_run", True) is not False,
+        )
+        db.commit()
+        return out
+
+
+@router.post("/admin/sovereign/mind-sandbox/score")
+def sovereign_mind_sandbox_score(
+    body: dict | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """Mid-window or final scorecard: Sovereign sandbox vs Ford commits."""
+    _require_sovereign_or_admin(authorization)
+    body = body or {}
+    from .energy_agent_sovereign_mind_sandbox import score_active
+    with SessionLocal() as db:
+        return score_active(db, run_id=body.get("run_id"))
+
+
+@router.post("/admin/sovereign/mind-sandbox/end")
+def sovereign_mind_sandbox_end(
+    body: dict | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """Close the free-run window and write comparison.md + scorecard.json."""
+    _require_sovereign_or_admin(authorization)
+    body = body or {}
+    from .energy_agent_sovereign_mind_sandbox import end_run
+    with SessionLocal() as db:
+        out = end_run(
+            db,
+            run_id=body.get("run_id"),
+            score=body.get("score", True) is not False,
+        )
+        db.commit()
+        return out
 
 
 @router.post("/admin/sovereign/jobs/requeue")
