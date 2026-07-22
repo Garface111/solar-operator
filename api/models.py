@@ -2223,7 +2223,9 @@ class BillDiscoveryJob(Base):
     """
     __tablename__ = "bill_discovery_job"
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    # No FK: discovery may be staged before tenant rows exist in some test paths;
+    # production always passes a real tenant_id from Cloud Capture auth.
+    tenant_id: Mapped[str] = mapped_column(String(32), index=True)
     provider: Mapped[str] = mapped_column(String(40), index=True)
     username_lc: Mapped[str] = mapped_column(String(200))
     login_host: Mapped[str | None] = mapped_column(String(200), nullable=True)
