@@ -201,12 +201,36 @@
     return "idle"; // online, no error, zero power (night / not producing)
   }
 
-  // Parse Fronius model string -> nameplate kW. "Primo 12.5-1 208-240" -> 12.5,
-  // "Symo 20.0-3-M" -> 20.0. The first decimal after the family name is the kW.
+  // Parse Fronius display name → nameplate kW (AC).
+  //   "Primo 12.5-1 208-240" → 12.5
+  //   "Symo 20.0-3-M" → 20.0
+  //   "21330 WDC Primo 01 15.0" → 15.0  (NOT 21330 — that's DC Wp)
+  // Never take the first bare number: Solar.web prefixes many names with
+  // "NNNNN WDC" (DC watts), which blew Lester Middlebury to 158 MW nameplate
+  // and ~$17k/mo AO monitoring (Ford 2026-07-22).
   function nameplateFromModel(displayName) {
     if (typeof displayName !== "string") return null;
-    const m = displayName.match(/\b(\d+(?:\.\d+)?)\b/);  // first number = kW rating
-    return m ? Math.round(parseFloat(m[1]) * 10) / 10 : null;
+    // Classic family + rating-phase: Primo 12.5-1 / Symo 20.0-3
+    let m = displayName.match(
+      /\b(?:Primo|Symo|Galvo|Eco|Tauro|Verto)(?:\s+GEN24)?\s+(\d+(?:\.\d+)?)-[13]\b/i);
+    if (m) {
+      const kw = parseFloat(m[1]);
+      if (kw > 0 && kw <= 1000) return Math.round(kw * 10) / 10;
+    }
+    // "… WDC Primo 01 15.0" / "Primo 15.0" — AC kW after optional unit index
+    m = displayName.match(
+      /\b(?:Primo|Symo|Galvo|Eco|Tauro|Verto)(?:\s+GEN24)?(?:\s+\d+)?\s+(\d+(?:\.\d+)?)\s*$/i);
+    if (m) {
+      const kw = parseFloat(m[1]);
+      if (kw > 0 && kw <= 1000) return Math.round(kw * 10) / 10;
+    }
+    // Explicit kW token anywhere
+    m = displayName.match(/(\d+(?:\.\d+)?)\s*k(?:w|wp)?\b/i);
+    if (m) {
+      const kw = parseFloat(m[1]);
+      if (kw > 0 && kw <= 1000) return Math.round(kw * 10) / 10;
+    }
+    return null; // never invent from a bare leading number (WDC watts)
   }
 
   // Trapezoidal integral of a [ts_ms, kW] power series -> kWh for the day.

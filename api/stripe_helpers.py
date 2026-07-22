@@ -65,12 +65,16 @@ def _ao_nameplate_price_id() -> str:
 
 def tenant_nameplate_kw(db, tenant_id: str) -> int:
     """Total REGISTERED inverter nameplate (kW, rounded) across a tenant's billable
-    arrays — the quantity AO monitoring bills on. Uses each inverter's stored
-    nameplate, falling back to a model-code-derived rating (the SAME derivation the
-    dashboard/fleet-tree uses), so the billed capacity matches what the owner sees.
-    Excludes soft-deleted / excluded arrays. Cheap — no telemetry pull."""
+    arrays — the quantity AO monitoring bills on. Uses each inverter's effective
+    nameplate (stored when sane, else model-code-derived — same as the fleet tree),
+    so the billed capacity matches what the owner sees.
+    Excludes soft-deleted / excluded arrays. Cheap — no telemetry pull.
+
+    Sanity: rejects per-inverter nameplates >500 kW (almost always a Fronius
+    'NNNNN WDC …' DC-watts misparse that inflated Lester to ~$17k/mo).
+    """
     from .models import Inverter, Array
-    from .inverter_fleet import _nameplate_from_model
+    from .inverter_fleet import _eff_nameplate_kw
     rows = db.execute(
         select(Inverter).join(Array, Array.id == Inverter.array_id).where(
             Inverter.tenant_id == tenant_id,
@@ -81,8 +85,7 @@ def tenant_nameplate_kw(db, tenant_id: str) -> int:
     ).scalars().all()
     total = 0.0
     for iv in rows:
-        np = getattr(iv, "nameplate_kw", None) or _nameplate_from_model(
-            getattr(iv, "vendor", None), getattr(iv, "model", None))
+        np = _eff_nameplate_kw(iv, {})
         if np:
             total += float(np)
     return int(round(total))

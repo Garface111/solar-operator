@@ -67,6 +67,15 @@ _SE_MODEL_W = re.compile(r"\bSE(\d{3,5})(?!\d)", re.IGNORECASE)         # SE1000
 _FRONIUS_MODEL_KW = re.compile(
     r"\b(?:Primo|Symo|Galvo|Eco|Tauro|Verto)(?:\s+GEN24)?\s+(\d{1,3}(?:\.\d+)?)-[13]\b",
     re.IGNORECASE)
+# Solar.web portal names often look like '21330 WDC Primo 01 15.0' — DC Wp
+# prefix + unit index + AC kW at the end. Must NOT take the leading WDC number.
+_FRONIUS_WDC_TRAIL_KW = re.compile(
+    r"\b(?:Primo|Symo|Galvo|Eco|Tauro|Verto)(?:\s+GEN24)?(?:\s+\d+)?\s+"
+    r"(\d{1,3}(?:\.\d+)?)\s*$",
+    re.IGNORECASE)
+# Single-inverter AC nameplates above this are almost never real on AO fleets
+# (would be utility-scale). Stored values above it are usually WDC watts.
+_ABSURD_INV_NAMEPLATE_KW = 500.0
 
 def _nameplate_from_model(vendor, model):
     if not model:
@@ -104,6 +113,13 @@ def _nameplate_from_model(vendor, model):
                 kw = float(mf.group(1))
             except (TypeError, ValueError):
                 kw = None
+        if kw is None:
+            mt = _FRONIUS_WDC_TRAIL_KW.search(s.strip())
+            if mt:
+                try:
+                    kw = float(mt.group(1))
+                except (TypeError, ValueError):
+                    kw = None
     if kw is None:
         return None
     return kw if 0 < kw <= 1000 else None
@@ -112,14 +128,40 @@ def _eff_nameplate_kw(iv, m):
     """Effective nameplate: the reported value if we have one, else the API
     telemetry value, else (Chint only) the rating parsed from the model code.
     getattr-guarded so it's safe on any inverter-like object (real Inverter rows
-    carry these columns; lightweight test stand-ins may not)."""
+    carry these columns; lightweight test stand-ins may not).
+
+    Rejects absurd stored nameplates (>500 kW per inverter — almost always a
+    WDC-watts misparse) and re-derives from the model string when possible.
+    """
     np = getattr(iv, "nameplate_kw", None)
+    vendor = getattr(iv, "vendor", None)
+    model = getattr(iv, "model", None) or (m.get("model") if m else None)
+    name = getattr(iv, "name", None)
     if np is not None:
-        return np
-    mp = m.get("nameplate_kw")
+        try:
+            npf = float(np)
+        except (TypeError, ValueError):
+            npf = None
+        if npf is not None and 0 < npf <= _ABSURD_INV_NAMEPLATE_KW:
+            return npf
+        # Absurd stored value — prefer model parse (also try display name).
+        parsed = (_nameplate_from_model(vendor, model)
+                  or _nameplate_from_model(vendor, name))
+        if parsed is not None:
+            return parsed
+        if npf is not None and npf > 1000:
+            # Last resort: treat as watts
+            return round(npf / 1000.0, 2)
+    mp = m.get("nameplate_kw") if m else None
     if mp is not None:
-        return mp
-    return _nameplate_from_model(getattr(iv, "vendor", None), getattr(iv, "model", None) or m.get("model"))
+        try:
+            mpf = float(mp)
+            if 0 < mpf <= _ABSURD_INV_NAMEPLATE_KW:
+                return mpf
+        except (TypeError, ValueError):
+            pass
+    return (_nameplate_from_model(vendor, model)
+            or _nameplate_from_model(vendor, name))
 
 
 def _sane_live_power_w(power_w, nameplate_kw):

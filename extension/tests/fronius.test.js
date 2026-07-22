@@ -13,16 +13,18 @@ test("parseAspNetDate parses ASP.NET /Date(ms)/ to ISO", () => {
   assert.equal(F.parseAspNetDate(12345), null);
 });
 
-test("nameplateFromModel takes the first decimal as kW", () => {
-  // Doc examples: "Primo 12.5-1 208-240" -> 12.5, "Symo 20.0-3-M" -> 20.0
+test("nameplateFromModel parses AC kW, never leading WDC watts", () => {
+  // Classic: "Primo 12.5-1 208-240" -> 12.5, "Symo 20.0-3-M" -> 20.0
   assert.equal(F.nameplateFromModel("Primo 12.5-1 208-240"), 12.5);
   assert.equal(F.nameplateFromModel("Symo 20.0-3-M"), 20);
   assert.equal(F.nameplateFromModel("Primo 8.2-1"), 8.2);
-  // "Gen24": the digits abut a letter (no word boundary), so the (\d…) regex
-  // does not match -> null. Documents the real edge, not an idealized one.
+  // Solar.web portal names prefix DC Wp — must use the trailing AC rating.
+  // Lester Middlebury: '21330 WDC Primo 01 15.0' must NOT return 21330.
+  assert.equal(F.nameplateFromModel("21330 WDC Primo 01 15.0"), 15.0);
+  assert.equal(F.nameplateFromModel("17775 WDC Primo 04 12.5 "), 12.5);
+  assert.equal(F.nameplateFromModel("10665 WDC Primo 10 7.6"), 7.6);
   assert.equal(F.nameplateFromModel("Gen24"), null);
-  assert.equal(F.nameplateFromModel("GEN 24"), 24);       // space -> boundary -> matches
-  assert.equal(F.nameplateFromModel("Inverter"), null);   // no number
+  assert.equal(F.nameplateFromModel("Inverter"), null);
   assert.equal(F.nameplateFromModel(null), null);
 });
 

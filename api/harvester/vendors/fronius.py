@@ -219,23 +219,38 @@ def _integrate_kwh(kw_series: list) -> float | None:
 
 
 def _nameplate(model: str) -> float | None:
-    """Parse Fronius display names like 'Primo 12.5-1 208-240 (7)' → 12.5.
+    """Parse Fronius display names → AC nameplate kW.
 
-    Prefer an explicit '…kW' / '…k ' token; else the first number after a family
-    word (Primo/Symo/Galvo/…). The old ``\\d+\\s*k`` pattern missed '12.5-1'
-    (no letter k), leaving nameplate_kw NULL on Waterford Primos.
+      'Primo 12.5-1 208-240 (7)' → 12.5
+      '21330 WDC Primo 01 15.0'  → 15.0  (NOT 21330 — that's DC Wp)
+
+    Never take the first bare number: Solar.web often prefixes names with
+    'NNNNN WDC' (DC watts). That mis-parse inflated Lester Middlebury to
+    ~158 MW and ~$17k/mo AO monitoring (Ford 2026-07-22).
     """
     if not model:
         return None
     m = re.search(r"(\d+(?:\.\d+)?)\s*k(?:w|wp)?\b", model, re.I)
     if m:
-        return float(m.group(1))
+        kw = float(m.group(1))
+        return kw if 0 < kw <= 1000 else None
+    # Classic family + rating-phase (Primo 12.5-1 / Symo 20.0-3)
     m = re.search(
-        r"(?:Primo|Symo|Galvo|Eco|IG|Pr|Sy)\s+(\d+(?:\.\d+)?)",
+        r"\b(?:Primo|Symo|Galvo|Eco|Tauro|Verto|IG)(?:\s+GEN24)?\s+"
+        r"(\d+(?:\.\d+)?)-[13]\b",
         model,
         re.I,
     )
     if m:
         return float(m.group(1))
-    m = re.search(r"\b(\d+(?:\.\d+)?)\b", model)
-    return float(m.group(1)) if m else None
+    # '… WDC Primo 01 15.0' — optional unit index, AC kW at end
+    m = re.search(
+        r"\b(?:Primo|Symo|Galvo|Eco|Tauro|Verto|IG)(?:\s+GEN24)?(?:\s+\d+)?\s+"
+        r"(\d+(?:\.\d+)?)\s*$",
+        model.strip(),
+        re.I,
+    )
+    if m:
+        kw = float(m.group(1))
+        return kw if 0 < kw <= 1000 else None
+    return None
