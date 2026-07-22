@@ -4386,6 +4386,106 @@ def _insert_inverter_daily_race_safe(db, *, tenant_id: str, inverter_id: int,
         return False
 
 
+def _rollup_inverter_dailies_to_array(
+    db,
+    *,
+    tenant_id: str,
+    array_id: int,
+    inv_ids: list[int],
+    days: Optional[set] = None,
+) -> int:
+    """Sum InverterDaily → array DailyGeneration for days missing (or lagging)
+    array-level kWh.
+
+    Why: Fronius (and some SMA/Chint) captures often write rich per-inverter
+    history via ci.daily / energy_today, but only TODAY at the site level
+    (EnergyTodayInkWh). Forecast + Analysis read DailyGeneration — so an array
+    can look "not modeled" (no matched actual days) while InverterDaily has
+    weeks of production. Rollup is additive and max-wins: never shrink a higher
+    measured array-day; never invent days without inverter evidence.
+
+    Returns number of array-day rows inserted or raised.
+    """
+    if not inv_ids:
+        return 0
+    q = (
+        select(InverterDaily.day, func.coalesce(func.sum(InverterDaily.kwh), 0.0))
+        .where(InverterDaily.inverter_id.in_(inv_ids))
+        .group_by(InverterDaily.day)
+    )
+    if days:
+        q = q.where(InverterDaily.day.in_(list(days)))
+    inv_by_day = {
+        d: float(kwh or 0.0)
+        for d, kwh in db.execute(q).all()
+        if d is not None and (kwh or 0) > 0
+    }
+    if not inv_by_day:
+        return 0
+    existing = {
+        r.day: r for r in db.execute(
+            select(DailyGeneration).where(
+                DailyGeneration.array_id == array_id,
+                DailyGeneration.day.in_(list(inv_by_day.keys())),
+            )
+        ).scalars().all()
+    }
+    n = 0
+    for d, inv_sum in inv_by_day.items():
+        inv_sum = round(inv_sum, 3)
+        row = existing.get(d)
+        if row is None:
+            if _insert_daily_generation_race_safe(
+                    db, tenant_id=tenant_id, array_id=array_id,
+                    day=d, kwh=inv_sum, source="extension_pull"):
+                n += 1
+            continue
+        src = (row.source or "").lower()
+        # Don't clobber a real utility-meter / SE-API day with an inverter sum.
+        if src in ("utility_meter", "gmp_api", "gmp_portal_scrape", "smarthub",
+                   "solaredge", "se", "solaredge_api"):
+            continue
+        # bill_prorate / missing / lower extension_pull → promote inverter sum.
+        if src in ("", "bill_prorate") or inv_sum > float(row.kwh or 0):
+            row.kwh = inv_sum
+            row.source = "extension_pull"
+            row.uploaded_at = now()
+            n += 1
+    return n
+
+
+def rollup_inverter_daily_for_array(db, tenant_id: str, array_id: int,
+                                    *, days_back: int = 30) -> int:
+    """Public helper: roll last N days of InverterDaily up to DailyGeneration
+    for one array. Used by capture + one-shot backfills."""
+    from datetime import timedelta
+    inv_ids = list(db.execute(
+        select(Inverter.id).where(
+            Inverter.array_id == array_id,
+            Inverter.deleted_at.is_(None),
+        )
+    ).scalars().all())
+    if not inv_ids:
+        return 0
+    try:
+        start = local_today() - timedelta(days=days_back)
+    except Exception:
+        start = now().date() - timedelta(days=days_back)
+    day_set = {
+        d for d in db.execute(
+            select(InverterDaily.day).where(
+                InverterDaily.inverter_id.in_(inv_ids),
+                InverterDaily.day >= start,
+            ).distinct()
+        ).scalars().all()
+        if d is not None
+    }
+    return _rollup_inverter_dailies_to_array(
+        db, tenant_id=tenant_id, array_id=array_id,
+        inv_ids=inv_ids, days=day_set or None,
+    )
+
+
 @router.post("/v1/array-owners/inverter-capture")
 def inverter_capture(
     body: InverterCaptureBody,
@@ -4921,18 +5021,34 @@ def _inverter_capture_for_tenant(tenant: Tenant, provider: str, body: "InverterC
             # the site total across inverters by nameplate so sparklines match
             # reality. Never invent energy above the site total; never shrink a
             # higher already-correct inverter sum.
-            if provider == "fronius" and want_arr:
-                _db_invs = db.execute(
-                    select(Inverter).where(
-                        Inverter.array_id == arr.id,
-                        Inverter.deleted_at.is_(None),
-                        Inverter.vendor == "fronius",
-                    )
-                ).scalars().all()
-                if _db_invs:
-                    _rebalance_fronius_inverter_dailies(
-                        db, tenant_id=tenant.id, array_id=arr.id,
-                        site_days=want_arr, inv_rows=_db_invs,
+            _db_invs = db.execute(
+                select(Inverter).where(
+                    Inverter.array_id == arr.id,
+                    Inverter.deleted_at.is_(None),
+                    Inverter.vendor == provider,
+                )
+            ).scalars().all()
+            if provider == "fronius" and want_arr and _db_invs:
+                _rebalance_fronius_inverter_dailies(
+                    db, tenant_id=tenant.id, array_id=arr.id,
+                    site_days=want_arr, inv_rows=_db_invs,
+                )
+
+            # ── Inverse rollup: InverterDaily history → array DailyGeneration ──
+            # When the portal only gave site-level TODAY but full per-inverter
+            # history (Fronius Waterford: weeks of InverterDaily, 1 DG day),
+            # Analysis/forecast see zero matched actuals. Fill missing array
+            # days from the inverter sum so weather modeling can run.
+            if _db_invs:
+                _rolled = _rollup_inverter_dailies_to_array(
+                    db, tenant_id=tenant.id, array_id=arr.id,
+                    inv_ids=[iv.id for iv in _db_invs],
+                )
+                if _rolled:
+                    log.info(
+                        "inverter-capture: rolled %d InverterDaily day(s) → "
+                        "DailyGeneration for array=%s vendor=%s",
+                        _rolled, arr.id, provider,
                     )
 
             results.append({

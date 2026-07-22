@@ -4,13 +4,18 @@ so that I can control it and also test it").
 
 This is the at-scale stress tenant for the Offtaker Invoice Generator — 8× the
 largest fleet the system had ever held (96 subs on ten_demo_realistic). Shape
-mirrors Anna's real world (GMP group net metering):
+mirrors Anna's real world (group net metering) but offtaker utility accounts
+are a MIX of every LIVE offtaker-supported provider (GMP + every live SmartHub
+coop), not all-GMP — so the Invoices UI / utility filters have real diversity:
 
-  • 26 community arrays, each with a HOST GMP account whose bills carry the
+  • 26 community arrays, each with a HOST utility account whose bills carry the
     array's GROUP excess (kwh_sent_to_grid) for 15 months (2025-04 → 2026-06);
-  • 800 offtakers, EVERY one bound to their OWN GMP account whose bills carry
+  • 800 offtakers, EVERY one bound to their OWN utility account whose bills carry
     their allocated excess (share × group), so every one is SENDABLE under the
     settled-bill gate (delivery.py: unbound offtakers never email, BY DESIGN);
+  • host + offtaker accounts round-robin across the live offtaker-supported
+    provider catalog (see `_offtaker_providers()`); `auto_attach_gmp` is true
+    only when the bound account is GMP;
   • realistic allocation shares: an anchor business + varied tail per array,
     4-decimal shares summing to 94–99% of each array (never > 100%);
   • ~1 in 12 offtakers has a RIGGED GMP bill (credited ≠ share × group) so the
@@ -136,6 +141,33 @@ MODELS = {
 }
 
 
+def _offtaker_providers() -> list[dict]:
+    """Live providers the offtaker utility-account list surfaces (GMP + live
+    SmartHub). Cached on first call; sorted for deterministic round-robin."""
+    from api.providers import PROVIDERS
+    from api.adapters.smarthub import ALL_SMARTHUB_PROVIDERS
+    out = []
+    for p in PROVIDERS:
+        code = p["code"]
+        if p.get("scrape_status") != "live":
+            continue
+        if code != "gmp" and code not in ALL_SMARTHUB_PROVIDERS:
+            continue
+        out.append({
+            "code": code,
+            "state": (p.get("state") or "VT").upper(),
+            "label": p.get("label") or code,
+        })
+    out.sort(key=lambda x: (x["state"], x["code"]))
+    # Hard fallback so a missing registry never blocks a seed.
+    return out or [{"code": "gmp", "state": "VT", "label": "Green Mountain Power"}]
+
+
+def _provider_for_index(i: int, catalog: list[dict] | None = None) -> dict:
+    cat = catalog if catalog is not None else _offtaker_providers()
+    return cat[i % len(cat)]
+
+
 def _months() -> list[tuple[int, int]]:
     out = []
     y, m = FIRST_MONTH
@@ -152,8 +184,8 @@ def _last_day(yy: int, mm: int) -> int:
 
 
 def _rate(ai: int, yy: int, mm: int, vintage: int) -> float:
-    """Deterministic GMP-ish net-metering credit rate: vintage base + a small
-    monthly wiggle + a Jan-2026 step, ~0.148-0.19 $/kWh."""
+    """Deterministic net-metering credit rate: vintage base + a small monthly
+    wiggle + a Jan-2026 step, ~0.148-0.19 $/kWh (utility-agnostic for demo)."""
     base = 0.148 + (vintage - 2013) * 0.003
     wiggle = ((mm * 13 + ai * 7) % 5 - 2) * 0.0004
     step = 0.004 if yy >= 2026 else 0.0
@@ -249,6 +281,8 @@ def seed(wipe_only: bool = False) -> dict:
         seen_names: set[str] = set()
         g = 0                       # global offtaker index 0..799
         array_ids: list[int] = []
+        prov_catalog = _offtaker_providers()
+        ua_seq = 0                  # global UA index for provider round-robin
 
         for ai, (aname, n_members) in enumerate(zip(ARRAY_NAMES, COUNTS)):
             vintage = 2013 + (ai % 12)
@@ -260,13 +294,17 @@ def seed(wipe_only: bool = False) -> dict:
             array_ids.append(arr.id)
             counts["arrays"] += 1
 
-            # Host GMP account: the array's group-excess bill, one per month.
+            # Host account: group-excess bills, provider mixed across catalog.
+            host_p = _provider_for_index(ua_seq, prov_catalog)
+            ua_seq += 1
             host = UtilityAccount(
-                tenant_id=TENANT_ID, provider="gmp", array_id=arr.id,
+                tenant_id=TENANT_ID, provider=host_p["code"], array_id=arr.id,
                 account_number=f"81{ai:08d}", customer_number=f"81{ai:08d}",
                 nickname=f"{aname} (host)", enabled=True, is_residential=False,
                 service_address={"line1": f"{100 + ai * 7} Solar Farm Rd, "
-                                          f"{BIZ_TOWNS[ai % len(BIZ_TOWNS)]}, VT"},
+                                          f"{BIZ_TOWNS[ai % len(BIZ_TOWNS)]}, "
+                                          f"{host_p['state']}",
+                                 "state": host_p["state"]},
             )
             db.add(host)
             db.flush()
@@ -311,13 +349,17 @@ def seed(wipe_only: bool = False) -> dict:
                 mode = ("to_me" if no_email or g % 10 == 8
                         else ("to_both" if g % 20 == 13 else "to_client"))
 
+                offt_p = _provider_for_index(ua_seq, prov_catalog)
+                ua_seq += 1
                 acct = UtilityAccount(
-                    tenant_id=TENANT_ID, provider="gmp",
+                    tenant_id=TENANT_ID, provider=offt_p["code"],
                     account_number=f"80{g:08d}", customer_number=f"80{g:08d}",
                     nickname=oname, enabled=True, is_residential=(g % 9 != 4),
                     service_address={"line1": f"{10 + (g * 13) % 980} "
                                               f"{LASTS[(g * 5) % len(LASTS)]} Rd, "
-                                              f"{BIZ_TOWNS[g % len(BIZ_TOWNS)]}, VT"},
+                                              f"{BIZ_TOWNS[g % len(BIZ_TOWNS)]}, "
+                                              f"{offt_p['state']}",
+                                     "state": offt_p["state"]},
                 )
                 db.add(acct)
                 db.flush()
@@ -363,7 +405,7 @@ def seed(wipe_only: bool = False) -> dict:
                                   else f"delivered+anna800-o{g:04d}@{SINK}"),
                     operator_email=OPERATOR_SINK,
                     formats=["pdf"], include_summary=False,
-                    auto_attach_gmp=True, enabled=True,
+                    auto_attach_gmp=(offt_p["code"] == "gmp"), enabled=True,
                 )
                 if budget:
                     sub.budget_amount_usd = float(40 + (g % 7) * 12)

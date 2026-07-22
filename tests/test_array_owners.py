@@ -1010,6 +1010,65 @@ def test_inverter_capture_backfills_per_inverter_history(client):
         assert rows["2026-06-15"] == 55.3
 
 
+def test_inverter_capture_rolls_inverter_daily_to_array_dg(client):
+    """REGRESSION (Ford 2026-07-22, Waterford Fronius): portal often sends
+    per-inverter history but only TODAY at site level. Analysis/forecast read
+    DailyGeneration — without a rollup the site has inv history + zero matched
+    actual days ("not modeled yet"). Capture must sum InverterDaily → array DG
+    for days the site stream missed."""
+    from api.models import DailyGeneration, Inverter, InverterDaily
+    from sqlalchemy import select as _sel
+    tid, key = _make_tenant()
+    payload = {
+        "provider": "fronius",
+        "sites": [{
+            "site_id": "sysWaterfordRollup",
+            "name": "Waterford Rollup",
+            "peak_power_kw": 150.0,
+            # Site-level: TODAY only (no site.daily history).
+            "energy_today_kwh": 280.0,
+            "inverters": [
+                {
+                    "serial": "primo-a", "name": "Primo A", "nameplate_kw": 12.5,
+                    "energy_today_kwh": 23.0,
+                    "daily": [
+                        {"date": "2026-07-10", "kwh": 90.0},
+                        {"date": "2026-07-11", "kwh": 85.0},
+                    ],
+                },
+                {
+                    "serial": "primo-b", "name": "Primo B", "nameplate_kw": 12.5,
+                    "energy_today_kwh": 22.0,
+                    "daily": [
+                        {"date": "2026-07-10", "kwh": 88.0},
+                        {"date": "2026-07-11", "kwh": 80.0},
+                    ],
+                },
+            ],
+        }],
+    }
+    resp = client.post("/v1/array-owners/inverter-capture", json=payload, headers=_auth(key))
+    assert resp.status_code == 200, resp.text
+    with SessionLocal() as db:
+        arr = db.execute(_sel(Array).where(Array.tenant_id == tid)).scalars().one()
+        dg = {
+            r.day.isoformat(): (r.kwh, r.source)
+            for r in db.execute(
+                _sel(DailyGeneration).where(DailyGeneration.array_id == arr.id)
+            ).scalars().all()
+        }
+        # Site energy_today landed for today.
+        assert any(v[0] == 280.0 for v in dg.values())
+        # History days only present on InverterDaily → rolled into array DG.
+        assert dg["2026-07-10"][0] == 178.0   # 90+88
+        assert dg["2026-07-10"][1] == "extension_pull"
+        assert dg["2026-07-11"][0] == 165.0   # 85+80
+        inv_n = db.execute(
+            _sel(InverterDaily).where(InverterDaily.tenant_id == tid)
+        ).scalars().all()
+        assert len(inv_n) >= 4
+
+
 def test_capture_allowed_for_paused_no_card_tenant(client):
     """MULTI-USER (Jun 2026): a 14-day trial with no card auto-pauses
     (active=False, subscription_status='paused_no_card', 'read-only, resume
