@@ -3579,6 +3579,10 @@ def sovereign_healthz(authorization: str | None = Header(default=None)):
     Surfaces ages, storm breaker, stuck jobs, primary vs recovery readiness,
     plus circuit-breaker / pool-pressure guard (sovereign_guard) so ops can
     see pause state without a separate endpoint.
+
+    ``mode`` is this *process* (web is often dark by design). ``mind_cloud``
+    is inferred from shared DB vitals — the Railway **worker** keeps the mind
+    alive even when Ford's laptop is off and web has SOVEREIGN_ENABLED=0.
     """
     _require_sovereign_or_admin(authorization)
     from .energy_agent_sovereign_watchdog import diagnose, watchdog_enabled
@@ -3589,6 +3593,39 @@ def sovereign_healthz(authorization: str | None = Header(default=None)):
         h["guard"] = guard_status()
     except Exception as e:  # noqa: BLE001
         h["guard"] = {"ok": False, "error": str(e)[:200]}
+    # Process vs cloud mind (web/worker split)
+    h["process_role"] = (
+        (os.getenv("PROCESS_ROLE") or os.getenv("SO_PROCESS") or "").strip()
+        or ("worker" if (os.getenv("RUN_SCHEDULER") or "0").strip() in ("1", "true", "yes") else "web")
+    )
+    h["this_process_enabled"] = sovereign_enabled()
+    ages = h.get("ages") or {}
+    sub_age = ages.get("sub_age_sec")
+    cortex_age = ages.get("cortex_age_sec")
+    sub_stale = ages.get("sub_stale_after_sec") or 160
+    cortex_stale = ages.get("cortex_stale_after_sec") or 900
+    channels = h.get("channels") or {}
+    primary = (channels.get("primary") or {})
+    mind_cloud_alive = bool(primary.get("alive")) or (
+        (sub_age is not None and sub_age < float(sub_stale) * 2)
+        or (cortex_age is not None and cortex_age < float(cortex_stale))
+    )
+    h["mind_cloud"] = {
+        "alive": mind_cloud_alive,
+        "runs_on": "Railway worker (PROCESS_ROLE=worker, RUN_SCHEDULER=1)",
+        "independent_of_ford_laptop": True,
+        "note": (
+            "Desk/chat/cortex/subconscious keep running in the cloud when this "
+            "web process is dark and when Ford's local portal is offline. "
+            "Local Live preview (127.0.0.1:7701) is view-only and needs the laptop."
+        ),
+        "sub_age_sec": sub_age,
+        "cortex_age_sec": cortex_age,
+    }
+    # Prefer cloud truth for top-level ok when worker is healthy
+    if mind_cloud_alive and not h.get("ok"):
+        h["ok"] = True
+        h["ok_reason"] = "mind_cloud_alive"
     return h
 
 
