@@ -1369,7 +1369,11 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
         inverters = discover_and_persist(db, tenant, force_refresh=force_refresh)
 
     arrays = db.execute(
-        select(Array).where(Array.tenant_id == tenant.id, Array.deleted_at.is_(None))
+        select(Array).where(
+            Array.tenant_id == tenant.id,
+            Array.deleted_at.is_(None),
+            Array.excluded.is_(False),
+        )
         .order_by(Array.id)
     ).scalars().all()
     array_by_id = {a.id: a for a in arrays}
@@ -2144,6 +2148,26 @@ def create_array(db, tenant: Tenant, name: str) -> Array:
 
     arr = Array(tenant_id=tenant.id, name=nm, fuel_type="solar")
     db.add(arr)
+    db.commit()
+    db.refresh(arr)
+    return arr
+
+
+def set_array_excluded(db, tenant: Tenant, array_id: int, excluded: bool) -> Array:
+    """Mark an array excluded (or re-include it) for the owner fleet.
+
+    Excluded arrays drop out of fleet-tree, Trends, billing nameplate, and
+    verification — same filter as soft-delete for reads — but keep all history
+    and can be re-included. Use this for personal/home arrays that should not
+    pollute a business fleet (HCT Sun / River pattern), not for permanent remove
+    (that's delete_array).
+
+    Ownership-checked. Idempotent on the requested state.
+    """
+    arr = db.get(Array, array_id)
+    if arr is None or arr.tenant_id != tenant.id or arr.deleted_at is not None:
+        raise FleetError("Array not found")
+    arr.excluded = bool(excluded)
     db.commit()
     db.refresh(arr)
     return arr

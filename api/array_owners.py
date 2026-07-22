@@ -506,6 +506,42 @@ def _array_provider(db, array_id: int) -> str | None:
     ).scalar_one_or_none()
 
 
+def _array_energy_rate(db, tenant, arr) -> tuple[float, str]:
+    """Resolve a $/kWh rate for EST. VALUE math with honest provenance.
+
+    Preference order (never fabricates):
+      1. RateSchedule / bill-derived schedule for this utility + age
+      2. Tenant.default_net_rate_per_kwh when set
+      3. Static VT utility table (api.rates.get_energy_rate)
+
+    Returns (rate, source) where source ∈
+    bill_or_schedule | tenant_default | vt_utility_default.
+    """
+    provider = _array_provider(db, arr.id)
+    try:
+        from .rate_schedule import resolve_net_rate
+        rr = resolve_net_rate(
+            db,
+            provider=provider,
+            region=getattr(arr, "region", None),
+            first_connect_date=getattr(arr, "first_connect_date", None),
+            period_end=None,
+        )
+        if rr and rr.source in ("schedule", "schedule_provisional"):
+            return float(rr.rate), "bill_or_schedule"
+    except Exception:  # noqa: BLE001
+        pass
+    tenant_rate = getattr(tenant, "default_net_rate_per_kwh", None)
+    if tenant_rate is not None:
+        try:
+            r = float(tenant_rate)
+            if 0.01 < r < 2.0:
+                return r, "tenant_default"
+        except (TypeError, ValueError):
+            pass
+    return float(get_energy_rate(provider)), "vt_utility_default"
+
+
 def _value_model(
     today_kwh: float, month_kwh: float, lifetime_kwh: float, rate: float
 ) -> dict:
@@ -935,8 +971,13 @@ def array_owners_fleet_trends(
     capacity_kw = 0.0          # summed inverter nameplate over the SCOPED set
     capacity_known_arrays = 0  # how many scoped arrays had any nameplate data
     by_array: dict[int, dict] = {}
-    rate_blended = 0.0
+    # Per-array rate weighted by that array's lifetime kWh when possible so
+    # EST. VALUE isn't a naive mean of static VT_RATES table entries.
+    rate_weight_sum = 0.0   # sum(rate_i * life_i)
+    rate_weight_kwh = 0.0   # sum(life_i)
+    rate_simple_sum = 0.0
     rate_n = 0
+    rate_sources_seen: set[str] = set()
 
     with SessionLocal() as db:
         arrays = db.execute(
@@ -1016,10 +1057,17 @@ def array_owners_fleet_trends(
                     capacity_known_arrays += 1
             except Exception:  # noqa: BLE001
                 pass
-            # rate blended over the SCOPED set, so EST. VALUE matches the kWh shown
+            # Per-array rate for EST. VALUE — prefer bill/schedule resolution,
+            # then tenant default, else VT utility table. Weighted by lifetime
+            # kWh so a large GMP site isn't drowned by a small VEC one.
             try:
-                rate_blended += get_energy_rate(_array_provider(db, arr.id))
+                arr_rate, arr_src = _array_energy_rate(db, tenant, arr)
+                rate_sources_seen.add(arr_src)
+                rate_simple_sum += arr_rate
                 rate_n += 1
+                if arr_life > 0:
+                    rate_weight_sum += arr_rate * arr_life
+                    rate_weight_kwh += arr_life
             except Exception:  # noqa: BLE001
                 pass
 
@@ -1086,7 +1134,26 @@ def array_owners_fleet_trends(
             }
 
     years = sorted({y for (y, _m) in fleet_ym.keys()})
-    rate = (rate_blended / rate_n) if rate_n else 0.0
+    if rate_weight_kwh > 0:
+        rate = rate_weight_sum / rate_weight_kwh
+    elif rate_n:
+        rate = rate_simple_sum / rate_n
+    else:
+        rate = 0.0
+    # Honest provenance for the UI: never claim "measured from bills" when we
+    # only used static VT defaults.
+    if rate_sources_seen and rate_sources_seen <= {"bill_or_schedule"}:
+        rate_source = "bill_or_schedule"
+        rate_note = "kWh-weighted from bill / rate schedule"
+    elif rate_sources_seen and "tenant_default" in rate_sources_seen and "bill_or_schedule" not in rate_sources_seen:
+        rate_source = "tenant_default"
+        rate_note = "account default net rate"
+    elif rate_sources_seen and "bill_or_schedule" in rate_sources_seen:
+        rate_source = "mixed"
+        rate_note = "mix of bill/schedule rates and VT utility defaults"
+    else:
+        rate_source = "vt_utility_default"
+        rate_note = "VT utility default estimate (by provider), not a bill-weighted blend"
 
     monthly_by_year: dict[str, list[dict]] = {}
     for y in years:
@@ -1210,6 +1277,8 @@ def array_owners_fleet_trends(
         "ttm_kwh": round(ttm_kwh, 1),
         "ttm_savings_usd": round(ttm_kwh * rate, 2) if rate else None,
         "blended_rate_usd_per_kwh": round(rate, 4) if rate else None,
+        "rate_source": rate_source if rate else None,
+        "rate_note": rate_note if rate else None,
         "lifetime_kwh": lifetime_kwh,
         "daily_recent": daily_recent,
         "daily_series": daily_series,
@@ -2205,6 +2274,38 @@ def test_alert_settings(authorization: str | None = Header(default=None)) -> dic
     if not ok:
         raise HTTPException(502, "Couldn't send the test email right now — try again shortly.")
     return {"ok": True, "sent_to": to}
+
+
+class ExcludeBody(BaseModel):
+    excluded: bool = True
+
+
+@router.post("/v1/array-owners/arrays/{array_id}/exclude")
+def exclude_array_ep(array_id: int, body: ExcludeBody = ExcludeBody(),  # noqa: B008
+                     authorization: str | None = Header(default=None)) -> dict:
+    """Exclude (or re-include) an array from the owner fleet without deleting it.
+
+    Sets `Array.excluded`. Excluded arrays drop out of fleet-tree, Trends,
+    verification, and nameplate billing inputs — history is preserved and
+    re-include is one call with ``excluded: false``. Prefer this over delete for
+    personal arrays that shouldn't sit in a business fleet.
+    """
+    tenant = _tenant_from_bearer(authorization)
+    from .account import require_not_demo
+    require_not_demo(tenant)
+    from . import inverter_fleet
+    with SessionLocal() as db:
+        try:
+            arr = inverter_fleet.set_array_excluded(
+                db, tenant, array_id, bool(body.excluded))
+        except inverter_fleet.FleetError:
+            raise HTTPException(404, "Array not found")
+        return {
+            "ok": True,
+            "array_id": arr.id,
+            "name": arr.name,
+            "excluded": bool(arr.excluded),
+        }
 
 
 @router.delete("/v1/array-owners/arrays/{array_id}")

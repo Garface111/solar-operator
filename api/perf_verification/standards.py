@@ -65,8 +65,8 @@ METHOD_SUMMARY = {
 REPORT_FOOTER = (
     "Performance Verification · methods consistent with IEC 61724-1 / 61724-3 · "
     "EnergyAgent Array Operator · not a third-party certification · "
-    "Measured energy prefers utility meter days, else inverter AC · "
-    "Expected energy uses weather POA × nameplate × labeled PR"
+    "Measured energy uses the utility meter when available, otherwise inverter AC · "
+    "Expected energy is weather irradiance (POA) × nameplate × performance ratio"
 )
 
 DEFAULT_DEVIATION_THRESHOLD = 0.05  # 5% persistent-deviation floor (Sunreport parity)
