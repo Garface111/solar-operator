@@ -620,15 +620,18 @@ def settled_periods_for_sub(sub) -> list[dict]:
             .where(Bill.account_id == uaid, Bill.period_end.isnot(None))
             .order_by(Bill.period_end.desc())
         ).scalars().all()
-    # A billable month = a settled bill that sent real excess to the grid. (A
-    # zero-excess/banked month can't be invoiced on its own, so it isn't offered.)
+    # A billable month = a settled bill with a positive offtaker pool (Group
+    # Excess Shared hard rule — never skip months that only resolve via
+    # gen−consumed when sent-to-grid is missing).
+    from .group_host_bill import group_excess_pool
     month_labels: list[str] = []
     seen: set[str] = set()
     for b in bills:
         pe = b.period_end.date() if isinstance(b.period_end, datetime) else b.period_end
         if pe is None:
             continue
-        if b.kwh_sent_to_grid is None or float(b.kwh_sent_to_grid) <= 0:
+        pool, _src, _w = group_excess_pool(b)
+        if pool is None or pool <= 0:
             continue
         lbl = pe.strftime("%Y-%m")
         if lbl in seen:
@@ -861,13 +864,11 @@ def _array_group_excess_for_sub_inner(db, sub, period_label=None,
         return None
 
     def _bill_excess(b):
-        v = getattr(b, "kwh_sent_to_grid", None)
-        if v is not None:
-            try:
-                return float(v)
-            except (TypeError, ValueError):
-                pass
-        return float(b.kwh_generated) if b.kwh_generated is not None else None
+        # HARD RULE: Group Excess Shared / kwh_sent_to_grid — never gross when
+        # shared is smaller (api.billing.group_host_bill.group_excess_pool).
+        from .group_host_bill import group_excess_pool
+        kwh, _src, _warn = group_excess_pool(b)
+        return kwh
 
     def _bill_label(b):
         pe = b.period_end.date() if hasattr(b.period_end, "date") else b.period_end
@@ -1240,6 +1241,46 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
         computed["array_group_excess_kwh"] = _group
         computed["realmath_kwh"] = (round(_share * _group, 2)
                                     if (_share and _group) else None)
+        # Host bill anatomy (Generated · Host consumed · Group excess shared ·
+        # Net billed · Fixed charges) + integrity / gross-fallback warnings.
+        try:
+            from .group_host_bill import bill_anatomy
+            from ..models import Bill as _BillAnat, UtilityAccount as _UAAnat
+            with SessionLocal() as _dba:
+                _host_id = sub.utility_account_id
+                if getattr(sub, "array_id", None) is not None:
+                    _hid = _dba.execute(
+                        select(_UAAnat.id).where(
+                            _UAAnat.array_id == sub.array_id,
+                            _UAAnat.deleted_at.is_(None),
+                        ).order_by(_UAAnat.id)
+                    ).scalars().first()
+                    if _hid is not None:
+                        _host_id = _hid
+                _host_bills = list(_dba.execute(
+                    select(_BillAnat).where(
+                        _BillAnat.account_id == _host_id,
+                        _BillAnat.period_end.isnot(None),
+                    ).order_by(_BillAnat.period_end.desc())
+                ).scalars().all())
+                _host_bill = None
+                if label:
+                    _lab = str(label)[:7]
+                    for _b in _host_bills:
+                        _pe = _b.period_end.date() if hasattr(_b.period_end, "date") else _b.period_end
+                        if _pe and _pe.strftime("%Y-%m") == _lab:
+                            _host_bill = _b
+                            break
+                _host_bill = _host_bill or (_host_bills[0] if _host_bills else None)
+                if _host_bill is not None:
+                    _anat = bill_anatomy(_host_bill)
+                    if _anat:
+                        computed["bill_anatomy"] = _anat
+                        for _w in (_anat.get("warnings") or []):
+                            if _w and _w not in warnings:
+                                warnings.append(_w)
+        except Exception:  # noqa: BLE001 — anatomy is additive, never block a draft
+            pass
         # GMP's DERIVED share — own-bill excess ÷ the group's host pool. This is
         # "the net meter group percentage pulled from the bill" (Ford 2026-07-10):
         # what the offtaker's own bill says their share actually was this period.

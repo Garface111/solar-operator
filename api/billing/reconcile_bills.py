@@ -204,19 +204,15 @@ def _mismatch_reason(
 
 
 def _array_group_excess(bill: Optional[Bill]) -> Optional[float]:
-    """The array's group-excess pool for the period = the EXCESS sent to grid on
-    the array's own GMP bill (kwh_sent_to_grid). This is the number GMP allocates
-    among the array's offtakers by share%. Falls back to net generated only when
-    an older parse never captured sent-to-grid."""
-    if bill is None:
-        return None
-    v = getattr(bill, "kwh_sent_to_grid", None)
-    if v is not None:
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            pass
-    return float(bill.kwh_generated) if bill.kwh_generated is not None else None
+    """The array's group-excess pool for the period = Group Excess Shared.
+
+    HARD RULE (Colleen / HCT May 2026): prefer ``kwh_sent_to_grid``; never inflate
+    to gross generation when shared < gross. Derives gen−consumed when shared is
+    missing; gross only as last resort (see group_host_bill.group_excess_pool).
+    """
+    from .group_host_bill import group_excess_pool
+    kwh, _src, _warn = group_excess_pool(bill)
+    return kwh
 
 
 def _allocation_check(
@@ -730,12 +726,28 @@ def audit_by_array(db: Session, tenant_id: str) -> dict:
         entry = arrays.get(aid)
         if entry is None:
             arr = db.get(Array, aid)
+            # Host bill anatomy for the master strip (Generated · Consumed ·
+            # Group excess · Net billed · Fixed charges).
+            _anat = None
+            try:
+                from .group_host_bill import bill_anatomy
+                _hb = _host_bill(aid)
+                _anat = bill_anatomy(_hb) if _hb is not None else None
+            except Exception:  # noqa: BLE001
+                _anat = None
+            _pool = (
+                (_anat or {}).get("group_excess_shared_kwh")
+                if _anat else None
+            )
+            if _pool is None:
+                _pool = a.get("array_group_excess_kwh")
             entry = {
                 "array_id": aid,
                 "array_name": arr.name if arr else f"Array {aid}",
                 "provider": (_array_provider(db, aid) or "other"),
-                "group_excess_kwh": a.get("array_group_excess_kwh"),
+                "group_excess_kwh": _pool,
                 "credit_rate": a.get("credit_rate"),
+                "bill_anatomy": _anat,
                 "flagged": 0,
                 "offtakers": [],
             }
@@ -744,6 +756,13 @@ def audit_by_array(db: Session, tenant_id: str) -> dict:
         # offtaker that resolved it (they all read the same host bill).
         if entry["group_excess_kwh"] is None and a.get("array_group_excess_kwh") is not None:
             entry["group_excess_kwh"] = a["array_group_excess_kwh"]
+        if entry.get("bill_anatomy") is None:
+            try:
+                from .group_host_bill import bill_anatomy
+                _hb2 = _host_bill(aid)
+                entry["bill_anatomy"] = bill_anatomy(_hb2) if _hb2 is not None else None
+            except Exception:  # noqa: BLE001
+                pass
         if entry["credit_rate"] is None and a.get("credit_rate") is not None:
             entry["credit_rate"] = a["credit_rate"]
         share = getattr(sub, "array_share_pct", None) or sub.allocation_pct

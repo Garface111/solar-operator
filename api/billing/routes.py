@@ -2401,6 +2401,16 @@ def audit_by_array_route(authorization: Optional[str] = Header(default=None)):
         return audit_by_array(db, t.id)
 
 
+@router.get("/gmp-group-host-help")
+def gmp_group_host_help(authorization: Optional[str] = Header(default=None)):
+    """Static operator help: how to read a GMP group host bill (anatomy + May
+    example). Auth-gated so only signed-in owners see it; content is not
+    tenant-specific."""
+    tenant_from_session(authorization)  # require a real session
+    from .group_host_bill import help_copy_gmp_group_host
+    return {"ok": True, **help_copy_gmp_group_host()}
+
+
 @router.get("/export-periods")
 def invoice_export_periods(authorization: Optional[str] = Header(default=None)):
     """The settled billing periods the operator can target for a FLEET-WIDE
@@ -3599,6 +3609,9 @@ def _rate_meta_from_ci(ci: Optional[dict]) -> dict:
         "derived_share_pct": ci.get("derived_share_pct"),
         "array_group_excess_kwh": ci.get("array_group_excess_kwh"),
         "own_bill_excess_kwh": ci.get("own_bill_excess_kwh"),
+        # Group-host bill anatomy + warnings (Colleen / GMP Group Excess Shared).
+        "bill_anatomy": ci.get("bill_anatomy"),
+        "bill_anatomy_warnings": (ci.get("bill_anatomy") or {}).get("warnings"),
     }
 
 
@@ -3687,6 +3700,8 @@ def _draft_dict(d: ReportDraft, sub=None, gmp_auto_status=None, operator_name=No
         "derived_share_pct": rate_meta.get("derived_share_pct"),
         "array_group_excess_kwh": rate_meta.get("array_group_excess_kwh"),
         "own_bill_excess_kwh": rate_meta.get("own_bill_excess_kwh"),
+        "bill_anatomy": rate_meta.get("bill_anatomy"),
+        "bill_anatomy_warnings": rate_meta.get("bill_anatomy_warnings"),
         # The offtaker's ENTERED share (the audit expectation) so the editor +
         # share displays never fall back to the frozen pair share (1.0 on an
         # own-meter draft would read as a meaningless "100%").

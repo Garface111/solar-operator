@@ -88,11 +88,12 @@ def transform_array_bills(db: Session, array_id: int) -> dict:
         select(Array.tenant_id).where(Array.id == array_id)
     ).scalar_one_or_none()
 
+    # Include bills with generation OR group excess (sent-to-grid). Some group-
+    # host months only resolve a clean pool on kwh_sent_to_grid.
     bills = list(db.execute(
         select(Bill).where(
             Bill.account_id.in_(acct_ids),
-            Bill.kwh_generated.isnot(None),
-            Bill.kwh_generated > 0,
+            Bill.period_end.isnot(None),
         ).order_by(Bill.period_end)
     ).scalars().all())
 
@@ -112,6 +113,7 @@ def transform_array_bills(db: Session, array_id: int) -> dict:
     # Never estimate today / the future / the trailing guard window — real metered
     # pulls own those days (see PRORATE_RECENCY_GUARD_DAYS).
     cutoff = now().date() - timedelta(days=PRORATE_RECENCY_GUARD_DAYS)
+    from ..billing.group_host_bill import group_excess_pool
     for b in bills:
         win = _bill_days(b)
         if win is None:
@@ -120,8 +122,13 @@ def transform_array_bills(db: Session, array_id: int) -> dict:
         if ps > cutoff:
             # Future-dated / too-recent bill window — refuse to project it forward.
             continue
+        # HARD RULE (Colleen / group host): smear Group Excess Shared, never
+        # page-1 snapshot gross and never gross when shared < generation.
+        pool, _src, _warn = group_excess_pool(b)
+        if pool is None or pool <= 0:
+            continue
         n_days = (pe - ps).days + 1          # share over the bill's TRUE window
-        per_day = float(b.kwh_generated) / n_days
+        per_day = float(pool) / n_days
         write_end = min(pe, cutoff)          # only fill days up to the cutoff
         d = ps
         while d <= write_end:

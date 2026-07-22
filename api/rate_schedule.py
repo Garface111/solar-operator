@@ -569,10 +569,13 @@ def resolve_offtaker_excess_credit(db, utility_account_id: int, target_label: Op
     bill has no excess to bill.
     """
     from .models import Bill, UtilityAccount, Array
+    from .billing.group_host_bill import group_excess_pool
+    # Candidate bills: any settled generation/excess signal. Pool resolution
+    # (Group Excess Shared hard rule) happens per bill via group_excess_pool —
+    # never require kwh_sent_to_grid alone or we miss gen−consumed months.
     bills = db.execute(
         select(Bill).where(
             Bill.account_id == utility_account_id,
-            Bill.kwh_sent_to_grid.isnot(None), Bill.kwh_sent_to_grid > 0,
             Bill.period_end.isnot(None))
         .order_by(Bill.period_end.desc())
     ).scalars().all()
@@ -583,13 +586,22 @@ def resolve_offtaker_excess_credit(db, utility_account_id: int, target_label: Op
     def _lbl(b):
         pe = b.period_end.date() if isinstance(b.period_end, datetime) else b.period_end
         return pe.strftime("%Y-%m") if pe else None
+    def _billable(b):
+        kwh, _src, _w = group_excess_pool(b)
+        return kwh is not None and kwh > 0
+    bills = [b for b in bills if _billable(b)]
     if target_label is not None:
         bill = next((b for b in bills if _lbl(b) == target_label), None)
     else:
         bill = bills[0] if bills else None
     if bill is None:
         return None
-    excess = round(float(bill.kwh_sent_to_grid), 1)
+    # HARD RULE: Group Excess Shared / kwh_sent_to_grid — never snapshot gross
+    # when shared < generation (host load was netted first).
+    excess, _pool_src, _pool_warn = group_excess_pool(bill)
+    if excess is None or excess <= 0:
+        return None
+    excess = round(float(excess), 1)
     # 1) Fully-cashed bill (solar_credit_usd captured) → its own cash rate.
     # 2) Else the rate the bill STATES on its credited excess line — the default the
     #    operator expects ("the credit rate in the bill"). This is what rescues GROUP
