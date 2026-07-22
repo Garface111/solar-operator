@@ -2418,7 +2418,27 @@ def _run_energy_agent_sovereign_jobs() -> None:
             return
         ok, _reason = _sov_heavy_begin("jobs")
         if not ok:
-            return
+            # Stale cortex_wake was locking jobs for hours — force release + retry once
+            if "held_by=" in (_reason or ""):
+                try:
+                    from .sovereign_guard import end_heavy, flight_status, heavy_max_hold_sec
+                    import time as _t
+
+                    fs = flight_status()
+                    since = fs.get("held_since")
+                    age = (_t.time() - float(since)) if since else 9999.0
+                    if age >= heavy_max_hold_sec() * 0.75:
+                        holder = fs.get("held_by") or "unknown"
+                        logger.warning(
+                            "sovereign_jobs stealing single_flight from %s age=%.0fs",
+                            holder, age,
+                        )
+                        end_heavy(str(holder))
+                        ok, _reason = _sov_heavy_begin("jobs")
+                except Exception as se:  # noqa: BLE001
+                    logger.debug("jobs steal flight failed: %s", se)
+            if not ok:
+                return
         mark_jobs_inflight(True)
         try:
             with SessionLocal() as db:

@@ -1407,6 +1407,12 @@ _OPERATING_AGREEMENT = {
         "can out-ship and out-think human ops — substance over thrash. Start/score via "
         "admin mind-sandbox endpoints or sandbox_start/sandbox_score actions."
     ),
+    "ford_email_channel": (
+        "PRIMARY FORD CHANNEL = EMAIL (not desk). Outbound: email_ford. "
+        "Inbound: Ford replies to sovereign@agent.arrayoperator.com → you answer by email. "
+        "Status emails are short and human — no job ids, no queue dumps. "
+        "Sandbox walls always: no main merge, no prod deploy; chamber is the product surface."
+    ),
 }
 
 
@@ -1432,6 +1438,12 @@ def ensure_operating_memory(db) -> None:
             grant_expand_memory(db)
         except Exception:
             log.debug("grant_expand_memory skipped", exc_info=True)
+        # Email channel + full-power sandbox handshake (idempotent)
+        try:
+            from .energy_agent_sovereign_email_boot import maybe_boot_email_channel
+            maybe_boot_email_channel(db)
+        except Exception:
+            log.debug("email channel boot skipped", exc_info=True)
         if not (existing.get("ford_operating_agreement") or "").strip():
             compact = (
                 "1) " + _OPERATING_AGREEMENT["authority_ship"] + "\n"
@@ -4335,6 +4347,47 @@ def sovereign_chamber_taste(
         )
         db.commit()
         return out
+
+
+@router.post("/admin/sovereign/email/handshake")
+def sovereign_email_handshake(
+    body: dict | None = None,
+    authorization: str | None = Header(default=None),
+):
+    """Seed email-channel mind state and email Ford (force=true re-sends)."""
+    _require_sovereign_or_admin(authorization)
+    body = body or {}
+    from .energy_agent_sovereign_email_boot import (
+        seed_email_channel_memory,
+        send_full_power_handshake,
+    )
+
+    with SessionLocal() as db:
+        seed = seed_email_channel_memory(db)
+        hand = send_full_power_handshake(
+            db, force=body.get("force", True) is not False
+        )
+        db.commit()
+        return {"ok": True, "seed": seed, "handshake": hand}
+
+
+@router.get("/admin/sovereign/email/status")
+def sovereign_email_status(authorization: str | None = Header(default=None)):
+    """Mailbox + channel config for Ford HUD."""
+    _require_sovereign_or_admin(authorization)
+    return {
+        "ok": True,
+        "sovereign_enabled": sovereign_enabled(),
+        "email_enabled": sovereign_email_enabled(),
+        "mailbox": sovereign_mail_address(),
+        "from_header": sovereign_mail_from(),
+        "recipients": sovereign_mail_recipients(),
+        "inbound_aliases": sorted(sovereign_inbound_addresses()),
+        "how": (
+            "Email sovereign@agent.arrayoperator.com (or reply to any Sovereign mail). "
+            "Resend inbound → desk turn → reply email. Sandbox walls always on."
+        ),
+    }
 
 
 # ── Local Sovereign Portal (loopback UI — no AO account) ───────────────────

@@ -398,12 +398,27 @@ def flight_status() -> dict[str, Any]:
     }
 
 
+def heavy_max_hold_sec() -> float:
+    """Max seconds a heavy layer may hold single-flight before forced release.
+
+    Stuck cortex_wake was starving jobs for hours. Default 120s.
+    Override: SOVEREIGN_HEAVY_MAX_HOLD_SEC.
+    """
+    try:
+        return max(30.0, float(os.getenv("SOVEREIGN_HEAVY_MAX_HOLD_SEC", "120") or 120))
+    except (TypeError, ValueError):
+        return 120.0
+
+
 def try_begin_heavy(layer: str) -> tuple[bool, str]:
     """Acquire process-local heavy single-flight lock for ``layer``.
 
     Returns (ok, reason). If another heavy layer holds the lock, return
     (False, 'single_flight held_by=...'). Non-reentrant: same layer held
     again also fails. When SOVEREIGN_SINGLE_FLIGHT=0, always allows.
+
+    Stale holders (held longer than SOVEREIGN_HEAVY_MAX_HOLD_SEC) are released
+    so jobs can drain under full-power sandbox mode.
     """
     if not single_flight_enabled():
         return True, "ok"
@@ -411,7 +426,19 @@ def try_begin_heavy(layer: str) -> tuple[bool, str]:
     with _flight_lock:
         holder = _flight.get("held_by")
         if holder is not None:
-            return False, f"single_flight held_by={holder}"
+            since = float(_flight.get("held_since") or 0)
+            age = time.time() - since if since else 9999.0
+            max_hold = heavy_max_hold_sec()
+            if age >= max_hold:
+                log.warning(
+                    "single_flight STALE release holder=%s age=%.0fs (max=%.0fs) "
+                    "for layer=%s",
+                    holder, age, max_hold, layer_s,
+                )
+                _flight["held_by"] = None
+                _flight["held_since"] = None
+            else:
+                return False, f"single_flight held_by={holder}"
         _flight["held_by"] = layer_s
         _flight["held_since"] = time.time()
     return True, "ok"
