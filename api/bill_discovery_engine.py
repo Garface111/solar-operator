@@ -77,6 +77,16 @@ _CLICK_TEXT = re.compile(
 
 # ── Queue ────────────────────────────────────────────────────────────────────
 
+def _ensure_table() -> None:
+    """Idempotent create for bill_discovery_job (create_all on boot also does this)."""
+    try:
+        from .db import engine
+        from .models import Base
+        BillDiscoveryJob.__table__.create(bind=engine, checkfirst=True)
+    except Exception as e:
+        log.debug("bill_discovery ensure_table: %s", e)
+
+
 def enqueue_discovery(
     *,
     tenant_id: str,
@@ -89,6 +99,7 @@ def enqueue_discovery(
     running job already exists for this login, return it instead of stacking."""
     from .bill_adapter_autopilot import classify_login
 
+    _ensure_table()
     provider = (provider or "").strip().lower()
     username_lc = (username or "").strip().lower()
     plan = classify_login(provider, login_host)
