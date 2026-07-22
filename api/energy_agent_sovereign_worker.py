@@ -1130,7 +1130,38 @@ def process_job(db, job) -> dict[str, Any]:
         )
     deploy = {}
     if sandbox_mode:
+        # L2 chamber: ship sandbox AO public/ to false-real URL (never prod)
         deploy = {"ok": False, "skipped": "mind_sandbox", "run_id": sandbox_run_id}
+        if (
+            ship.get("ok")
+            and repo_name == "array-operator"
+            and (os.getenv("SOVEREIGN_CHAMBER_DEPLOY", "1") or "1").strip().lower()
+            not in ("0", "false", "no", "off")
+        ):
+            try:
+                from .energy_agent_sovereign_chamber import deploy_chamber
+
+                chamber = deploy_chamber(
+                    run_id=sandbox_run_id,
+                    job_id=job.id,
+                    title=title,
+                    db=db,
+                )
+                deploy = {
+                    "ok": bool(chamber.get("ok")),
+                    "provider": "chamber",
+                    "chamber": chamber,
+                    "run_id": sandbox_run_id,
+                    "url": chamber.get("chamber_url"),
+                }
+            except Exception as e:  # noqa: BLE001
+                log.warning("chamber deploy after sandbox ship: %s", e)
+                deploy = {
+                    "ok": False,
+                    "provider": "chamber",
+                    "error": str(e)[:400],
+                    "run_id": sandbox_run_id,
+                }
     elif ship.get("ok") and ship.get("push_main", {}).get("ok"):
         deploy = deploy_repo(repo_name)
     elif ship.get("ok") and code_push_enabled() and repo_name == "solar-operator":

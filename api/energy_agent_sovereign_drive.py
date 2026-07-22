@@ -20,11 +20,23 @@ def chamber_mode() -> bool:
 
 
 def chamber_product_url() -> str:
-    """URL the mind should treat as the live product it owns."""
+    """URL the mind should treat as the live product it owns.
+
+    Prefer L2 chamber (Netlify branch deploy / last sandbox ship), then env,
+    then local portal Live as last-resort L0.
+    """
+    try:
+        from .energy_agent_sovereign_chamber import resolve_chamber_url
+
+        u = resolve_chamber_url(None)
+        if u:
+            return u.rstrip("/")
+    except Exception:
+        pass
     return (
         os.getenv("SOVEREIGN_CHAMBER_URL")
         or os.getenv("SOVEREIGN_PORTAL_URL")
-        or "http://127.0.0.1:7701/live"
+        or "https://chamber--array-operator-ea.netlify.app"
     ).rstrip("/")
 
 
