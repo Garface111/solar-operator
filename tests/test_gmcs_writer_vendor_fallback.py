@@ -80,6 +80,34 @@ def test_vendor_month_returned_when_no_utility(db):
     assert merged[(2025, 8)] == pytest.approx(10.0 * dim)
 
 
+def test_alsoenergy_is_in_vendor_fallback_set():
+    """AlsoEnergy (PowerTrack) is a first-class VENDORS slug — same fallback as Locus."""
+    assert "alsoenergy" in gmcs_writer._VENDOR_FALLBACK_SOURCES
+    assert "locus" in gmcs_writer._VENDOR_FALLBACK_SOURCES
+
+
+def test_alsoenergy_month_returned_when_no_utility(db):
+    """source=alsoenergy daily rows fill a month with no bill / GMP data."""
+    _seed_utility(db)
+    dim = calendar.monthrange(2025, 9)[1]
+    for dd in range(1, dim + 1):
+        db.add(DailyGeneration(
+            tenant_id="ten_t", array_id=1, day=date(2025, 9, dd),
+            kwh=12.0, source="alsoenergy",
+        ))
+    db.commit()
+    vend = gmcs_writer._vendor_generation_by_month(
+        db, 1, date(2025, 9, 1), date(2025, 9, 30)
+    )
+    util = gmcs_writer._daily_generation_by_month(
+        db, 1, date(2025, 9, 1), date(2025, 9, 30)
+    )
+    assert (2025, 9) not in util
+    assert vend[(2025, 9)] == pytest.approx(12.0 * dim)
+    merged = gmcs_writer._merge_report_months(vendor=vend, bill={}, utility=util)
+    assert merged[(2025, 9)] == pytest.approx(12.0 * dim)
+
+
 def test_gmp_full_month_still_beats_locus(db):
     _seed_utility(db)
     dim = calendar.monthrange(2025, 6)[1]

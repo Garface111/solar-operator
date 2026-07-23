@@ -140,6 +140,9 @@ def _sheet_name_for_array(name: str, used: set[str]) -> str:
 
 # Inverter / extension telemetry — LAST resort for a month with no utility data.
 # Precedence in build_workbook: utility daily (incl. GMP 15-min) > bill > vendor.
+# Includes every VENDORS slug (locus, alsoenergy/PowerTrack, solaredge, fronius,
+# sma, chint, enphase, …) plus extension captures — derived from the registry so
+# a new vendor is automatically fallback-eligible.
 _VENDOR_FALLBACK_SOURCES = VENDOR_TELEMETRY_SOURCES | EXTENSION_SOURCES
 
 
