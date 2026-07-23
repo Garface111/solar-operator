@@ -3876,23 +3876,82 @@ def enable_generation_reports(authorization: str = Header(default=None)):
     and does **not** mail anyone. Per-client enrollment + metered billing stay
     on auto-send-all / per-client PATCH / send-report / download paths.
 
+    When enabling, also mirrors any already-stored Cloud Capture utility logins
+    (GMP / SmartHub co-ops like VEC) into report Clients via
+    ``ensure_client_for_login`` and rearms harvest so arrays + utility data pull
+    on the next tick — otherwise a tenant that saved logins *before* opening the
+    desk would stay empty until they re-entered every password.
+
     Idempotent. Demo tenants are rejected (require_not_demo). Enable-only —
     there is no paired disable; turning the desk marker off while clients stay
     auto_send=True would leave an inconsistent scheduler state.
     """
     t = tenant_from_session(authorization)
     require_not_demo(t)
+    clients_seeded = 0
+    logins_rearmed = 0
     with SessionLocal() as db:
         row = db.get(Tenant, t.id)
         if row is None:
             raise HTTPException(404, "Account not found")
-        if not bool(getattr(row, "generation_reports", False)):
+        newly_enabled = not bool(getattr(row, "generation_reports", False))
+        if newly_enabled:
             row.generation_reports = True
-            db.commit()
+        # Always re-seed from vault when the desk is open (idempotent ensure).
+        # Fresh enable: row.generation_reports is True above so
+        # tenant_in_reports_world passes. Re-enable/idempotent call: same.
+        try:
+            from .cloud_capture import ensure_client_for_login
+            from .app import _PROVIDER_AUTOPOP_FIELDS
+            from sqlalchemy.orm import defer
+            # Metadata only — never load vault ciphertext in the web process.
+            creds = db.execute(
+                select(PortalCredential).options(
+                    defer(PortalCredential.secret_enc),
+                    defer(PortalCredential.session_state_enc),
+                ).where(
+                    PortalCredential.tenant_id == t.id,
+                    PortalCredential.cloud_capture_enabled.is_(True),
+                    PortalCredential.secret_enc.isnot(None),
+                )
+            ).scalars().all()
+            # Reflect generation_reports onto the in-memory tenant used by ensure.
+            row.generation_reports = True
+            for cred in creds:
+                provider = (cred.provider or "").strip().lower()
+                if provider not in _PROVIDER_AUTOPOP_FIELDS:
+                    continue
+                before = db.execute(
+                    select(func.count()).select_from(Client).where(
+                        Client.tenant_id == t.id,
+                        Client.deleted_at.is_(None),
+                    )
+                ).scalar() or 0
+                ensure_client_for_login(db, row, provider, cred.username)
+                after = db.execute(
+                    select(func.count()).select_from(Client).where(
+                        Client.tenant_id == t.id,
+                        Client.deleted_at.is_(None),
+                    )
+                ).scalar() or 0
+                if after > before:
+                    clients_seeded += after - before
+                # Rearm so the harvester pulls arrays/utility data soon.
+                cred.last_harvest_at = None
+                cred.harvest_fails = 0
+                logins_rearmed += 1
+        except Exception:  # noqa: BLE001 — never fail enable on seed hiccups
+            logger.warning(
+                "generation-reports enable: vault→client seed failed for %s",
+                t.id, exc_info=True,
+            )
+        db.commit()
     return {
         "ok": True,
         "generation_reports": True,
         "message": _GENREPORTS_ENABLE_MESSAGE,
+        "clients_seeded": clients_seeded,
+        "logins_rearmed": logins_rearmed,
     }
 
 

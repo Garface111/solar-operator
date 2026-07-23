@@ -5,10 +5,14 @@ The extension routes the GMP API through its service worker only to dodge the
 content-script CORS block; server-side there is no CORS, so after login we lift
 the JWT from localStorage['gmp-vue'] and call api.greenmountainpower.com directly.
 
-Emits two captures, identical to the extension:
+Emits two captures, identical to the extension. ORDER MATTERS for generation
+reports: /v1/sync MUST run first so autopop creates the Client + Arrays under
+it; meter-capture second attaches DailyGeneration to those arrays. If meter
+runs first it creates arrays with client_id=None and /v1/sync then skips them
+(array_id already set) — clients stay empty and reports see no arrays.
+  * bill/JWT   → POST /v1/sync  (Client + UtilityAccount + Array under client;
+                 stores UtilitySession + pulls historical bill PDFs with JWT)
   * generation → POST /v1/array-owners/utility-meter-capture
-  * bill/JWT   → POST /v1/sync  (so the backend stores a UtilitySession + pulls
-                 historical bill PDFs with the JWT)
 """
 from __future__ import annotations
 
@@ -75,8 +79,46 @@ class GMPVendor:
         headers = {**_HEADERS_TMPL, "Authorization": f"Bearer {jwt}"}
         requests: list[CaptureRequest] = []
 
+        # 1) bill / JWT sync FIRST — Client + arrays land under the reports
+        #    client (ensure_client_for_login / autopop). Meter capture below
+        #    must not race ahead or arrays end up client-less.
+        sync_accounts = []
+        for a in (user.get("accounts") or []):
+            sync_accounts.append({
+                "accountNumber": a.get("accountNumber"),
+                "nickname": a.get("nickname"),
+                "customerNumber": a.get("personId") or a.get("customerNumber"),
+                "currentBillUrl": a.get("currentBillUrl"),
+                "currentBillUrlBinary": a.get("currentBillUrlBinary"),
+                "serviceAddress": a.get("address") or a.get("serviceAddress"),
+                "solarNetMeter": a.get("solarNetMeter"),
+                "groupNetMetered": a.get("groupNetMetered"),
+                "isPrimary": a.get("isPrimary"),
+            })
+        requests.append(CaptureRequest(
+            path="/v1/sync",
+            body={
+                "provider": "gmp",
+                "capturedAt": datetime.utcnow().isoformat() + "Z",
+                "pageUrl": LOGIN_URL,
+                "user": {
+                    "accountId": user.get("accountId"),
+                    "username": user.get("username"),
+                    "email": user.get("email"),
+                    "fullName": user.get("fullName"),
+                },
+                "auth": {
+                    "apiToken": jwt,
+                    "apiTokenExpires": user.get("apitokenExpires"),
+                    "refreshToken": user.get("refreshtoken"),
+                },
+                "accounts": sync_accounts,
+            },
+            note=f"gmp bill/jwt sync ({len(sync_accounts)} accts)",
+        ))
+
+        # 2) generation (daily) — attaches to arrays created by /v1/sync
         async with httpx.AsyncClient(timeout=httpx.Timeout(45.0), headers=headers) as api:
-            # 1) accounts
             cur = await self._get(api, "/users/current")
             accounts_meta = ((cur.get("customData") or {}).get("energyAccounts")
                              or cur.get("energyAccounts") or [])
@@ -113,43 +155,6 @@ class GMPVendor:
                     body={"provider": "gmp", "accounts": gen_accounts},
                     note=f"gmp generation ({len(gen_accounts)} accts, {solar_days} days)",
                 ))
-
-        # 2) bill / JWT sync — hand the JWT + current-bill URLs to the backend,
-        #    which enumerates & pulls historical PDFs itself.
-        sync_accounts = []
-        for a in (user.get("accounts") or []):
-            sync_accounts.append({
-                "accountNumber": a.get("accountNumber"),
-                "nickname": a.get("nickname"),
-                "customerNumber": a.get("personId") or a.get("customerNumber"),
-                "currentBillUrl": a.get("currentBillUrl"),
-                "currentBillUrlBinary": a.get("currentBillUrlBinary"),
-                "serviceAddress": a.get("address") or a.get("serviceAddress"),
-                "solarNetMeter": a.get("solarNetMeter"),
-                "groupNetMetered": a.get("groupNetMetered"),
-                "isPrimary": a.get("isPrimary"),
-            })
-        requests.append(CaptureRequest(
-            path="/v1/sync",
-            body={
-                "provider": "gmp",
-                "capturedAt": datetime.utcnow().isoformat() + "Z",
-                "pageUrl": LOGIN_URL,
-                "user": {
-                    "accountId": user.get("accountId"),
-                    "username": user.get("username"),
-                    "email": user.get("email"),
-                    "fullName": user.get("fullName"),
-                },
-                "auth": {
-                    "apiToken": jwt,
-                    "apiTokenExpires": user.get("apitokenExpires"),
-                    "refreshToken": user.get("refreshtoken"),
-                },
-                "accounts": sync_accounts,
-            },
-            note=f"gmp bill/jwt sync ({len(sync_accounts)} accts)",
-        ))
 
         return ScrapeResult(
             requests=requests,
