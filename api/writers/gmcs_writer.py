@@ -35,7 +35,10 @@ from openpyxl.utils import get_column_letter
 
 from ..bill_attribution import distribute_kwh_by_calendar_day
 from ..db import SessionLocal, DATA_DIR
-from ..generation_sources import EXTENSION_SOURCES, VENDOR_TELEMETRY_SOURCES
+from ..generation_sources import (
+    MONITORING_REPORT_SOURCES,
+    UTILITY_REAL_SOURCES,
+)
 from ..models import Tenant, Client, UtilityAccount, Array, Bill, DailyGeneration
 from ..report_arrays import not_vendor_only, utility_backed_array_ids
 
@@ -138,62 +141,56 @@ def _sheet_name_for_array(name: str, used: set[str]) -> str:
     return final
 
 
-# Inverter / extension telemetry — LAST resort for a month with no utility data.
-# Precedence in build_workbook: utility daily (incl. GMP 15-min) > bill > vendor.
-# Includes every VENDORS slug (locus, alsoenergy/PowerTrack, solaredge, fronius,
-# sma, chint, enphase, …) plus extension captures — derived from the registry so
-# a new vendor is automatically fallback-eligible.
-_VENDOR_FALLBACK_SOURCES = VENDOR_TELEMETRY_SOURCES | EXTENSION_SOURCES
+# ── Generation-report source tiers (native multi-source) ─────────────────────
+# Tier 1 — settlement utility daily (GMP 15-min / SmartHub·VEC·WEC export)
+# Tier 2 — monitoring production (Locus, AlsoEnergy, eGauge, Meter Mate, …)
+# Tier 3 — utility bills (calendar-day pro-rate)
+# Merge order: bill < monitoring < utility  (utility always wins a month)
+_UTILITY_REPORT_SOURCES = UTILITY_REAL_SOURCES
+_MONITORING_REPORT_SOURCES = MONITORING_REPORT_SOURCES
+# Back-compat alias used by older tests
+_VENDOR_FALLBACK_SOURCES = _MONITORING_REPORT_SOURCES
 
 
-def _daily_generation_by_month(
-    db, array_id: int, start: date, end: date
+def _sum_daily_by_month(
+    db, array_id: int, start: date, end: date, sources: frozenset[str]
 ) -> dict[tuple[int, int], float]:
-    """Return {(year, month): kwh_sum} of UTILITY-side daily generation for
-    an array in [start, end].
-
-    Base source is DailyGeneration that is NOT inverter/extension telemetry and
-    NOT the redundant ``bill_prorate`` smear (real bill kWh is applied
-    separately via per_group). Real GMP 15-minute meter data
-    (``GmpDailyGeneration`` via the reports read-contract) is the utility
-    revenue meter Crown REC reports from to NEPOOL-GIS, so it WINS for any
-    month it covers nearly fully — that is what makes our monthly numbers
-    reconcile with Crown line-by-line instead of the flattened bill-proration
-    estimate (bill proration keeps the quarter total but flattens the
-    within-quarter monthly peaks, shifting per-month REC floors).
-
-    Vendor telemetry (Locus / SolarEdge / …) is intentionally NOT here — see
-    ``_vendor_generation_by_month`` + ``_merge_report_months`` for the
-    fallback-only path (utility empty months only).
-
-    Coverage guard: the GMP total only overrides a month when it has near-full
-    daily coverage (>= days_in_month - 2), so a partial or stale-meter fragment
-    (e.g. an account whose interval feed stopped years ago) can never undercount a
-    month by silently replacing a full bill estimate with a few days of intervals.
-    """
-    import calendar as _cal
-    from ..reports import gmp_daily_read
-
-    # NEPOOL RECs settle on the UTILITY's measured generation (GMP bills +
-    # GMP interval meter) first. Exclusions here (Ford 2026-07-16 — London_SE
-    # was reporting SolarEdge, not GMP):
-    #   • VENDOR/EXTENSION telemetry — wrong meter when utility data exists;
-    #     re-introduced only as last-resort fallback via _vendor_generation_by_month.
-    #   • bill_prorate — redundant smear of the same bill applied via per_group.
-    _exclude = _VENDOR_FALLBACK_SOURCES | {"bill_prorate"}
+    """{(year, month): kwh} for DailyGeneration rows whose source is in `sources`."""
+    if not sources:
+        return {}
     rows = db.execute(
         select(DailyGeneration.day, DailyGeneration.kwh)
         .where(
             DailyGeneration.array_id == array_id,
             DailyGeneration.day >= start,
             DailyGeneration.day <= end,
-            func.lower(DailyGeneration.source).notin_(_exclude),
+            func.lower(DailyGeneration.source).in_(sources),
         )
     ).all()
     buckets: dict[tuple[int, int], float] = {}
     for day, kwh in rows:
         key = (day.year, day.month)
         buckets[key] = buckets.get(key, 0.0) + float(kwh)
+    return buckets
+
+
+def _daily_generation_by_month(
+    db, array_id: int, start: date, end: date
+) -> dict[tuple[int, int], float]:
+    """Return {(year, month): kwh_sum} of UTILITY-side daily generation.
+
+    Includes SmartHub/VEC (`smarthub` + `utility_meter` daily net-export), GMP
+    API/portal, and the GMP 15-minute interval overlay when a month is nearly
+    fully covered. Monitoring vendors (Locus/AlsoEnergy/…) are NOT here — see
+    ``_monitoring_generation_by_month``.
+
+    Coverage guard: GMP interval only overrides a month when days >=
+    days_in_month - 2, so a partial feed cannot undercount a full bill month.
+    """
+    import calendar as _cal
+    from ..reports import gmp_daily_read
+
+    buckets = _sum_daily_by_month(db, array_id, start, end, _UTILITY_REPORT_SOURCES)
 
     # Overlay authoritative GMP meter data where a month is (nearly) fully covered.
     for r in gmp_daily_read.get_monthly_totals(array_id, start=start, end=end, db=db):
@@ -204,30 +201,19 @@ def _daily_generation_by_month(
     return buckets
 
 
-def _vendor_generation_by_month(
+def _monitoring_generation_by_month(
     db, array_id: int, start: date, end: date
 ) -> dict[tuple[int, int], float]:
-    """Monthly kWh from inverter/extension telemetry only (Locus, SolarEdge, …).
+    """Native monitoring-tier monthly kWh (Locus, AlsoEnergy, eGauge, …).
 
-    Used solely as a FALLBACK when a month has no utility daily and no bill
-    kWh — never allowed to displace GMP interval or bill numbers.
+    Used whenever utility daily is missing for a month. Beats bill pro-rate
+    (better month shape) but never displaces settlement utility / GMP interval.
     """
-    if not _VENDOR_FALLBACK_SOURCES:
-        return {}
-    rows = db.execute(
-        select(DailyGeneration.day, DailyGeneration.kwh)
-        .where(
-            DailyGeneration.array_id == array_id,
-            DailyGeneration.day >= start,
-            DailyGeneration.day <= end,
-            func.lower(DailyGeneration.source).in_(_VENDOR_FALLBACK_SOURCES),
-        )
-    ).all()
-    buckets: dict[tuple[int, int], float] = {}
-    for day, kwh in rows:
-        key = (day.year, day.month)
-        buckets[key] = buckets.get(key, 0.0) + float(kwh)
-    return buckets
+    return _sum_daily_by_month(db, array_id, start, end, _MONITORING_REPORT_SOURCES)
+
+
+# Back-compat name — tests and older call sites
+_vendor_generation_by_month = _monitoring_generation_by_month
 
 
 def _merge_report_months(
@@ -236,38 +222,64 @@ def _merge_report_months(
     bill: dict[tuple[int, int], float],
     utility: dict[tuple[int, int], float],
 ) -> dict[tuple[int, int], float]:
-    """Precedence: utility daily (incl. GMP 15-min) > bill > vendor telemetry."""
-    return {**vendor, **bill, **utility}
+    """Precedence: utility daily (VEC/GMP) > monitoring (Locus/Also/…) > bill."""
+    return {**bill, **vendor, **utility}
 
 
 def _client_is_inverter_only(db, client_id: int) -> bool:
     """True when the client has no utility-backed arrays.
 
     Inverter-only fleets (e.g. Locus-only, GMP not connected yet) may use
-    vendor telemetry as the sole generation source for reports. Mixed fleets
-    keep excluding vendor-twin arrays so a Fronius twin cannot double-report
-    alongside a GMP-backed sibling.
+    monitoring telemetry as the sole generation source for reports. Mixed fleets
+    keep excluding empty vendor-twin arrays so a Fronius twin without its own
+    production history cannot double-report alongside a GMP-backed sibling.
     """
     return not utility_backed_array_ids(
         db, client_id=client_id, include_excluded=False, include_deleted=False
     )
 
 
-def _reportable_arrays_query(client_id: int, *, inverter_only_client: bool):
-    """Array filter for generation reports.
+def _array_has_monitoring_history(db, array_id: int) -> bool:
+    """True if this array has any positive monitoring-tier DailyGeneration row."""
+    row = db.execute(
+        select(DailyGeneration.id).where(
+            DailyGeneration.array_id == array_id,
+            DailyGeneration.kwh > 0,
+            func.lower(DailyGeneration.source).in_(_MONITORING_REPORT_SOURCES),
+        ).limit(1)
+    ).first()
+    return row is not None
 
-    Utility-backed clients: ``not_vendor_only()`` (drops vendor twins).
-    Inverter-only clients: every non-deleted, non-excluded array — vendor
-    fallback supplies the kWh.
+
+def _reportable_arrays_query(client_id: int, *, inverter_only_client: bool):
+    """Base Array filter (non-deleted, non-excluded). Further gating is in Python.
+
+    Mixed fleets: keep utility-backed arrays + any array with monitoring history
+    (Locus/AlsoEnergy/eGauge/…). Inverter-only clients: all arrays.
     """
-    q = [
+    return [
         Array.client_id == client_id,
         Array.excluded.is_(False),
         Array.deleted_at.is_(None),
     ]
-    if not inverter_only_client:
-        q.append(not_vendor_only())
-    return q
+
+
+def _filter_reportable_arrays(db, arrays: list, *, inverter_only_client: bool) -> list:
+    """Apply native multi-source inclusion rules to a list of Array rows."""
+    if inverter_only_client:
+        return list(arrays)
+    out = []
+    for arr in arrays:
+        # Utility-backed (or hand-added stub with no inverters)
+        from ..report_arrays import is_vendor_only_array
+        if not is_vendor_only_array(db, arr.id):
+            out.append(arr)
+            continue
+        # Vendor-only twin WITH monitoring production history → include (native
+        # Locus/Also/eGauge path). Empty twins stay out.
+        if _array_has_monitoring_history(db, arr.id):
+            out.append(arr)
+    return out
 
 
 # ── main builder ─────────────────────────────────────────────────────
@@ -304,18 +316,24 @@ def report_has_data(client_id: int, *, quarters: int = 6,
         if client is None:
             return False
         inv_only = _client_is_inverter_only(db, client.id)
-        arrays = db.execute(
-            select(Array).where(*_reportable_arrays_query(client.id, inverter_only_client=inv_only))
-        ).scalars().all()
+        arrays = _filter_reportable_arrays(
+            db,
+            db.execute(
+                select(Array).where(
+                    *_reportable_arrays_query(client.id, inverter_only_client=inv_only)
+                )
+            ).scalars().all(),
+            inverter_only_client=inv_only,
+        )
         array_ids = [a.id for a in arrays]
         if not array_ids:
             return False
 
-        # 1) Utility daily + vendor fallback — any non-zero month in window.
+        # 1) Utility daily + native monitoring — any non-zero month in window.
         for arr_id in array_ids:
             util = _daily_generation_by_month(db, arr_id, report_start, report_end)
-            vend = _vendor_generation_by_month(db, arr_id, report_start, report_end)
-            if any(v > 0 for v in util.values()) or any(v > 0 for v in vend.values()):
+            mon = _monitoring_generation_by_month(db, arr_id, report_start, report_end)
+            if any(v > 0 for v in util.values()) or any(v > 0 for v in mon.values()):
                 return True
 
         # 2) Bill kWh — attribute each bill across calendar days, keep only the
@@ -370,14 +388,20 @@ def reported_array_ids(client_id: int, *, quarters: int = 6,
         if client is None:
             return out
         inv_only = _client_is_inverter_only(db, client.id)
-        arrays = db.execute(
-            select(Array).where(*_reportable_arrays_query(client.id, inverter_only_client=inv_only))
-        ).scalars().all()
+        arrays = _filter_reportable_arrays(
+            db,
+            db.execute(
+                select(Array).where(
+                    *_reportable_arrays_query(client.id, inverter_only_client=inv_only)
+                )
+            ).scalars().all(),
+            inverter_only_client=inv_only,
+        )
         for arr in arrays:
-            # 1) Utility daily + vendor fallback — any non-zero month in window.
+            # 1) Utility daily + native monitoring — any non-zero month in window.
             util = _daily_generation_by_month(db, arr.id, report_start, report_end)
-            vend = _vendor_generation_by_month(db, arr.id, report_start, report_end)
-            if any(v > 0 for v in util.values()) or any(v > 0 for v in vend.values()):
+            mon = _monitoring_generation_by_month(db, arr.id, report_start, report_end)
+            if any(v > 0 for v in util.values()) or any(v > 0 for v in mon.values()):
                 out.append(arr.id)
                 continue
             # 2) Bill kWh — attributed across calendar days, months in-window.
@@ -462,18 +486,19 @@ def build_workbook(tenant_id: Optional[str] = None,
                         / f"{last_y}-Q{last_q}-GMCS-report.xlsx")
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Arrays scoped to THIS client only; skip excluded (below-REC-threshold)
-        # AND soft-deleted arrays. Without the deleted_at filter, arrays the
-        # operator removed still got a sheet in the report (Ford 2026-07-16 —
-        # Bruce deleted arrays that kept showing up in the GMCS workbook).
-        # Vendor twins stay out on mixed fleets; inverter-only clients keep
-        # their arrays so Locus (etc.) can fall back into the report.
+        # Arrays scoped to THIS client only; skip excluded + soft-deleted.
+        # Native multi-source: utility-backed arrays always; vendor-only arrays
+        # that already have Locus/AlsoEnergy/eGauge/… history also included.
         inv_only = _client_is_inverter_only(db, client.id)
-        arrays = db.execute(
-            select(Array).where(
-                *_reportable_arrays_query(client.id, inverter_only_client=inv_only)
-            )
-        ).scalars().all()
+        arrays = _filter_reportable_arrays(
+            db,
+            db.execute(
+                select(Array).where(
+                    *_reportable_arrays_query(client.id, inverter_only_client=inv_only)
+                )
+            ).scalars().all(),
+            inverter_only_client=inv_only,
+        )
         arrays_by_id = {a.id: a for a in arrays}
         array_ids = list(arrays_by_id.keys())
 
@@ -621,8 +646,8 @@ def build_workbook(tenant_id: Optional[str] = None,
         # Data: 6 quarter blocks × 3 month rows
         # First block starts at row 7; gap row between blocks (row 6, 10, 14, ...)
         row = 7
-        # Precedence per (year, month): utility daily (GMP 15-min / meter) >
-        # bill kWh > vendor telemetry (Locus/SolarEdge/…) as last-resort fill.
+        # Precedence: utility daily (VEC/GMP) > monitoring (Locus/Also/eGauge/…)
+        # > bill pro-rate.
         gen_by_month = _merge_report_months(
             vendor=vendor_gen_by_group.get(grp, {}),
             bill=per_group.get(grp, {}),
@@ -712,8 +737,7 @@ def build_directory_workbook(
                         / f"{last_y}-Q{last_q}-NEPOOL-directory.xlsx")
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Per-client: utility fleets drop vendor twins; inverter-only clients keep them.
-        from ..report_arrays import is_vendor_only_array
+        # Per-client native multi-source inclusion (utility + monitoring history).
         inv_only_by_client = {
             cid: _client_is_inverter_only(db, cid) for cid in clients_by_id
         }
@@ -725,12 +749,18 @@ def build_directory_workbook(
                 Array.deleted_at.is_(None),
             ).order_by(Array.name.asc())
         ).scalars().all()
-        arrays = []
+        by_client: dict[int, list] = {}
         for a in arrays_all:
             if a.client_id is None:
                 continue
-            if inv_only_by_client.get(a.client_id) or not is_vendor_only_array(db, a.id):
-                arrays.append(a)
+            by_client.setdefault(a.client_id, []).append(a)
+        arrays = []
+        for cid, arrs in by_client.items():
+            arrays.extend(
+                _filter_reportable_arrays(
+                    db, arrs, inverter_only_client=bool(inv_only_by_client.get(cid))
+                )
+            )
 
         # Unique display group per array: "Client — Array"
         arrays_by_id: dict[int, Array] = {}

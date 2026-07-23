@@ -19,11 +19,12 @@ import logging
 from datetime import datetime, date
 from typing import Optional
 
-from fastapi import APIRouter, Header, HTTPException, UploadFile, File
+from fastapi import APIRouter, Form, Header, HTTPException, UploadFile, File
 from sqlalchemy import select, func
 
 from .account import tenant_from_session, require_not_demo
 from .db import SessionLocal
+from .generation_sources import normalize_source
 from .models import Array, DailyGeneration, now
 
 log = logging.getLogger(__name__)
@@ -173,10 +174,17 @@ async def upload_daily_csv(
     array_id: int,
     file: UploadFile = File(...),
     authorization: str | None = Header(default=None),
+    source: str | None = Form(default=None),
 ):
-    """Accept a GMP daily generation CSV and upsert DailyGeneration rows."""
+    """Accept a daily generation CSV and upsert DailyGeneration rows.
+
+    Optional form field ``source`` tags the rows (locus, alsoenergy, egauge,
+    metermate, langsend, vec website, …). Free-text sheet labels are normalized
+    via ``generation_sources.normalize_source``; default is ``csv``.
+    """
     tenant = tenant_from_session(authorization)
     require_not_demo(tenant)
+    src = normalize_source(source, default="csv")
 
     with SessionLocal() as db:
         arr = db.get(Array, array_id)
@@ -204,7 +212,7 @@ async def upload_daily_csv(
         for day, kwh in parsed_rows:
             if day in existing_by_day:
                 existing_by_day[day].kwh = kwh
-                existing_by_day[day].source = "csv"
+                existing_by_day[day].source = src
                 existing_by_day[day].uploaded_at = now()
                 updated += 1
             else:
@@ -213,7 +221,7 @@ async def upload_daily_csv(
                     array_id=array_id,
                     day=day,
                     kwh=kwh,
-                    source="csv",
+                    source=src,
                 ))
                 inserted += 1
 
@@ -228,7 +236,7 @@ async def upload_daily_csv(
             "start": all_days[0].isoformat(),
             "end": all_days[-1].isoformat(),
         },
-        "source": "csv",
+        "source": src,
         # How we interpreted the file: "header-detected" (named columns found)
         # vs "no-header-fallback" (assumed date,kWh in the first two columns).
         "detected_format": fmt,
