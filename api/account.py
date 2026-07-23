@@ -1255,6 +1255,58 @@ def download_directory_report(
     )
 
 
+@router.get("/v1/account/quarterly-summary.xlsx")
+def download_quarterly_summary(
+    quarter: Optional[str] = Query(default=None),
+    authorization: Optional[str] = Header(default=None),
+):
+    """Fleet quarterly summary spreadsheet (Ford 2026-07-23 screenshot format).
+
+    Single "Summary" sheet:
+      Name | Account # | {Month1} | {Month2} | {Month3} | Total
+
+    One row per utility account under every report-eligible array across all
+    clients. Month columns follow the selected quarter. `quarter` like
+    'Q1-2026'; omit for the latest complete quarter.
+    """
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    from .report_eligibility import tenant_in_reports_world
+    if not tenant_in_reports_world(t):
+        raise HTTPException(404, "Generation reports aren't enabled on this account")
+    if quarter:
+        try:
+            qy, qq = _parse_quarter_str(quarter)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+    else:
+        from .writers.gmcs_writer import default_reporting_reference_date, _rolling_quarters
+        qy, qq = _rolling_quarters(default_reporting_reference_date(datetime.utcnow().date()))[-1]
+
+    from .writers.gmp_raw_writer import build_quarterly_summary_workbook
+    tmpdir = tempfile.mkdtemp(prefix=f"so-qsum-{t.id}-")
+    fname = f"quarterly-summary-Q{qq}-{qy}.xlsx"
+    out_path = Path(tmpdir) / fname
+    try:
+        build_quarterly_summary_workbook(t.id, out_path, year=qy, quarter=qq)
+    except Exception as e:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        logger.exception("download_quarterly_summary failed for tenant=%s", t.id)
+        raise HTTPException(500, f"Couldn't build the quarterly summary: {e}") from e
+    # Metered billing: directory-style deliverable for the whole fleet this quarter.
+    from .delivery import record_genreport_directory
+    record_genreport_directory(
+        t.id, reference_date=_quarter_to_reference_date(qy, qq),
+        first_source="download",
+    )
+    return FileResponse(
+        str(out_path),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=fname,
+        background=BackgroundTask(shutil.rmtree, tmpdir, ignore_errors=True),
+    )
+
+
 @router.get("/v1/account/generation-directory.xlsx")
 def download_generation_directory(
     quarter: Optional[str] = Query(default=None),
