@@ -31,11 +31,15 @@ from sqlalchemy import func, select
 
 from ..bill_attribution import distribute_kwh_by_calendar_day
 from ..db import SessionLocal
-from ..generation_sources import EXTENSION_SOURCES, VENDOR_TELEMETRY_SOURCES
+from ..generation_sources import (
+    EXTENSION_SOURCES,
+    MONITORING_REPORT_SOURCES,
+    VENDOR_TELEMETRY_SOURCES,
+)
 from ..models import (
     Array, Bill, Client, DailyGeneration, GmpDailyGeneration, Tenant, UtilityAccount,
 )
-from ..report_arrays import not_vendor_only
+from ..report_arrays import is_vendor_only_array, not_vendor_only
 from ..reports import gmp_daily_read
 from .gmcs_writer import _daily_generation_by_month, _quarter_months, _sheet_name_for_array
 
@@ -418,6 +422,43 @@ _SUMMARY_HDR_FONT = Font(bold=True, size=11)
 _SUMMARY_NUM = "0.000"
 
 
+def _monitoring_months(
+    db, array_id: int, months, start: date, end: date,
+) -> dict[tuple[int, int], float]:
+    """Monthly kWh from the array's MONITORING feed (Locus, AlsoEnergy, eGauge,
+    Meter Mate, …) — the native production tier for arrays with no utility
+    account. Utility daily still outranks this where both cover a month; callers
+    merge utility over the top."""
+    out: dict[tuple[int, int], float] = {k: 0.0 for k in months}
+    rows = db.execute(
+        select(DailyGeneration.day, DailyGeneration.kwh).where(
+            DailyGeneration.array_id == array_id,
+            DailyGeneration.day >= start,
+            DailyGeneration.day <= end,
+            func.lower(DailyGeneration.source).in_(MONITORING_REPORT_SOURCES),
+        )
+    ).all()
+    for d, kwh in rows:
+        key = (d.year, d.month)
+        if key in out:
+            out[key] += float(kwh or 0.0)
+    return {k: round(v, 6) for k, v in out.items()}
+
+
+def _has_monitoring_history(db, array_id: int) -> bool:
+    """True if the array has any positive monitoring-tier DailyGeneration row.
+    Mirrors gmcs_writer._array_has_monitoring_history so a vendor-only array
+    (Locus/AlsoEnergy, no utility account) with real production is admitted to
+    the summary; an empty vendor twin (Fronius twin, no production) stays out."""
+    return db.execute(
+        select(DailyGeneration.id).where(
+            DailyGeneration.array_id == array_id,
+            DailyGeneration.kwh > 0,
+            func.lower(DailyGeneration.source).in_(MONITORING_REPORT_SOURCES),
+        ).limit(1)
+    ).first() is not None
+
+
 def _account_monthly_kwh(
     db, ua: UtilityAccount, months, start: date, end: date, *, solo_array: bool,
 ) -> dict[tuple[int, int], float]:
@@ -504,9 +545,19 @@ def build_quarterly_summary_workbook(
                     Array.client_id.in_(client_ids),
                     Array.deleted_at.is_(None),
                     Array.excluded.is_(False),
-                    not_vendor_only(),
                 ).order_by(Array.name)
             ).scalars().all()
+            # Native multi-source inclusion (mirrors gmcs_writer): utility-backed
+            # arrays + bare onboarding stubs, PLUS vendor-only arrays that carry
+            # real monitoring production (Locus / AlsoEnergy / eGauge / …). Empty
+            # vendor twins (a Fronius twin with no production of its own) stay out
+            # so they can't double-report next to a utility-backed sibling — and
+            # so byte-pinned utility-only workbooks (Bruce) are unchanged.
+            arrays = [
+                a for a in arrays
+                if not is_vendor_only_array(db, a.id)
+                or _has_monitoring_history(db, a.id)
+            ]
 
         # Pre-count live UAs per array for solo-account fallback.
         array_ids = [a.id for a in arrays]
@@ -532,9 +583,17 @@ def build_quarterly_summary_workbook(
         for arr in arrays:
             uas = uas_by_array.get(arr.id) or []
             if not uas:
-                # Array with no utility account yet — still list it so the
-                # operator sees the gap (blank account #, zeros).
-                rows.append((arr.name, "", {k: 0.0 for k in months}))
+                # No utility account — either a bare onboarding stub (all zeros,
+                # so the operator sees the gap) or a monitoring-only array
+                # (Locus / AlsoEnergy / eGauge). Use the array-level feed:
+                # utility daily wins a month, else monitoring, else 0. Account #
+                # is blank — these arrays settle off a monitor, not a meter.
+                util = _daily_generation_by_month(db, arr.id, start, end)
+                mon = _monitoring_months(db, arr.id, months, start, end)
+                monthly = {
+                    k: float(util.get(k) or mon.get(k) or 0.0) for k in months
+                }
+                rows.append((arr.name, "", monthly))
                 continue
             solo = ua_count.get(arr.id, 0) == 1
             for ua in uas:

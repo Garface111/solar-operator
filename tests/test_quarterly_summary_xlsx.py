@@ -15,7 +15,9 @@ from api.db import SessionLocal
 from api.models import (
     Array,
     Client,
+    DailyGeneration,
     GmpDailyGeneration,
+    Inverter,
     Tenant,
     UtilityAccount,
 )
@@ -111,6 +113,74 @@ def test_build_quarterly_summary_format(tmp_path: Path):
         if sh.cell(r, 1).value == "Starlake":
             starlake_accts.append(str(sh.cell(r, 2).value))
     assert sorted(starlake_accts) == ["111", "222"]
+
+
+def _seed_vendor_only() -> tuple[str, int]:
+    """Tenant with a Locus-monitored array (no utility account) + an empty
+    Fronius twin (inverter, but no production)."""
+    tid = "ten_" + secrets.token_hex(6)
+    with SessionLocal() as db:
+        db.add(Tenant(
+            id=tid, name="Vendor Co", contact_email=f"{tid}@t.test",
+            tenant_key="k_" + secrets.token_hex(8), plan="standard", active=True,
+            generation_reports=True, product="array_operator",
+        ))
+        c = Client(tenant_id=tid, name="Loc Client", active=True)
+        db.add(c)
+        db.flush()
+        # Monitored vendor-only array: a Locus inverter + real daily production,
+        # NO utility account. Must appear in the summary (blank account #).
+        mon = Array(tenant_id=tid, name="Benson Site", client_id=c.id, fuel_type="solar")
+        db.add(mon)
+        db.flush()
+        db.add(Inverter(
+            tenant_id=tid, array_id=mon.id, vendor="locus",
+            serial="LOC-1", nameplate_kw=10.0,
+        ))
+        for d, kwh in (
+            (date(2026, 1, 10), 40.0),
+            (date(2026, 2, 5), 25.0),
+            (date(2026, 3, 3), 12.5),
+        ):
+            db.add(DailyGeneration(
+                tenant_id=tid, array_id=mon.id, day=d, kwh=kwh, source="locus",
+            ))
+        # Empty vendor twin: an inverter but no production of its own → excluded,
+        # so it can't double-report next to a real sibling.
+        twin = Array(
+            tenant_id=tid, name="Benson Site (Fronius)", client_id=c.id,
+            fuel_type="solar",
+        )
+        db.add(twin)
+        db.flush()
+        db.add(Inverter(
+            tenant_id=tid, array_id=twin.id, vendor="fronius",
+            serial="FRO-1", nameplate_kw=10.0,
+        ))
+        db.commit()
+        return tid, c.id
+
+
+def test_quarterly_summary_includes_monitored_vendor_array(tmp_path: Path):
+    tid, _ = _seed_vendor_only()
+    out = tmp_path / "summary.xlsx"
+    build_quarterly_summary_workbook(tid, out, year=2026, quarter=1)
+
+    wb = load_workbook(out)
+    sh = wb["Summary"]
+    rows = {sh.cell(r, 1).value: r for r in range(2, 30) if sh.cell(r, 1).value}
+
+    # The Locus-monitored array appears — blank account #, monitoring kWh.
+    assert "Benson Site" in rows
+    br = rows["Benson Site"]
+    assert (sh.cell(br, 2).value or "") == ""
+    assert float(sh.cell(br, 3).value) == 40.0   # Jan
+    assert float(sh.cell(br, 4).value) == 25.0   # Feb
+    assert float(sh.cell(br, 5).value) == 12.5   # Mar
+    assert float(sh.cell(br, 6).value) == 77.5   # Total
+
+    # The empty vendor twin (no production) is excluded.
+    assert "Benson Site (Fronius)" not in rows
 
 
 def test_quarterly_summary_endpoint(client):
