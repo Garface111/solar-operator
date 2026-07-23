@@ -544,7 +544,7 @@ export function ClientCard({
                     type="button"
                     onClick={handleDownloadGen}
                     disabled={downloadingGen}
-                    title="Raw utility generation for the selected quarter — monthly per project across all utilities (GMP + co-ops), plus daily meter detail where available."
+                    title="Raw utility generation for the selected quarter — monthly per project across all utilities (GMP + co-ops), plus hourly meter detail where available."
                     className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-cream-border bg-white px-5 py-2.5 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
                   >
                     {downloadingGen ? (

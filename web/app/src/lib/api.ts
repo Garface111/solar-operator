@@ -756,7 +756,7 @@ export async function downloadDirectoryReport(quarter?: string): Promise<void> {
 }
 
 /** Download ALL clients' utility generation in one workbook (a Generation
- *  Summary across GMP + co-ops, plus per-project daily meter detail). The
+ *  Summary across GMP + co-ops, plus per-project hourly meter detail). The
  *  all-clients counterpart of downloadGeneration(). */
 export async function downloadGenerationDirectory(quarter?: string): Promise<void> {
   const token = getSession();
@@ -1222,7 +1222,8 @@ export async function downloadClientReport(
 
 /** Download a client's RAW utility generation workbook for a quarter — a Monthly
  *  Summary (projects × the quarter's 3 months) across all the client's utilities
- *  (GMP + SmartHub co-ops) plus per-project daily meter detail. `quarter` like
+ *  (GMP + SmartHub co-ops) plus per-project hourly meter detail (GMP 15-min
+ *  intervals rolled to the hour; co-ops fall back to daily). `quarter` like
  *  'Q1-2026'; omit for the latest. */
 export async function downloadGeneration(
   clientId: number,

@@ -1262,8 +1262,9 @@ def download_generation_directory(
 ):
     """All-clients utility generation workbook for a quarter (Ford 2026-07-16) —
     one Generation Summary (client × project × the quarter's months, across GMP +
-    co-ops) plus a per-project daily meter detail sheet. The all-clients
-    counterpart of the per-client /clients/{id}/generation.xlsx download."""
+    co-ops) plus a per-project HOURLY meter detail sheet (GMP 15-min→hour;
+    SmartHub daily fallback). The all-clients counterpart of the per-client
+    /clients/{id}/generation.xlsx download."""
     t = tenant_from_session(authorization)
     require_not_demo(t)
     if quarter:
@@ -4312,7 +4313,8 @@ def download_generation(
     """Raw utility generation workbook for a client + quarter (Ford 2026-07-16):
     a Monthly Summary (projects × the quarter's 3 months) across ALL the client's
     utilities — GMP interval meter + bill, and SmartHub co-op daily meter — plus a
-    per-project daily detail sheet where a daily meter feed exists. Utility-measured
+    per-project HOURLY detail sheet (GMP 15-min intervals rolled to the hour;
+    SmartHub falls back to daily rows when no hourly feed exists). Utility-measured
     generation only (never inverter telemetry). `quarter` like 'Q1-2026'; omit for
     the latest complete quarter."""
     t = tenant_from_session(authorization)

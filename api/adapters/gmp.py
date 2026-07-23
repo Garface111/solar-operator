@@ -105,6 +105,69 @@ def fetch_usage_csv(account_number: str, jwt: str, start, end, timeout: float = 
     return r.text
 
 
+def _iter_usage_csv_rows(csv_text: str):
+    """Yield (IntervalStart datetime, Quantity float, service_agreement, unit)
+    from a GMP 15-min usage CSV. Shared by daily + hourly aggregators.
+
+    NEVER fabricates: blank/missing/unparseable Quantity rows are skipped.
+    """
+    import csv as _csv
+    import io as _io
+
+    if not csv_text or not csv_text.strip():
+        return
+    reader = _csv.reader(_io.StringIO(csv_text))
+    rows = list(reader)
+    if not rows:
+        return
+
+    header_idx = None
+    for i, row in enumerate(rows[:5]):
+        low = [c.strip().lower() for c in row]
+        if any("interval" in c or c == "date" for c in low) and any(
+            "quantity" in c or "kwh" in c for c in low
+        ):
+            header_idx = i
+            break
+    if header_idx is None:
+        header_idx = 0
+    header = [c.strip().lower() for c in rows[header_idx]]
+
+    def col(*names):
+        for nm in names:
+            for j, h in enumerate(header):
+                if h == nm or nm in h:
+                    return j
+        return None
+
+    i_start = col("intervalstart", "interval start", "start", "date")
+    i_qty = col("quantity", "kwh", "usage", "value")
+    i_sa = col("serviceagreement", "service agreement", "account", "meter")
+    i_unit = col("unitofmeasure", "unit of measure", "unit", "uom")
+    if i_start is None or i_qty is None:
+        return
+
+    for row in rows[header_idx + 1:]:
+        if not row or len(row) <= max(i_start, i_qty):
+            continue
+        raw_dt = (row[i_start] or "").strip().strip('"')
+        if not raw_dt:
+            continue
+        ts = _parse_interval_datetime(raw_dt)
+        if ts is None:
+            continue
+        qty = _to_float((row[i_qty] or "").strip().strip('"').replace(",", ""))
+        if qty is None:
+            continue
+        sa = ""
+        if i_sa is not None and i_sa < len(row):
+            sa = (row[i_sa] or "").strip()
+        unit = ""
+        if i_unit is not None and i_unit < len(row):
+            unit = (row[i_unit] or "").strip()
+        yield ts, qty, sa, unit
+
+
 def parse_usage_csv_to_daily(csv_text: str) -> dict[str, Any]:
     """Parse a GMP 15-minute interval CSV into per-day kWh aggregates.
 
@@ -125,44 +188,8 @@ def parse_usage_csv_to_daily(csv_text: str) -> dict[str, Any]:
           "unit": str|None,                 # UnitOfMeasure (expect 'kWh')
         }
     """
-    import csv as _csv
-    import io as _io
-
     empty = {"by_day": {}, "row_count": 0, "interval_min": None,
              "interval_max": None, "service_agreements": [], "unit": None}
-    if not csv_text or not csv_text.strip():
-        return empty
-
-    reader = _csv.reader(_io.StringIO(csv_text))
-    rows = list(reader)
-    if not rows:
-        return empty
-
-    # Locate the header row (GMP sometimes prepends a title line); find the row
-    # that contains an "interval" + "quantity" column.
-    header_idx = None
-    for i, row in enumerate(rows[:5]):
-        low = [c.strip().lower() for c in row]
-        if any("interval" in c or c == "date" for c in low) and any("quantity" in c or "kwh" in c for c in low):
-            header_idx = i
-            break
-    if header_idx is None:
-        header_idx = 0
-    header = [c.strip().lower() for c in rows[header_idx]]
-
-    def col(*names):
-        for nm in names:
-            for j, h in enumerate(header):
-                if h == nm or nm in h:
-                    return j
-        return None
-
-    i_start = col("intervalstart", "interval start", "start", "date")
-    i_qty = col("quantity", "kwh", "usage", "value")
-    i_sa = col("serviceagreement", "service agreement", "account", "meter")
-    i_unit = col("unitofmeasure", "unit of measure", "unit", "uom")
-    if i_start is None or i_qty is None:
-        return empty
 
     by_day: dict = {}
     row_count = 0
@@ -170,34 +197,22 @@ def parse_usage_csv_to_daily(csv_text: str) -> dict[str, Any]:
     unit = None
     dmin = dmax = None
 
-    for row in rows[header_idx + 1:]:
-        if not row or len(row) <= max(i_start, i_qty):
-            continue
-        raw_dt = (row[i_start] or "").strip().strip('"')
-        if not raw_dt:
-            continue
-        d = _parse_interval_date(raw_dt)
-        if d is None:
-            continue
-        qty = _to_float((row[i_qty] or "").strip().strip('"').replace(",", ""))
-        if qty is None:
-            continue  # never fabricate — a missing reading is skipped
+    for ts, qty, sa, u in _iter_usage_csv_rows(csv_text):
+        d = ts.date()
         cell = by_day.setdefault(d, {"kwh": 0.0, "intervals": 0})
         cell["kwh"] += qty
         cell["intervals"] += 1
         row_count += 1
-        if i_sa is not None and i_sa < len(row):
-            sa = (row[i_sa] or "").strip()
-            if sa:
-                sas.add(sa)
-        if unit is None and i_unit is not None and i_unit < len(row):
-            u = (row[i_unit] or "").strip()
-            if u:
-                unit = u
+        if sa:
+            sas.add(sa)
+        if unit is None and u:
+            unit = u
         dmin = d if dmin is None else min(dmin, d)
         dmax = d if dmax is None else max(dmax, d)
 
-    # round day totals to avoid float dust
+    if not by_day:
+        return empty
+
     for d in by_day:
         by_day[d]["kwh"] = round(by_day[d]["kwh"], 6)
 
@@ -211,22 +226,108 @@ def parse_usage_csv_to_daily(csv_text: str) -> dict[str, Any]:
     }
 
 
+def parse_usage_csv_to_hourly(csv_text: str) -> dict[str, Any]:
+    """Parse a GMP 15-minute interval CSV into per-hour kWh aggregates.
+
+    Same columns as parse_usage_csv_to_daily. Each 15-min Quantity is summed into
+    the hour of its IntervalStart (local wall time as GMP reports it). A full
+    hour has 4 intervals; a partial hour keeps the interval count honest.
+
+    Returns:
+        {
+          "by_hour": {(date, hour_0_23): {"kwh": float, "intervals": int}},
+          "row_count": int,
+          "interval_min": date|None,
+          "interval_max": date|None,
+          "service_agreements": [str],
+          "unit": str|None,
+        }
+    """
+    empty = {"by_hour": {}, "row_count": 0, "interval_min": None,
+             "interval_max": None, "service_agreements": [], "unit": None}
+
+    by_hour: dict = {}
+    row_count = 0
+    sas: set = set()
+    unit = None
+    dmin = dmax = None
+
+    for ts, qty, sa, u in _iter_usage_csv_rows(csv_text):
+        d = ts.date()
+        key = (d, ts.hour)
+        cell = by_hour.setdefault(key, {"kwh": 0.0, "intervals": 0})
+        cell["kwh"] += qty
+        cell["intervals"] += 1
+        row_count += 1
+        if sa:
+            sas.add(sa)
+        if unit is None and u:
+            unit = u
+        dmin = d if dmin is None else min(dmin, d)
+        dmax = d if dmax is None else max(dmax, d)
+
+    if not by_hour:
+        return empty
+
+    for k in by_hour:
+        by_hour[k]["kwh"] = round(by_hour[k]["kwh"], 6)
+
+    return {
+        "by_hour": by_hour,
+        "row_count": row_count,
+        "interval_min": dmin,
+        "interval_max": dmax,
+        "service_agreements": sorted(sas),
+        "unit": unit,
+    }
+
+
+def _parse_interval_datetime(s: str) -> datetime | None:
+    """Parse a GMP IntervalStart cell to a naive datetime (local wall clock).
+
+    Handles 'YYYY-MM-DD HH:MM:SS', ISO 'YYYY-MM-DDTHH:MM:SS[.fff][Z]', and
+    'MM/DD/YYYY HH:MM'. Date-only strings land at midnight.
+    """
+    s = (s or "").strip()
+    if not s:
+        return None
+    # Strip trailing Z / timezone offset so fromisoformat is happy on older
+    # Python paths; GMP timestamps are wall-clock VT, not UTC-for-us.
+    raw = s
+    if raw.endswith("Z"):
+        raw = raw[:-1]
+    if "+" in raw[10:]:
+        raw = raw[: raw.rfind("+")]
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%m/%d/%Y %H:%M:%S",
+        "%m/%d/%Y %H:%M",
+        "%m/%d/%y %H:%M:%S",
+        "%m/%d/%y %H:%M",
+        "%Y-%m-%d",
+        "%m/%d/%Y",
+        "%m/%d/%y",
+        "%Y/%m/%d",
+    ):
+        try:
+            return datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(raw)
+    except Exception:
+        return None
+
+
 def _parse_interval_date(s: str):
     """Extract the calendar date from a GMP IntervalStart cell. Handles
     'YYYY-MM-DD HH:MM:SS', ISO 'YYYY-MM-DDTHH:MM:SS', and 'MM/DD/YYYY HH:MM'."""
-    s = s.strip()
-    # take just the date portion before any space or 'T'
-    head = s.split("T")[0].split(" ")[0]
-    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%Y/%m/%d"):
-        try:
-            return datetime.strptime(head, fmt).date()
-        except ValueError:
-            continue
-    # last resort: full ISO parse
-    try:
-        return datetime.fromisoformat(s).date()
-    except Exception:
-        return None
+    ts = _parse_interval_datetime(s)
+    return ts.date() if ts is not None else None
 
 
 def parse_extension_payload(payload: dict) -> dict:

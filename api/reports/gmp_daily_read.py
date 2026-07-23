@@ -197,6 +197,89 @@ def get_account_daily_series(
             db.close()
 
 
+def get_hourly_series(
+    array_id: int,
+    *,
+    start: Optional[date] = None,
+    end: Optional[date] = None,
+    db: Optional[Session] = None,
+) -> list[dict[str, Any]]:
+    """Per-HOUR generation for an array, summed across its GMP meters.
+
+    Re-derives hourly totals from the raw sponge (GmpUsageRaw CSV windows) —
+    the 15-min Quantity rows aggregated into the hour of IntervalStart. Used by
+    the generation-reports XLSX detail export.
+
+    Returns ascending list of:
+        {"day": date, "hour": int (0-23), "kwh": float,
+         "meters": int, "intervals": int}
+      intervals = 15-min slots summed into that hour (4 = full hour / meter)
+
+    Empty list when the array has no GMP raw interval data (or no meters).
+    """
+    from ..adapters import gmp as gmp_adapter  # noqa: PLC0415
+
+    _own = db is None
+    if _own:
+        db = SessionLocal()
+    try:
+        acct_ids = _account_ids_for_array(db, array_id)
+        if not acct_ids:
+            return []
+
+        # Per-account first (window overlap → last write wins for that hour),
+        # then sum across meters so multi-meter arrays don't double-count a
+        # re-fetched window.
+        merged: dict[tuple[date, int], dict[str, Any]] = {}
+        for acct_id in acct_ids:
+            q = select(GmpUsageRaw).where(
+                GmpUsageRaw.account_id == acct_id,
+                GmpUsageRaw.http_status == 200,
+                GmpUsageRaw.raw_csv.isnot(None),
+            )
+            # Windows that could cover any day in [start, end].
+            if start is not None:
+                q = q.where(GmpUsageRaw.window_end >= start)
+            if end is not None:
+                q = q.where(GmpUsageRaw.window_start <= end)
+            q = q.order_by(GmpUsageRaw.window_start, GmpUsageRaw.fetched_at)
+            account_hours: dict[tuple[date, int], dict[str, float]] = {}
+            for raw in db.execute(q).scalars().all():
+                parsed = gmp_adapter.parse_usage_csv_to_hourly(raw.raw_csv or "")
+                for (d, h), cell in (parsed.get("by_hour") or {}).items():
+                    if start is not None and d < start:
+                        continue
+                    if end is not None and d > end:
+                        continue
+                    # Later windows overwrite same hour for this account.
+                    account_hours[(d, int(h))] = {
+                        "kwh": float(cell.get("kwh") or 0.0),
+                        "intervals": int(cell.get("intervals") or 0),
+                    }
+            for key, cell in account_hours.items():
+                slot = merged.setdefault(
+                    key, {"kwh": 0.0, "intervals": 0, "meters": 0},
+                )
+                slot["kwh"] += cell["kwh"]
+                slot["intervals"] += cell["intervals"]
+                slot["meters"] += 1
+
+        out = [
+            {
+                "day": d,
+                "hour": h,
+                "kwh": round(float(v["kwh"]), 4),
+                "meters": int(v["meters"]),
+                "intervals": int(v["intervals"]),
+            }
+            for (d, h), v in sorted(merged.items(), key=lambda x: (x[0][0], x[0][1]))
+        ]
+        return out
+    finally:
+        if _own:
+            db.close()
+
+
 def get_raw_windows(
     account_id: int,
     *,
