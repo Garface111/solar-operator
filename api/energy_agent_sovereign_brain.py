@@ -181,6 +181,16 @@ def fallback_provider() -> str:
     return _norm_provider(os.getenv("SOVEREIGN_BRAIN_FALLBACK") or "claude") or "claude"
 
 
+def _cli_credits_only() -> bool:
+    """When on (default), the Sovereign brain never spends the Anthropic API
+    key. The direct-API provider (call_claude) is dropped from call_brain's
+    order and the claude_cli subprocess runs with ANTHROPIC_API_KEY stripped,
+    so the CLI can only bill Ford's Claude subscription (CLI credits) — or fail
+    to the Grok (xAI) fallback. Set SOVEREIGN_CLI_CREDITS_ONLY=0 to re-enable
+    Anthropic API spend."""
+    return _flag("SOVEREIGN_CLI_CREDITS_ONLY", "1")
+
+
 def _http_json(url: str, headers: dict, body: dict, timeout: int = 90) -> dict:
     data = json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
@@ -238,6 +248,11 @@ def call_claude(
     temperature: float = 0.45,
     timeout: int | None = None,
 ) -> dict:
+    if _cli_credits_only():
+        # CLI-credits-only mode: the direct Anthropic API bills the API key, so
+        # it is disabled. call_brain also filters this provider out; this guard
+        # blocks any other direct caller.
+        raise RuntimeError("cli_credits_only: direct Anthropic API disabled")
     if not ANTHROPIC_API_KEY:
         raise RuntimeError("no_anthropic")
     if timeout is None:
@@ -333,10 +348,19 @@ def call_claude_cli(messages: list[dict], *, timeout: int | None = None) -> dict
         "--max-turns", os.getenv("SOVEREIGN_CLI_MAX_TURNS", "1"),
         "--fallback-model", os.getenv("SOVEREIGN_CLI_FALLBACK_MODEL", "claude-sonnet-4-5"),
     ]
-    # With an API key, --bare skips the OAuth/subscription path (headless-safe).
-    if (os.getenv("ANTHROPIC_API_KEY") or "").strip():
+    child_env = None
+    if _cli_credits_only():
+        # CLI-credits-only: strip ANTHROPIC_API_KEY from the child env so the
+        # CLI physically cannot bill the API key — it must use Ford's Claude
+        # subscription (OAuth) or fail (→ Grok fallback). --bare is never added.
+        if (os.environ.get("ANTHROPIC_API_KEY") or "").strip():
+            child_env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
+    elif (os.getenv("ANTHROPIC_API_KEY") or "").strip():
+        # With an API key, --bare skips the OAuth/subscription path (headless-safe).
         cmd.insert(1, "--bare")
-    p = subprocess.run(cmd, capture_output=True, text=True, timeout=int(timeout))
+    p = subprocess.run(
+        cmd, capture_output=True, text=True, timeout=int(timeout), env=child_env
+    )
     out = (p.stdout or "").strip()
     if not out:
         raise RuntimeError(f"claude_cli empty (rc={p.returncode}): {(p.stderr or '')[:200]}")
@@ -388,6 +412,13 @@ def call_brain(messages: list[dict], *, timeout: int | None = None) -> dict:
         if p not in seen:
             seen.add(p)
             providers.append(p)
+
+    # CLI-credits-only: never fall to the direct Anthropic API (bills the API
+    # key). Keep claude_cli (subscription) → grok (xAI) only.
+    if _cli_credits_only():
+        providers = [p for p in providers if p != "claude"]
+        if not providers:
+            providers = ["claude_cli", "grok"]
 
     errors: list[str] = []
     for i, p in enumerate(providers):
