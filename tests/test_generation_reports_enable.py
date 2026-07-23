@@ -14,7 +14,7 @@ from sqlalchemy import select
 
 from api.account import mint_session_for_tenant
 from api.db import SessionLocal
-from api.models import Client, Tenant
+from api.models import Client, PortalCredential, Tenant
 
 
 def _mk_tenant(*, product: str = "array_operator", gen_reports: bool = False,
@@ -139,6 +139,79 @@ def test_enable_rejects_demo(client: TestClient):
     detail = resp.json().get("detail") or {}
     if isinstance(detail, dict):
         assert detail.get("error") == "demo-read-only"
+
+
+def test_enable_seeds_clients_from_vault_logins(client: TestClient, monkeypatch):
+    """Turning on the gen-reports desk for an AO tenant that already stored
+    GMP/VEC Cloud Capture logins must mint pending report Clients + rearm
+    harvest — without making the operator re-enter passwords."""
+    # Vault encrypt/decrypt is web-process-disabled; seed rows with a fake
+    # ciphertext and defer-safe columns only (ensure never reads the secret).
+    monkeypatch.setenv("CLOUD_CAPTURE_COLLECT", "1")
+    tid, auth = _mk_tenant(product="array_operator", gen_reports=False)
+
+    with SessionLocal() as db:
+        db.add(PortalCredential(
+            tenant_id=tid, provider="gmp",
+            username="vault.gmp@example.com",
+            username_lc="vault.gmp@example.com",
+            secret_enc=b"fake-ciphertext",
+            cloud_capture_enabled=True,
+            harvest_fails=2,
+        ))
+        db.add(PortalCredential(
+            tenant_id=tid, provider="vec",
+            username="vecuser",
+            username_lc="vecuser",
+            login_host="vermontelectric.smarthub.coop",
+            secret_enc=b"fake-ciphertext",
+            cloud_capture_enabled=True,
+        ))
+        # Inverter cloud must NOT become a report client.
+        db.add(PortalCredential(
+            tenant_id=tid, provider="fronius",
+            username="inv@example.com",
+            username_lc="inv@example.com",
+            secret_enc=b"fake-ciphertext",
+            cloud_capture_enabled=True,
+        ))
+        db.commit()
+
+    assert len(_clients_for(tid)) == 0
+
+    resp = client.post(
+        "/v1/account/generation-reports/enable",
+        headers={"Authorization": auth},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["generation_reports"] is True
+    assert body["logins_rearmed"] == 2  # gmp + vec only
+    assert body["clients_seeded"] >= 2
+
+    rows = _clients_for(tid)
+    emails = {c.gmp_email for c in rows}
+    users = {c.vec_username for c in rows}
+    assert "vault.gmp@example.com" in emails
+    assert "vecuser" in users
+    assert all(c.capture_pending for c in rows if c.gmp_email or c.vec_username)
+
+    with SessionLocal() as db:
+        gmp = db.execute(
+            select(PortalCredential).where(
+                PortalCredential.tenant_id == tid,
+                PortalCredential.provider == "gmp",
+            )
+        ).scalar_one()
+        assert gmp.last_harvest_at is None
+        assert gmp.harvest_fails == 0
+
+
+def _clients_for(tid: str) -> list[Client]:
+    with SessionLocal() as db:
+        return list(db.execute(
+            select(Client).where(Client.tenant_id == tid, Client.deleted_at.is_(None))
+        ).scalars().all())
 
 
 def test_enable_unauth_401(client: TestClient):

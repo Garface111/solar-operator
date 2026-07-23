@@ -1128,7 +1128,34 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                             if existing_arr is None or existing_arr.deleted_at is not None:
                                 acct.array_id = None
                             else:
-                                ctx.add("array_skipped", decision=f"account {acct_no} already linked to array {acct.array_id}")
+                                # Meter-capture (utility-meter-capture) can land
+                                # BEFORE /v1/sync and create arrays with
+                                # client_id=None. Claim those orphans for this
+                                # reports client so gen-reports clients aren't
+                                # empty while generation data sits on unowned
+                                # arrays. Never steal an array already under
+                                # another client.
+                                if existing_arr.client_id is None:
+                                    existing_arr.client_id = owner.id
+                                    ctx.add(
+                                        "array_claimed",
+                                        decision=(
+                                            f"claimed orphan array {existing_arr.name!r} "
+                                            f"(id {existing_arr.id}) for client {owner.id}"
+                                        ),
+                                    )
+                                    if not acct.captured_client_name:
+                                        acct.captured_client_name = (owner.name or "")[:200]
+                                    if owner.is_placeholder:
+                                        owner.is_placeholder = False
+                                else:
+                                    ctx.add(
+                                        "array_skipped",
+                                        decision=(
+                                            f"account {acct_no} already linked to "
+                                            f"array {acct.array_id}"
+                                        ),
+                                    )
                                 continue
                         arr_name = (a.get("nickname") or acct_no)[:200]
                         # PREFER linking to an EXISTING active array of this owner
@@ -1404,7 +1431,28 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                                 if existing_arr is None or existing_arr.deleted_at is not None:
                                     acct.array_id = None
                                 else:
-                                    ctx.add("array_skipped", decision=f"account {acct_no} already linked to array {acct.array_id}")
+                                    # Claim meter-capture orphans (client_id=None)
+                                    # so gen-reports clients get their arrays even
+                                    # when meter-capture raced ahead of /v1/sync.
+                                    if existing_arr.client_id is None:
+                                        existing_arr.client_id = target.id
+                                        ctx.add(
+                                            "array_claimed",
+                                            decision=(
+                                                f"claimed orphan array {existing_arr.name!r} "
+                                                f"(id {existing_arr.id}) for client {target.id}"
+                                            ),
+                                        )
+                                        if not acct.captured_client_name:
+                                            acct.captured_client_name = (target.name or "")[:200]
+                                    else:
+                                        ctx.add(
+                                            "array_skipped",
+                                            decision=(
+                                                f"account {acct_no} already linked to "
+                                                f"array {acct.array_id}"
+                                            ),
+                                        )
                                     continue
                             arr_name = (a.get("nickname") or acct_no)[:200]
                             # Smart absorb: attach to an existing vendor twin

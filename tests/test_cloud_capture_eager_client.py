@@ -140,6 +140,84 @@ def test_array_operator_tenant_creates_no_client(client):
     assert _clients(tid) == []
 
 
+def test_ao_with_generation_reports_eagerly_creates_client(client):
+    """Folded AO tenants (generation_reports=True) ARE in the reports world —
+    a GMP/VEC Cloud Capture login must spawn a report Client immediately."""
+    tid = "ten_" + secrets.token_hex(6)
+    key = "sol_live_" + secrets.token_urlsafe(18)
+    with SessionLocal() as db:
+        db.add(Tenant(
+            id=tid, name="Folded AO", contact_email=f"{tid}@ex.test",
+            tenant_key=key, plan="standard", active=True,
+            product="array_operator", generation_reports=True,
+        ))
+        db.commit()
+    auth = {"Authorization": f"Bearer {mint_session_for_tenant(tid)}"}
+
+    r = _save_login(client, auth, "gmp", "folded.owner@example.com")
+    assert r.status_code == 200, r.text
+    rows = _clients(tid)
+    assert len(rows) == 1
+    assert rows[0].gmp_email == "folded.owner@example.com"
+    assert rows[0].gmp_autopopulate is True
+    assert rows[0].capture_pending is True
+
+    # VEC too — same reports-world path.
+    r2 = _save_login(client, auth, "vec", "vec.farmer@coop.test",
+                     login_host="vermontelectric.smarthub.coop")
+    assert r2.status_code == 200, r2.text
+    assert len(_clients(tid)) == 2
+
+
+def test_sync_claims_orphan_array_onto_reports_client(client):
+    """When meter-capture races ahead of /v1/sync it creates arrays with
+    client_id=None. The subsequent sync must CLAIM those orphans onto the
+    matched reports client — otherwise gen-reports clients stay empty while
+    utility data sits on unowned arrays."""
+    tid, key, auth = _make_tenant()
+    assert _save_login(client, auth, "gmp", "racer@example.com").status_code == 200
+    (owner,) = _clients(tid)
+
+    # Simulate meter-capture racing first: UA + Array with no client.
+    with SessionLocal() as db:
+        arr = Array(tenant_id=tid, name="Race Field", client_id=None, fuel_type="solar")
+        db.add(arr)
+        db.flush()
+        from api.models import UtilityAccount
+        db.add(UtilityAccount(
+            tenant_id=tid, provider="gmp", account_number="8801",
+            array_id=arr.id, nickname="Race Field",
+        ))
+        db.commit()
+        orphan_id = arr.id
+
+    payload = {
+        "provider": "gmp",
+        "user": {"email": "racer@example.com", "fullName": "Race Farm",
+                 "username": "racer@example.com"},
+        "auth": {"apiToken": "jwt_" + secrets.token_hex(6)},
+        "accounts": [{
+            "accountNumber": "8801", "nickname": "Race Field",
+            "customerNumber": "cust_8801",
+            "serviceAddress": {"line1": "1 Race Rd"},
+            "isPrimary": True, "solarNetMeter": True,
+        }],
+    }
+    r = client.post("/v1/sync", json=payload,
+                    headers={"Authorization": f"Bearer {key}"})
+    assert r.status_code == 200, r.text
+
+    with SessionLocal() as db:
+        arr = db.get(Array, orphan_id)
+        assert arr is not None
+        assert arr.client_id == owner.id
+        # No duplicate array created for the same account.
+        n = db.execute(
+            select(Array).where(Array.tenant_id == tid, Array.deleted_at.is_(None))
+        ).scalars().all()
+        assert len(n) == 1
+
+
 def test_inverter_cloud_creates_no_client(client):
     """Fronius/SMA/Chint are inverter telemetry, not utility bills — no autopop
     config, so no eager client (a pre-created card would never fill in)."""
