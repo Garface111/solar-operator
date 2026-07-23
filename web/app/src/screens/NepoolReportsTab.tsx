@@ -361,7 +361,7 @@ export default function NepoolReportsTab() {
               <Button
                 variant="secondary"
                 disabled={dirBusy !== null}
-                title="Every client's raw utility generation in one workbook — a Generation Summary (client × project × month, across GMP + co-ops) plus daily meter detail. Per-client version is on the Clients tab."
+                title="Every client's raw utility generation in one workbook — a Generation Summary (client × project × month, across GMP + co-ops) plus hourly meter detail. Per-client version is on the Clients tab."
                 onClick={() => {
                   setDirBusy("gen");
                   setDirMsg(null);

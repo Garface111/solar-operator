@@ -1,20 +1,22 @@
-"""Raw utility generation export (Ford 2026-07-16).
+"""Raw utility generation export (Ford 2026-07-16; hourly detail 2026-07-23).
 
 A NEPOOL Operator can download a client's utility generation for a chosen
 quarter, organized by month — the meter data behind the REC report, shaped for a
 monthly-basis program to ingest. Covers ALL of the client's utilities:
-  • GMP — the 15-minute interval meter (api.reports.gmp_daily_read) + the bill's
-    reported generation where no interval exists.
-  • SmartHub co-ops (VEC/WEC/…) — the daily RETURN-meter generation captured into
-    DailyGeneration (co-op bills carry no kwh_generated, so their generation is in
-    the meter feed, not the bill).
+  • GMP — the 15-minute interval meter, rolled up to HOURLY for the detail sheet
+    (api.reports.gmp_daily_read.get_hourly_series from the raw sponge) + the
+    bill's reported generation where no interval exists for the monthly grid.
+  • SmartHub co-ops (VEC/WEC/…) — only daily RETURN-meter generation is captured
+    (co-op bills carry no kwh_generated). Detail sheets fall back to one row per
+    day with Hour blank when no GMP hourly exists — never fabricate hours.
 Inverter/vendor telemetry (solaredge/fronius/…) is never included — this is
 utility-measured generation, the REC basis.
 
 Workbook:
   • "Monthly Summary" — projects × the quarter's 3 months grid + totals, with the
     utility + source per project, so every project shows.
-  • a per-project daily detail sheet wherever a daily meter feed exists.
+  • a per-project HOURLY detail sheet wherever a meter feed exists (GMP
+    interval→hour; SmartHub daily as day-grain rows).
 """
 from __future__ import annotations
 
@@ -24,7 +26,7 @@ from datetime import date
 from pathlib import Path
 
 from openpyxl import Workbook
-from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.styles import Alignment, Font, PatternFill
 from sqlalchemy import func, select
 
 from ..bill_attribution import distribute_kwh_by_calendar_day
@@ -89,20 +91,50 @@ def _array_monthly(db, array_id: int, months, start, end):
     return out
 
 
-def _daily_utility_series(db, array_id: int, start, end):
-    """Daily utility-measured generation for an array — the co-op/utility daily
-    meter (DailyGeneration, vendor-excluded), with the higher-fidelity GMP
-    interval meter overlaid where present. [{day, kwh, intervals}] ascending."""
+def _hourly_utility_series(db, array_id: int, start, end):
+    """Hourly (preferred) or daily-fallback utility generation for an array.
+
+    GMP: re-derive hours from the raw 15-min sponge via get_hourly_series.
+    SmartHub / other daily meter only: one row per day with hour=None (never
+    invent 24 hourly buckets from a daily total).
+
+    Returns list of {"day", "hour", "kwh", "intervals", "grain"} sorted.
+    """
+    hourly = gmp_daily_read.get_hourly_series(array_id, start=start, end=end, db=db)
+    if hourly:
+        return [
+            {
+                "day": r["day"],
+                "hour": int(r["hour"]),
+                "kwh": round(float(r["kwh"]), 4),
+                "intervals": r.get("intervals"),
+                "grain": "hour",
+            }
+            for r in hourly
+        ]
+
+    # Daily meter only (VEC/WEC SmartHub, or GMP with no raw sponge yet).
     rows = db.execute(
         select(DailyGeneration.day, DailyGeneration.kwh)
         .where(DailyGeneration.array_id == array_id,
                DailyGeneration.day >= start, DailyGeneration.day <= end,
                func.lower(DailyGeneration.source).notin_(_METER_EXCLUDE))
     ).all()
-    by_day = {d: {"kwh": round(float(k or 0.0), 3), "intervals": None} for d, k in rows}
+    by_day = {d: round(float(k or 0.0), 3) for d, k in rows}
+    # Overlay GMP daily aggregates when present (higher fidelity than generic
+    # DailyGeneration for GMP arrays that haven't got raw windows parsed yet).
     for r in gmp_daily_read.get_daily_series(array_id, start=start, end=end, db=db):
-        by_day[r["day"]] = {"kwh": round(float(r["kwh"]), 3), "intervals": r["intervals"]}
-    return [{"day": d, **v} for d, v in sorted(by_day.items())]
+        by_day[r["day"]] = round(float(r["kwh"]), 3)
+    return [
+        {
+            "day": d,
+            "hour": None,
+            "kwh": kwh,
+            "intervals": None,
+            "grain": "day",
+        }
+        for d, kwh in sorted(by_day.items())
+    ]
 
 
 def _write_summary(sh, client_name, rows, months, year, quarter):
@@ -146,39 +178,81 @@ def _write_summary(sh, client_name, rows, months, year, quarter):
         sh.column_dimensions[chr(ord("B") + i)].width = 17
 
 
-def _write_daily(sh, arr, series, year, quarter):
-    by_day = {r["day"]: r for r in series}
+def _write_hourly(sh, arr, series, year, quarter):
+    """Detail sheet: Date | Hour | Generation (kWh) | 15-min intervals.
+
+    GMP rows have hour 0–23. Daily-only fallback rows leave Hour blank and note
+    grain in the subtitle so we never invent 24 buckets from a day total.
+    """
+    by_key = {}
+    grain = "hour"
+    for r in series:
+        if r.get("grain") == "day":
+            grain = "day"
+        by_key[(r["day"], r.get("hour"))] = r
     nid = getattr(arr, "nepool_gis_id", None)
     sh["A1"] = f"{arr.name}" + (f"  ·  NEPOOL-GIS {nid}" if nid else "")
     sh["A1"].font = _TITLE
-    sh.merge_cells("A1:C1")
-    sh["A2"] = f"Daily utility meter · Q{quarter} {year}"
+    sh.merge_cells("A1:D1")
+    if grain == "hour":
+        sh["A2"] = (
+            f"Hourly utility meter (from GMP 15-min intervals) · Q{quarter} {year}"
+        )
+    else:
+        sh["A2"] = (
+            f"Daily utility meter (hourly not available for this utility) · "
+            f"Q{quarter} {year}"
+        )
     sh["A2"].font = _SUB
-    sh.merge_cells("A2:C2")
+    sh.merge_cells("A2:D2")
     row = 4
     for (y, m) in _quarter_months(year, quarter):
         sh.cell(row, 1, f"{calendar.month_name[m]} {y}").font = _MONTH
         row += 1
-        for col, label in enumerate(["Date", "Generation (kWh)", "Intervals"], start=1):
+        for col, label in enumerate(
+            ["Date", "Hour (0–23)", "Generation (kWh)", "15-min intervals"], start=1
+        ):
             c = sh.cell(row, col, label)
             c.font, c.fill, c.alignment = _HDR, _HDR_FILL, _CENTER
         row += 1
         mt = 0.0
-        for dd in range(1, calendar.monthrange(y, m)[1] + 1):
-            d = date(y, m, dd)
-            sh.cell(row, 1, d.isoformat())
-            if d in by_day:
-                sh.cell(row, 2, by_day[d]["kwh"])
-                if by_day[d].get("intervals") is not None:
-                    sh.cell(row, 3, by_day[d]["intervals"])
-                mt += by_day[d]["kwh"]
-            row += 1
+        if grain == "hour":
+            for dd in range(1, calendar.monthrange(y, m)[1] + 1):
+                d = date(y, m, dd)
+                day_total = 0.0
+                wrote_any = False
+                for h in range(24):
+                    cell = by_key.get((d, h))
+                    if cell is None:
+                        continue
+                    wrote_any = True
+                    sh.cell(row, 1, d.isoformat())
+                    sh.cell(row, 2, h)
+                    sh.cell(row, 3, cell["kwh"])
+                    if cell.get("intervals") is not None:
+                        sh.cell(row, 4, cell["intervals"])
+                    day_total += cell["kwh"]
+                    row += 1
+                if wrote_any:
+                    mt += day_total
+        else:
+            for dd in range(1, calendar.monthrange(y, m)[1] + 1):
+                d = date(y, m, dd)
+                cell = by_key.get((d, None))
+                if cell is None:
+                    continue
+                sh.cell(row, 1, d.isoformat())
+                # Hour left blank — daily total only.
+                sh.cell(row, 3, cell["kwh"])
+                mt += cell["kwh"]
+                row += 1
         sh.cell(row, 1, f"{calendar.month_name[m]} total").font = _BOLD
-        sh.cell(row, 2, round(mt, 3)).font = _BOLD
+        sh.cell(row, 3, round(mt, 4)).font = _BOLD
         row += 2
     sh.column_dimensions["A"].width = 14
-    sh.column_dimensions["B"].width = 18
-    sh.column_dimensions["C"].width = 11
+    sh.column_dimensions["B"].width = 12
+    sh.column_dimensions["C"].width = 18
+    sh.column_dimensions["D"].width = 16
 
 
 def build_generation_workbook(client_id: int, out_path, *, year: int, quarter: int) -> Path:
@@ -206,7 +280,7 @@ def build_generation_workbook(client_id: int, out_path, *, year: int, quarter: i
             monthly = _array_monthly(db, arr.id, months, start, end)
             if any(v[0] for v in monthly.values()):
                 summary_rows.append((arr.name, monthly, _providers_for_array(db, arr.id)))
-            series = _daily_utility_series(db, arr.id, start, end)
+            series = _hourly_utility_series(db, arr.id, start, end)
             if series:
                 detail.append((arr, series))
 
@@ -222,7 +296,7 @@ def build_generation_workbook(client_id: int, out_path, *, year: int, quarter: i
         used = {"Monthly Summary"}
         for arr, series in detail:
             sh = wb.create_sheet(title=_sheet_name_for_array(arr.name, used))
-            _write_daily(sh, arr, series, year, quarter)
+            _write_hourly(sh, arr, series, year, quarter)
 
     wb.save(str(out_path))
     return out_path
@@ -278,8 +352,8 @@ def _write_all_summary(sh, tenant_name, rows, months, year, quarter):
 
 def build_all_clients_generation_workbook(tenant_id: str, out_path, *, year: int, quarter: int) -> Path:
     """One workbook covering EVERY client's utility generation for the quarter —
-    a combined Generation Summary (client × project × months) plus a daily meter
-    detail sheet per project that has one. All-clients counterpart of the
+    a combined Generation Summary (client × project × months) plus an hourly
+    meter detail sheet per project that has one. All-clients counterpart of the
     per-client export."""
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -309,7 +383,7 @@ def build_all_clients_generation_workbook(tenant_id: str, out_path, *, year: int
                 monthly = _array_monthly(db, arr.id, months, start, end)
                 if any(v[0] for v in monthly.values()):
                     all_rows.append((c.name, arr.name, monthly, _providers_for_array(db, arr.id)))
-                series = _daily_utility_series(db, arr.id, start, end)
+                series = _hourly_utility_series(db, arr.id, start, end)
                 if series:
                     detail.append((c.name, arr, series))
 
@@ -325,7 +399,7 @@ def build_all_clients_generation_workbook(tenant_id: str, out_path, *, year: int
         used = {"Generation Summary"}
         for cname, arr, series in detail:
             sh = wb.create_sheet(title=_sheet_name_for_array(f"{cname[:9]}·{arr.name}", used))
-            _write_daily(sh, arr, series, year, quarter)
+            _write_hourly(sh, arr, series, year, quarter)
 
     wb.save(str(out_path))
     return out_path
