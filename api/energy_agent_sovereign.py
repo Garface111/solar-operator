@@ -3740,6 +3740,55 @@ def sovereign_healthz(authorization: str | None = Header(default=None)):
     return h
 
 
+@router.get("/admin/sovereign/brain")
+def sovereign_brain_fuel(authorization: str | None = Header(default=None)):
+    """Fuel telemetry — which brain the engine is burning and its credit source.
+
+    Rocket-engine analogy: the Portal's fuel gauge. Surfaces provider order,
+    CLI-credits-only guard, live xAI auth identity (Grok Build prepaid vs the
+    capped console key), the access-token expiry countdown, and the last brain
+    provider actually used per the shared world state (online/offline).
+    """
+    _require_sovereign_or_admin(authorization)
+    out: dict = {"ok": True}
+    try:
+        from .energy_agent_sovereign_brain import (
+            primary_provider,
+            fallback_provider,
+            _cli_credits_only,
+            claude_cli_available,
+        )
+        out["providers"] = {
+            "primary": primary_provider(),
+            "fallback": fallback_provider(),
+            "cli_credits_only": _cli_credits_only(),
+            "claude_cli_available": claude_cli_available(),
+            "anthropic_api_disabled": _cli_credits_only(),
+        }
+    except Exception as e:  # noqa: BLE001
+        out["providers_error"] = str(e)[:200]
+    try:
+        from .xai_auth import xai_auth_status, token_info
+        out["xai"] = xai_auth_status()
+        out["token"] = token_info()
+    except Exception as e:  # noqa: BLE001
+        out["xai_error"] = str(e)[:200]
+    # Last brain use + online/offline from shared world state
+    try:
+        with SessionLocal() as db:
+            row = db.get(EaSovereignState, "product")
+            world = json.loads(row.state_json) if row and row.state_json else {}
+            last_tick = row.last_tick_at.isoformat() + "Z" if row and row.last_tick_at else None
+        excerpt = (world.get("last_monologue_excerpt") or "")
+        out["last_provider"] = world.get("last_brain_provider")
+        out["last_tick_at"] = last_tick
+        out["brain_online"] = bool(excerpt) and not excerpt.startswith("(brain offline)")
+        out["monologue_excerpt"] = excerpt[:600]
+    except Exception as e:  # noqa: BLE001
+        out["state_error"] = str(e)[:200]
+    return out
+
+
 @router.get("/admin/sovereign/skills")
 def sovereign_skills_list(
     authorization: str | None = Header(default=None),

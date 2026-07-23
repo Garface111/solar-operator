@@ -45,6 +45,80 @@ def _env_api_key() -> str:
     return (os.getenv("XAI_API_KEY") or os.getenv("GROK_API_KEY") or "").strip()
 
 
+# ── Self-healing token store ────────────────────────────────────────────────
+# Grok Build OIDC refresh tokens are single-use / rotating. A rotated token that
+# only lives in env (Railway) goes stale on the next refresh, and the brain dies
+# when the access JWT expires. Persist rotations to the shared DB so web+worker
+# and future restarts always read the freshest token. All best-effort: any DB
+# failure silently falls back to env, i.e. exactly the pre-existing behaviour.
+_KV_REFRESH = "sys_xai_oidc_refresh_token"
+_KV_ACCESS = "sys_xai_oidc_access_token"
+
+
+def _kv_get(key: str) -> str:
+    try:
+        from api.db import SessionLocal
+        from sqlalchemy import text
+        with SessionLocal() as db:
+            row = db.execute(
+                text("SELECT value FROM ea_sovereign_memory WHERE key = :k"),
+                {"k": key},
+            ).fetchone()
+            return (row[0] or "").strip() if row and row[0] else ""
+    except Exception:  # noqa: BLE001 — never let token storage break auth
+        return ""
+
+
+def _kv_set(key: str, value: str) -> None:
+    value = (value or "").strip()
+    if not value:
+        return
+    try:
+        from api.db import SessionLocal
+        from sqlalchemy import text
+        with SessionLocal() as db:
+            db.execute(
+                text(
+                    "INSERT INTO ea_sovereign_memory (key, value, source, updated_at) "
+                    "VALUES (:k, :v, 'xai_auth', now()) "
+                    "ON CONFLICT (key) DO UPDATE SET value = :v, "
+                    "source = 'xai_auth', updated_at = now()"
+                ),
+                {"k": key, "v": value},
+            )
+            db.commit()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def seed_oidc_tokens(refresh_token: str = "", access_token: str = "") -> dict:
+    """Seed the shared token store after a fresh `grok login`. Clears then sets
+    so a new login always wins over a rotated-then-revoked value."""
+    if refresh_token:
+        _kv_set(_KV_REFRESH, refresh_token)
+    if access_token:
+        _kv_set(_KV_ACCESS, access_token)
+    with _lock:
+        _cache["access_token"] = None
+        _cache["expires_at"] = 0.0
+    return {"seeded_refresh": bool(refresh_token), "seeded_access": bool(access_token)}
+
+
+def _jwt_exp(tok: str) -> int | None:
+    """Best-effort exp (unix secs) from a JWT access token, without verifying."""
+    try:
+        import base64
+        parts = (tok or "").split(".")
+        if len(parts) < 2:
+            return None
+        pad = parts[1] + "=" * (-len(parts[1]) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(pad.encode()))
+        exp = int(payload.get("exp") or 0)
+        return exp or None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _auth_json_path() -> Path:
     return Path(os.getenv("GROK_AUTH_JSON") or os.path.expanduser("~/.grok/auth.json"))
 
@@ -80,11 +154,12 @@ def _load_oidc_from_auth_json() -> dict[str, str] | None:
 
 def _oidc_config() -> dict[str, str] | None:
     """Env-first (Railway), then ~/.grok/auth.json (local / Grok Build host)."""
-    rt = (os.getenv("XAI_OIDC_REFRESH_TOKEN") or "").strip()
+    # Prefer the self-healing DB store (freshest rotated token) over env seed.
+    rt = _kv_get(_KV_REFRESH) or (os.getenv("XAI_OIDC_REFRESH_TOKEN") or "").strip()
     cid = (os.getenv("XAI_OIDC_CLIENT_ID") or "").strip()
     if rt and cid:
         return {
-            "access_token": (os.getenv("XAI_ACCESS_TOKEN") or "").strip(),
+            "access_token": _kv_get(_KV_ACCESS) or (os.getenv("XAI_ACCESS_TOKEN") or "").strip(),
             "refresh_token": rt,
             "client_id": cid,
             "token_url": (
@@ -122,6 +197,10 @@ def _refresh_access_token(cfg: dict[str, str]) -> str:
         _cache["source"] = "oidc_refresh"
         if new_rt:
             _cache["refresh_token"] = new_rt
+    # Persist rotation so the next process/restart doesn't reuse a revoked token.
+    _kv_set(_KV_ACCESS, at)
+    if new_rt:
+        _kv_set(_KV_REFRESH, new_rt)
     log.info(
         "xAI OIDC refreshed (team=%s, expires_in=%ss)",
         cfg.get("team_id") or "?",
@@ -222,4 +301,51 @@ def xai_auth_status() -> dict[str, Any]:
         "cache_expires_at": exp,
         "auth_json_path": str(_auth_json_path()),
         "auth_json_exists": _auth_json_path().is_file(),
+        "store": {
+            "db_refresh": bool(_kv_get(_KV_REFRESH)),
+            "db_access": bool(_kv_get(_KV_ACCESS)),
+        },
     }
+
+
+def token_info() -> dict[str, Any]:
+    """Non-billing fuel view of the active bearer: kind, team, expiry countdown.
+
+    Does not mint or refresh (no network) — reads the cached/config token only,
+    so the Portal can poll it cheaply as a live fuel gauge.
+    """
+    prefer = _flag("XAI_PREFER_GROK_BUILD_OIDC", "1")
+    info: dict[str, Any] = {
+        "kind": None,
+        "credits": None,
+        "team_id": None,
+        "prefer_build_oidc": prefer,
+        "expires_at": None,
+        "seconds_left": None,
+        "source": None,
+    }
+    try:
+        cfg = _oidc_config() or {}
+        info["team_id"] = cfg.get("team_id") or None
+        with _lock:
+            tok = _cache.get("access_token")
+            info["source"] = _cache.get("source")
+        tok = (tok or cfg.get("access_token") or "").strip()
+        api_key = _env_api_key()
+        if tok and not tok.startswith("xai-"):
+            info["kind"] = "grok_build_oidc"
+            info["credits"] = "grok_build_prepaid"
+            exp = _jwt_exp(tok)
+            if exp:
+                info["expires_at"] = exp
+                info["seconds_left"] = max(0, exp - int(time.time()))
+        elif (tok.startswith("xai-") or api_key) and not prefer:
+            info["kind"] = "classic_api_key"
+            info["credits"] = "console_api_capped"
+        elif api_key and prefer:
+            # prefer OIDC but only a classic key resolved → will refuse to bill it
+            info["kind"] = "classic_api_key_blocked"
+            info["credits"] = "refused_capped"
+    except Exception as e:  # noqa: BLE001
+        info["error"] = str(e)[:160]
+    return info
