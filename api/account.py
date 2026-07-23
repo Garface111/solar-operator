@@ -629,9 +629,33 @@ def auth_request(req: AuthRequest, request: Request):
     return {"ok": True, "delivered": True}
 
 
+def _login_token_is_permanent(row) -> bool:
+    """Ops hand-off links with far-future expires_at are multi-use + never time out.
+
+    Normal magic links expire in 15 minutes and burn on first click. Permanent
+    links (expires more than ~1 year from now — e.g. year 2099 hand-offs Ford
+    emails to a customer) stay valid forever and can be bookmarked / re-clicked.
+    Each click still mints a fresh session (30d when persist_session is true).
+    """
+    try:
+        exp = row.expires_at
+        if exp is None:
+            return False
+        # Compare naive UTC (login_tokens.expires_at is stored naive).
+        if getattr(exp, "tzinfo", None) is not None:
+            exp = exp.replace(tzinfo=None)
+        return exp >= datetime.utcnow() + timedelta(days=360)
+    except Exception:
+        return False
+
+
 @router.post("/v1/auth/verify")
 def auth_verify(req: AuthVerify):
-    """Exchange a single-use login token for a session token."""
+    """Exchange a login token for a session token.
+
+    Default tokens are single-use + short-lived. Permanent ops hand-off tokens
+    (see ``_login_token_is_permanent``) are multi-use and never expire.
+    """
     token = req.token.strip()
     with SessionLocal() as db:
         row = db.execute(
@@ -639,11 +663,13 @@ def auth_verify(req: AuthVerify):
         ).scalars().first()
         if not row:
             raise HTTPException(401, "Invalid or expired sign-in link")
-        if row.used_at is not None:
+        permanent = _login_token_is_permanent(row)
+        if row.used_at is not None and not permanent:
             raise HTTPException(401, "This sign-in link was already used")
         if row.expires_at < datetime.utcnow():
             raise HTTPException(401, "Sign-in link expired — request a new one")
-        row.used_at = datetime.utcnow()
+        if not permanent:
+            row.used_at = datetime.utcnow()
         tenant_id = row.tenant_id
         persist = row.persist_session if row.persist_session is not None else True
         db.commit()
@@ -651,6 +677,35 @@ def auth_verify(req: AuthVerify):
     ttl = SESSION_TTL_SECONDS if persist else 24 * 3600  # 30 days or 1 day
     session_token = _sign_session(tenant_id, ttl_seconds=ttl)
     return {"ok": True, "session_token": session_token, "expires_in": ttl}
+
+
+def issue_permanent_login_token(
+    tenant_id: str,
+    email: str,
+    *,
+    years: int = 50,
+) -> str:
+    """Mint a multi-use, never-expiring login token for ops hand-offs.
+
+    Returns the raw token string (caller builds the branded URL + sends email).
+    """
+    token = secrets.token_urlsafe(32)
+    expires = datetime.utcnow() + timedelta(days=max(365, int(years) * 365))
+    with SessionLocal() as db:
+        t = db.get(Tenant, tenant_id)
+        if not t:
+            raise ValueError(f"tenant not found: {tenant_id}")
+        db.add(
+            LoginToken(
+                token=token,
+                tenant_id=tenant_id,
+                email=(email or t.contact_email or "").lower().strip(),
+                expires_at=expires,
+                persist_session=True,
+            )
+        )
+        db.commit()
+    return token
 
 
 @router.get("/v1/dev/auto-login")
