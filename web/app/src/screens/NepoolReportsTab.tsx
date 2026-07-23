@@ -24,6 +24,7 @@ import {
   sendSampleReport,
   downloadDirectoryReport,
   downloadGenerationDirectory,
+  downloadQuarterlySummary,
   sendDirectoryReport,
   recentReportQuarters,
 } from "../lib/api";
@@ -130,7 +131,7 @@ export default function NepoolReportsTab() {
   // NEPOOL-GIS directory (all clients × arrays) for operator bulk upload.
   const dirQuarters = recentReportQuarters(8);
   const [dirQuarter, setDirQuarter] = useState(dirQuarters[0]?.value ?? "");
-  const [dirBusy, setDirBusy] = useState<"dl" | "mail" | "gen" | null>(null);
+  const [dirBusy, setDirBusy] = useState<"dl" | "mail" | "gen" | "qsum" | null>(null);
   const [dirMsg, setDirMsg] = useState<{ ok: boolean; text: string } | null>(null);
   const handleSendSample = useCallback(() => {
     setSampleSending(true);
@@ -254,10 +255,59 @@ export default function NepoolReportsTab() {
       {/* 1. Failure strip — always first if any delivery bounced */}
       {failures.length > 0 && <FailureStrip failures={failures} />}
 
-      {/* 2. One-glance status */}
+      {/* 2. One-glance status + quarterly summary download (top of page) */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <StatusPill status={overallStatus} quarter={mostRecentLabel} />
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="flex items-center gap-2 text-xs text-zinc-600">
+            <span className="font-semibold uppercase tracking-wide">Quarter</span>
+            <select
+              value={dirQuarter}
+              onChange={(e) => setDirQuarter(e.target.value)}
+              className="rounded-lg border border-zinc-200 bg-white px-2 py-1.5 text-sm font-medium text-zinc-800"
+              aria-label="Quarter for summary download"
+            >
+              {dirQuarters.map((q) => (
+                <option key={q.value} value={q.value}>
+                  {q.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <Button
+            variant="secondary"
+            disabled={dirBusy !== null}
+            title="Name · Account # · each month in the quarter · Total — one row per utility account across every array."
+            onClick={() => {
+              setDirBusy("qsum");
+              setDirMsg(null);
+              downloadQuarterlySummary(dirQuarter || undefined)
+                .then(() =>
+                  setDirMsg({ ok: true, text: "Quarterly summary downloaded." }),
+                )
+                .catch((err) =>
+                  setDirMsg({
+                    ok: false,
+                    text:
+                      err instanceof Error
+                        ? err.message
+                        : "Couldn't download quarterly summary.",
+                  }),
+                )
+                .finally(() => setDirBusy(null));
+            }}
+          >
+            {dirBusy === "qsum" ? "Building…" : "Download quarterly summary"}
+          </Button>
+        </div>
       </div>
+      {dirMsg && dirBusy === null && (
+        <p
+          className={`-mt-1 text-xs ${dirMsg.ok ? "text-primary-700" : "text-red-600"}`}
+        >
+          {dirMsg.text}
+        </p>
+      )}
 
       {/* 3. Delivery settings — cadence, CC-me, email template */}
       <AutoReportsSettingsCard

@@ -32,7 +32,9 @@ from sqlalchemy import func, select
 from ..bill_attribution import distribute_kwh_by_calendar_day
 from ..db import SessionLocal
 from ..generation_sources import EXTENSION_SOURCES, VENDOR_TELEMETRY_SOURCES
-from ..models import Array, Bill, Client, DailyGeneration, Tenant, UtilityAccount
+from ..models import (
+    Array, Bill, Client, DailyGeneration, GmpDailyGeneration, Tenant, UtilityAccount,
+)
 from ..report_arrays import not_vendor_only
 from ..reports import gmp_daily_read
 from .gmcs_writer import _daily_generation_by_month, _quarter_months, _sheet_name_for_array
@@ -400,6 +402,184 @@ def build_all_clients_generation_workbook(tenant_id: str, out_path, *, year: int
         for cname, arr, series in detail:
             sh = wb.create_sheet(title=_sheet_name_for_array(f"{cname[:9]}·{arr.name}", used))
             _write_hourly(sh, arr, series, year, quarter)
+
+    wb.save(str(out_path))
+    return out_path
+
+
+# ── Quarterly Summary (Crown / GMP-style one-pager) ───────────────────────────
+# Screenshot contract (Ford 2026-07-23): a single "Summary" sheet —
+#   Name | Account # | {Month1} | {Month2} | {Month3} | Total
+# One row per utility account under a report-eligible array. Month headers are
+# bare month names (January, February, …) matching the operator spreadsheet.
+
+_SUMMARY_HDR_FILL = PatternFill("solid", fgColor="C6EFCE")  # light green like the shot
+_SUMMARY_HDR_FONT = Font(bold=True, size=11)
+_SUMMARY_NUM = "0.000"
+
+
+def _account_monthly_kwh(
+    db, ua: UtilityAccount, months, start: date, end: date, *, solo_array: bool,
+) -> dict[tuple[int, int], float]:
+    """Monthly kWh for ONE utility account across the quarter months.
+
+    Priority:
+      1. GmpDailyGeneration (per-meter GMP intervals) — true account level.
+      2. Bills on this account with kwh_generated (calendar-day attribution).
+      3. If this is the array's only live utility account, fall back to the
+         array-level utility meter feed (SmartHub daily etc.).
+    """
+    out: dict[tuple[int, int], float] = {k: 0.0 for k in months}
+
+    # 1) GMP per-account daily
+    gmp_rows = db.execute(
+        select(GmpDailyGeneration.day, GmpDailyGeneration.kwh).where(
+            GmpDailyGeneration.account_id == ua.id,
+            GmpDailyGeneration.day >= start,
+            GmpDailyGeneration.day <= end,
+        )
+    ).all()
+    if gmp_rows:
+        for d, kwh in gmp_rows:
+            key = (d.year, d.month)
+            if key in out:
+                out[key] += float(kwh or 0.0)
+        return {k: round(v, 6) for k, v in out.items()}
+
+    # 2) Bills on this account
+    bills = db.execute(select(Bill).where(Bill.account_id == ua.id)).scalars().all()
+    bill_hit = False
+    for b in bills:
+        for key, kwh in distribute_kwh_by_calendar_day(b).items():
+            if key in out and kwh:
+                out[key] += float(kwh)
+                bill_hit = True
+    if bill_hit:
+        return {k: round(v, 6) for k, v in out.items()}
+
+    # 3) Solo-account array → whole array meter feed
+    if solo_array and ua.array_id is not None:
+        meter = _daily_generation_by_month(db, ua.array_id, start, end)
+        for key in months:
+            if key in meter and meter[key]:
+                out[key] = float(meter[key])
+    return {k: round(v, 6) for k, v in out.items()}
+
+
+def build_quarterly_summary_workbook(
+    tenant_id: str, out_path, *, year: int, quarter: int,
+) -> Path:
+    """Fleet quarterly summary matching the operator spreadsheet screenshot.
+
+    Sheet "Summary":
+      Name | Account # | January | February | March | Total
+    (month names follow the selected quarter — Q2 → April May June, etc.)
+
+    One row per live UtilityAccount linked to a non-vendor-only, non-excluded
+    array under any of the tenant's clients. Sorted by array name then account #.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    months = _quarter_months(year, quarter)
+    start = date(months[0][0], months[0][1], 1)
+    ly, lm = months[-1]
+    end = date(ly, lm, calendar.monthrange(ly, lm)[1])
+    month_labels = [calendar.month_name[m] for (_y, m) in months]
+
+    with SessionLocal() as db:
+        clients = db.execute(
+            select(Client).where(
+                Client.tenant_id == tenant_id,
+                Client.deleted_at.is_(None),
+                Client.active == True,  # noqa: E712
+            )
+        ).scalars().all()
+        client_ids = [c.id for c in clients]
+
+        arrays = []
+        if client_ids:
+            arrays = db.execute(
+                select(Array).where(
+                    Array.tenant_id == tenant_id,
+                    Array.client_id.in_(client_ids),
+                    Array.deleted_at.is_(None),
+                    Array.excluded.is_(False),
+                    not_vendor_only(),
+                ).order_by(Array.name)
+            ).scalars().all()
+
+        # Pre-count live UAs per array for solo-account fallback.
+        array_ids = [a.id for a in arrays]
+        ua_count: dict[int, int] = defaultdict(int)
+        all_uas: list[UtilityAccount] = []
+        if array_ids:
+            all_uas = list(db.execute(
+                select(UtilityAccount).where(
+                    UtilityAccount.array_id.in_(array_ids),
+                    UtilityAccount.deleted_at.is_(None),
+                ).order_by(UtilityAccount.account_number)
+            ).scalars().all())
+            for ua in all_uas:
+                if ua.array_id is not None:
+                    ua_count[ua.array_id] += 1
+
+        uas_by_array: dict[int, list[UtilityAccount]] = defaultdict(list)
+        for ua in all_uas:
+            if ua.array_id is not None:
+                uas_by_array[ua.array_id].append(ua)
+
+        rows = []  # (name, account_number, monthly_dict)
+        for arr in arrays:
+            uas = uas_by_array.get(arr.id) or []
+            if not uas:
+                # Array with no utility account yet — still list it so the
+                # operator sees the gap (blank account #, zeros).
+                rows.append((arr.name, "", {k: 0.0 for k in months}))
+                continue
+            solo = ua_count.get(arr.id, 0) == 1
+            for ua in uas:
+                monthly = _account_monthly_kwh(
+                    db, ua, months, start, end, solo_array=solo,
+                )
+                rows.append((arr.name, ua.account_number or "", monthly))
+
+        # Sort by name then account # (stable, spreadsheet-friendly).
+        rows.sort(key=lambda r: (r[0].lower(), r[1]))
+
+        wb = Workbook()
+        sh = wb.active
+        sh.title = "Summary"
+
+        headers = ["Name", "Account #"] + month_labels + ["Total"]
+        for col, label in enumerate(headers, start=1):
+            cell = sh.cell(1, col, label)
+            cell.font = _SUMMARY_HDR_FONT
+            if col == 1:
+                cell.fill = _SUMMARY_HDR_FILL
+
+        r = 2
+        for name, acct, monthly in rows:
+            sh.cell(r, 1, name)
+            # Account # as text so leading zeros / long IDs don't scientific-note.
+            sh.cell(r, 2, str(acct) if acct else "")
+            total = 0.0
+            for i, key in enumerate(months):
+                kwh = float(monthly.get(key) or 0.0)
+                cell = sh.cell(r, 3 + i, round(kwh, 3))
+                cell.number_format = _SUMMARY_NUM
+                total += kwh
+            tcell = sh.cell(r, 3 + len(months), round(total, 3))
+            tcell.number_format = _SUMMARY_NUM
+            tcell.font = _BOLD
+            r += 1
+
+        sh.column_dimensions["A"].width = 28
+        sh.column_dimensions["B"].width = 14
+        for i in range(len(months) + 1):
+            sh.column_dimensions[chr(ord("C") + i)].width = 12
+
+        # Freeze header row like a working spreadsheet.
+        sh.freeze_panes = "A2"
 
     wb.save(str(out_path))
     return out_path

@@ -755,6 +755,40 @@ export async function downloadDirectoryReport(quarter?: string): Promise<void> {
   URL.revokeObjectURL(link.href);
 }
 
+/** Download the fleet quarterly summary spreadsheet (Crown/GMP style):
+ *  Name | Account # | Month1 | Month2 | Month3 | Total — one row per utility
+ *  account under every report-eligible array. Sheet name "Summary". */
+export async function downloadQuarterlySummary(quarter?: string): Promise<void> {
+  const token = getSession();
+  const qs = quarter ? `?quarter=${encodeURIComponent(quarter)}` : "";
+  const res = await fetchWithTimeout(
+    `/v1/account/quarterly-summary.xlsx${qs}`,
+    { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+  );
+  if (res.status === 401) {
+    notifyUnauthorizedOnce();
+    throw new UnauthorizedError();
+  }
+  if (!res.ok) {
+    let msg = `Couldn't build the quarterly summary (${res.status})`;
+    try {
+      msg = (await res.json()).detail || msg;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(typeof msg === "string" ? msg : "Couldn't build the quarterly summary");
+  }
+  const blob = await res.blob();
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  const label = quarter ? quarter.replace(/[^A-Za-z0-9]+/g, "-") : "latest";
+  link.download = `quarterly-summary-${label}.xlsx`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(link.href);
+}
+
 /** Download ALL clients' utility generation in one workbook (a Generation
  *  Summary across GMP + co-ops, plus per-project hourly meter detail). The
  *  all-clients counterpart of downloadGeneration(). */
