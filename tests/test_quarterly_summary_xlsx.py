@@ -21,7 +21,10 @@ from api.models import (
     Tenant,
     UtilityAccount,
 )
-from api.writers.gmp_raw_writer import build_quarterly_summary_workbook
+from api.writers.gmp_raw_writer import (
+    build_all_clients_generation_workbook,
+    build_quarterly_summary_workbook,
+)
 
 
 def _seed_tenant_with_gmp() -> tuple[str, int]:
@@ -181,6 +184,27 @@ def test_quarterly_summary_includes_monitored_vendor_array(tmp_path: Path):
 
     # The empty vendor twin (no production) is excluded.
     assert "Benson Site (Fronius)" not in rows
+
+
+def test_generation_directory_includes_monitored_vendor(tmp_path: Path):
+    """The all-clients generation directory (Download all generation) also shows
+    monitored vendor arrays, labeled with the monitoring vendor as source."""
+    tid, _ = _seed_vendor_only()
+    out = tmp_path / "gen-dir.xlsx"
+    build_all_clients_generation_workbook(tid, out, year=2026, quarter=1)
+
+    wb = load_workbook(out)
+    sh = wb["Generation Summary"]
+    projects = {}
+    for row in sh.iter_rows(min_row=5, values_only=True):
+        if row and row[1]:  # a project row (col B = project name)
+            projects[row[1]] = row[-1]  # project -> "utility · source"
+
+    assert "Benson Site" in projects
+    assert "monitor" in (projects["Benson Site"] or "")
+    assert "LOCUS" in (projects["Benson Site"] or "")
+    # Empty vendor twin still excluded here too.
+    assert "Benson Site (Fronius)" not in projects
 
 
 def test_quarterly_summary_endpoint(client):

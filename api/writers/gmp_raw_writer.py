@@ -39,7 +39,7 @@ from ..generation_sources import (
 from ..models import (
     Array, Bill, Client, DailyGeneration, GmpDailyGeneration, Tenant, UtilityAccount,
 )
-from ..report_arrays import is_vendor_only_array, not_vendor_only
+from ..report_arrays import is_vendor_only_array
 from ..reports import gmp_daily_read
 from .gmcs_writer import _daily_generation_by_month, _quarter_months, _sheet_name_for_array
 
@@ -63,8 +63,27 @@ def _accounts(db, array_id: int):
     ).scalars().all()
 
 
+def _monitoring_source_labels(db, array_id: int) -> list[str]:
+    """Distinct monitoring-tier source slugs (uppercased) with real production —
+    LOCUS, ALSOENERGY, EGAUGE, … Used to label the source column for an array
+    that settles off a monitor rather than a utility meter."""
+    rows = db.execute(
+        select(func.distinct(func.lower(DailyGeneration.source))).where(
+            DailyGeneration.array_id == array_id,
+            DailyGeneration.kwh > 0,
+            func.lower(DailyGeneration.source).in_(MONITORING_REPORT_SOURCES),
+        )
+    ).scalars().all()
+    return sorted(s.upper() for s in rows if s)
+
+
 def _providers_for_array(db, array_id: int) -> list[str]:
-    return sorted({(ua.provider or "").upper() for ua in _accounts(db, array_id) if ua.provider})
+    util = sorted({(ua.provider or "").upper() for ua in _accounts(db, array_id) if ua.provider})
+    if util:
+        return util
+    # No utility account (Locus / AlsoEnergy / eGauge array) — surface the
+    # monitoring vendor so the source column isn't a bare "—".
+    return _monitoring_source_labels(db, array_id)
 
 
 def _bill_months(db, array_id: int) -> dict[tuple[int, int], float]:
@@ -81,17 +100,27 @@ def _bill_months(db, array_id: int) -> dict[tuple[int, int], float]:
 
 
 def _array_monthly(db, array_id: int, months, start, end):
-    """Per (year,month) -> (kwh, source). The utility METER feed (GMP interval +
-    SmartHub daily, vendor-excluded) wins where present; the GMP bill fills GMP
-    months with no interval; 0 otherwise."""
+    """Per (year,month) -> (kwh, source). This is the raw *utility-generation*
+    export, so utility data always wins: METER feed (GMP interval + SmartHub
+    daily) > GMP bill > monitoring (Locus / AlsoEnergy / eGauge / …) > 0.
+
+    Monitoring is the last resort — it only fills a month with NO utility data
+    at all, so a monitoring-only array (John's Locus fleet, no utility account)
+    still reports every month, while a utility-backed array (Bruce's GMP arrays)
+    keeps its meter/bill provenance and is never silently swapped to a vendor
+    feed. (The REC workbook ranks monitoring above bill; this export deliberately
+    does not, to preserve the utility-generation semantics operators expect.)"""
     meter = _daily_generation_by_month(db, array_id, start, end)  # GMP interval + co-op daily
     bills = _bill_months(db, array_id)
+    mon = _monitoring_months(db, array_id, months, start, end)    # Locus / Also / eGauge / …
     out = {}
     for key in months:
         if key in meter and meter[key]:
             out[key] = (meter[key], "meter")
-        elif key in bills:
+        elif key in bills and bills[key]:
             out[key] = (bills[key], "bill")
+        elif mon.get(key):
+            out[key] = (mon[key], "monitor")
         else:
             out[key] = (0.0, "")
     return out
@@ -146,10 +175,11 @@ def _hourly_utility_series(db, array_id: int, start, end):
 def _write_summary(sh, client_name, rows, months, year, quarter):
     ncols = len(months) + 3
     end_col = chr(ord("A") + ncols - 1)
-    sh["A1"] = f"{client_name} — utility generation, Q{quarter} {year}"
+    sh["A1"] = f"{client_name} — generation, Q{quarter} {year}"
     sh["A1"].font = _TITLE
     sh.merge_cells(f"A1:{end_col}1")
-    sh["A2"] = "Generation (kWh) by month · utility meter (GMP interval / co-op daily) or GMP bill"
+    sh["A2"] = ("Generation (kWh) by month · utility meter (GMP interval / co-op daily), "
+                "site monitor (Locus / AlsoEnergy / eGauge / …), or GMP bill")
     sh["A2"].font = _SUB
     sh.merge_cells(f"A2:{end_col}2")
 
@@ -274,11 +304,12 @@ def build_generation_workbook(client_id: int, out_path, *, year: int, quarter: i
         if client is None:
             raise ValueError("client not found")
         arrays = db.execute(
-            select(Array).where(Array.client_id == client_id,
+            select(Array).where(Array.tenant_id == client.tenant_id,
+                                Array.client_id == client_id,
                                 Array.deleted_at.is_(None),
-                                Array.excluded.is_(False),
-                                not_vendor_only()).order_by(Array.name)
+                                Array.excluded.is_(False)).order_by(Array.name)
         ).scalars().all()
+        arrays = _include_reportable(db, arrays)
 
         summary_rows = []
         detail = []  # (array, series)
@@ -312,10 +343,11 @@ def _write_all_summary(sh, tenant_name, rows, months, year, quarter):
     """rows: [(client_name, project_name, monthly, providers)] across all clients."""
     ncols = len(months) + 4
     end_col = chr(ord("A") + ncols - 1)
-    sh["A1"] = f"{tenant_name} — utility generation (all clients), Q{quarter} {year}"
+    sh["A1"] = f"{tenant_name} — generation (all clients), Q{quarter} {year}"
     sh["A1"].font = _TITLE
     sh.merge_cells(f"A1:{end_col}1")
-    sh["A2"] = "Generation (kWh) by month · utility meter (GMP interval / co-op daily) or GMP bill"
+    sh["A2"] = ("Generation (kWh) by month · utility meter (GMP interval / co-op daily), "
+                "site monitor (Locus / AlsoEnergy / eGauge / …), or GMP bill")
     sh["A2"].font = _SUB
     sh.merge_cells(f"A2:{end_col}2")
 
@@ -373,18 +405,20 @@ def build_all_clients_generation_workbook(tenant_id: str, out_path, *, year: int
         tenant_name = (tenant.company_name or tenant.name) if tenant else "Your fleet"
         clients = db.execute(
             select(Client).where(Client.tenant_id == tenant_id,
-                                 Client.deleted_at.is_(None)).order_by(Client.name)
+                                 Client.deleted_at.is_(None),
+                                 Client.active == True).order_by(Client.name)  # noqa: E712
         ).scalars().all()
 
         all_rows = []   # (client_name, project_name, monthly, providers)
         detail = []     # (client_name, array, series)
         for c in clients:
             arrays = db.execute(
-                select(Array).where(Array.client_id == c.id,
+                select(Array).where(Array.tenant_id == tenant_id,
+                                    Array.client_id == c.id,
                                     Array.deleted_at.is_(None),
-                                    Array.excluded.is_(False),
-                                    not_vendor_only()).order_by(Array.name)
+                                    Array.excluded.is_(False)).order_by(Array.name)
             ).scalars().all()
+            arrays = _include_reportable(db, arrays)
             for arr in arrays:
                 monthly = _array_monthly(db, arr.id, months, start, end)
                 if any(v[0] for v in monthly.values()):
@@ -457,6 +491,19 @@ def _has_monitoring_history(db, array_id: int) -> bool:
             func.lower(DailyGeneration.source).in_(MONITORING_REPORT_SOURCES),
         ).limit(1)
     ).first() is not None
+
+
+def _include_reportable(db, arrays: list) -> list:
+    """Native multi-source inclusion (mirrors gmcs_writer._filter_reportable_arrays):
+    utility-backed arrays + bare onboarding stubs, PLUS vendor-only arrays that
+    carry real monitoring production (Locus / AlsoEnergy / eGauge / Meter Mate).
+    Empty vendor twins (an inverter but no production of their own) stay out so
+    they cannot double-report next to a utility-backed sibling, and byte-pinned
+    utility-only workbooks are unchanged."""
+    return [
+        a for a in arrays
+        if not is_vendor_only_array(db, a.id) or _has_monitoring_history(db, a.id)
+    ]
 
 
 def _account_monthly_kwh(
@@ -547,17 +594,7 @@ def build_quarterly_summary_workbook(
                     Array.excluded.is_(False),
                 ).order_by(Array.name)
             ).scalars().all()
-            # Native multi-source inclusion (mirrors gmcs_writer): utility-backed
-            # arrays + bare onboarding stubs, PLUS vendor-only arrays that carry
-            # real monitoring production (Locus / AlsoEnergy / eGauge / …). Empty
-            # vendor twins (a Fronius twin with no production of its own) stay out
-            # so they can't double-report next to a utility-backed sibling — and
-            # so byte-pinned utility-only workbooks (Bruce) are unchanged.
-            arrays = [
-                a for a in arrays
-                if not is_vendor_only_array(db, a.id)
-                or _has_monitoring_history(db, a.id)
-            ]
+            arrays = _include_reportable(db, arrays)
 
         # Pre-count live UAs per array for solo-account fallback.
         array_ids = [a.id for a in arrays]
