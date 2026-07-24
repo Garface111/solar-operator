@@ -4,7 +4,7 @@
 # Roles (first match wins):
 #   CLOUD_CAPTURE_HARVESTER=1  → headless browser harvester + /health
 #   PROCESS_ROLE=worker
-#     or SO_PROCESS=worker     → APScheduler + Sovereign + minimal /health
+#     or SO_PROCESS=worker     → APScheduler + minimal /health
 #                                (api.background_main; no public product API)
 #   default                    → migrate + uvicorn api.app (public web/API)
 #

@@ -7,8 +7,8 @@
 # web-staging runs the SAME code as prod but is inert toward the outside world
 # BY CONSTRUCTION:
 #   * staging has NO worker and NO cloud-capture-harvester service, so the
-#     scheduler, the Sovereign, and headless bill-capture simply never run;
-#   * RUN_SCHEDULER=0 and SOVEREIGN_ENABLED=0 belt-and-suspenders;
+#     scheduler and headless bill-capture simply never run;
+#   * RUN_SCHEDULER=0 belt-and-suspenders;
 #   * RESEND_API_KEY / STRIPE_SECRET_KEY are unset (email + billing are no-ops),
 #     and EMAIL_SINK_TO redirects any stray mail to the operator;
 #   * it has its OWN empty Postgres and its own session/admin/config secrets.

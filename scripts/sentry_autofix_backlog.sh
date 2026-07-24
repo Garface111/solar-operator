@@ -91,7 +91,7 @@ def score(it):
         return 2  # frontend — may need array-operator repo; still try
     if 'LockNotAvailable' in t or 'DeadlockDetected' in t or 'QueuePool' in t or 'PendingRollback' in t:
         return 3
-    if 'Vault decrypt is disabled' in t or 'SOVEREIGN_ENABLED' in t or 'not configured' in tl:
+    if 'Vault decrypt is disabled' in t or 'not configured' in tl:
         return 4  # intentional config / expected
     if 'ClientDisconnect' in t or 'ResizeObserver' in t:
         return 5  # noise

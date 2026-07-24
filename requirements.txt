@@ -36,5 +36,3 @@ sentry-sdk[fastapi]>=2.0.0
 # imports it at module load and a missing key must fail loud, not at import.
 cryptography>=42,<49
 
-# Pure-Python git for Sovereign worker when image lacks git binary
-dulwich>=0.21,<0.23
