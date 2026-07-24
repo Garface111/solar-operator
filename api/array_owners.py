@@ -3874,6 +3874,10 @@ class AlsoEnergyConnectAccountBody(BaseModel):
     password: str
     # When omitted, every discovered site is connected.
     site_ids: Optional[list[int]] = None
+    # Generation-reports onboarding: file the connected sites under this client
+    # (login → client → arrays), same contract as the Locus flow. Must belong
+    # to the caller's tenant.
+    client_id: Optional[int] = None
 
 
 def _attach_alsoenergy(db, arr: Array, creds: dict, site_id: int) -> None:
@@ -3884,6 +3888,44 @@ def _attach_alsoenergy(db, arr: Array, creds: dict, site_id: int) -> None:
         "site_id": int(site_id),
     }
     _connect_inverter(db, arr, "alsoenergy", config)
+
+
+class AlsoEnergyDiscoverBody(BaseModel):
+    username: str
+    password: str
+
+
+@router.post("/v1/array-owners/alsoenergy/discover")
+def alsoenergy_discover(
+    body: AlsoEnergyDiscoverBody,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Preview every AlsoEnergy / PowerTrack site under one login.
+
+    Saves NOTHING — the operator sees the sites as checkboxes and picks before
+    anything is created. Mirrors /locus/discover so the Add-a-client flow can
+    treat every login-based monitoring vendor the same way; without it,
+    AlsoEnergy could only "connect everything", which is exactly the
+    import-first behavior the Discover pool exists to prevent.
+    """
+    _tenant = _tenant_from_bearer(authorization)
+    _guard_vendor_discover(_tenant.id, "alsoenergy")
+
+    creds = {"username": body.username, "password": body.password}
+    try:
+        sites = inverters.alsoenergy.discover_sites(creds)
+    except InverterScopeError as exc:
+        raise HTTPException(400, str(exc))
+    except InverterAuthError as exc:
+        raise HTTPException(400, str(exc))
+    except InverterError as exc:
+        raise HTTPException(502, f"AlsoEnergy error: {exc}")
+
+    return {
+        "ok": True,
+        "sites": sites,
+        "message": None if sites else "No sites found under this AlsoEnergy login.",
+    }
 
 
 @router.post("/v1/array-owners/alsoenergy/connect-account")
@@ -3959,6 +4001,22 @@ def alsoenergy_connect_account(
                 select(Array.name).where(Array.tenant_id == tenant.id)
             ).all()
         }
+        # Onboarding: resolve the destination client, verified tenant-owned so
+        # a client_id from another tenant can never claim these arrays.
+        ae_client_id: Optional[int] = None
+        if body.client_id is not None:
+            from .models import Client  # noqa: PLC0415
+            _c = db.execute(
+                select(Client).where(
+                    Client.id == body.client_id,
+                    Client.tenant_id == tenant.id,
+                    Client.deleted_at.is_(None),
+                )
+            ).scalar_one_or_none()
+            if _c is None:
+                raise HTTPException(404, "client not found for this account")
+            ae_client_id = _c.id
+
         arr_by_id = {a.id: a for a in arrays}
         for a in arrays:
             key = a.name.strip().lower()
@@ -4007,6 +4065,10 @@ def alsoenergy_connect_account(
 
             if target is not None:
                 _attach_alsoenergy(db, target, creds, sid)
+                # Onboarding: adopt an unassigned match onto the chosen client
+                # (never move one another client already owns).
+                if ae_client_id is not None and target.client_id is None:
+                    target.client_id = ae_client_id
                 used.add(target.id)
                 entry["array_id"] = target.id
                 entry["name"] = target.name
@@ -4016,7 +4078,8 @@ def alsoenergy_connect_account(
                 if name.lower() in all_names_lower:
                     name = f"{site_name} ({sid})"
                 new_arr = Array(
-                    tenant_id=tenant.id, name=name, client_id=None, fuel_type="solar",
+                    tenant_id=tenant.id, name=name, client_id=ae_client_id,
+                    fuel_type="solar",
                 )
                 db.add(new_arr)
                 db.flush()

@@ -57,7 +57,13 @@ def test_alsoenergy_connect_account_creates_arrays(client):
             select(Array).where(Array.tenant_id == tid, Array.deleted_at.is_(None))
         ).scalars().all()
         assert len(arrays) == 2
-        conns = db.execute(select(InverterConnection)).scalars().all()
+        # Scoped to THIS tenant: an unscoped select(InverterConnection) picked up
+        # alsoenergy rows created by other test modules and failed spuriously.
+        conns = db.execute(
+            select(InverterConnection)
+            .join(Array, Array.id == InverterConnection.array_id)
+            .where(Array.tenant_id == tid)
+        ).scalars().all()
         ae = [c for c in conns if c.vendor == "alsoenergy"]
         assert len(ae) == 2
         assert all(c.config.get("username") == "owner@ae.test" for c in ae)
