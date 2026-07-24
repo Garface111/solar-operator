@@ -52,12 +52,38 @@ _COGNITO_CONTENT_TYPE = "application/x-amz-json-1.1"
 
 # Cognito error __type values that mean "these credentials are bad" (vs. a
 # transient/service failure). Anything else is surfaced as a generic LocusError.
+#
+# Each maps to its OWN message: collapsing them all into "rejected the
+# username/password" actively misleads (Bruce 2026-07-23 typed the company
+# display name "Johnson Hardware and Rental" instead of the SolarNOC username
+# `johnson_hardware_and_rental` and was told his correct password was wrong).
 _COGNITO_AUTH_ERRORS = {
     "NotAuthorizedException",
     "UserNotFoundException",
     "UserNotConfirmedException",
     "PasswordResetRequiredException",
 }
+
+_AUTH_ERROR_MESSAGES = {
+    "UserNotFoundException": (
+        "No SolarNOC user by that name. Use the USERNAME you sign into the "
+        "SolarNOC portal with — usually lowercase with underscores "
+        "(e.g. acme_solar_llc), not the company's display name."
+    ),
+    "UserNotConfirmedException": (
+        "That SolarNOC account hasn't been confirmed yet. Finish the sign-up "
+        "confirmation at the SolarNOC portal, then connect it here."
+    ),
+    "PasswordResetRequiredException": (
+        "SolarNOC requires a password reset for this account before it can be "
+        "connected. Reset it at the SolarNOC portal, then try again."
+    ),
+}
+
+# NotAuthorizedException doubles as the lockout signal; Cognito distinguishes
+# them only in the human-readable message, so we sniff it to avoid telling a
+# locked-out operator that their (correct) password is wrong.
+_LOCKOUT_HINT = "attempts exceeded"
 
 
 class LocusError(Exception):
@@ -72,6 +98,11 @@ class LocusScopeError(LocusAuthError):
     """Raised for 403 — credentials are VALID but lack permission for the
     requested partner/site. Distinct from a 401 so callers can tell a bad
     credential apart from a forbidden entity."""
+
+
+class LocusUserNotFoundError(LocusAuthError):
+    """Cognito has no such username. Its own class so the login path can retry
+    once with a normalized username (people type the company display name)."""
 
 
 # Token cache: cache_key -> (id_token, refresh_token, expires_at). Module-scoped
@@ -130,22 +161,72 @@ def _cognito(target: str, payload: dict) -> dict:
         message = body.get("message") or ""
     except Exception:  # noqa: BLE001
         message = resp.text[:200]
+    if err_type == "UserNotFoundException":
+        raise LocusUserNotFoundError(_AUTH_ERROR_MESSAGES[err_type])
+    if err_type in _AUTH_ERROR_MESSAGES:
+        raise LocusAuthError(_AUTH_ERROR_MESSAGES[err_type])
     if err_type in _COGNITO_AUTH_ERRORS:
+        # NotAuthorizedException: wrong password, a disabled user, or a lockout.
+        if _LOCKOUT_HINT in (message or "").lower():
+            raise LocusAuthError(
+                "SolarNOC has temporarily locked this account after too many "
+                "failed sign-in attempts. Wait a few minutes, or sign in at the "
+                "SolarNOC portal to clear it, then try again."
+            )
         raise LocusAuthError(
-            "Locus (SolarNOC) rejected the username/password. "
-            "Double-check the login you use at the SolarNOC portal."
+            "Locus (SolarNOC) rejected the username/password. Double-check the "
+            "login you use at the SolarNOC portal — the username is usually "
+            "lowercase with underscores, not the company's display name."
         )
     raise LocusError(f"Locus login failed ({resp.status_code} {err_type}): {message}")
 
 
-def _initiate_auth(username: str, password: str, client_id: str) -> dict:
-    """USER_PASSWORD_AUTH — exchange username/password for Cognito tokens."""
-    body = _cognito("InitiateAuth", {
+def normalize_username(username: str) -> str:
+    """SolarNOC's username slug for a typed display name.
+
+    Operators reach for the company name they see in the portal ("Johnson
+    Hardware and Rental") when the Cognito username is the slug
+    (`johnson_hardware_and_rental`). Lowercase, trim, and collapse runs of
+    spaces/hyphens/dots into single underscores.
+    """
+    s = (username or "").strip().lower()
+    return re.sub(r"[\s.\-]+", "_", s)
+
+
+def _auth_once(username: str, password: str, client_id: str) -> dict:
+    """One USER_PASSWORD_AUTH round-trip."""
+    return _cognito("InitiateAuth", {
         "AuthFlow": "USER_PASSWORD_AUTH",
         "ClientId": client_id,
         "AuthParameters": {"USERNAME": username, "PASSWORD": password},
         "ClientMetadata": {},
     })
+
+
+def _initiate_auth(username: str, password: str, client_id: str) -> dict:
+    """USER_PASSWORD_AUTH — exchange username/password for Cognito tokens.
+
+    If Cognito says the user doesn't exist and the typed name isn't already a
+    slug, retry once with the normalized form so a display name still connects.
+    """
+    try:
+        body = _auth_once(username, password, client_id)
+    except LocusUserNotFoundError:
+        slug = normalize_username(username)
+        if slug == (username or "").strip():
+            raise  # already a slug — the user genuinely doesn't exist
+        log.info("locus: username %r not found; retrying as %r", username, slug)
+        body = _auth_once(slug, password, client_id)
+
+    challenge = body.get("ChallengeName")
+    if challenge and not body.get("AuthenticationResult"):
+        # An extra step (MFA code, forced password change) we can't complete
+        # headlessly — say so plainly instead of "returned no IdToken".
+        raise LocusAuthError(
+            f"SolarNOC wants an extra sign-in step ({challenge}) that we can't "
+            "complete automatically. Finish it at the SolarNOC portal, then "
+            "connect the login here."
+        )
     return body.get("AuthenticationResult") or {}
 
 
