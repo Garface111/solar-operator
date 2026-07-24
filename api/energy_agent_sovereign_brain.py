@@ -212,9 +212,17 @@ def call_grok(
         from .xai_auth import get_xai_bearer
         bearer = get_xai_bearer()
     except Exception as e:
-        if not XAI_API_KEY:
-            raise RuntimeError(f"no_xai: {e}") from e
-        bearer = XAI_API_KEY
+        # Build-only enforcement: when XAI_PREFER_GROK_BUILD_OIDC is on we must
+        # NEVER silently fall back to the classic console key — that bills the
+        # capped team (a2f4ee20) and breaks "exclusively Grok Build credits".
+        # Fail instead so the engine rests on prepaid credits.
+        prefer_build = (os.getenv("XAI_PREFER_GROK_BUILD_OIDC", "1") or "1").strip().lower() in (
+            "1", "true", "yes", "on",
+        )
+        if XAI_API_KEY and not prefer_build:
+            bearer = XAI_API_KEY
+        else:
+            raise RuntimeError(f"no_xai_build: {e}") from e
     if timeout is None:
         timeout = int(os.getenv("SOVEREIGN_GROK_TIMEOUT", "90") or 90)
     body = {
