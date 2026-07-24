@@ -1253,6 +1253,81 @@ class InverterConnection(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 
+class DiscoveredCandidate(Base):
+    """One site/account we can SEE through a saved login but have not committed
+    to the operator's system — the "Discover" staging pool.
+
+    Why a pool instead of importing on connect: a Locus PARTNER login discovers
+    every site under the partner, which can span MULTIPLE operators. Auto-adding
+    them all is what put "Benson Site"/"Tinker Hall Site" under three different
+    tenants (2026-07-23). So discovery is now a read that lands here, and the
+    operator CURATES what becomes a real Client/Array.
+
+    Rows are upserted by (tenant, provider, source_login, external_id) on every
+    refresh — nightly, or on demand — so the pool tracks the login rather than
+    a moment in time. `status` is the operator's verdict and is NEVER reset by a
+    refresh; only `last_seen_at`/`name`/`peak_power_kw` are refreshed.
+
+    Nothing here is a credential: the login is stored only as a username, and
+    refresh re-reads secrets from InverterConnection.config / the cloud vault.
+    """
+    __tablename__ = "discovered_candidates"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    # locus | alsoenergy | solaredge | gmp | vec | <smarthub provider code>
+    provider: Mapped[str] = mapped_column(String(40), index=True)
+    # vendor (monitoring portal) | utility (bill portal)
+    source_kind: Mapped[str] = mapped_column(String(10), default="vendor")
+    # The login these were discovered through — username only, never a secret.
+    source_login: Mapped[str] = mapped_column(String(200), index=True)
+    # The provider's own id: Locus/AlsoEnergy site id, or a utility account number.
+    external_id: Mapped[str] = mapped_column(String(80))
+    name: Mapped[str] = mapped_column(String(200))
+    peak_power_kw: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # new = awaiting the operator's decision; imported = now a real Array;
+    # ignored = "not mine / not wanted", stays hidden until un-ignored.
+    status: Mapped[str] = mapped_column(String(12), default="new", index=True)
+    imported_array_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("arrays.id"), nullable=True
+    )
+    imported_client_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("clients.id"), nullable=True
+    )
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "provider", "source_login", "external_id",
+            name="uq_candidate_per_login",
+        ),
+    )
+
+
+class DiscoveryLoginState(Base):
+    """Per-(tenant, login) bookkeeping for the Discover pool: when we last
+    successfully read it and why the last read failed.
+
+    Separate from the candidates so a login whose password went stale still
+    shows up in the UI (with its error) instead of silently vanishing.
+    """
+    __tablename__ = "discovery_login_state"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(40))
+    source_kind: Mapped[str] = mapped_column(String(10), default="vendor")
+    source_login: Mapped[str] = mapped_column(String(200))
+    last_ok_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "provider", "source_login", name="uq_discovery_login",
+        ),
+    )
+
+
 class Inverter(Base):
     """A persisted, owner-arrangeable inverter — the FIRST-CLASS unit behind the
     Array Operator sandbox.

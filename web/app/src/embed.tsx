@@ -27,6 +27,7 @@ import {
 import { ToastProvider } from "./ui/Toast";
 import { Spinner } from "./ui/Spinner";
 import ClientsTab from "./screens/ClientsTab";
+import DiscoverTab from "./screens/DiscoverTab";
 import NepoolReportsTab from "./screens/NepoolReportsTab";
 import { SetupProgress } from "./components/SetupProgress";
 import { lazyWithRetry } from "./lib/lazyWithRetry";
@@ -51,9 +52,12 @@ function SectionSpinner() {
 }
 
 /** Internal section nav — Clients is the landing (the roster you work from,
- *  matching the standalone app's default), Reports is one tab over. */
+ *  matching the standalone app's default). Discover sits next to it because
+ *  it's where the roster comes FROM (the staging pool of everything the saved
+ *  logins can see); Reports is one tab further over. */
 const SECTIONS = [
   { to: "/clients", label: "Clients" },
+  { to: "/discover", label: "Discover" },
   { to: "/reports", label: "Reports" },
 ] as const;
 
@@ -173,6 +177,7 @@ function EmbedApp() {
           <Route path="/reports" element={<NepoolReportsTab />} />
           <Route path="/clients" element={<ClientsTab />} />
           <Route path="/clients/:clientId" element={<ClientsTab />} />
+          <Route path="/discover" element={<DiscoverTab />} />
           <Route
             path="/verify/:clientId"
             element={

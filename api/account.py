@@ -5312,6 +5312,85 @@ def get_reports(
     return {"reports": result}
 
 
+# ─── Discover: the candidate staging pool ────────────────────────────────
+#
+# Everything visible through the operator's saved logins, staged for curation.
+# See api/discovery.py for why import is deliberately NOT automatic.
+
+class DiscoveryRefreshBody(BaseModel):
+    # Refresh one login group ("locus:acme_solar"); omit for all of them.
+    login_key: Optional[str] = None
+
+
+class DiscoveryImportBody(BaseModel):
+    candidate_ids: list[int]
+    # File the picked candidates under an existing client, or create one.
+    client_id: Optional[int] = None
+    client_name: Optional[str] = None
+
+
+class DiscoveryIgnoreBody(BaseModel):
+    candidate_ids: list[int]
+    ignored: bool = True
+
+
+@router.get("/v1/account/discovery/candidates")
+def list_discovery_candidates(
+    authorization: Optional[str] = Header(default=None),
+) -> dict:
+    """The Discover pool, grouped by the login each candidate came from."""
+    t = tenant_from_session(authorization)
+    from . import discovery  # noqa: PLC0415
+    with SessionLocal() as db:
+        return discovery.list_pool(db, t.id)
+
+
+@router.post("/v1/account/discovery/refresh")
+def refresh_discovery(
+    body: DiscoveryRefreshBody | None = None,
+    authorization: Optional[str] = Header(default=None),
+) -> dict:
+    """Re-read the saved logins now (the nightly job does this on its own)."""
+    t = tenant_from_session(authorization)
+    from . import discovery  # noqa: PLC0415
+    with SessionLocal() as db:
+        return discovery.refresh_tenant(
+            db, t.id, only_login_key=(body.login_key if body else None)
+        )
+
+
+@router.post("/v1/account/discovery/import")
+def import_discovery_candidates(
+    body: DiscoveryImportBody,
+    authorization: Optional[str] = Header(default=None),
+) -> dict:
+    """Turn picked candidates into real arrays under one client."""
+    t = tenant_from_session(authorization)
+    from . import discovery  # noqa: PLC0415
+    if not body.candidate_ids:
+        raise HTTPException(400, "Pick at least one site to add.")
+    with SessionLocal() as db:
+        try:
+            return discovery.import_candidates(
+                db, t.id, body.candidate_ids,
+                client_id=body.client_id, client_name=body.client_name,
+            )
+        except discovery.DiscoveryImportError as exc:
+            raise HTTPException(400, str(exc))
+
+
+@router.post("/v1/account/discovery/ignore")
+def ignore_discovery_candidates(
+    body: DiscoveryIgnoreBody,
+    authorization: Optional[str] = Header(default=None),
+) -> dict:
+    """Hide (or un-hide) candidates that aren't this operator's to manage."""
+    t = tenant_from_session(authorization)
+    from . import discovery  # noqa: PLC0415
+    with SessionLocal() as db:
+        return discovery.set_ignored(db, t.id, body.candidate_ids, body.ignored)
+
+
 # ─── Next-run preview ────────────────────────────────────────────────────
 
 @router.get("/v1/account/reports/next-run")

@@ -1652,6 +1652,16 @@ def start():
         CronTrigger(hour=3, minute=0),
         id="inverter_daily_pull", replace_existing=True,
     )
+    # Daily at 03:40 UTC: refresh the Discover pool from every saved login, so a
+    # newly-commissioned site shows up on its own. Runs AFTER the inverter pull
+    # so a login proven healthy at 03:00 isn't re-tried cold. Read-only with
+    # respect to the operator's system — it only restocks the menu.
+    scheduler.add_job(
+        _run_discovery_refresh,
+        CronTrigger(hour=3, minute=40),
+        id="discovery_refresh", replace_existing=True,
+        max_instances=1, coalesce=True,
+    )
     # NOTE — there is deliberately NO server-side SmartHub pull job. The v1.9.25
     # design (jobs/smarthub_pull.py riding a stored authorizationToken) was proven
     # wrong on a live VEC HAR: SmartHub's usage API authenticates with the owner's
@@ -2415,6 +2425,23 @@ def _run_inverter_alert_sweep() -> None:
             "Inverter alert sweep: unhandled exception",
             f"The inverter down/underperformance alert sweep raised an "
             f"unexpected error:\n{exc}",
+        )
+
+
+def _run_discovery_refresh() -> None:
+    """Restock every operator's Discover pool from their saved logins."""
+    try:
+        from .jobs.discovery_refresh import refresh_all_tenants
+        result = refresh_all_tenants()
+        logger.info(
+            "discovery_refresh: tenants=%d candidates=%d failed=%d",
+            result.get("tenants", 0), result.get("candidates", 0),
+            result.get("failed", 0),
+        )
+    except Exception as exc:
+        send_internal_alert(
+            "Discovery refresh: unhandled exception",
+            f"The nightly Discover-pool refresh raised an unexpected error:\n{exc}",
         )
 
 

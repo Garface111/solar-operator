@@ -2827,3 +2827,106 @@ export interface PortalAccess {
 export async function getPortalAccess(): Promise<PortalAccess> {
   return request<PortalAccess>("/v1/portal-access");
 }
+
+// ─── discovery pool (the "pre-sandbox" staging area) ───────────────────────
+//
+// One saved vendor/utility login can see sites belonging to MANY operators — a
+// Locus PARTNER login is the worst case. Auto-importing everything it can read
+// contaminated tenants with other people's arrays. So nothing a login sees
+// enters the system on its own: every candidate lands in this pool and the
+// operator curates which ones cross over. The pool persists and refreshes
+// nightly; entering a login stays a one-time act.
+
+/** new = waiting to be curated · imported = already in the system · ignored = curated out. */
+export type CandidateStatus = "new" | "imported" | "ignored";
+
+/** One site/array we can see from a saved login. Not in the system until imported. */
+export interface DiscoveryCandidate {
+  id: number;
+  name: string;
+  external_id: string;
+  peak_power_kw: number | null;
+  status: CandidateStatus;
+  imported_array_id: number | null;
+  imported_client_id: number | null;
+  imported_client_name: string | null;
+  /** Server's guess at which client this belongs to — prefills "New client…". */
+  suggested_client: string;
+  last_seen_at: string;
+}
+
+/** Every candidate one saved login can see, plus that login's health. */
+export interface DiscoveryLoginGroup {
+  /** Stable group id, e.g. "locus:johnson_hardware_and_rental". */
+  key: string;
+  provider: string;
+  provider_label: string;
+  source_kind: "vendor" | "utility";
+  login: string;
+  last_seen_at: string | null;
+  /** Last failure text (e.g. an expired password) — surfaced inline. */
+  last_error: string | null;
+  counts: { new: number; imported: number; ignored: number };
+  candidates: DiscoveryCandidate[];
+}
+
+export interface DiscoveryPool {
+  ok: boolean;
+  refreshed_at: string | null;
+  logins: DiscoveryLoginGroup[];
+}
+
+/** The whole staging pool — every login, every candidate, current status. */
+export async function listDiscoveryCandidates(): Promise<DiscoveryPool> {
+  return request<DiscoveryPool>("/v1/account/discovery/candidates");
+}
+
+/** Re-check saved logins now instead of waiting for the nightly pass. Omit
+ *  loginKey to check every login. Per-login failures come back in `errors`
+ *  rather than failing the whole call. */
+export async function refreshDiscovery(
+  loginKey?: string,
+): Promise<{
+  ok: boolean;
+  refreshed: number;
+  found: number;
+  errors: { login_key: string; error: string }[];
+}> {
+  return request("/v1/account/discovery/refresh", {
+    body: loginKey !== undefined ? { login_key: loginKey } : {},
+  });
+}
+
+/** Move candidates into the operator's own system, filed under one client —
+ *  either an existing one (clientId) or a new one created on the spot
+ *  (clientName). Already-imported candidates come back in `skipped`. */
+export async function importDiscoveryCandidates(input: {
+  candidateIds: number[];
+  clientId?: number;
+  clientName?: string;
+}): Promise<{
+  ok: boolean;
+  client: { id: number; name: string } | null;
+  imported: { candidate_id: number; array_id: number; name: string }[];
+  skipped: { candidate_id: number; reason: string }[];
+  message: string;
+}> {
+  return request("/v1/account/discovery/import", {
+    body: {
+      candidate_ids: input.candidateIds,
+      ...(input.clientId !== undefined ? { client_id: input.clientId } : {}),
+      ...(input.clientName !== undefined ? { client_name: input.clientName } : {}),
+    },
+  });
+}
+
+/** Curate candidates out of the way (or back in). Ignoring never deletes —
+ *  the row stays in the pool so a nightly refresh doesn't resurface it. */
+export async function setDiscoveryIgnored(
+  candidateIds: number[],
+  ignored: boolean,
+): Promise<{ ok: boolean; updated: number }> {
+  return request("/v1/account/discovery/ignore", {
+    body: { candidate_ids: candidateIds, ignored },
+  });
+}
