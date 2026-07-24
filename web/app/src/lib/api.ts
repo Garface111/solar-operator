@@ -2738,6 +2738,57 @@ export async function connectSolarEdgeAccount(
   );
 }
 
+// ─── Locus (SolarNOC) account discovery — "one login, all its sites" ────────
+
+/** One Locus site returned by discover (preview — saves nothing). */
+export interface LocusDiscoveredSite {
+  site_id: number;
+  name: string;
+  peak_power_kw?: number | null;
+}
+
+/** POST /v1/array-owners/locus/discover response. */
+export interface LocusDiscoverResult {
+  ok: boolean;
+  sites: LocusDiscoveredSite[];
+  /** Friendly note for the empty case; null when sites were found. */
+  message: string | null;
+}
+
+/** Preview every Locus site a partner login can read. Saves nothing — the modal
+ *  shows the sites as checkboxes before the operator commits. Bad creds (401) or
+ *  a forbidden partner (403) come back as a 400 → thrown Error with the detail. */
+export async function discoverLocus(
+  username: string,
+  password: string,
+): Promise<LocusDiscoverResult> {
+  return request<LocusDiscoverResult>(
+    "/v1/array-owners/locus/discover",
+    { body: { username, password } },
+  );
+}
+
+/** Connect the chosen Locus sites and file them under a client — the
+ *  login → client → arrays onboarding. Pass clientId to attach the connected
+ *  arrays to that client; omit siteIds to connect every discovered site. */
+export async function connectLocusAccount(
+  username: string,
+  password: string,
+  opts?: { siteIds?: number[]; clientId?: number },
+): Promise<ConnectAccountResult> {
+  return request<ConnectAccountResult>(
+    "/v1/array-owners/locus/connect-account",
+    {
+      body: {
+        username,
+        password,
+        ...(opts?.siteIds !== undefined ? { site_ids: opts.siteIds } : {}),
+        ...(opts?.clientId !== undefined ? { client_id: opts.clientId } : {}),
+      },
+    },
+  );
+}
+
 // ─── portal access roster (v1.9.112 multi-login vault) ─────────────────────
 
 /** One (client, portal-identity) row from GET /v1/portal-access. */

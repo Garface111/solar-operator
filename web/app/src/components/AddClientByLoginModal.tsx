@@ -8,6 +8,9 @@ import {
   getPortalAccess,
   createClient,
   setCloudCredential,
+  discoverLocus,
+  connectLocusAccount,
+  type LocusDiscoveredSite,
   type PortalAccessUnassigned,
 } from "../lib/api";
 import {
@@ -425,6 +428,188 @@ function CloudAddLoginForm({
   );
 }
 
+/** Prettify a login into a default client name (four.general → "Four General"). */
+function nameFromLogin(login: string): string {
+  const s = (login || "").trim();
+  const local = s.includes("@") ? s.split("@")[0] : s;
+  const cleaned = local.replace(/[._-]+/g, " ").trim();
+  return (
+    cleaned.replace(/\b\w/g, (ch) => ch.toUpperCase()).slice(0, 120) ||
+    s.slice(0, 120) ||
+    "New client"
+  );
+}
+
+/**
+ * LocusAddLoginForm — the login → client → arrays onboarding for a Locus
+ * (SolarNOC) monitoring login. Unlike a utility login, Locus settles off a
+ * site monitor, so the flow is: enter the login → we discover every site under
+ * it → the operator confirms which sites are theirs → we create ONE client
+ * named from the login and file the picked sites under it as arrays, then pull
+ * their generation so the report is ready. (Ford 2026-07-23.)
+ */
+function LocusAddLoginForm({ onCreated }: { onCreated: () => void }) {
+  const toast = useToast();
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [clientName, setClientName] = useState("");
+  const [sites, setSites] = useState<LocusDiscoveredSite[] | null>(null);
+  const [picked, setPicked] = useState<Set<number>>(new Set());
+  const [busy, setBusy] = useState<"discover" | "create" | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function discover() {
+    const user = username.trim();
+    if (!user) { toast.show("Enter your Locus username.", "info"); return; }
+    if (!password) { toast.show("Enter your Locus password.", "info"); return; }
+    setBusy("discover");
+    setErr(null);
+    try {
+      const r = await discoverLocus(user, password);
+      setSites(r.sites);
+      setPicked(new Set(r.sites.map((s) => s.site_id))); // all pre-checked
+      if (!clientName.trim()) setClientName(nameFromLogin(user));
+      if (!r.sites.length) setErr(r.message || "No sites found under this login.");
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Couldn't reach Locus with that login.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function toggle(siteId: number) {
+    setPicked((prev) => {
+      const next = new Set(prev);
+      if (next.has(siteId)) next.delete(siteId);
+      else next.add(siteId);
+      return next;
+    });
+  }
+
+  async function create() {
+    const name = clientName.trim() || nameFromLogin(username);
+    if (!picked.size) { toast.show("Pick at least one site.", "info"); return; }
+    setBusy("create");
+    setErr(null);
+    try {
+      const client = await createClient({ name });
+      const res = await connectLocusAccount(username.trim(), password, {
+        siteIds: [...picked],
+        clientId: client.id,
+      });
+      toast.success(
+        `${client.name}: ${res.connected.length} array${res.connected.length === 1 ? "" : "s"} connected. ` +
+          `We're pulling their generation now — the report will be ready shortly.`,
+      );
+      onCreated();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Couldn't create the client.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <p className="text-sm font-semibold text-zinc-900">Connect a Locus (SolarNOC) login</p>
+      <p className="text-xs text-zinc-500">
+        We’ll find every site under this login. The login becomes a client and the
+        sites you keep become its arrays — ready for generation reports.
+      </p>
+      <input
+        type="text"
+        autoComplete="off"
+        placeholder="Locus username"
+        value={username}
+        onChange={(e) => setUsername(e.target.value)}
+        className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm focus:border-primary-400 focus:outline-none"
+      />
+      <input
+        type="password"
+        autoComplete="off"
+        placeholder="Locus password"
+        value={password}
+        onChange={(e) => setPassword(e.target.value)}
+        className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm focus:border-primary-400 focus:outline-none"
+      />
+
+      {sites === null ? (
+        <Button disabled={busy !== null} onClick={discover} className="w-full py-2 text-sm">
+          {busy === "discover" ? "Finding sites…" : "Find my sites"}
+        </Button>
+      ) : (
+        <>
+          <label className="block text-xs font-medium text-zinc-600">
+            Client name
+            <input
+              type="text"
+              value={clientName}
+              onChange={(e) => setClientName(e.target.value)}
+              className="mt-1 w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm text-zinc-900 focus:border-primary-400 focus:outline-none"
+            />
+          </label>
+          {sites.length > 0 && (
+            <div className="rounded-lg border border-zinc-200 bg-white">
+              <div className="flex items-center justify-between border-b border-zinc-100 px-3 py-2">
+                <span className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                  Sites found ({picked.size}/{sites.length})
+                </span>
+                <button
+                  type="button"
+                  className="text-xs font-medium text-primary-600 hover:underline"
+                  onClick={() =>
+                    setPicked(
+                      picked.size === sites.length
+                        ? new Set()
+                        : new Set(sites.map((s) => s.site_id)),
+                    )
+                  }
+                >
+                  {picked.size === sites.length ? "Clear all" : "Select all"}
+                </button>
+              </div>
+              <ul className="max-h-52 overflow-y-auto">
+                {sites.map((s) => (
+                  <li key={s.site_id}>
+                    <label className="flex cursor-pointer items-center gap-2 px-3 py-2 text-sm hover:bg-zinc-50">
+                      <input
+                        type="checkbox"
+                        checked={picked.has(s.site_id)}
+                        onChange={() => toggle(s.site_id)}
+                        className="h-4 w-4"
+                      />
+                      <span className="truncate text-zinc-800">{s.name}</span>
+                      {s.peak_power_kw ? (
+                        <span className="ml-auto shrink-0 text-xs text-zinc-400">
+                          {s.peak_power_kw} kW
+                        </span>
+                      ) : null}
+                    </label>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <Button disabled={busy !== null || !picked.size} onClick={create} className="w-full py-2 text-sm">
+            {busy === "create"
+              ? "Creating client…"
+              : `Create client with ${picked.size} site${picked.size === 1 ? "" : "s"}`}
+          </Button>
+          <button
+            type="button"
+            className="w-full text-xs text-zinc-500 hover:underline"
+            onClick={() => { setSites(null); setPicked(new Set()); setErr(null); }}
+          >
+            ← use a different login
+          </button>
+        </>
+      )}
+
+      {err && <p className="text-xs font-medium text-red-600">{err}</p>}
+    </div>
+  );
+}
+
 /**
  * AddClientByLoginModal — the "click a portal, sign in, done" flow.
  *
@@ -751,6 +936,22 @@ export function AddClientByLoginModal({
             )}
           </>
         )}
+
+        {/* Locus (SolarNOC) monitoring login → client → arrays. Orthogonal to
+            the utility flows above, so it's always offered. */}
+        <div className="flex items-center gap-3 pt-1">
+          <span className="h-px flex-1 bg-cream-border" />
+          <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+            or connect a solar monitor
+          </span>
+          <span className="h-px flex-1 bg-cream-border" />
+        </div>
+        <LocusAddLoginForm
+          onCreated={() => {
+            void onCaptured();
+            onClose();
+          }}
+        />
 
         {!cloudMode && (<>
         <div className={extensionAbsent ? "opacity-50" : ""}>

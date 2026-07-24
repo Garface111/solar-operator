@@ -32,6 +32,8 @@ import {
   undoDelete,
   undoMerge,
   getNepoolStats,
+  downloadQuarterlySummary,
+  recentReportQuarters,
   UnauthorizedError,
 } from "../lib/api";
 import { notifyFleetChanged } from "../lib/fleetEvents";
@@ -100,6 +102,12 @@ export function ClientsSection({ expandClientId }: Props) {
   useEffect(() => {
     modalOpenRef.current = adding || addingByLogin || importing || assigningNepool;
   }, [adding, addingByLogin, importing, assigningNepool]);
+
+  // Master generation-report spreadsheet download (all clients, one quarter).
+  const masterQuarters = recentReportQuarters(8);
+  const [masterQuarter, setMasterQuarter] = useState(masterQuarters[0]?.value ?? "");
+  const [masterBusy, setMasterBusy] = useState(false);
+  const [masterErr, setMasterErr] = useState<string | null>(null);
 
   // Multi-select state
   const [selectMode, setSelectMode] = useState(false);
@@ -634,6 +642,55 @@ export function ClientsSection({ expandClientId }: Props) {
           account={account}
         />
       </Suspense>
+
+      {/* Master generation-report spreadsheet — one workbook, every client's
+          arrays × months + totals for the chosen quarter. Prominent, above the
+          list, so it's the obvious "give me the whole thing" action. */}
+      <div className="mb-3 rounded-xl border border-primary-200 bg-primary-50/60 p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-primary-900">
+              Generation report master spreadsheet
+            </p>
+            <p className="mt-0.5 text-xs text-primary-700/80">
+              Every client’s arrays and monthly generation in one sheet, for the quarter you pick.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <label className="flex items-center gap-2 text-xs text-primary-800">
+              <span className="font-semibold uppercase tracking-wide">Quarter</span>
+              <select
+                value={masterQuarter}
+                onChange={(e) => setMasterQuarter(e.target.value)}
+                className="rounded-lg border border-primary-200 bg-white px-2 py-1.5 text-sm text-zinc-800 focus:border-primary-400 focus:outline-none"
+              >
+                {masterQuarters.map((q) => (
+                  <option key={q.value} value={q.value}>{q.label}</option>
+                ))}
+              </select>
+            </label>
+            <Button
+              disabled={masterBusy}
+              onClick={() => {
+                setMasterBusy(true);
+                setMasterErr(null);
+                downloadQuarterlySummary(masterQuarter || undefined)
+                  .then(() => toast.success("Master spreadsheet downloaded."))
+                  .catch((err) =>
+                    setMasterErr(err instanceof Error ? err.message : "Couldn’t build the spreadsheet."),
+                  )
+                  .finally(() => setMasterBusy(false));
+              }}
+              className="px-4 py-2 text-sm"
+            >
+              {masterBusy ? "Building…" : "Download master spreadsheet"}
+            </Button>
+          </div>
+        </div>
+        {masterErr && (
+          <p className="mt-2 text-xs font-medium text-red-600">{masterErr}</p>
+        )}
+      </div>
 
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">

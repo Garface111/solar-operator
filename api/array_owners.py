@@ -3398,6 +3398,10 @@ class LocusConnectAccountBody(BaseModel):
     partner_id: Optional[int] = None
     # When omitted, every discovered site is connected.
     site_ids: Optional[list[int]] = None
+    # Generation-reports onboarding: attach the connected sites to this client
+    # (the login → client → arrays flow) instead of leaving them unassigned.
+    # Must belong to the caller's tenant.
+    client_id: Optional[int] = None
 
 
 @router.post("/v1/array-owners/locus/connect-account")
@@ -3480,6 +3484,23 @@ def locus_connect_account(
                 select(Array.name).where(Array.tenant_id == tenant.id)
             ).all()
         }
+        # Onboarding: resolve the client the connected sites should live under
+        # (login → client → arrays). Verified to belong to this tenant so a
+        # client_id from another tenant can never claim these arrays.
+        target_client_id: Optional[int] = None
+        if body.client_id is not None:
+            from .models import Client  # noqa: PLC0415
+            _client = db.execute(
+                select(Client).where(
+                    Client.id == body.client_id,
+                    Client.tenant_id == tenant.id,
+                    Client.deleted_at.is_(None),
+                )
+            ).scalar_one_or_none()
+            if _client is None:
+                raise HTTPException(404, "client not found for this account")
+            target_client_id = _client.id
+
         arr_by_id = {a.id: a for a in arrays}
         for a in arrays:
             key = a.name.strip().lower()
@@ -3530,6 +3551,10 @@ def locus_connect_account(
 
             if target is not None:
                 _attach_locus(db, target, creds, sid)
+                # Onboarding: pull an unassigned matched array onto the chosen
+                # client (never move one already owned by another client).
+                if target_client_id is not None and target.client_id is None:
+                    target.client_id = target_client_id
                 used.add(target.id)
                 entry["array_id"] = target.id
                 entry["name"] = target.name
@@ -3541,7 +3566,8 @@ def locus_connect_account(
                     # soft-deleted arrays, whose names still reserve the slot).
                     name = f"{site_name} ({sid})"
                 new_arr = Array(
-                    tenant_id=tenant.id, name=name, client_id=None, fuel_type="solar",
+                    tenant_id=tenant.id, name=name, client_id=target_client_id,
+                    fuel_type="solar",
                 )
                 db.add(new_arr)
                 db.flush()
