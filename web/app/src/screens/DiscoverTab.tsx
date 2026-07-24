@@ -120,6 +120,9 @@ function CandidateRow({
           {candidate.imported_client_name && (
             <span className="text-xs text-zinc-500">
               {candidate.imported_client_name}
+              {/* The roster hides retired clients, so name them as retired
+                  rather than pointing at a client with no row in the table. */}
+              {candidate.imported_client_active === false && " (retired)"}
             </span>
           )}
         </span>

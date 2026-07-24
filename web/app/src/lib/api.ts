@@ -2428,6 +2428,9 @@ export interface CanvasClientData {
   id: number;
   name: string;
   contact_email?: string | null;
+  /** Retired clients are hidden from the roster in the embed — the canvas
+   *  applies the same rule as the table via lib/rosterFilter.ts. */
+  active?: boolean;
   canvas_x: number | null;
   canvas_y: number | null;
   canvas_pinned: boolean;
@@ -2850,6 +2853,9 @@ export interface DiscoveryCandidate {
   imported_array_id: number | null;
   imported_client_id: number | null;
   imported_client_name: string | null;
+  /** false when that client is retired — the roster hides it, so the UI says
+   *  "(retired)" instead of naming a client with no row in the table. */
+  imported_client_active?: boolean | null;
   /** Server's guess at which client this belongs to — prefills "New client…". */
   suggested_client: string;
   last_seen_at: string;

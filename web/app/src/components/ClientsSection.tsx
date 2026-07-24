@@ -36,6 +36,7 @@ import {
   recentReportQuarters,
   UnauthorizedError,
 } from "../lib/api";
+import { rosterClients as rosterClients_ } from "../lib/rosterFilter";
 import { notifyFleetChanged } from "../lib/fleetEvents";
 import { type PollerHandle, pollUntilChanged } from "../lib/poller";
 import { useDashboardContext } from "../screens/DashboardLayout";
@@ -45,31 +46,14 @@ interface Props {
   expandClientId?: number;
 }
 
-// Inside the Array Operator "Generation reports" embed, hide retired (inactive)
-// clients from the ROSTER (table + empty state) — a folded tenant can carry
-// many inactive capture-artifact clients that aren't part of its reporting
-// world. Render-only: the raw `clients` state still holds every row so all
-// mutation/merge/undo logic is unchanged. The standalone /accounts SPA leaves
-// the flag unset and shows inactive rows (its reactivate flow lives on them).
-//
-// Evaluated at RENDER, not module load: embed.tsx sets window.__soGenrepEmbed
-// in its own module body, which the bundler runs AFTER this module's top-level
-// — a module-const captured it as false and the filter never fired.
-function hideInactiveClients(): boolean {
-  return (
-    typeof window !== "undefined" &&
-    (window as { __soGenrepEmbed?: boolean }).__soGenrepEmbed === true
-  );
-}
-
 export function ClientsSection({ expandClientId }: Props) {
   const toast = useToast();
   const { account } = useDashboardContext();
   const operatorEmail = account?.email ?? null;
   const [clients, setClients] = useState<ClientRow[] | null>(null);
-  // Roster shown to the user — inactive clients filtered out in the embed only.
-  const rosterClients =
-    hideInactiveClients() && clients ? clients.filter((c) => c.active) : clients;
+  // Roster shown to the user — THE shared rule, so the table and the sandbox
+  // canvas can never disagree about which clients exist (lib/rosterFilter.ts).
+  const rosterClients = rosterClients_(clients);
   const [adding, setAdding] = useState(false);
   const [addingByLogin, setAddingByLogin] = useState(false);
   const [importing, setImporting] = useState(false);

@@ -161,6 +161,11 @@ def get_canvas(authorization: Optional[str] = Header(default=None)):
                 "id": c.id,
                 "name": c.name,
                 "contact_email": c.contact_email,
+                # Lets the canvas apply the SAME roster rule as the Clients
+                # table — the embed hides retired clients, and without this the
+                # sandbox rendered a card for a client the table didn't list
+                # (Ford 2026-07-24). See web/app/src/lib/rosterFilter.ts.
+                "active": bool(getattr(c, "active", True)),
                 "canvas_x": getattr(c, "canvas_x", None),
                 "canvas_y": getattr(c, "canvas_y", None),
                 "canvas_pinned": getattr(c, "canvas_pinned", False) or False,

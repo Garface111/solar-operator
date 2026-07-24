@@ -337,8 +337,11 @@ def list_pool(db, tenant_id: str) -> dict:
             )
         ).scalars().all()
     }
-    client_names = {
-        c.id: c.name
+    # Retired clients keep their name here (the array really IS in the system)
+    # but are flagged, so the UI can say "Bruce Genereaux (retired)" instead of
+    # pointing at a client the roster doesn't show — see rosterFilter.ts.
+    clients_by_id = {
+        c.id: c
         for c in db.execute(
             select(Client).where(Client.tenant_id == tenant_id)
         ).scalars().all()
@@ -370,7 +373,14 @@ def list_pool(db, tenant_id: str) -> dict:
             "status": row.status,
             "imported_array_id": row.imported_array_id,
             "imported_client_id": row.imported_client_id,
-            "imported_client_name": client_names.get(row.imported_client_id),
+            "imported_client_name": (
+                clients_by_id[row.imported_client_id].name
+                if row.imported_client_id in clients_by_id else None
+            ),
+            "imported_client_active": (
+                bool(clients_by_id[row.imported_client_id].active)
+                if row.imported_client_id in clients_by_id else None
+            ),
             "suggested_client": _suggested_client_name(row.source_login),
             "last_seen_at": row.last_seen_at.isoformat() if row.last_seen_at else None,
         })

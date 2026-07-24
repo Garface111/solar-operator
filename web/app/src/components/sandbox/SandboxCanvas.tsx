@@ -37,6 +37,7 @@ import {
   type CanvasResponse,
   type CanvasClientData,
 } from '../../lib/api';
+import { rosterClients } from '../../lib/rosterFilter';
 import { notifyFleetChanged, FLEET_CHANGED, fleetChangeSource } from '../../lib/fleetEvents';
 import { useToast } from '../../ui/Toast';
 import { Spinner } from '../../ui/Spinner';
@@ -545,7 +546,10 @@ export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen
     // animation while existing nodes get entryDelay:0 (no flicker on refresh).
     const prevIds = opts.sseReveal ? new Set(nodesRef.current.map((n) => n.id)) : null;
     try {
-      const data = await getCanvasData();
+      const raw = await getCanvasData();
+      // Same roster rule as the Clients table — without it the canvas painted a
+      // card for a retired client the table didn't list (Ford 2026-07-24).
+      const data = { ...raw, clients: rosterClients(raw.clients) };
       // Seed the saved free-layout map from the DB coords so a Sorted→Free toggle can
       // restore the operator's arrangement even before any drag this session.
       for (const c of data.clients) {
