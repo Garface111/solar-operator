@@ -1,16 +1,3 @@
-"""Background worker process — APScheduler + Sovereign, no public API.
-
-Railway process split:
-  - web:    migrate + uvicorn api.app (RUN_SCHEDULER=0)
-  - worker: this module (RUN_SCHEDULER=1, PROCESS_ROLE=worker)
-
-Serves a minimal FastAPI app so railway.toml healthcheckPath=/health works.
-Does NOT mount the full product API — bill-pull *job* code still lives in
-api/worker.py (unchanged); this process only *schedules* and drains jobs.
-
-Local:
-  PROCESS_ROLE=worker RUN_SCHEDULER=1 PORT=8001 python -m api.background_main
-"""
 from __future__ import annotations
 
 import logging
@@ -49,39 +36,6 @@ def _startup() -> None:
     log.info("background worker: starting APScheduler (RUN_SCHEDULER=%r)", os.environ.get("RUN_SCHEDULER"))
     start_scheduler()
 
-    # Same sovereign desk recover as web _startup — only this process owns it.
-    def _sovereign_boot_recover() -> None:
-        import time
-        boot_log = logging.getLogger("energy_agent.sovereign.boot")
-        try:
-            time.sleep(4)
-            from api.energy_agent_sovereign_desk import (
-                note_sovereign_boot,
-                recover_orphan_desk_turns,
-            )
-            note_sovereign_boot()
-            res = recover_orphan_desk_turns(limit=5)
-            if res.get("recovered"):
-                boot_log.warning(
-                    "sovereign boot recovered %s orphan desk turn(s): %s",
-                    res.get("recovered"),
-                    res.get("results"),
-                )
-            else:
-                boot_log.info("sovereign boot: no orphan desk turns (%s)", res)
-        except Exception:
-            boot_log.exception("sovereign boot recover failed")
-
-    try:
-        import threading
-        threading.Thread(
-            target=_sovereign_boot_recover,
-            name="sov-boot-recover",
-            daemon=True,
-        ).start()
-    except Exception:
-        log.exception("failed to spawn sovereign boot recover thread")
-
 
 @app.get("/health")
 async def health():
@@ -96,13 +50,6 @@ async def health():
     from api.scheduler import scheduler as aps
     # Surface desk drain ownership so ops can confirm web never runs the brain.
     desk_drain = False
-    try:
-        desk_drain = bool(
-            getattr(aps, "running", False)
-            and aps.get_job("energy_agent_sovereign_desk_drain") is not None
-        )
-    except Exception:
-        desk_drain = False
     return {
         "ok": True,
         "role": "worker",

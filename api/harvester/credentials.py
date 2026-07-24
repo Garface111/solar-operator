@@ -140,7 +140,7 @@ def save_session_state(db, cred: PortalCredential, storage_state: dict | None) -
 
 
 def list_all_meta(db, *, limit: int = 100, tenant_id: str | None = None) -> list[dict]:
-    """Credential inventory for Sovereign/ops — metadata only, never secrets.
+    """Credential inventory for ops — metadata only, never secrets.
 
     ``tenant_id`` is REQUIRED for fleet safety. Pass an explicit tenant to list;
     fleet-wide inventory is refused here (callers that need cross-tenant ops must
@@ -220,7 +220,7 @@ def rearm(
 ) -> dict:
     """Clear fail/pause state so the scheduler retries this login ASAP.
 
-    Used by Sovereign portal sign-off + credential unlock. Never returns secrets.
+    Used by portal sign-off + credential unlock. Never returns secrets.
     """
     provider = (provider or "").strip().lower()
     q = select(PortalCredential).where(

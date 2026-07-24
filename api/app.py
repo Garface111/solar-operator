@@ -113,8 +113,6 @@ def _find_array_to_absorb_into(db, tenant_id, owner_id, provider, captured_name)
     return None
 
 
-
-
 def _smart_client_name(
     user_dict: dict,
     accounts: list[dict],
@@ -469,11 +467,6 @@ app.include_router(energy_agent_mind_router)
 # Owner ⇄ Energy Agent email channel (weekly check-in + reply-to-act + opt-out)
 from .energy_agent_email import router as energy_agent_email_router
 app.include_router(energy_agent_email_router)
-# Sovereign Mind (product executive) + private Ford desk chat
-from .energy_agent_sovereign import router as energy_agent_sovereign_router
-app.include_router(energy_agent_sovereign_router)
-from .energy_agent_sovereign_desk import router as energy_agent_sovereign_desk_router
-app.include_router(energy_agent_sovereign_desk_router)
 from .ford_escalations import router as ford_escalations_router
 app.include_router(ford_escalations_router)
 from .telemetry import router as telemetry_router
@@ -489,7 +482,7 @@ if _SO_DEV_ENABLED:
 def _startup():
     init_db()
     # Process split: web serves HTTP only when RUN_SCHEDULER=0; worker owns
-    # APScheduler + Sovereign. Default RUN_SCHEDULER=1 keeps single-process
+    # APScheduler. Default RUN_SCHEDULER=1 keeps single-process
     # deploys working until ops set web→0 / worker→1.
     from .scheduler import scheduler_enabled
     if scheduler_enabled():
@@ -510,45 +503,6 @@ def _startup():
     except Exception:
         pass  # non-fatal — fall back to the default limiter
 
-    # Sovereign durability: after deploy/restart, resume orphan desk turns so
-    # Ford never loses a mid-flight "thinking" reply. Runs off the main thread.
-    # Only when this process owns the scheduler — avoids double recovery if both
-    # web and worker would otherwise race on the same orphan rows.
-    if not scheduler_enabled():
-        return
-
-    def _sovereign_boot_recover() -> None:
-        import logging
-        import time
-        log = logging.getLogger("energy_agent.sovereign.boot")
-        try:
-            time.sleep(4)  # let pool + tables settle
-            from .energy_agent_sovereign_desk import (
-                note_sovereign_boot,
-                recover_orphan_desk_turns,
-            )
-            note_sovereign_boot()
-            res = recover_orphan_desk_turns(limit=5)
-            if res.get("recovered"):
-                log.warning(
-                    "sovereign boot recovered %s orphan desk turn(s): %s",
-                    res.get("recovered"),
-                    res.get("results"),
-                )
-            else:
-                log.info("sovereign boot: no orphan desk turns (%s)", res)
-        except Exception:
-            log.exception("sovereign boot recover failed")
-
-    try:
-        import threading
-        threading.Thread(
-            target=_sovereign_boot_recover,
-            name="sov-boot-recover",
-            daemon=True,
-        ).start()
-    except Exception:
-        pass
 
 
 @app.get("/health")

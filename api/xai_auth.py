@@ -1,4 +1,4 @@
-"""xAI / Grok bearer resolution for Energy Agent + Sovereign.
+"""xAI / Grok bearer resolution for the Energy Agent.
 
 Two billing identities exist for Ford:
   1. console.x.ai **API key** team (was credit-capped: a2f4ee20-…)
@@ -61,7 +61,7 @@ def _kv_get(key: str) -> str:
         from sqlalchemy import text
         with SessionLocal() as db:
             row = db.execute(
-                text("SELECT value FROM ea_sovereign_memory WHERE key = :k"),
+                text("SELECT value FROM kv_flag WHERE key = :k"),
                 {"k": key},
             ).fetchone()
             return (row[0] or "").strip() if row and row[0] else ""
@@ -79,10 +79,10 @@ def _kv_set(key: str, value: str) -> None:
         with SessionLocal() as db:
             db.execute(
                 text(
-                    "INSERT INTO ea_sovereign_memory (key, value, source, updated_at) "
-                    "VALUES (:k, :v, 'xai_auth', now()) "
+                    "INSERT INTO kv_flag (key, value, updated_at) "
+                    "VALUES (:k, :v, now()) "
                     "ON CONFLICT (key) DO UPDATE SET value = :v, "
-                    "source = 'xai_auth', updated_at = now()"
+                    "updated_at = now()"
                 ),
                 {"k": key, "v": value},
             )

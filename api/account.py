@@ -1425,7 +1425,7 @@ def update_email(
 
     Sends a single-use confirmation link to the NEW email. Closes the
     privilege-escalation path where any paying tenant could reassign
-    contact_email to a Sovereign-allowlisted address without proof of ownership.
+    contact_email to an allowlisted address without proof of ownership.
     """
     t = tenant_from_session(authorization)
     require_not_demo(t)

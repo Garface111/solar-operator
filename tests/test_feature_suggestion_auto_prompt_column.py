@@ -1,8 +1,11 @@
 """Regression: feature_suggestions.auto_prompt missing on existing tables.
 
-Sentry: ProgrammingError UndefinedColumn feature_suggestions.auto_prompt
-Culprit: /v1/sovereign/desk/ops → list_features SELECT includes mapped column
-that create_all never added to an already-existing feature_suggestions table.
+Sentry: ProgrammingError UndefinedColumn feature_suggestions.auto_prompt —
+a column mapped on the model that create_all never added to an already-existing
+feature_suggestions table, so any SELECT naming it blew up in prod.
+
+Originally driven through the Sovereign ops list_features endpoint; that caller
+is gone, but the self-heal it exposed is product code and stays covered here.
 """
 from __future__ import annotations
 
@@ -15,11 +18,7 @@ from sqlalchemy.pool import StaticPool
 @pytest.fixture()
 def legacy_fs_db(monkeypatch):
     """Session against a feature_suggestions table that predates auto_prompt."""
-    monkeypatch.setenv("SOVEREIGN_ENABLED", "1")
-    monkeypatch.setenv("SOVEREIGN_OPS_AUTHORITY", "1")
-
     import api.feature_suggestions as fs_mod
-    import api.energy_agent_sovereign_ops as ops
 
     fs_mod._reset_schema_ensure_for_tests()
 
@@ -53,88 +52,48 @@ def legacy_fs_db(monkeypatch):
 
     Session = sessionmaker(bind=engine)
     with Session() as db:
-        yield db, ops, fs_mod, engine
+        yield db, fs_mod, engine
 
     fs_mod._reset_schema_ensure_for_tests()
 
 
-def test_ensure_adds_auto_prompt_column(legacy_fs_db):
-    db, ops, fs_mod, engine = legacy_fs_db
-    cols_before = {
+def _cols(engine):
+    return {
         r[1]
         for r in engine.connect().execute(text("PRAGMA table_info(feature_suggestions)"))
     }
-    assert "auto_prompt" not in cols_before
+
+
+def test_ensure_adds_auto_prompt_column(legacy_fs_db):
+    db, fs_mod, engine = legacy_fs_db
+    assert "auto_prompt" not in _cols(engine)
 
     fs_mod.ensure_feature_suggestion_columns(db)
 
-    cols_after = {
-        r[1]
-        for r in engine.connect().execute(text("PRAGMA table_info(feature_suggestions)"))
-    }
-    assert "auto_prompt" in cols_after
-
-
-def test_list_features_survives_missing_auto_prompt_column(legacy_fs_db):
-    """The Sentry path: list_features must not raise UndefinedColumn."""
-    db, ops, fs_mod, engine = legacy_fs_db
-
-    # Would raise ProgrammingError / OperationalError without ensure:
-    # SELECT ... feature_suggestions.auto_prompt FROM feature_suggestions
-    rows = ops.list_features(db, status="reviewed", limit=25)
-    assert len(rows) == 1
-    assert rows[0]["status"] == "reviewed"
-    assert "dark mode" in (rows[0]["text"] or "")
-
-    # Column is present after the self-heal path inside list_features
-    cols = {
-        r[1]
-        for r in engine.connect().execute(text("PRAGMA table_info(feature_suggestions)"))
-    }
-    assert "auto_prompt" in cols
-
-
-def test_triage_feature_queue_survives_missing_auto_prompt(legacy_fs_db):
-    """Sentry PYTHON-FASTAPI-24: triage_feature_queue SELECT must not raise."""
-    db, ops, fs_mod, engine = legacy_fs_db
-    with engine.begin() as conn:
-        conn.execute(text(
-            "INSERT INTO feature_suggestions (text, status, product) "
-            "VALUES ('Add fleet CSV export', 'new', 'array_operator')"
-        ))
-
-    out = ops.triage_feature_queue(db, limit=15)
-    assert out.get("ok") is True
-    assert out.get("triaged", 0) >= 1
-
-    cols = {
-        r[1]
-        for r in engine.connect().execute(text("PRAGMA table_info(feature_suggestions)"))
-    }
-    assert "auto_prompt" in cols
+    assert "auto_prompt" in _cols(engine)
 
 
 def test_ensure_ddl_commits_outside_caller_transaction(legacy_fs_db):
     """ALTER must survive the caller's session.rollback() (PG recurrence class)."""
-    db, ops, fs_mod, engine = legacy_fs_db
+    db, fs_mod, engine = legacy_fs_db
     fs_mod.ensure_feature_suggestion_columns(db)
     # Caller aborts its ambient txn — DDL must already be committed separately.
     db.rollback()
 
-    cols = {
-        r[1]
-        for r in engine.connect().execute(text("PRAGMA table_info(feature_suggestions)"))
-    }
-    assert "auto_prompt" in cols
-    # Cache must be set only after columns exist; a later SELECT still works.
-    rows = ops.list_features(db, status="reviewed", limit=5)
+    assert "auto_prompt" in _cols(engine)
+    # A SELECT naming the column still works after the rollback.
+    rows = db.execute(text(
+        "SELECT auto_prompt FROM feature_suggestions WHERE status = 'reviewed'"
+    )).fetchall()
     assert len(rows) == 1
 
 
 def test_ensure_is_idempotent(legacy_fs_db):
-    db, ops, fs_mod, engine = legacy_fs_db
+    db, fs_mod, engine = legacy_fs_db
     fs_mod.ensure_feature_suggestion_columns(db)
     fs_mod._reset_schema_ensure_for_tests()
     fs_mod.ensure_feature_suggestion_columns(db)  # second apply after cache clear
-    rows = ops.list_features(db, status="reviewed", limit=5)
+
+    assert "auto_prompt" in _cols(engine)
+    rows = db.execute(text("SELECT id FROM feature_suggestions")).fetchall()
     assert len(rows) == 1

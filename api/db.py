@@ -1,36 +1,3 @@
-"""
-DB engine + session helpers. SQLite for dev, Postgres on Railway.
-Reads DATABASE_URL (Railway convention) first, then SOLAR_DB_URL.
-
-Pool hardening (2026-07-14 outage + 2026-07-09 meltdown class)
--------------------------------------------------------------
-Root failure mode: every request-thread waits on a DB connection while all
-connections are held (long txn / external HTTP while session open / lock
-pile-up). With pool_timeout=30s the threadpool fills → even /health hung.
-
-Defenses:
-  • Fail-fast pool_timeout (default 8s) so workers free quickly under saturation
-  • PG session GUCs kill idle-in-transaction zombies + lock/statement runaways
-  • pool_use_lifo reuses hot connections under burst
-  • Checkout counters + rate-limited internal alert at high utilization
-  • pool_status() for /health (no checkout required)
-  • dispose_pool() recovery path for the watchdog
-
-Role-aware pool budgets (web vs worker)
----------------------------------------
-Web keeps headroom for request bursts; worker-like processes self-cap so a
-background/scheduler service cannot starve the API of Postgres connections.
-
-  • web (default):  pool_size=15, max_overflow=15  → capacity 30
-  • worker:         pool_size=6,  max_overflow=4   → capacity 10
-
-Worker detection (same spirit as api.sovereign_guard.process_role):
-PROCESS_ROLE / SO_PROCESS in {worker, background, scheduler}, or
-RAILWAY_SERVICE_NAME / RAILWAY_SERVICE containing "worker" or "background".
-
-DB_POOL_SIZE / DB_MAX_OVERFLOW env vars always win when set (no silent override).
-SQLite ignores pool sizing. Keep (size+overflow) * processes under PG max_connections.
-"""
 from __future__ import annotations
 
 import logging
@@ -56,11 +23,6 @@ _WORKER_MAX_OVERFLOW = 4
 
 
 def process_is_worker(environ: Mapping[str, str] | None = None) -> bool:
-    """True when this process should use the smaller worker pool budget.
-
-    Mirrors api.sovereign_guard.process_role() worker-like detection without
-    importing that module (db is loaded early; keep this dependency-free).
-    """
     env = os.environ if environ is None else environ
     explicit = (env.get("PROCESS_ROLE") or env.get("SO_PROCESS") or "").strip().lower()
     if explicit in ("worker", "background", "scheduler"):

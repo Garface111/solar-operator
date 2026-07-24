@@ -12,7 +12,7 @@ is satisfied by copying those referenced rows too.
 
 Skipped tables: vendor credential/session state (encrypted with prod's
 SO_CONFIG_KEY — useless under staging's different key, and capture is off),
-auth tokens, Stripe events, and Sovereign artifacts (Sovereign is off in staging).
+auth tokens, and Stripe events.
 
 TID is a controlled constant inlined into COPY (SELECT ... WHERE ...) — copy_expert
 cannot bind params. Do not pass untrusted input.
@@ -27,8 +27,6 @@ STG = open("/tmp/stg_db_url").read().strip()
 SKIP = {
     "portal_credential", "portal_login_status", "utility_sessions", "sma_consents",
     "login_tokens", "stripe_events",
-    "ea_sovereign_desk_messages", "ea_sovereign_message_outbox",
-    "ea_sovereign_desk_assets", "ea_sovereign_bridge_tasks",
 }
 
 # Columns encrypted at rest under PROD's SO_CONFIG_KEY (api/crypto.py
