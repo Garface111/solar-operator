@@ -693,7 +693,7 @@ class EaChatAsset(Base):
     meta_json: Mapped[str] = mapped_column(Text, default="{}")
 
 
-# Attachment limits (owner chat — smaller than Sovereign desk)
+# Attachment limits (owner chat)
 _EA_MAX_UPLOAD_BYTES = int(os.getenv("EA_CHAT_MAX_UPLOAD", str(8 * 1024 * 1024)))
 _EA_MAX_TEXT_EXTRACT = 80_000
 _EA_ASSET_DIR = Path(os.getenv("EA_CHAT_ASSET_DIR", "/tmp/ea_chat_assets"))

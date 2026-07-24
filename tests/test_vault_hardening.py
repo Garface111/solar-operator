@@ -176,29 +176,6 @@ def test_list_all_meta_requires_tenant_id(Session):
             list_all_meta(db)
 
 
-def test_desk_auth_binds_tenant_id(monkeypatch):
-    from api import energy_agent_sovereign_desk as desk
-    from fastapi import HTTPException
-
-    class T:
-        id = "ten_stranger"
-        contact_email = "ford.genereaux@gmail.com"  # email alone must not unlock
-
-    monkeypatch.setattr(desk, "tenant_from_session", lambda a: T())
-    monkeypatch.setattr(desk, "require_not_demo", lambda t: None)
-    with pytest.raises(HTTPException) as ei:
-        desk._auth_ford("Bearer x")
-    assert ei.value.status_code == 403
-
-    class T2:
-        id = "ten_aaad29f08dbe9943"
-        contact_email = "other@example.com"
-
-    monkeypatch.setattr(desk, "tenant_from_session", lambda a: T2())
-    t, email = desk._auth_ford("Bearer x")
-    assert t.id == "ten_aaad29f08dbe9943"
-
-
 def test_creds_repr_hides_password():
     from api.harvester.credentials import Creds
 
@@ -218,18 +195,6 @@ def test_run_scheduler_defaults_off(monkeypatch):
     assert sched.scheduler_enabled() is False
     monkeypatch.setenv("RUN_SCHEDULER", "1")
     assert sched.scheduler_enabled() is True
-
-
-def test_sovereign_ops_defaults_fail_closed(monkeypatch):
-    from api import energy_agent_sovereign_ops as ops
-
-    monkeypatch.delenv("SOVEREIGN_OPS_AUTHORITY", raising=False)
-    monkeypatch.delenv("SOVEREIGN_CREDENTIALS_UNLOCKED", raising=False)
-    monkeypatch.delenv("SOVEREIGN_PORTAL_SIGN_OFF", raising=False)
-    monkeypatch.setenv("SOVEREIGN_ENABLED", "1")
-    assert ops.ops_enabled() is False
-    assert ops.credentials_unlocked() is False
-    assert ops.portal_signoff_enabled() is False
 
 
 def test_decrypt_audit_includes_context(caplog):

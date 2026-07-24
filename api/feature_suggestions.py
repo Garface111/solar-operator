@@ -42,11 +42,11 @@ VALID_STATUSES = ("new", "reviewed", "building", "shipped")
 
 
 # ── Actionability gate (Ford 2026-07-17) ────────────────────────────────────
-# The Energy Agent's mind/sovereign and the Improve box were filing questions,
+# The Energy Agent mind and the Improve box were filing questions,
 # spoken-chatter fragments, and internal control text ("Call escalate_to_ford
 # now") as build tickets — the customer then saw "Working on your change" for
 # something they never asked to build. This gate strips the "[tag]" markup the
-# mind/sovereign prepend, then requires the CORE ask to name an actual UI change.
+# mind prepend, then requires the CORE ask to name an actual UI change.
 # Conservative on purpose: it only rejects high-confidence non-requests, so a
 # real "add / move / separate / make X bigger" ask still passes.
 _CONTROL_ARTIFACTS = (
@@ -79,8 +79,8 @@ _UI_NOUNS = (
 
 
 def _strip_suggestion_markup(text: str) -> str:
-    """Drop the leading '[tag]' lines and 'Site improve:'/'[Sovereign]' prefixes
-    so the gate judges the real ask, not the framing the mind/sovereign added."""
+    """Drop leading '[tag]' lines and 'Site improve:' prefixes so the gate judges
+    the real ask, not the framing the mind prepended."""
     out = []
     for raw in (text or "").splitlines():
         s = raw.strip()
@@ -90,7 +90,7 @@ def _strip_suggestion_markup(text: str) -> str:
             continue  # a whole tag line, e.g. "[Proactive mind — …]"
         s = re.sub(r"^\[[^\]]*\]\s*", "", s)  # a leading inline [tag]
         s = re.sub(
-            r"^(site improve[d]?|improve site|feature request|\[sovereign\])\s*:?\s*",
+            r"^(site improve[d]?|improve site|feature request)\s*:?\s*",
             "", s, flags=re.I,
         )
         if s:
@@ -140,7 +140,7 @@ class FeatureSuggestion(Base):
 # create_all only creates missing *tables* — it never ALTERs existing ones. When
 # auto_prompt (or screenshot_b64) was added to the model, prod kept the old
 # shape and every FeatureSuggestion SELECT died with UndefinedColumn
-# (Sentry: /v1/sovereign/desk/ops → list_features). migrate.py has the ALTER,
+# (Sentry: an ops list_features SELECT). migrate.py has the ALTER,
 # but this module is also the create_all path; self-heal so reads work even if
 # migrate has not run yet.
 _schema_ensured_ids: set[int] = set()
@@ -271,7 +271,6 @@ def _customer_facing_outcome(status: str, review: str | None) -> dict:
         if review and (
             "claimed live" in (review or "").lower()
             or "claimed this" in (review or "").lower()
-            or "Sovereign claimed" in (review or "")
             or "Energy Agent claimed" in (review or "")
         ):
             detail = "Energy Agent claimed this and is building it now."
@@ -368,77 +367,8 @@ def submit_suggestion(body: SuggestionIn, authorization: str | None = Header(def
         db.commit()
         db.refresh(fs)
         sid = fs.id
-        # Hand to Sovereign immediately (mind + queue + optional ship job)
-        claimed = None
-        try:
-            from .energy_agent_sovereign_ops import claim_improvement_for_sovereign
-            claimed = claim_improvement_for_sovereign(
-                db,
-                feature_id=sid,
-                text=text,
-                tenant_id=tenant_id,
-                email=email,
-                product=product,
-                has_screenshot=bool(shot),
-            )
-            db.commit()
-        except Exception:
-            try:
-                db.rollback()
-            except Exception:
-                pass
-            claimed = None
 
-    # Live wake: force cortex so Sovereign acts now (not next 5m tick)
-    try:
-        from .energy_agent_sovereign_subconscious import fire_and_forget_wake
-        fire_and_forget_wake(
-            "feature_suggestion",
-            {
-                "id": sid,
-                "text": text[:1200],
-                "tenant_id": tenant_id,
-                "email": email,
-                "product": product,
-                "has_screenshot": bool(shot),
-                "claimed": bool(claimed and claimed.get("ok")),
-                "status": (claimed or {}).get("status") or "new",
-            },
-            source="feature_suggestion",
-            force_cortex=True,
-        )
-    except Exception:
-        pass
-
-    try:
-        send_internal_alert(
-            subject=f"New {product} feature suggestion (#{sid})",
-            body=(
-                f"From: {email or 'anonymous'}\nTenant: {tenant_id or '-'}\n"
-                f"Product: {product}\n\n{text}\n"
-                + (
-                    "\n[Includes a marked-up screenshot — the review agent will read it.]\n"
-                    if shot
-                    else ""
-                )
-                + "\n(Handed to Sovereign mind immediately + classic judge path.)"
-            ),
-        )
-    except Exception:
-        pass
-
-    status_out = (claimed or {}).get("status") or "new"
-    # Frontend (EA Improve + wish widget) requires ok:true + id
-    return {
-        "ok": True,
-        "id": sid,
-        "status": status_out,
-        "auto_prompt": auto_prompt,
-        "sovereign": {
-            "claimed": bool(claimed and claimed.get("ok")),
-            "job_id": (claimed or {}).get("job_id"),
-        },
-    }
+    status_out = "new"
 
 
 @router.get("/v1/feature-suggestion/{sid}/status")

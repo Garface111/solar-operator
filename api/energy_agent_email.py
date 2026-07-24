@@ -50,13 +50,6 @@ OWNER_AGENT_MAILBOX = (
 )
 OWNER_AGENT_FROM = f"Energy Agent <{OWNER_AGENT_MAILBOX}>"
 
-# Our own outbound identities — never converse with ourselves.
-_SELF_ADDRESSES = {
-    OWNER_AGENT_MAILBOX,
-    "repairs@agent.arrayoperator.com",
-    "sovereign@arrayoperator.com",
-    "sovereign@agent.arrayoperator.com",
-}
 
 _MAX_OWNER_EMAIL_TURNS_PER_DAY = int(os.getenv("EA_OWNER_EMAIL_TURNS_PER_DAY", "20") or 20)
 _CHECKIN_MIN_GAP_DAYS = 5.5  # idempotence across restarts / double-fires

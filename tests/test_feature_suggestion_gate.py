@@ -16,7 +16,7 @@ REJECT = [
     "Repeated UX friction notes — improve scannability and status-first layout on the surfaces they use most.",
     # the mind's empty-text default boilerplate
     "[Proactive mind — prepared for your fleet's UX]\nImprove layout scannability on the current surface.",
-    # the sovereign cluster meta-note
+    # a bracketed agent meta-note (historical): still must be rejected
     "[Sovereign] UX friction cluster (sovereign): multiple propose_ui / complaint signals in 14d (count=4). "
     "Review Energy Agent mind metrics and top surfaces for layout/clarity fixes.",
     "hi",                                   # too short
