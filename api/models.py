@@ -548,8 +548,16 @@ class Client(Base):
     tenant: Mapped[Tenant] = relationship(back_populates="clients")
     arrays: Mapped[list["Array"]] = relationship(back_populates="client")
 
+    # Client names are unique per tenant — but ONLY among LIVE rows (same
+    # doctrine as uq_array_per_tenant_live, 2026-07-16). A plain UNIQUE spanned
+    # soft-deleted rows, so a deleted client's ghost still RESERVED its name:
+    # Ford deleted "Pbozuwa", tried to re-add it from the same login, and got
+    # "A client with that name already exists" (2026-07-24). Migration swaps
+    # the old uq_client_per_tenant constraint for this index; see api/migrate.py.
     __table_args__ = (
-        UniqueConstraint("tenant_id", "name", name="uq_client_per_tenant"),
+        Index("uq_client_per_tenant_live", "tenant_id", "name", unique=True,
+              postgresql_where=text("deleted_at IS NULL"),
+              sqlite_where=text("deleted_at IS NULL")),
         Index("ix_clients_tenant_gmp_email", "tenant_id", "gmp_email"),
         Index("ix_clients_tenant_vec_email", "tenant_id", "vec_email"),
     )

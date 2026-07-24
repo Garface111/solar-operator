@@ -177,6 +177,21 @@ def main():
             print("  ↪ arrays: uq_array_per_tenant → partial uq_array_per_tenant_live "
                   "(live rows only)")
 
+        # 2026-07-24: same live-only treatment for CLIENT names. The old
+        # uq_client_per_tenant UNIQUE(tenant_id, name) spanned soft-deleted
+        # rows, so deleting a client and re-adding it from the same login hit
+        # "A client with that name already exists" (the ghost reserved the
+        # name — exactly the array bug of 2026-07-16, one table over).
+        # Idempotent + safe: live rows are already unique among themselves.
+        if engine.dialect.name == "postgresql":
+            conn.execute(text(
+                "ALTER TABLE clients DROP CONSTRAINT IF EXISTS uq_client_per_tenant"))
+            conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_client_per_tenant_live "
+                "ON clients (tenant_id, name) WHERE deleted_at IS NULL"))
+            print("  ↪ clients: uq_client_per_tenant → partial "
+                  "uq_client_per_tenant_live (live rows only)")
+
         # 2026-06-03 Phase-1 expansion: Client layer
         # Idempotency: create_all() above already created `clients` table
         # via Base.metadata, so we only need to (a) add arrays.client_id and

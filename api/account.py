@@ -5089,18 +5089,37 @@ def undo_delete(
         restored_arrays = payload.get("arrays") or []
         restored_uas = payload.get("utility_accounts") or []
 
+        # Name uniqueness applies to LIVE rows only (partial indexes), so a
+        # restore can collide with a live row that re-took the name after the
+        # delete. Rename the RESTORED row rather than failing the whole undo —
+        # the operator keeps both, and the "(restored)" suffix says which is
+        # which.
+        def _restore_with_rename(model, ids: list[int]) -> None:
+            live_names = {
+                (n or "").strip().lower()
+                for (n,) in db.execute(
+                    select(model.name).where(
+                        model.tenant_id == t.id, model.deleted_at.is_(None)
+                    )
+                ).all()
+            }
+            rows = db.execute(
+                select(model).where(model.id.in_(ids), model.tenant_id == t.id)
+            ).scalars().all()
+            for row in rows:
+                name = row.name or ""
+                if name.strip().lower() in live_names:
+                    candidate = f"{name} (restored)"
+                    if candidate.strip().lower() in live_names:
+                        candidate = f"{name} (restored {row.id})"
+                    row.name = candidate[:200]
+                live_names.add((row.name or "").strip().lower())
+                row.deleted_at = None
+
         if restored_clients:
-            db.execute(
-                Client.__table__.update()
-                .where(Client.id.in_(restored_clients), Client.tenant_id == t.id)
-                .values(deleted_at=None)
-            )
+            _restore_with_rename(Client, restored_clients)
         if restored_arrays:
-            db.execute(
-                Array.__table__.update()
-                .where(Array.id.in_(restored_arrays), Array.tenant_id == t.id)
-                .values(deleted_at=None)
-            )
+            _restore_with_rename(Array, restored_arrays)
         if restored_uas:
             db.execute(
                 UtilityAccount.__table__.update()
