@@ -1677,9 +1677,13 @@ def start():
     # been pulled yet (history_backfilled_at IS NULL) — stamps only on success so
     # a failed/partial attempt retries next run. Capped per-run to respect vendor
     # rate limits; the connect endpoint also fires it immediately for new connects.
+    # HOURLY (was daily 04:15 — see REBUILD-MAP layer 3): the conn-95 incident
+    # proved a daily healer plus fire-and-forget connect threads leaves broken
+    # backfills invisible for DAYS. Hourly retries + the healer's own >24h
+    # stuck-connection alert make a dead backfill loud within a day.
     scheduler.add_job(
         _run_history_heal,
-        CronTrigger(hour=4, minute=15),
+        CronTrigger(minute=25),
         id="inverter_history_heal", replace_existing=True,
         max_instances=1, coalesce=True,
     )

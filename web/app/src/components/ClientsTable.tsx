@@ -486,6 +486,9 @@ export function ClientsTable({
   const loadingIdsRef = useRef<Set<number>>(new Set());
   // Bump to force re-render after async cache writes.
   const [, setTick] = useState(0);
+  // Roster visible to the mount-only invalidation listener below.
+  const clientsForInvalidateRef = useRef(clients);
+  clientsForInvalidateRef.current = clients;
 
   // Pre-warm the array cache for every client so the expanded panels fill in
   // without a stagger of spinners. Fires once on mount; new clients added later
@@ -508,6 +511,41 @@ export function ClientsTable({
     });
     // Empty dep: we only want this once at mount. New clients fetch via toggleExpand.
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Cross-surface / server-pushed array mutations: any notifyFleetChanged
+  // fires 'so:arrays-changed', and the liveSync SSE plane fires 'so:live-sync'
+  // per raw server event. Either way the pre-warmed cache is stale — refetch
+  // every client's arrays in place (stale-while-revalidate: rows swap when the
+  // fresh data lands, so expanded panels update without a spinner flash).
+  useEffect(() => {
+    let debounce: ReturnType<typeof setTimeout> | null = null;
+    const invalidate = () => {
+      if (debounce) clearTimeout(debounce);
+      debounce = setTimeout(() => {
+        clientsForInvalidateRef.current.forEach((c) => {
+          if (loadingIdsRef.current.has(c.id)) return;
+          loadingIdsRef.current.add(c.id);
+          listArrays(c.id)
+            .then((rows) => {
+              arraysCacheRef.current.set(c.id, rows);
+              loadingIdsRef.current.delete(c.id);
+              setTick((t) => t + 1);
+            })
+            .catch(() => {
+              // Keep the stale rows — better than wiping an open panel.
+              loadingIdsRef.current.delete(c.id);
+            });
+        });
+      }, 300);
+    };
+    window.addEventListener("so:arrays-changed", invalidate);
+    window.addEventListener("so:live-sync", invalidate);
+    return () => {
+      if (debounce) clearTimeout(debounce);
+      window.removeEventListener("so:arrays-changed", invalidate);
+      window.removeEventListener("so:live-sync", invalidate);
+    };
   }, []);
 
   // Listens for the guided-fill button in the NEPOOL banner. If a user manually

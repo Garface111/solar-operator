@@ -186,6 +186,13 @@ def transform_tenant_bills(tenant_id: str, *, db: Optional[Session] = None) -> d
                 totals[k] += r[k]
         if _own:
             db.commit()
+        # One event per tenant run that actually changed rows, AFTER commit,
+        # so open dashboards refresh (REBUILD-MAP layer 1). When a caller owns
+        # the session it also owns the commit — publish only when we committed.
+        if _own and (totals["days_written"] or totals["days_updated"]):
+            from .. import events  # noqa: PLC0415 — avoid import cycle
+            events.publish(tenant_id, "generation.updated",
+                           {"source": "bill_prorate"})
         return totals
     finally:
         if _own:

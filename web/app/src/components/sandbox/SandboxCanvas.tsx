@@ -487,6 +487,9 @@ export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen
   // SSE: timestamp of the last so:capture-cleared event — used to de-dupe
   // SSE toasts from toasts already fired by CaptureListener in the same tab.
   const recentCaptureClearedRef = useRef<number>(0);
+  // SSE: trailing-edge coalescer for clients/arrays/generation change events —
+  // an import burst becomes one silent reveal instead of N stacked reloads.
+  const sseReloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Pre-drag node positions captured at drag start so we can snap a node
   // back if a merge dialog gets cancelled.
@@ -627,12 +630,18 @@ export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen
 
   // External mutations (Table delete, array delete in list view, etc.) must
   // re-sync the canvas without a full page refresh. Ignore our own 'canvas'
-  // broadcasts to avoid reload loops.
+  // broadcasts to avoid reload loops — and the sources our own SSE stream
+  // already covers first-hand: 'server' (liveSync republishing the same
+  // /v1/events feed) and 'capture' (CaptureListener, whose paired
+  // so:capture-cleared event already triggers a loadCanvas below).
   useEffect(() => {
     let debounce: ReturnType<typeof setTimeout> | null = null;
     const onFleet = (e: Event) => {
       const src = fleetChangeSource(e);
-      if (src === 'canvas' || src === 'sandbox-delete' || src === 'sandbox-mutate') return;
+      if (
+        src === 'canvas' || src === 'sandbox-delete' || src === 'sandbox-mutate' ||
+        src === 'server' || src === 'capture'
+      ) return;
       if (debounce) clearTimeout(debounce);
       debounce = setTimeout(() => {
         void loadCanvas({ silent: true });
@@ -785,6 +794,20 @@ export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen
                     `${payload.client_name} added — they're on your dashboard.`,
                   );
                 }
+              } else if (
+                payload.type === 'clients.changed' ||
+                payload.type === 'arrays.changed' ||
+                payload.type === 'generation.updated'
+              ) {
+                // Tenant data changed somewhere else (an import, another tab,
+                // the harvester) — reveal it silently, coalescing a burst of
+                // events into a single reload. No toast: nothing here was an
+                // action the operator took in this tab.
+                if (sseReloadTimerRef.current) clearTimeout(sseReloadTimerRef.current);
+                sseReloadTimerRef.current = setTimeout(() => {
+                  sseReloadTimerRef.current = null;
+                  void loadCanvasRef.current({ sseReveal: true });
+                }, 250);
               }
             } catch { /* malformed JSON — ignore */ }
           }
@@ -810,6 +833,10 @@ export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen
     return () => {
       canceled = true;
       sseAbortRef.current?.abort();
+      if (sseReloadTimerRef.current) {
+        clearTimeout(sseReloadTimerRef.current);
+        sseReloadTimerRef.current = null;
+      }
       setSseStatus('disconnected');
     };
   }, []); // Stable: all dependencies accessed via refs

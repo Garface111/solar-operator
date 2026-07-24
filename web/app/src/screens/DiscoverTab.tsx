@@ -18,6 +18,7 @@ import {
   refreshDiscovery,
   setDiscoveryIgnored,
 } from "../lib/api";
+import { notifyFleetChanged } from "../lib/fleetEvents";
 
 const AddClientByLoginModal = lazyWithRetry(() =>
   import("../components/AddClientByLoginModal").then((m) => ({
@@ -450,6 +451,9 @@ export default function DiscoverTab() {
       await loadPool();
       // A brand-new client has to appear in the target picker straight away.
       listClients().then(setClients).catch(() => { /* keep the stale list */ });
+      // The import just changed the roster — tell every other surface
+      // (canvas, table, chips, billing) instead of leaving them to the poll.
+      notifyFleetChanged("discover");
     } catch (err) {
       if (!(err instanceof UnauthorizedError)) {
         toast.error(
@@ -470,6 +474,7 @@ export default function DiscoverTab() {
       setSelectedIds(new Set());
       await loadPool();
       toast.success(`Set ${n} aside.`);
+      notifyFleetChanged("discover");
     } catch (err) {
       if (!(err instanceof UnauthorizedError)) {
         toast.error(err instanceof Error ? err.message : "Couldn't ignore those.");

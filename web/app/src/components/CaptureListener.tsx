@@ -21,6 +21,7 @@
 
 import { useEffect, useRef } from "react";
 import { useToast } from "../ui/Toast";
+import { notifyFleetChanged } from "../lib/fleetEvents";
 
 interface Props {
   /** Called when a capture lands — parent should reload clients and
@@ -106,6 +107,9 @@ export function CaptureListener({ onCaptureLanded }: Props) {
           toast.show("Captured fresh utility data.", "info");
         }
         try { window.dispatchEvent(new CustomEvent("so:capture-cleared")); } catch { /* ignore */ }
+        // Fresh data landed — refresh every other surface (chips, billing,
+        // reports), not just the clients list the parent reloaded above.
+        notifyFleetChanged("capture");
         return;
       }
 
@@ -126,6 +130,7 @@ export function CaptureListener({ onCaptureLanded }: Props) {
           );
         }
         try { window.dispatchEvent(new CustomEvent("so:capture-cleared")); } catch { /* ignore */ }
+        notifyFleetChanged("capture");
         return;
       }
 
@@ -138,6 +143,7 @@ export function CaptureListener({ onCaptureLanded }: Props) {
       // first-visit redirect). The flag carries a timestamp so it can self-expire.
       try { localStorage.setItem("so:capture:landed:ts", String(Date.now())); } catch { /* ignore */ }
       try { window.dispatchEvent(new CustomEvent("so:capture-cleared")); } catch { /* ignore */ }
+      notifyFleetChanged("capture");
     }
     handlerRef.current = handler;
     window.addEventListener("message", handler);

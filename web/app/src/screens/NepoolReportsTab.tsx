@@ -28,6 +28,7 @@ import {
   sendDirectoryReport,
   recentReportQuarters,
 } from "../lib/api";
+import { FLEET_CHANGED } from "../lib/fleetEvents";
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -156,25 +157,51 @@ export default function NepoolReportsTab() {
       .finally(() => setSampleSending(false));
   }, []);
 
-  const loadData = useCallback(() => {
-    setLoading(true);
-    setLoadError(null);
+  // silent: background freshness refetch — keep the current timeline on
+  // screen (no skeleton flash) and swallow failures (leave stale data rather
+  // than swapping a readable page for an error card).
+  const fetchData = useCallback((silent: boolean) => {
+    if (!silent) {
+      setLoading(true);
+      setLoadError(null);
+    }
     Promise.all([listClients(), getReports(6)])
       .then(([rows, reps]) => {
         setClients(rows);
         setReports(reps);
       })
       .catch((err) => {
+        if (silent) return;
         setLoadError(
           err instanceof Error ? err.message : "Couldn't load reports",
         );
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (!silent) setLoading(false);
+      });
   }, []);
+
+  const loadData = useCallback(() => fetchData(false), [fetchData]);
 
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  // Freshness plane: whenever any surface (or the server, via liveSync's
+  // notifyFleetChanged("server")) reports fleet data changed, refetch the
+  // report history quietly. Debounced so event bursts become one round-trip.
+  useEffect(() => {
+    let debounce: ReturnType<typeof setTimeout> | null = null;
+    const onFleet = () => {
+      if (debounce) clearTimeout(debounce);
+      debounce = setTimeout(() => fetchData(true), 300);
+    };
+    window.addEventListener(FLEET_CHANGED, onFleet);
+    return () => {
+      if (debounce) clearTimeout(debounce);
+      window.removeEventListener(FLEET_CHANGED, onFleet);
+    };
+  }, [fetchData]);
 
   // ── Account loading guard ─────────────────────────────────────────────────
   if (account === null) {

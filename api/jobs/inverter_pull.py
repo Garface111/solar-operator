@@ -175,6 +175,10 @@ def pull_all_inverters(days_back: int = 90) -> dict:
     end = today
 
     results: list[dict] = []
+    # Tenants whose DailyGeneration actually changed this run — each gets ONE
+    # generation.updated event after the loop so open dashboards refresh
+    # (REBUILD-MAP layer 1; the nightly pull used to land data silently).
+    touched_tenants: set[str] = set()
 
     with SessionLocal() as db:
         for c in _resolve_connections(db):
@@ -206,6 +210,8 @@ def pull_all_inverters(days_back: int = 90) -> dict:
                 elif c.vendor == "fronius":
                     _backfill_fronius_location(db, arr, c.config)
                 db.commit()
+                if n:
+                    touched_tenants.add(arr.tenant_id)
                 results.append({"array_id": arr.id, "vendor": c.vendor, "days_pulled": n})
             except InverterError as exc:
                 db.rollback()
@@ -219,5 +225,9 @@ def pull_all_inverters(days_back: int = 90) -> dict:
                 db.rollback()
                 log.error("inverter_pull unhandled array=%d vendor=%s: %s", arr.id, c.vendor, exc)
                 results.append({"array_id": arr.id, "vendor": c.vendor, "errors": [str(exc)]})
+
+    from .. import events  # noqa: PLC0415 — avoid import cycle at module load
+    for tid in touched_tenants:
+        events.publish(tid, "generation.updated", {"source": "inverter_pull"})
 
     return {"connections_processed": len(results), "results": results}

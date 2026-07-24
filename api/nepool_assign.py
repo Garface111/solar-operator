@@ -24,6 +24,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import joinedload
 
+from . import events
 from .db import SessionLocal
 from .models import Array, Client
 from .account import tenant_from_session, require_not_demo
@@ -356,6 +357,10 @@ def nepool_commit(
             updated += 1
 
         db.commit()
+
+    # Post-commit: NEPOOL GIS ids were stamped onto arrays — refetch.
+    if updated:
+        events.publish(t.id, "arrays.changed")
 
     return {
         "ok": True,

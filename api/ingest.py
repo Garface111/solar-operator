@@ -37,6 +37,7 @@ from fastapi import APIRouter, Header, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from sqlalchemy import select
 
+from . import events
 from .db import SessionLocal
 from .fuels import normalize_fuel
 from .models import Client, Array, UtilityAccount
@@ -1038,6 +1039,11 @@ def ingest_commit(
                     existing.array_id = arr.id
 
         db.commit()
+
+    # Post-commit: the spreadsheet import lands clients, arrays, and account
+    # links in one shot — tell open dashboards to refetch.
+    events.publish(t.id, "clients.changed")
+    events.publish(t.id, "arrays.changed")
 
     return {
         "ok": True,

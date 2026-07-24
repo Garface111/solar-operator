@@ -194,7 +194,8 @@ from .verification import router as verification_router
 from .perf_verification.routes import router as perf_verification_router
 from .dev_sandbox import router as dev_sandbox_router, DEV_ENABLED as _SO_DEV_ENABLED
 from .dev_captures import router as dev_captures_router
-from .events import router as events_router, broadcast as _sse_broadcast
+from .events import router as events_router, broadcast as _sse_broadcast, \
+    publish as _events_publish
 from . import scheduler
 
 log = logging.getLogger("solar_operator.app")
@@ -1719,6 +1720,11 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                 else:
                     from .worker import pull_bills_for_tenant
                     pull_bills_for_tenant(tid)
+                # The absorb lands bills/arrays/generation AFTER capture.landed
+                # fired — push a follow-up so open dashboards refetch the data
+                # that just arrived (publish is thread-safe, swallows failures).
+                _events_publish(tid, "arrays.changed")
+                _events_publish(tid, "generation.updated")
             except Exception:
                 import logging
                 logging.getLogger(__name__).exception(
@@ -1867,6 +1873,10 @@ def _sync_replay_into_sibling(tenant: Tenant, normalized: dict) -> None:
                 else:
                     from .worker import pull_bills_for_tenant
                     pull_bills_for_tenant(tid)
+                # Same follow-up push the primary absorb sends — the sibling's
+                # dashboards refetch the bills/generation that just landed.
+                _events_publish(tid, "arrays.changed")
+                _events_publish(tid, "generation.updated")
             except Exception:
                 logging.getLogger(__name__).exception(
                     "sibling-sync absorb failed for %s", tid)

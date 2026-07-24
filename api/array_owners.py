@@ -35,6 +35,7 @@ from sqlalchemy import exists, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
+from . import events
 from . import generation_sources
 from . import inverters
 from . import ratelimit
@@ -1625,6 +1626,7 @@ def reassign_inverter_ep(body: ReassignInverterBody,
             )
         except inverter_fleet.FleetError as exc:
             raise HTTPException(400, str(exc))
+        events.publish(tenant.id, "arrays.changed", {"array_id": iv.array_id})
         return {"ok": True, "inverter_id": iv.id, "array_id": iv.array_id,
                 "position": iv.position}
 
@@ -1647,6 +1649,7 @@ def reorder_inverters_ep(body: ReorderInvertersBody,
             )
         except inverter_fleet.FleetError as exc:
             raise HTTPException(400, str(exc))
+        events.publish(tenant.id, "arrays.changed", {"array_id": body.array_id})
         return {"ok": True}
 
 
@@ -1662,6 +1665,7 @@ def create_array_ep(body: CreateArrayBody,
     from . import inverter_fleet
     with SessionLocal() as db:
         arr = inverter_fleet.create_array(db, tenant, body.name)
+        events.publish(tenant.id, "arrays.changed", {"array_id": arr.id})
         return {"ok": True, "array_id": arr.id, "array_name": arr.name}
 
 
@@ -1684,6 +1688,7 @@ def rename_array_ep(array_id: int, body: RenameBody,
             msg = str(exc)
             status = 409 if "already has that name" in msg else 400
             raise HTTPException(status, msg)
+        events.publish(tenant.id, "arrays.changed", {"array_id": a.id})
         return {"ok": True, "array_id": a.id, "name": a.name}
 
 
@@ -1712,6 +1717,7 @@ def set_array_portfolio_ep(array_id: int, body: PortfolioBody,
             raise HTTPException(404, "Array not found")
         arr.portfolio_name = name
         db.commit()
+        events.publish(tenant.id, "arrays.changed", {"array_id": arr.id})
         return {"ok": True, "array_id": arr.id, "portfolio_name": arr.portfolio_name}
 
 
@@ -1735,6 +1741,7 @@ def set_array_reminder_ep(array_id: int, body: ReminderBody,
             raise HTTPException(404, "Array not found")
         arr.reminder = note
         db.commit()
+        events.publish(tenant.id, "arrays.changed", {"array_id": arr.id})
         return {"ok": True, "array_id": arr.id, "reminder": arr.reminder}
 
 
@@ -1941,6 +1948,7 @@ def rename_inverter_ep(inverter_id: int, body: RenameBody,
             iv = inverter_fleet.rename_inverter(db, tenant, inverter_id, body.name)
         except inverter_fleet.FleetError as exc:
             raise HTTPException(400, str(exc))
+        events.publish(tenant.id, "arrays.changed", {"array_id": iv.array_id})
         return {"ok": True, "inverter_id": iv.id, "name": iv.name}
 
 
@@ -2180,6 +2188,8 @@ def link_utility_account_ep(body: LinkAccountBody,
         else:
             acct.array_id = None
         db.commit()
+        events.publish(tenant.id, "arrays.changed",
+                       {"array_id": acct.array_id} if acct.array_id else None)
         return {"ok": True, "account_id": acct.id, "linked_array_id": acct.array_id}
 
 
@@ -2300,6 +2310,7 @@ def exclude_array_ep(array_id: int, body: ExcludeBody = ExcludeBody(),  # noqa: 
                 db, tenant, array_id, bool(body.excluded))
         except inverter_fleet.FleetError:
             raise HTTPException(404, "Array not found")
+        events.publish(tenant.id, "arrays.changed", {"array_id": arr.id})
         return {
             "ok": True,
             "array_id": arr.id,
@@ -2328,6 +2339,7 @@ def delete_array_ep(array_id: int,
             arr = inverter_fleet.delete_array(db, tenant, array_id)
         except inverter_fleet.FleetError:
             raise HTTPException(404, "Array not found")
+        events.publish(tenant.id, "arrays.changed", {"array_id": arr.id})
         return {"ok": True, "array_id": arr.id}
 
 
@@ -2350,6 +2362,7 @@ def restore_array_ep(array_id: int,
             arr = inverter_fleet.restore_array(db, tenant, array_id)
         except inverter_fleet.FleetError:
             raise HTTPException(404, "Array not found")
+        events.publish(tenant.id, "arrays.changed", {"array_id": arr.id})
         return {"ok": True, "array_id": arr.id, "array_name": arr.name}
 
 
@@ -2374,6 +2387,7 @@ def delete_inverter_ep(inverter_id: int,
             iv = inverter_fleet.delete_inverter(db, tenant, inverter_id)
         except inverter_fleet.FleetError:
             raise HTTPException(404, "Inverter not found")
+        events.publish(tenant.id, "arrays.changed", {"array_id": iv.array_id})
         return {"ok": True, "inverter_id": iv.id}
 
 
@@ -2396,6 +2410,7 @@ def restore_inverter_ep(inverter_id: int,
             iv = inverter_fleet.restore_inverter(db, tenant, inverter_id)
         except inverter_fleet.FleetError:
             raise HTTPException(404, "Inverter not found")
+        events.publish(tenant.id, "arrays.changed", {"array_id": iv.array_id})
         return {"ok": True, "inverter_id": iv.id}
 
 
@@ -2406,6 +2421,8 @@ def reset_layout_ep(authorization: str | None = Header(default=None)) -> dict:
     from . import inverter_fleet
     with SessionLocal() as db:
         n = inverter_fleet.reset_layout(db, tenant)
+        if n:
+            events.publish(tenant.id, "arrays.changed")
         return {"ok": True, "reset": n}
 
 
@@ -2455,6 +2472,7 @@ def connect_inverter(
         except InverterError as exc:
             raise HTTPException(400, str(exc))
 
+    events.publish(tenant.id, "arrays.changed", {"array_id": array_id})
     return {"ok": True, "site_name": result.get("site_name")}
 
 
@@ -2702,6 +2720,7 @@ def connect_solaredge(
         except InverterError as exc:
             raise HTTPException(400, f"SolarEdge error: {exc}")
 
+    events.publish(tenant.id, "arrays.changed", {"array_id": array_id})
     return {
         "ok": True,
         "site_name": result.get("site_name"),
@@ -2757,6 +2776,7 @@ def connect_locus(
         except InverterError as exc:
             raise HTTPException(400, f"Locus error: {exc}")
 
+    events.publish(tenant.id, "arrays.changed", {"array_id": array_id})
     return {
         "ok": True,
         "site_name": result.get("site_name"),
@@ -3300,6 +3320,8 @@ def solaredge_connect_account(
                                     source_label="vendor:solaredge")
 
         db.commit()
+        if connected:
+            events.publish(tenant.id, "arrays.changed")
 
         # Self-healing: kick off the deep multi-year history backfill for every
         # array we just attached so past years populate in Trends within minutes
@@ -3352,9 +3374,12 @@ def _attach_locus(db, arr: Array, creds: dict, site_id: int) -> InverterConnecti
 
 class LocusDiscoverBody(BaseModel):
     username: str
-    password: str
+    password: str = ""
     # Optional: normally derived from the login; override only for a sub-partner.
     partner_id: Optional[int] = None
+    # Use the password already in the vault for this username — the operator
+    # picked a saved login and should not have to retype anything.
+    use_saved: bool = False
 
 
 @router.post("/v1/array-owners/locus/discover")
@@ -3371,7 +3396,9 @@ def locus_discover(
     _tenant = _tenant_from_bearer(authorization)
     _guard_vendor_discover(_tenant.id, "locus")
 
-    creds = {"username": body.username, "password": body.password}
+    with SessionLocal() as db:
+        creds = _resolve_vendor_creds(db, _tenant.id, "locus", body)
+        hint = _did_you_mean(db, _tenant.id, "locus", body.username)
     if body.partner_id is not None:
         creds["partner_id"] = body.partner_id
 
@@ -3380,7 +3407,7 @@ def locus_discover(
     except InverterScopeError as exc:
         raise HTTPException(400, str(exc))
     except InverterAuthError as exc:
-        raise HTTPException(400, str(exc))
+        raise HTTPException(400, f"{exc}{hint}")
     except InverterError as exc:
         raise HTTPException(502, f"Locus error: {exc}")
 
@@ -3393,7 +3420,9 @@ def locus_discover(
 
 class LocusConnectAccountBody(BaseModel):
     username: str
-    password: str
+    password: str = ""
+    # Use the vault's password for this username (operator picked a saved login).
+    use_saved: bool = False
     # Optional: normally derived from the login; override only for a sub-partner.
     partner_id: Optional[int] = None
     # When omitted, every discovered site is connected.
@@ -3583,6 +3612,8 @@ def locus_connect_account(
             connected.append(entry)
 
         db.commit()
+        if connected:
+            events.publish(tenant.id, "arrays.changed")
 
         # Self-healing: kick off the deep multi-year history backfill for every
         # array we just attached so past years populate in Trends within minutes
@@ -3844,6 +3875,8 @@ def fronius_connect_account(
                                     source_label="vendor:fronius")
 
         db.commit()
+        if connected:
+            events.publish(tenant.id, "arrays.changed")
 
         # Self-healing: deep multi-year history backfill for every array we just
         # attached so past years populate in Trends within minutes. Best-effort;
@@ -3871,7 +3904,9 @@ def fronius_connect_account(
 
 class AlsoEnergyConnectAccountBody(BaseModel):
     username: str
-    password: str
+    password: str = ""
+    # Use the vault's password for this username (operator picked a saved login).
+    use_saved: bool = False
     # When omitted, every discovered site is connected.
     site_ids: Optional[list[int]] = None
     # Generation-reports onboarding: file the connected sites under this client
@@ -3890,9 +3925,101 @@ def _attach_alsoenergy(db, arr: Array, creds: dict, site_id: int) -> None:
     _connect_inverter(db, arr, "alsoenergy", config)
 
 
+def saved_vendor_logins(db, tenant_id: str, vendor: str | None = None) -> list[dict]:
+    """Every monitoring login this tenant already has in the vault.
+
+    Usernames only — never a password. Lets the UI offer "use the login you
+    already have" instead of asking an operator to retype a portal username
+    from memory (Bruce, 2026-07-24, typed `Johnson_Rental_and_Hardware` for the
+    saved `johnson_hardware_and_rental` and was locked out of his own account
+    by a word-order slip no normalizer can fix).
+    """
+    rows = db.execute(
+        select(InverterConnection, Array)
+        .join(Array, Array.id == InverterConnection.array_id)
+        .where(Array.tenant_id == tenant_id, Array.deleted_at.is_(None))
+    ).all()
+    by_key: dict[tuple[str, str], dict] = {}
+    for conn, _arr in rows:
+        if vendor and conn.vendor != vendor:
+            continue
+        username = str((conn.config or {}).get("username") or "").strip()
+        if not username:
+            continue  # key-only vendors (SolarEdge) have no username to offer
+        key = (conn.vendor, username.lower())
+        entry = by_key.setdefault(key, {
+            "vendor": conn.vendor, "username": username, "arrays": 0,
+        })
+        entry["arrays"] += 1
+    return sorted(by_key.values(), key=lambda e: (e["vendor"], e["username"]))
+
+
+def _saved_vendor_config(db, tenant_id: str, vendor: str, username: str) -> dict | None:
+    """The stored config for one saved (vendor, username), or None.
+
+    Matched case-insensitively on the username so the operator picking a login
+    from the list always resolves, regardless of how it was originally typed.
+    """
+    rows = db.execute(
+        select(InverterConnection, Array)
+        .join(Array, Array.id == InverterConnection.array_id)
+        .where(
+            Array.tenant_id == tenant_id,
+            Array.deleted_at.is_(None),
+            InverterConnection.vendor == vendor,
+        )
+    ).all()
+    want = (username or "").strip().lower()
+    for conn, _arr in rows:
+        cfg = conn.config or {}
+        if str(cfg.get("username") or "").strip().lower() == want:
+            return dict(cfg)
+    return None
+
+
+def _resolve_vendor_creds(db, tenant_id: str, vendor: str, body) -> dict:
+    """Credentials for a discover/connect call: the saved vault entry when the
+    operator picked an existing login, otherwise what they typed."""
+    if getattr(body, "use_saved", False):
+        cfg = _saved_vendor_config(db, tenant_id, vendor, body.username)
+        if cfg is None:
+            raise HTTPException(
+                404,
+                f"No saved {vendor} login named {body.username!r} on this account.",
+            )
+        return {"username": cfg.get("username"), "password": cfg.get("password")}
+    if not (body.password or ""):
+        raise HTTPException(400, "password is required")
+    return {"username": (body.username or "").strip(), "password": body.password}
+
+
+def _did_you_mean(db, tenant_id: str, vendor: str, typed: str) -> str:
+    """Append the saved usernames to a user-not-found error, so a near-miss is
+    self-correcting instead of a dead end."""
+    saved = [e["username"] for e in saved_vendor_logins(db, tenant_id, vendor)]
+    if not saved:
+        return ""
+    shown = ", ".join(repr(s) for s in saved[:3])
+    return f" This account already has a saved login: {shown} — pick it above instead of retyping."
+
+
+@router.get("/v1/array-owners/vendor-logins")
+def list_vendor_logins(
+    vendor: str | None = None,
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Monitoring logins already saved for this tenant (usernames only)."""
+    tenant = _tenant_from_bearer(authorization)
+    with SessionLocal() as db:
+        return {"ok": True, "logins": saved_vendor_logins(db, tenant.id, vendor)}
+
+
 class AlsoEnergyDiscoverBody(BaseModel):
     username: str
-    password: str
+    password: str = ""
+    # Use the password already in the vault for this username — the operator
+    # picked a saved login and should not have to retype anything.
+    use_saved: bool = False
 
 
 @router.post("/v1/array-owners/alsoenergy/discover")
@@ -3911,13 +4038,15 @@ def alsoenergy_discover(
     _tenant = _tenant_from_bearer(authorization)
     _guard_vendor_discover(_tenant.id, "alsoenergy")
 
-    creds = {"username": body.username, "password": body.password}
+    with SessionLocal() as db:
+        creds = _resolve_vendor_creds(db, _tenant.id, "alsoenergy", body)
+        hint = _did_you_mean(db, _tenant.id, "alsoenergy", body.username)
     try:
         sites = inverters.alsoenergy.discover_sites(creds)
     except InverterScopeError as exc:
         raise HTTPException(400, str(exc))
     except InverterAuthError as exc:
-        raise HTTPException(400, str(exc))
+        raise HTTPException(400, f"{exc}{hint}")
     except InverterError as exc:
         raise HTTPException(502, f"AlsoEnergy error: {exc}")
 
@@ -4095,6 +4224,8 @@ def alsoenergy_connect_account(
             connected.append(entry)
 
         db.commit()
+        if connected:
+            events.publish(tenant.id, "arrays.changed")
 
         for _e in connected:
             if _e.get("array_id"):
@@ -4195,6 +4326,7 @@ def connect_single(
         array_id = target.id
         array_name = target.name
 
+    events.publish(tenant.id, "arrays.changed", {"array_id": array_id})
     return {
         "ok": True,
         "vendor": vendor,
@@ -5154,6 +5286,13 @@ def _inverter_capture_for_tenant(tenant: Tenant, provider: str, body: "InverterC
 
         db.commit()
 
+    # Post-commit: the capture may have created arrays AND landed daily rows —
+    # push both so open dashboards refetch (also fires for the fan-out sibling,
+    # under ITS tenant id, since this write-body serves both).
+    if results:
+        events.publish(tenant.id, "arrays.changed")
+        events.publish(tenant.id, "generation.updated")
+
     fault_count = sum(1 for r in results if (r["error_count_today"] or 0) > 0)
     return {
         "ok": True,
@@ -5351,6 +5490,12 @@ def _utility_meter_capture_for_tenant(
 
         db.commit()
 
+    # Post-commit: accounts may have created arrays AND landed generation rows.
+    # One event per request (not per array), also for the fan-out sibling.
+    if results:
+        events.publish(tenant.id, "arrays.changed")
+        events.publish(tenant.id, "generation.updated")
+
     # With a fresh session on file, kick off an immediate bill absorb so the
     # owner's bills appear within minutes instead of waiting up to 6h for the
     # scheduler tick. This is the SAME data-sponge /v1/sync fires on GMP capture:
@@ -5370,6 +5515,11 @@ def _utility_meter_capture_for_tenant(
                     else:
                         from .worker import pull_bills_for_tenant
                         pull_bills_for_tenant(tid)
+                    # The absorb landed bills/arrays/daily rows AFTER the
+                    # capture's own events — push a follow-up so open dashboards
+                    # refetch (publish is thread-safe and swallows failures).
+                    events.publish(tid, "arrays.changed")
+                    events.publish(tid, "generation.updated")
                 except Exception:
                     log.exception("post-meter-capture bill absorb failed for %s", tid)
             Thread(target=_bg_absorb, args=(_tid, _prov), daemon=True).start()
@@ -7093,6 +7243,8 @@ def sma_connect_account(
             connected.append(entry)
 
         db.commit()
+        if connected:
+            events.publish(tenant.id, "arrays.changed")
 
         for _e in connected:
             if _e.get("array_id"):

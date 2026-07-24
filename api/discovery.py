@@ -30,6 +30,7 @@ from datetime import datetime
 
 from sqlalchemy import select
 
+from . import events
 from . import inverters
 from .inverters.base import InverterAuthError, InverterError
 from .models import (
@@ -556,6 +557,15 @@ def import_candidates(
         imported.append({"candidate_id": row.id, "array_id": arr.id, "name": name})
 
     db.commit()
+
+    # Importing lands BOTH kinds of rows: the destination client (possibly
+    # created above) and its new arrays. Post-commit so subscribers refetch
+    # fresh state; publish swallows its own failures. clients.changed fires
+    # even on an all-skipped import — the destination client may still have
+    # been created above.
+    events.publish(tenant_id, "clients.changed", {"client_id": client.id})
+    if imported:
+        events.publish(tenant_id, "arrays.changed", {"client_id": client.id})
 
     # Pull each new vendor array's history AFTER the commit so a slow backfill
     # can't hold the import transaction open.

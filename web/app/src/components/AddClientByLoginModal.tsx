@@ -24,6 +24,7 @@ import {
   useExtensionStatus,
   type ExtensionStatus,
 } from "../lib/useExtensionStatus";
+import { notifyFleetChanged } from "../lib/fleetEvents";
 import { wipeCookiesAndWait, gmpPortalUrl } from "../lib/openPortalTab";
 import { milesToState } from "../lib/stateGeo";
 
@@ -206,6 +207,10 @@ function ConnectedLoginsList({
       );
       setOpenFor(null);
       setName("");
+      // Broadcast so the canvas/table/chips behind the modal pick the new
+      // client up immediately (ClientsSection queues its own reload for
+      // modal close so open forms are never clobbered).
+      notifyFleetChanged("modal");
       onCreated();
     } catch (e) {
       toast.show(
@@ -502,6 +507,7 @@ function MonitorConnectForm({
           `${res.connected.length} SolarEdge array${res.connected.length === 1 ? "" : "s"} connected. ` +
             `File them under a client in Discover.`,
         );
+        notifyFleetChanged("modal");
         onReview();
         return;
       }
@@ -521,6 +527,7 @@ function MonitorConnectForm({
         `${client.name}: ${res.connected.length} array${res.connected.length === 1 ? "" : "s"} connected. ` +
           `We're pulling their generation now — the report will be ready shortly.`,
       );
+      notifyFleetChanged("modal");
       onCreated();
     } catch (e) {
       setErr(e instanceof Error ? e.message : "Couldn't create the client.");
@@ -732,6 +739,9 @@ function UtilityCloudForm({
         `Connected ${utility.name}. We'll pull this login's bills on the next sync ` +
           `and its arrays will appear automatically — no need to re-enter anything.`,
       );
+      // The backend eagerly creates a client for this login — broadcast so
+      // the roster/canvas show it without waiting for the poll.
+      notifyFleetChanged("modal");
       onCreated();
     } catch (e) {
       toast.show(

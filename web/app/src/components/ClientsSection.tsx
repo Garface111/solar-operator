@@ -37,7 +37,8 @@ import {
   UnauthorizedError,
 } from "../lib/api";
 import { rosterClients as rosterClients_ } from "../lib/rosterFilter";
-import { notifyFleetChanged } from "../lib/fleetEvents";
+import { fleetChangeSource, notifyFleetChanged } from "../lib/fleetEvents";
+import { LIVE_SYNC_EVENT } from "../lib/liveSync";
 import { type PollerHandle, pollUntilChanged } from "../lib/poller";
 import { useDashboardContext } from "../screens/DashboardLayout";
 
@@ -78,13 +79,23 @@ export function ClientsSection({ expandClientId }: Props) {
   const modalOpenRef = useRef(false);
   const pollingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pollingPulseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Fleet-change reload machinery: a bus event that lands while a modal is up
+  // is queued (one flag, not a backlog) and flushed the moment it closes, so
+  // server pushes never clobber an in-flight form but are never lost either.
+  const pendingFleetReloadRef = useRef(false);
+  const fleetReloadRef = useRef<(() => void) | null>(null);
 
   // Keep clientsRef in sync so polling closures always read the latest value.
   useEffect(() => { clientsRef.current = clients; }, [clients]);
 
-  // Track modal open state so polling yields while a modal is up.
+  // Track modal open state so polling yields while a modal is up. When the
+  // last modal closes, flush any fleet-change reload queued while it was open.
   useEffect(() => {
     modalOpenRef.current = adding || addingByLogin || importing || assigningNepool;
+    if (!modalOpenRef.current && pendingFleetReloadRef.current) {
+      pendingFleetReloadRef.current = false;
+      fleetReloadRef.current?.();
+    }
   }, [adding, addingByLogin, importing, assigningNepool]);
 
   // Master generation-report spreadsheet download (all clients, one quarter).
@@ -183,6 +194,10 @@ export function ClientsSection({ expandClientId }: Props) {
                 () => setPollingNewData(false),
                 1_000,
               );
+              // SSE-down fallback: the poll noticed a change, so tell the other
+              // surfaces (canvas, chips, billing) too. Our own bus handler
+              // ignores source "poll" — this tick just applied the fresh data.
+              notifyFleetChanged("poll");
             }
           }
         } catch { /* non-fatal — leave stale rather than wiping */ }
@@ -422,10 +437,12 @@ export function ClientsSection({ expandClientId }: Props) {
       });
 
     // Live-refresh whenever the sandbox above mutates its state (reparent,
-    // merge, detach, delete, etc.). Coalesce rapid bursts with a short debounce
-    // so dragging across multiple cards doesn't N+1 the backend.
+    // merge, detach, delete, etc.) — or the server pushes a change over the
+    // liveSync SSE plane. Coalesce rapid bursts with a short debounce so
+    // dragging across multiple cards (or an import burst) doesn't N+1 the
+    // backend.
     let debounce: ReturnType<typeof setTimeout> | null = null;
-    const onSandboxMutated = () => {
+    const reload = () => {
       if (debounce) clearTimeout(debounce);
       debounce = setTimeout(() => {
         if (cancelled) return;
@@ -435,7 +452,19 @@ export function ClientsSection({ expandClientId }: Props) {
         getNepoolStats()
           .then((s) => { if (!cancelled) setMissingNepoolCount(s.arrays_missing_nepool); })
           .catch(() => { /* non-critical */ });
-      }, 150);
+      }, 300);
+    };
+    fleetReloadRef.current = reload;
+    const onSandboxMutated = (e?: Event) => {
+      // Our own poll broadcast — that tick just applied the fresh roster
+      // itself; reloading again here would be a pointless second round-trip.
+      if (e && fleetChangeSource(e) === 'poll') return;
+      // Never clobber optimistic edits mid-modal — queue ONE reload for close.
+      if (modalOpenRef.current) {
+        pendingFleetReloadRef.current = true;
+        return;
+      }
+      reload();
     };
     window.addEventListener('so:sandbox:mutated', onSandboxMutated);
     // Bruce Jun 6: NEPOOL banner didn't clear after inline-edit assignment.
@@ -444,14 +473,19 @@ export function ClientsSection({ expandClientId }: Props) {
     // here, so the banner kept its stale count until a full page reload.
     // Reuse the same debounced refresh as sandbox mutations.
     window.addEventListener('so:arrays-changed', onSandboxMutated);
+    // Raw server pushes (liveSync dispatches these per SSE event, alongside the
+    // coalesced bus fire — the shared debounce above folds both into one GET).
+    window.addEventListener(LIVE_SYNC_EVENT, onSandboxMutated);
     getNepoolStats()
       .then((s) => { if (!cancelled) setMissingNepoolCount(s.arrays_missing_nepool); })
       .catch(() => { /* non-critical */ });
     return () => {
       cancelled = true;
       if (debounce) clearTimeout(debounce);
+      fleetReloadRef.current = null;
       window.removeEventListener('so:sandbox:mutated', onSandboxMutated);
       window.removeEventListener('so:arrays-changed', onSandboxMutated);
+      window.removeEventListener(LIVE_SYNC_EVENT, onSandboxMutated);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

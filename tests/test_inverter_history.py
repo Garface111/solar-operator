@@ -85,7 +85,11 @@ def test_backfill_never_clobbers_protected_source(monkeypatch):
         assert row.source == "utility_meter" and row.kwh == 999.0  # untouched
 
 
-def test_backfill_error_leaves_unstamped_for_retry(monkeypatch):
+def test_backfill_error_stamps_with_tagged_error_and_healer_retries(monkeypatch):
+    """REBUILT CONTRACT (conn-95 incident): a completed pass with failed years
+    STAMPS anyway — no more eternal-pending — records the failure on
+    last_error (tagged), and the healer picks it up for retry until a clean
+    pass clears the tag."""
     tid = _tenant(); aid = _array(tid, "SE Err"); cid = _conn(aid)
 
     def boom(vendor, config, start, end):
@@ -93,9 +97,30 @@ def test_backfill_error_leaves_unstamped_for_retry(monkeypatch):
     monkeypatch.setattr(inverters, "fetch_daily", boom)
 
     r = ih.backfill_connection_history(cid, start_year=2024)
-    assert r["stamped"] is False and r["had_error"] is True
+    assert r["stamped"] is True
+    assert r["failed_years"], "failed years must be reported"
     with SessionLocal() as db:
-        assert db.get(InverterConnection, cid).history_backfilled_at is None
+        conn = db.get(InverterConnection, cid)
+        assert conn.history_backfilled_at is not None  # visible as attempted
+        assert (conn.last_error or "").startswith("history backfill:")
+
+    # The healer must see it as an errored-retry candidate once the 6h
+    # cool-down has passed — backdate the stamp to simulate that.
+    from datetime import timedelta
+    from api.models import now
+    with SessionLocal() as db:
+        conn = db.get(InverterConnection, cid)
+        conn.history_backfilled_at = now() - timedelta(hours=7)
+        db.commit()
+
+    # A clean pass now clears the tag.
+    monkeypatch.setattr(inverters, "fetch_daily",
+                        lambda vendor, config, start, end: [])
+    healed = ih.heal_missing_history(start_year=2024)
+    assert healed["errored_retry"] >= 1
+    with SessionLocal() as db:
+        conn = db.get(InverterConnection, cid)
+        assert conn.last_error is None
 
 
 def test_orphaned_connection_stamped_not_retried_forever(monkeypatch):

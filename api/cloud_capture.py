@@ -43,6 +43,7 @@ _NO_VAULT = (defer(PortalCredential.secret_enc),
              defer(PortalCredential.session_state_enc))
 from .harvester import config
 from .harvester import credentials as cc
+from . import events
 from . import ratelimit
 
 log = logging.getLogger("cloud_capture")
@@ -373,6 +374,10 @@ def save_credential(body: CredentialIn, request: Request,
                 log.warning("ensure_client_for_login failed for %s/%s", t.id, provider,
                             exc_info=True)
         db.commit()
+    # The save may have surfaced a "Pulling bills…" client card — tell open
+    # dashboards to refetch (post-commit; publish swallows its own failures).
+    if body.enable:
+        events.publish(t.id, "clients.changed")
     # Bill Adapter Autopilot: classify platform family + arm known bill pull
     # (GMP JWT / SmartHub harvester) the moment a login is saved in Accounts.
     autopilot: dict = {}

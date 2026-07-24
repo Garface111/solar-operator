@@ -20,6 +20,7 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 
+from . import events
 from .account import tenant_from_session, require_not_demo
 from .adapters.solaredge import (
     SolarEdgeAuthError,
@@ -115,6 +116,9 @@ def setup_solaredge(
         arr.solaredge_site_id = site_id
         db.commit()
 
+    events.publish(t.id, "arrays.changed",
+                   {"client_id": client_id, "array_id": array_id})
+
     return {
         "ok": True,
         "needs_site_selection": False,
@@ -142,6 +146,10 @@ def preview_solaredge(
 
     if result["errors"]:
         raise HTTPException(502, f"SolarEdge pull failed: {result['errors'][0]}")
+
+    # pull_daily_for_array committed fresh DailyGeneration rows — announce them.
+    if result.get("days_pulled"):
+        events.publish(t.id, "generation.updated", {"array_id": array_id})
 
     # Re-query to get the actual rows for the sample (pull_daily_for_array committed)
     from datetime import date, timedelta
@@ -187,5 +195,8 @@ def disconnect_solaredge(
         arr.solaredge_api_key = None
         arr.solaredge_site_id = None
         db.commit()
+
+    events.publish(t.id, "arrays.changed",
+                   {"client_id": client_id, "array_id": array_id})
 
     return {"ok": True}

@@ -12,7 +12,10 @@
  * under #so-genrep so nothing leaks into the host page (and host element
  * rules stay out by specificity).
  *
- * Public API:  window.NepoolGenReports.mount(host) -> unmount()
+ * Public API:  window.NepoolGenReports = { mount, unmount }
+ *   mount(host) returns a cleanup (and stores it); unmount() invokes the
+ *   stored cleanup — reports.js calls unmount when the sub-view swaps away,
+ *   so React roots never leak between tab switches.
  */
 import { StrictMode, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -38,6 +41,7 @@ import {
   getAccount,
   getSession,
 } from "./lib/api";
+import { startLiveSync } from "./lib/liveSync";
 import "./index.css";
 import "./embed-sky.css"; // Sky material layer (THE FOLD Phase 3) - AFTER index.css so it wins order ties
 
@@ -197,10 +201,21 @@ function EmbedApp() {
 
 const ROOT_ID = "so-genrep"; // every built CSS selector is scoped under this id
 
+// Cleanup for the currently mounted instance, so unmount() (and a re-mount)
+// can tear down the previous React root instead of leaking it as a zombie.
+let activeCleanup: (() => void) | null = null;
+
 function mount(host: HTMLElement): () => void {
   // One instance at a time — the scoped stylesheet keys on a single id.
+  // Tear the previous instance down properly (React root + live sync), then
+  // sweep any orphaned host element a pre-unmount page may have left behind.
+  activeCleanup?.();
   const prior = document.getElementById(ROOT_ID);
   if (prior) prior.remove();
+
+  // The single freshness plane: one SSE stream per page pushing server-side
+  // changes onto the DOM bus so every surface refreshes without the 15s poll.
+  const stopLiveSync = startLiveSync();
 
   const el = document.createElement("div");
   el.id = ROOT_ID;
@@ -215,15 +230,24 @@ function mount(host: HTMLElement): () => void {
     </StrictMode>,
   );
 
-  return () => {
+  const cleanup = () => {
+    if (activeCleanup === cleanup) activeCleanup = null;
     root.unmount();
     el.remove();
+    stopLiveSync();
   };
+  activeCleanup = cleanup;
+  return cleanup;
+}
+
+/** Tear down the current instance (no-op when nothing is mounted). */
+function unmount(): void {
+  activeCleanup?.();
 }
 
 declare global {
   interface Window {
-    NepoolGenReports?: { mount: typeof mount };
+    NepoolGenReports?: { mount: typeof mount; unmount: typeof unmount };
     __soEventsBase?: string;
     __soGenrepEmbed?: boolean;
   }
@@ -240,4 +264,4 @@ window.__soGenrepEmbed = true;
 // origin; AO's CSP connect-src and the backend's CORS already allow it.
 window.__soEventsBase = "https://web-production-49c83.up.railway.app";
 
-window.NepoolGenReports = { mount };
+window.NepoolGenReports = { mount, unmount };

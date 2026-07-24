@@ -22,6 +22,7 @@ from typing import Optional
 from fastapi import APIRouter, Form, Header, HTTPException, UploadFile, File
 from sqlalchemy import select, func
 
+from . import events
 from .account import tenant_from_session, require_not_demo
 from .db import SessionLocal
 from .generation_sources import normalize_source
@@ -226,6 +227,11 @@ async def upload_daily_csv(
                 inserted += 1
 
         db.commit()
+
+    # Post-commit: fresh DailyGeneration rows landed interactively — tell open
+    # dashboards to refetch generation AND the array surfaces built on it.
+    events.publish(tenant.id, "generation.updated", {"array_id": array_id})
+    events.publish(tenant.id, "arrays.changed", {"array_id": array_id})
 
     all_days = sorted(d for d, _ in parsed_rows)
     return {

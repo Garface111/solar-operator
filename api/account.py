@@ -60,6 +60,17 @@ from .email_templates import (
 logger = logging.getLogger(__name__)
 
 
+def _emit(tenant_id: str, event_type: str, payload: Optional[dict] = None) -> None:
+    """Publish a tenant event AFTER a commit (subscribers refetch on receipt).
+
+    Deferred import: api.events imports tenant_from_session from THIS module, so
+    a top-level `from . import events` here would be circular. publish() swallows
+    its own failures — an event can never break the mutation it announces.
+    """
+    from . import events  # noqa: PLC0415 — see docstring
+    events.publish(tenant_id, event_type, payload)
+
+
 def _iso_utc(dt: Optional[datetime]) -> Optional[str]:
     """Serialize a datetime as an ISO-8601 string with an explicit UTC offset.
 
@@ -3257,6 +3268,7 @@ def create_client(body: ClientCreate,
                 c.name = name
         else:
             raise HTTPException(500, "Couldn't generate a unique placeholder name after 20 tries")
+        _emit(t.id, "clients.changed", {"client_id": c.id})
         return {"ok": True, "client": _client_to_dict(c, 0)}
 
 
@@ -3548,6 +3560,8 @@ def merge_client_into(src_client_id: int, body: MergeIntoBody,
         ))
 
         db.commit()
+        _emit(t.id, "clients.changed", {"client_id": dst.id})
+        _emit(t.id, "arrays.changed", {"client_id": dst.id})
         db.refresh(dst)
         # Re-count arrays for the response
         n_arrays = db.execute(
@@ -3625,6 +3639,8 @@ def undo_merge(body: MergeUndoBody,
 
         history.consumed_at = now_ts
         db.commit()
+        _emit(t.id, "clients.changed", {"client_id": src_id})
+        _emit(t.id, "arrays.changed", {"client_id": src_id})
         return {"ok": True, "restored_client_id": src_id}
 
 
@@ -3837,6 +3853,7 @@ def merge_array_into(src_array_id: int, body: ArrayMergeIntoBody,
         if not res.get("ok"):
             raise HTTPException(400, res.get("error", "merge failed"))
         db.commit()
+        _emit(t.id, "arrays.changed", {"array_id": dst.id})
         db.refresh(dst)
 
         new_count = billable_array_count(db, t.id)
@@ -3999,6 +4016,8 @@ def enable_generation_reports(authorization: str = Header(default=None)):
                 t.id, exc_info=True,
             )
         db.commit()
+        if newly_enabled or clients_seeded:
+            _emit(t.id, "clients.changed")
     return {
         "ok": True,
         "generation_reports": True,
@@ -4045,6 +4064,7 @@ def set_auto_send_all(body: AutoSendAllBody,
             if row is not None:
                 row.generation_reports = True
         db.commit()
+        _emit(t.id, "clients.changed")
         n_clients = len(clients)
         arrays = int(db.execute(
             select(func.count()).select_from(Array).where(
@@ -4119,6 +4139,7 @@ def update_client(client_id: int, body: ClientUpdate,
         if c.is_placeholder:
             c.is_placeholder = False
         db.commit(); db.refresh(c)
+        _emit(t.id, "clients.changed", {"client_id": c.id})
         n_arr = db.execute(
             select(Array).where(Array.client_id == c.id, not_vendor_only())
         ).scalars().all()
@@ -4169,6 +4190,9 @@ def delete_client(client_id: int,
             expires_at=now_ts + timedelta(minutes=5),
         ))
         db.commit()
+        _emit(t.id, "clients.changed", {"client_id": client_id})
+        if array_ids:
+            _emit(t.id, "arrays.changed", {"client_id": client_id})
         new_count = billable_array_count(db, t.id)
         sub_id = t.stripe_subscription_id
         tenant_email = t.contact_email
@@ -4708,6 +4732,7 @@ def create_array(client_id: int, body: ArrayCreate,
                 nickname=(acc.nickname or arr.name).strip(),
             ))
         db.commit()
+        _emit(t.id, "arrays.changed", {"client_id": c.id, "array_id": arr.id})
         accts = db.execute(
             select(UtilityAccount).where(UtilityAccount.array_id == arr.id)
         ).scalars().all()
@@ -4761,6 +4786,7 @@ def update_array(client_id: int, array_id: int, body: ArrayUpdate,
         if "fuel_type" in body.model_fields_set:
             a.fuel_type = normalize_fuel(body.fuel_type)
         db.commit()
+        _emit(t.id, "arrays.changed", {"client_id": c.id, "array_id": a.id})
         excluded_changed = bool(a.excluded) != was_excluded
         if excluded_changed:
             new_count = billable_array_count(db, t.id)
@@ -4814,6 +4840,7 @@ def delete_array(client_id: int, array_id: int,
             expires_at=now_ts + timedelta(minutes=5),
         ))
         db.commit()
+        _emit(t.id, "arrays.changed", {"client_id": c.id, "array_id": array_id})
         new_count = billable_array_count(db, t.id)
         sub_id = t.stripe_subscription_id
         tenant_email = t.contact_email
@@ -4879,6 +4906,7 @@ def restore_array(client_id: int, array_id: int,
 
         a.deleted_at = None
         db.commit()
+        _emit(t.id, "arrays.changed", {"client_id": c.id, "array_id": a.id})
 
         all_accts = db.execute(
             select(UtilityAccount).where(
@@ -4954,6 +4982,7 @@ def bulk_delete_arrays(
             expires_at=now_ts + timedelta(minutes=5),
         ))
         db.commit()
+        _emit(t.id, "arrays.changed")
         new_count = billable_array_count(db, t.id)
         sub_id = t.stripe_subscription_id
         tenant_email = t.contact_email
@@ -5019,6 +5048,9 @@ def bulk_delete_clients(
             expires_at=now_ts + timedelta(minutes=5),
         ))
         db.commit()
+        _emit(t.id, "clients.changed")
+        if array_ids:
+            _emit(t.id, "arrays.changed")
         new_count = billable_array_count(db, t.id)
         sub_id = t.stripe_subscription_id
         tenant_email = t.contact_email
@@ -5078,6 +5110,10 @@ def undo_delete(
 
         history.consumed_at = now_ts
         db.commit()
+        if restored_clients:
+            _emit(t.id, "clients.changed")
+        if restored_arrays or restored_uas:
+            _emit(t.id, "arrays.changed")
         new_count = billable_array_count(db, t.id)
         sub_id = t.stripe_subscription_id
         tenant_email = t.contact_email
@@ -5138,6 +5174,7 @@ def add_utility_account(client_id: int, array_id: int, body: AccountCreate,
             nickname=(body.nickname or a.name).strip(),
         )
         db.add(ac); db.commit()
+        _emit(t.id, "arrays.changed", {"client_id": c.id, "array_id": a.id})
         return {"ok": True, "account": {
             "id": ac.id, "provider": ac.provider,
             "provider_label": (get_provider(ac.provider) or {}).get("label", ac.provider),
@@ -5160,6 +5197,7 @@ def remove_utility_account(client_id: int, array_id: int, acct_id: int,
         if not ac or ac.tenant_id != t.id or ac.array_id != a.id:
             raise HTTPException(404, "Utility account not found")
         db.delete(ac); db.commit()
+        _emit(t.id, "arrays.changed", {"client_id": c.id, "array_id": a.id})
     return {"ok": True, "account_id": acct_id, "deleted": True}
 
 
