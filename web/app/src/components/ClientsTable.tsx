@@ -1,4 +1,5 @@
-import { Suspense, useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import { lazyWithRetry } from "../lib/lazyWithRetry";
 import { Modal } from "../ui/Modal";
@@ -237,15 +238,52 @@ function MoreMenu({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  // Fixed-viewport coords for the dropdown. The table lives inside an
+  // overflow-x-auto wrapper, and per CSS spec a non-visible overflow on one
+  // axis forces the OTHER axis to auto too — so the wrapper clipped this menu
+  // vertically (the last row's kebab got cut off, Ford 2026-07-24). We portal
+  // the menu out to the embed root and position it fixed so no overflow
+  // ancestor can clip it, while staying inside #so-genrep to keep the embed's
+  // scoped Tailwind styles.
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+
+  useLayoutEffect(() => {
+    if (!open || !ref.current) return;
+    const place = () => {
+      const btn = ref.current?.querySelector("button");
+      if (!btn) return;
+      const r = btn.getBoundingClientRect();
+      const menuH = menuRef.current?.offsetHeight ?? 132;
+      const below = window.innerHeight - r.bottom;
+      // Flip above the button when there isn't room below (last row near the
+      // fold) so the menu never spills off-screen.
+      const top = below < menuH + 12 ? r.top - menuH - 4 : r.bottom + 4;
+      setPos({ top, left: r.right - 148 });
+    };
+    place();
+    window.addEventListener("scroll", place, true);
+    window.addEventListener("resize", place);
+    return () => {
+      window.removeEventListener("scroll", place, true);
+      window.removeEventListener("resize", place);
+    };
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
     function handler(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Node;
+      if (ref.current?.contains(t) || menuRef.current?.contains(t)) return;
+      setOpen(false);
     }
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, [open]);
+
+  const portalTarget =
+    (typeof document !== "undefined" && document.getElementById("so-genrep")) ||
+    (typeof document !== "undefined" ? document.body : null);
 
   return (
     <div ref={ref} className="relative">
@@ -264,8 +302,13 @@ function MoreMenu({
           <circle cx="13" cy="8" r="1.5" />
         </svg>
       </button>
-      {open && (
-        <div className="absolute right-0 top-7 z-30 min-w-[148px] rounded-lg border border-zinc-200 bg-white py-1 shadow-lg">
+      {open && portalTarget && createPortal(
+        <div
+          ref={menuRef}
+          style={{ position: "fixed", top: pos?.top ?? -9999, left: pos?.left ?? -9999 }}
+          className="z-[9990] min-w-[148px] rounded-lg border border-zinc-200 bg-white py-1 shadow-lg"
+          onClick={(e) => e.stopPropagation()}
+        >
           <button
             type="button"
             onClick={(e) => {
@@ -316,7 +359,8 @@ function MoreMenu({
             {downloading && <Spinner className="h-3 w-3" />}
             Download .xlsx
           </button>
-        </div>
+        </div>,
+        portalTarget,
       )}
     </div>
   );

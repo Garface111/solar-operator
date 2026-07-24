@@ -48,6 +48,15 @@ body {
   padding: 14px;
   box-shadow: 0 10px 34px -12px rgba(20, 60, 120, 0.22);
 
+  /* Fill the space (Ford 2026-07-24: "expand the backdrop so it fills the
+     bottom half even with no/one client — right now it's way too cramped").
+     The frosted sheet reaches near the viewport bottom regardless of how many
+     clients there are; content taller than this (the 48-array sandbox) just
+     grows past it. The ~4.5rem offset clears the AO Invoices sub-nav the embed
+     mounts under. dvh so mobile browser chrome doesn't leave a dead strip. */
+  min-height: calc(100vh - 4.5rem);
+  min-height: calc(100dvh - 4.5rem);
+
   --so-cream: transparent;
   --so-cream-border: rgba(20, 60, 120, 0.13);
   --so-wood-border: rgba(20, 60, 120, 0.16);
