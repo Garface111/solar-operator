@@ -1,4 +1,5 @@
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import { Modal } from "../ui/Modal";
 import { Button } from "../ui/Button";
 import { useToast } from "../ui/Toast";
@@ -6,11 +7,17 @@ import {
   requestUtilityAddition,
   getProviders,
   getPortalAccess,
+  listDiscoveryCandidates,
+  getInverterVendors,
   createClient,
   setCloudCredential,
   discoverLocus,
   connectLocusAccount,
-  type LocusDiscoveredSite,
+  discoverAlsoEnergy,
+  connectAlsoEnergyAccount,
+  discoverSolarEdge,
+  connectSolarEdgeAccount,
+  type InverterVendorEntry,
   type PortalAccessUnassigned,
 } from "../lib/api";
 import {
@@ -58,48 +65,122 @@ const GMP_FRIENDLY = "Green Mountain Power";
 // {gmp,vec}_username + autopopulate that attaches the login's captured bills to
 // the new client). Inverter logins (fronius/chint) and co-op logins aren't
 // utility-bill sources for a NEPOOL client, so they're not offered here —
-// they're managed in the credential vault ("Add more logins" below).
+// they're managed in the credential vault.
 const ATTACHABLE: Record<string, { label: string; field: "gmp" | "vec" }> = {
   gmp: { label: "Green Mountain Power", field: "gmp" },
   vec: { label: "Vermont Electric Coop", field: "vec" },
 };
 
+/** Prettify a login into a default client name (four.general → "Four General"). */
+function nameFromLogin(login: string): string {
+  const s = (login || "").trim();
+  const local = s.includes("@") ? s.split("@")[0] : s;
+  const cleaned = local.replace(/[._-]+/g, " ").trim();
+  return (
+    cleaned.replace(/\b\w/g, (ch) => ch.toUpperCase()).slice(0, 120) ||
+    s.slice(0, 120) ||
+    "New client"
+  );
+}
+
+// ─── Section 1: the logins already feeding generation reports ───────────────
+
 /**
- * LinkedLoginsPicker — the primary Add-Client path (Ford 2026-07-16):
- * pick a utility login you've ALREADY linked (from GET /v1/portal-access
- * unassigned_logins, i.e. saved logins no client claims yet) and spin up a
- * client from it — no re-signing into a portal. Plus a big button that opens
- * the Master-account credential vault to add more logins.
+ * One row in the top section. Merged from two sources that overlap:
+ *   • GET /v1/account/discovery/candidates → every saved login we actively
+ *     read sites from, with its health and its curation counts.
+ *   • GET /v1/portal-access → unassigned_logins, i.e. saved utility logins no
+ *     client has claimed yet (these may not be in the pool at all).
+ * A login in both sources collapses into one row (provider+username, case
+ * insensitive), keeping the pool's counts AND the unassigned action.
  */
-function LinkedLoginsPicker({
+interface ConnectedLogin {
+  key: string;
+  provider: string;
+  label: string;
+  username: string;
+  kind: "vendor" | "utility";
+  lastError: string | null;
+  counts: { new: number; imported: number; ignored: number } | null;
+  /** Set when this is a saved utility login no client claims yet — the one
+   *  row that can become a client without re-entering anything. */
+  unassigned: PortalAccessUnassigned | null;
+}
+
+function mergeKey(provider: string, username: string): string {
+  return `${provider.trim().toLowerCase()}:${username.trim().toLowerCase()}`;
+}
+
+/**
+ * ConnectedLoginsList — "Logins feeding your generation reports". Every login
+ * we already hold, utility and monitoring alike, in one list with a plain
+ * status line. This replaces the old LinkedLoginsPicker, which only showed
+ * unassigned utility logins and hid the monitoring ones entirely.
+ */
+function ConnectedLoginsList({
   onCreated,
-  onAddMore,
+  onReview,
 }: {
   onCreated: () => void;
-  onAddMore: () => void;
+  onReview: () => void;
 }) {
   const toast = useToast();
-  const [logins, setLogins] = useState<PortalAccessUnassigned[] | null>(null);
+  const [rows, setRows] = useState<ConnectedLogin[] | null>(null);
   const [openFor, setOpenFor] = useState<string | null>(null);
   const [name, setName] = useState("");
   const [creating, setCreating] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    getPortalAccess()
-      .then((p) => {
-        if (cancelled) return;
-        setLogins(p.unassigned_logins.filter((l) => ATTACHABLE[l.provider]));
-      })
-      .catch(() => {
-        if (!cancelled) setLogins([]);
-      });
+    (async () => {
+      // Either source failing is non-fatal — show whatever we could load.
+      const [pool, access] = await Promise.all([
+        listDiscoveryCandidates().catch(() => null),
+        getPortalAccess().catch(() => null),
+      ]);
+      if (cancelled) return;
+
+      const byKey = new Map<string, ConnectedLogin>();
+      for (const g of pool?.logins ?? []) {
+        byKey.set(mergeKey(g.provider, g.login), {
+          key: mergeKey(g.provider, g.login),
+          provider: g.provider,
+          label: g.provider_label,
+          username: g.login,
+          kind: g.source_kind,
+          lastError: g.last_error,
+          counts: g.counts,
+          unassigned: null,
+        });
+      }
+      for (const l of access?.unassigned_logins ?? []) {
+        const k = mergeKey(l.provider, l.username);
+        const existing = byKey.get(k);
+        if (existing) {
+          existing.unassigned = l;
+        } else {
+          byKey.set(k, {
+            key: k,
+            provider: l.provider,
+            label: ATTACHABLE[l.provider]?.label || l.provider.toUpperCase(),
+            username: l.username,
+            kind: "utility",
+            lastError: null,
+            counts: null,
+            unassigned: l,
+          });
+        }
+      }
+      setRows([...byKey.values()]);
+    })();
     return () => {
       cancelled = true;
     };
   }, []);
 
-  async function create(login: PortalAccessUnassigned) {
+  async function create(row: ConnectedLogin) {
+    const login = row.unassigned;
+    if (!login) return;
     const nm = name.trim();
     if (!nm) {
       toast.show("Name the client first.", "info");
@@ -140,48 +221,48 @@ function LinkedLoginsPicker({
     <div className="space-y-3">
       <div>
         <p className="text-sm font-semibold text-zinc-900">
-          Add from a login you&apos;ve already linked
+          Logins feeding your generation reports
         </p>
         <p className="mt-0.5 text-xs text-zinc-500">
-          Pick a saved utility login and we&apos;ll create the client from it —
-          no need to sign in again.
+          Every utility and monitoring login we hold, and what it&apos;s
+          bringing in.
         </p>
       </div>
 
-      {logins === null ? (
+      {rows === null ? (
         <div className="rounded-xl border border-cream-border px-4 py-3 text-sm text-zinc-500">
-          Loading your linked logins&hellip;
+          Loading your logins&hellip;
         </div>
-      ) : logins.length === 0 ? (
+      ) : rows.length === 0 ? (
         <div className="rounded-xl border border-dashed border-cream-border px-4 py-3 text-sm text-zinc-600">
-          No unassigned utility logins yet. Add one below, then it&apos;ll show
-          up here to attach to a client.
+          No logins connected yet — add one below.
         </div>
       ) : (
         <ul className="space-y-2">
-          {logins.map((l) => {
-            const meta = ATTACHABLE[l.provider];
-            const isOpen = openFor === l.username + ":" + l.provider;
+          {rows.map((r) => {
+            const attachable = !!r.unassigned && !!ATTACHABLE[r.provider];
+            const isOpen = openFor === r.key;
+            const newCount = r.counts?.new ?? 0;
             return (
               <li
-                key={l.provider + ":" + l.username}
+                key={r.key}
                 className="rounded-xl border border-cream-border bg-white p-3 shadow-sm"
               >
-                <div className="flex items-center justify-between gap-3">
+                <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0">
                     <p className="truncate text-sm font-semibold text-zinc-900">
-                      {l.username}
+                      {r.label}
                     </p>
-                    <p className="text-xs text-zinc-500">
-                      {meta.label}
-                      {l.status === "automated" ? " · syncing automatically" : ""}
+                    <p className="truncate text-xs text-zinc-500">
+                      {r.username}
                     </p>
+                    <LoginStatusLine row={r} />
                   </div>
-                  {!isOpen && (
+                  {attachable && !isOpen && (
                     <Button
                       onClick={() => {
-                        setOpenFor(l.username + ":" + l.provider);
-                        setName("");
+                        setOpenFor(r.key);
+                        setName(nameFromLogin(r.username));
                       }}
                       className="shrink-0 px-3 py-1.5 text-xs"
                     >
@@ -189,6 +270,17 @@ function LinkedLoginsPicker({
                     </Button>
                   )}
                 </div>
+
+                {newCount > 0 && (
+                  <button
+                    type="button"
+                    onClick={onReview}
+                    className="mt-2 text-xs font-medium text-primary-600 hover:underline"
+                  >
+                    Review {newCount} site{newCount === 1 ? "" : "s"} →
+                  </button>
+                )}
+
                 {isOpen && (
                   <div className="mt-3 flex flex-col gap-2 sm:flex-row">
                     <input
@@ -196,14 +288,14 @@ function LinkedLoginsPicker({
                       value={name}
                       onChange={(e) => setName(e.target.value)}
                       onKeyDown={(e) => {
-                        if (e.key === "Enter") void create(l);
+                        if (e.key === "Enter") void create(r);
                       }}
                       placeholder="Client name (e.g. Town of Glover)"
                       className="min-w-0 flex-1 rounded-lg border border-cream-border px-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-primary-400 focus:outline-none focus:ring-2 focus:ring-primary-500/30"
                     />
                     <div className="flex gap-2">
                       <Button
-                        onClick={() => void create(l)}
+                        onClick={() => void create(r)}
                         disabled={creating || !name.trim()}
                         className="px-3 py-2 text-sm"
                       >
@@ -224,254 +316,166 @@ function LinkedLoginsPicker({
           })}
         </ul>
       )}
-
-      <button
-        type="button"
-        onClick={onAddMore}
-        className="flex w-full items-center justify-center gap-2 rounded-xl bg-primary-600 px-4 py-3 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-primary-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
-      >
-        <span aria-hidden className="text-base leading-none">＋</span>
-        Add more logins to the utility accounts
-      </button>
     </div>
   );
 }
 
+/** The one plain sentence under a login: what it's actually done for you.
+ *  A last_error wins the row's attention — that's how a stale password
+ *  surfaces without needing its own banner. */
+function LoginStatusLine({ row }: { row: ConnectedLogin }) {
+  if (row.lastError) {
+    return (
+      <p className="mt-0.5 text-xs font-medium text-amber-700">
+        Needs attention — {row.lastError}
+      </p>
+    );
+  }
+  const imported = row.counts?.imported ?? 0;
+  const fresh = row.counts?.new ?? 0;
+  if (imported > 0) {
+    return (
+      <p className="mt-0.5 text-xs text-zinc-500">
+        {imported} array{imported === 1 ? "" : "s"} in your system
+        {fresh > 0 ? ` · ${fresh} new to review` : ""}
+      </p>
+    );
+  }
+  if (fresh > 0) {
+    return (
+      <p className="mt-0.5 text-xs text-zinc-500">
+        {fresh} site{fresh === 1 ? "" : "s"} found — none added yet
+      </p>
+    );
+  }
+  if (row.unassigned) {
+    return (
+      <p className="mt-0.5 text-xs text-zinc-500">Not linked to a client yet</p>
+    );
+  }
+  return null;
+}
+
+// ─── Section 2: one search, then one form ───────────────────────────────────
+
 /**
- * CloudAddLoginForm — the Cloud-Capture "Add a client" path (Ford 2026-07-16).
- *
- * On a cloud-capture tenant the operator should NOT be sent to the utility's
- * website to sign in with the Chrome extension. Instead they hand us the login
- * (utility + username + password + consent); we store it server-side
- * (POST /v1/cloud-capture/credentials) and the backend immediately spins up a
- * "Pulling bills…" client NAMED FROM THE LOGIN (ensure_client_for_login), then
- * the headless harvester signs in and fills that client's arrays. No extension.
+ * One searchable thing you can log into — a utility portal or a monitoring
+ * vendor. The two catalogs (GET /v1/providers and
+ * GET /v1/array-owners/inverter-vendors) merge into this single shape so the
+ * operator searches once instead of choosing a category first.
  */
-function CloudAddLoginForm({
-  portals,
+interface CatalogEntry {
+  key: string;
+  kind: "utility" | "monitoring";
+  code: string;
+  label: string;
+  /** Small trailing note in the row — state for a utility, blank otherwise. */
+  hint: string;
+  /** Utility only. */
+  utility?: SmartHubEntry;
+  /** Monitoring only. */
+  vendor?: InverterVendorEntry;
+  /** Distance to the operator, when they've shared their location. */
+  miles?: number | null;
+}
+
+/** Which connect surface a monitoring vendor gets here. Vendors with no
+ *  account-level connect path in this modal fall through to "unsupported" —
+ *  they're connected from an array's monitoring panel instead, and we say so
+ *  rather than showing a form that can't finish. */
+type MonitorMode =
+  | "login-discover"
+  | "key-account"
+  | "unsupported";
+
+function monitorMode(v: InverterVendorEntry): MonitorMode {
+  if (!v.available) return "unsupported";
+  if (v.connect_mode === "consent") return "unsupported";
+  // Both login-based monitors preview their sites first — never connect a whole
+  // account blind. A partner login can span several operators' sites, which is
+  // exactly what the pick step exists to catch.
+  if (v.code === "locus" || v.code === "alsoenergy") return "login-discover";
+  if (v.code === "solaredge") return "key-account";
+  return "unsupported";
+}
+
+/** A site checkbox row — Locus and SolarEdge discover results share this shape. */
+interface PickSite {
+  site_id: number;
+  name: string;
+  peak_power_kw?: number | null;
+}
+
+/**
+ * MonitorConnectForm — the one form for a monitoring vendor, driven by its
+ * connect mode. Generalized from the old Locus-only form:
+ *   • locus       → discover → pick sites → create client → connect-account
+ *   • alsoenergy  → NO discover route on the backend, so we connect the whole
+ *                   account in one call (it enumerates sites server-side)
+ *   • solaredge   → API key → discover → pick sites → connect-account. That
+ *                   endpoint takes no client_id, so we don't claim a client;
+ *                   the sites land in Discover for the operator to file.
+ */
+function MonitorConnectForm({
+  vendor,
   onCreated,
+  onReview,
 }: {
-  portals: SmartHubEntry[];
+  vendor: InverterVendorEntry;
   onCreated: () => void;
+  onReview: () => void;
 }) {
   const toast = useToast();
-  // Utility selection: GMP by default, or a co-op picked from the live list.
-  const [util, setUtil] = useState<{ provider: string; label: string; host: string }>({
-    provider: "gmp",
-    label: GMP_FRIENDLY,
-    host: "",
-  });
-  const [pickingUtil, setPickingUtil] = useState(false);
-  const [utilQuery, setUtilQuery] = useState("");
+  const mode = monitorMode(vendor);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [consent, setConsent] = useState(false);
-  const [saving, setSaving] = useState(false);
-
-  const utilMatches = useMemo(() => {
-    const q = utilQuery.trim().toLowerCase();
-    const base = q
-      ? portals.filter(
-          (p) => p.name.toLowerCase().includes(q) || p.hint.toLowerCase().includes(q),
-        )
-      : portals;
-    return base.slice(0, 40);
-  }, [portals, utilQuery]);
-
-  async function submit() {
-    const user = username.trim();
-    if (!user) {
-      toast.show("Enter the login's username or email.", "info");
-      return;
-    }
-    if (!password) {
-      toast.show("Enter the login's password.", "info");
-      return;
-    }
-    if (!consent) {
-      toast.show("Tick the box to store this login securely.", "info");
-      return;
-    }
-    setSaving(true);
-    try {
-      await setCloudCredential({
-        provider: util.provider,
-        username: user,
-        password,
-        login_host: util.host || null,
-        enable: true,
-        consent: true,
-      });
-      toast.success(
-        `Connected ${util.label}. We'll pull this login's bills on the next sync ` +
-          `and its arrays will appear automatically — no need to re-enter anything.`,
-      );
-      onCreated();
-    } catch (e) {
-      toast.show(
-        e instanceof Error ? e.message : "Couldn't save that login — try again.",
-        "error",
-      );
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div className="space-y-3">
-      <div>
-        <p className="text-sm font-semibold text-zinc-900">Add a client by its utility login</p>
-        <p className="mt-0.5 text-xs text-zinc-500">
-          Give us the login and we create the client from it — no signing into a
-          portal, no extension. Their arrays fill in as we pull the bills.
-        </p>
-      </div>
-
-      {/* Utility selector */}
-      <div>
-        <label className="mb-1 block text-xs font-semibold uppercase tracking-wide text-zinc-500">
-          Utility
-        </label>
-        {!pickingUtil ? (
-          <button
-            type="button"
-            onClick={() => {
-              setPickingUtil(true);
-              setUtilQuery("");
-            }}
-            className="flex w-full items-center justify-between rounded-lg border border-cream-border bg-white px-3 py-2 text-left text-sm text-zinc-900 hover:border-primary-400"
-          >
-            <span>{util.label}</span>
-            <span className="text-xs text-primary-700">Change ▾</span>
-          </button>
-        ) : (
-          <div className="rounded-lg border border-cream-border bg-white p-2">
-            <input
-              autoFocus
-              value={utilQuery}
-              onChange={(e) => setUtilQuery(e.target.value)}
-              placeholder="Search utilities…"
-              className="mb-2 w-full rounded-md border border-cream-border px-2 py-1.5 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-primary-400 focus:outline-none"
-            />
-            <ul className="max-h-40 space-y-0.5 overflow-y-auto">
-              <li>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setUtil({ provider: "gmp", label: GMP_FRIENDLY, host: "" });
-                    setPickingUtil(false);
-                  }}
-                  className="w-full rounded-md px-2 py-1.5 text-left text-sm text-zinc-800 hover:bg-primary-50"
-                >
-                  {GMP_FRIENDLY} <span className="text-xs text-zinc-400">· VT</span>
-                </button>
-              </li>
-              {utilMatches.map((p) => (
-                <li key={p.provider}>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setUtil({ provider: p.provider, label: p.name, host: p.host });
-                      setPickingUtil(false);
-                    }}
-                    className="w-full rounded-md px-2 py-1.5 text-left text-sm text-zinc-800 hover:bg-primary-50"
-                  >
-                    {p.name} <span className="text-xs text-zinc-400">· {p.hint}</span>
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-      </div>
-
-      {/* Credentials */}
-      <div className="grid gap-2 sm:grid-cols-2">
-        <input
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          placeholder="Login username or email"
-          autoComplete="off"
-          className="rounded-lg border border-cream-border px-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-primary-400 focus:outline-none focus:ring-2 focus:ring-primary-500/30"
-        />
-        <input
-          value={password}
-          onChange={(e) => setPassword(e.target.value)}
-          type="password"
-          placeholder="Login password"
-          autoComplete="new-password"
-          className="rounded-lg border border-cream-border px-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-primary-400 focus:outline-none focus:ring-2 focus:ring-primary-500/30"
-        />
-      </div>
-
-      <label className="flex items-start gap-2 text-xs text-zinc-600">
-        <input
-          type="checkbox"
-          checked={consent}
-          onChange={(e) => setConsent(e.target.checked)}
-          className="mt-0.5 h-4 w-4 shrink-0 rounded border-cream-border text-primary-600 focus:ring-primary-500/40"
-        />
-        <span>
-          Store this login securely on our servers so we can pull {util.label}
-          &rsquo;s bills automatically. Remove it anytime in the credential vault.
-        </span>
-      </label>
-
-      <Button
-        onClick={() => void submit()}
-        disabled={saving || !username.trim() || !password || !consent}
-        className="w-full py-2.5 text-sm"
-      >
-        {saving ? "Connecting…" : "Add client from this login"}
-      </Button>
-    </div>
-  );
-}
-
-/** Prettify a login into a default client name (four.general → "Four General"). */
-function nameFromLogin(login: string): string {
-  const s = (login || "").trim();
-  const local = s.includes("@") ? s.split("@")[0] : s;
-  const cleaned = local.replace(/[._-]+/g, " ").trim();
-  return (
-    cleaned.replace(/\b\w/g, (ch) => ch.toUpperCase()).slice(0, 120) ||
-    s.slice(0, 120) ||
-    "New client"
-  );
-}
-
-/**
- * LocusAddLoginForm — the login → client → arrays onboarding for a Locus
- * (SolarNOC) monitoring login. Unlike a utility login, Locus settles off a
- * site monitor, so the flow is: enter the login → we discover every site under
- * it → the operator confirms which sites are theirs → we create ONE client
- * named from the login and file the picked sites under it as arrays, then pull
- * their generation so the report is ready. (Ford 2026-07-23.)
- */
-function LocusAddLoginForm({ onCreated }: { onCreated: () => void }) {
-  const toast = useToast();
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
+  const [apiKey, setApiKey] = useState("");
   const [clientName, setClientName] = useState("");
-  const [sites, setSites] = useState<LocusDiscoveredSite[] | null>(null);
+  const [sites, setSites] = useState<PickSite[] | null>(null);
   const [picked, setPicked] = useState<Set<number>>(new Set());
   const [busy, setBusy] = useState<"discover" | "create" | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
   async function discover() {
-    const user = username.trim();
-    if (!user) { toast.show("Enter your Locus username.", "info"); return; }
-    if (!password) { toast.show("Enter your Locus password.", "info"); return; }
     setBusy("discover");
     setErr(null);
     try {
-      const r = await discoverLocus(user, password);
+      if (mode === "key-account") {
+        const key = apiKey.trim();
+        if (!key) {
+          toast.show("Paste your SolarEdge API key.", "info");
+          return;
+        }
+        const r = await discoverSolarEdge(key);
+        setSites(r.sites);
+        setPicked(new Set(r.sites.map((s) => s.site_id))); // all pre-checked
+        if (!r.sites.length) setErr(r.message || "No sites found on that key.");
+        return;
+      }
+      const user = username.trim();
+      if (!user) {
+        toast.show(`Enter your ${vendor.label} username.`, "info");
+        return;
+      }
+      if (!password) {
+        toast.show(`Enter your ${vendor.label} password.`, "info");
+        return;
+      }
+      if (!clientName.trim()) setClientName(nameFromLogin(user));
+      const r =
+        vendor.code === "alsoenergy"
+          ? await discoverAlsoEnergy(user, password)
+          : await discoverLocus(user, password);
       setSites(r.sites);
       setPicked(new Set(r.sites.map((s) => s.site_id))); // all pre-checked
-      if (!clientName.trim()) setClientName(nameFromLogin(user));
-      if (!r.sites.length) setErr(r.message || "No sites found under this login.");
+      if (!r.sites.length)
+        setErr(r.message || "No sites found under this login.");
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "Couldn't reach Locus with that login.");
+      setErr(
+        e instanceof Error
+          ? e.message
+          : `Couldn't reach ${vendor.label} with that login.`,
+      );
     } finally {
       setBusy(null);
     }
@@ -487,16 +491,32 @@ function LocusAddLoginForm({ onCreated }: { onCreated: () => void }) {
   }
 
   async function create() {
-    const name = clientName.trim() || nameFromLogin(username);
-    if (!picked.size) { toast.show("Pick at least one site.", "info"); return; }
     setBusy("create");
     setErr(null);
     try {
+      if (mode === "key-account") {
+        // This endpoint has no client_id — connect the sites, then point the
+        // operator at Discover to file them under a client.
+        const res = await connectSolarEdgeAccount(apiKey.trim(), [...picked]);
+        toast.success(
+          `${res.connected.length} SolarEdge array${res.connected.length === 1 ? "" : "s"} connected. ` +
+            `File them under a client in Discover.`,
+        );
+        onReview();
+        return;
+      }
+      const name = clientName.trim() || nameFromLogin(username);
       const client = await createClient({ name });
-      const res = await connectLocusAccount(username.trim(), password, {
-        siteIds: [...picked],
-        clientId: client.id,
-      });
+      const res =
+        vendor.code === "alsoenergy"
+          ? await connectAlsoEnergyAccount(username.trim(), password, {
+              siteIds: [...picked],
+              clientId: client.id,
+            })
+          : await connectLocusAccount(username.trim(), password, {
+              siteIds: [...picked],
+              clientId: client.id,
+            });
       toast.success(
         `${client.name}: ${res.connected.length} array${res.connected.length === 1 ? "" : "s"} connected. ` +
           `We're pulling their generation now — the report will be ready shortly.`,
@@ -509,45 +529,84 @@ function LocusAddLoginForm({ onCreated }: { onCreated: () => void }) {
     }
   }
 
+  if (mode === "unsupported") {
+    return (
+      <div className="space-y-2">
+        <p className="text-sm font-semibold text-zinc-900">{vendor.label}</p>
+        {vendor.note && <p className="text-xs text-zinc-600">{vendor.note}</p>}
+        <p className="text-xs text-zinc-500">
+          We can&apos;t connect this one from here yet — open the array in your
+          dashboard and connect it from its monitoring panel.
+        </p>
+      </div>
+    );
+  }
+
+  // Every monitor previews its sites, so there is always something to check.
+  const canCreate = picked.size > 0;
+
   return (
     <div className="space-y-3">
-      <p className="text-sm font-semibold text-zinc-900">Connect a Locus (SolarNOC) login</p>
-      <p className="text-xs text-zinc-500">
-        We’ll find every site under this login. The login becomes a client and the
-        sites you keep become its arrays — ready for generation reports.
+      <p className="text-sm font-semibold text-zinc-900">
+        Connect {vendor.label}
       </p>
-      <input
-        type="text"
-        autoComplete="off"
-        placeholder="Locus username"
-        value={username}
-        onChange={(e) => setUsername(e.target.value)}
-        className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm focus:border-primary-400 focus:outline-none"
-      />
-      <input
-        type="password"
-        autoComplete="off"
-        placeholder="Locus password"
-        value={password}
-        onChange={(e) => setPassword(e.target.value)}
-        className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm focus:border-primary-400 focus:outline-none"
-      />
+      <p className="text-xs text-zinc-500">
+        {mode === "key-account"
+          ? "Paste an account-level API key and we'll show you every site it can read before anything is saved."
+          : "We'll find every site under this login. The login becomes a client and the sites you keep become its arrays — ready for generation reports."}
+      </p>
+
+      {mode === "key-account" ? (
+        <input
+          type="password"
+          autoComplete="off"
+          placeholder="SolarEdge API key"
+          value={apiKey}
+          onChange={(e) => setApiKey(e.target.value)}
+          className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm focus:border-primary-400 focus:outline-none"
+        />
+      ) : (
+        <>
+          <input
+            type="text"
+            autoComplete="off"
+            placeholder={`${vendor.label} username`}
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm focus:border-primary-400 focus:outline-none"
+          />
+          <input
+            type="password"
+            autoComplete="off"
+            placeholder={`${vendor.label} password`}
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            className="w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm focus:border-primary-400 focus:outline-none"
+          />
+        </>
+      )}
 
       {sites === null ? (
-        <Button disabled={busy !== null} onClick={discover} className="w-full py-2 text-sm">
+        <Button
+          disabled={busy !== null}
+          onClick={discover}
+          className="w-full py-2 text-sm"
+        >
           {busy === "discover" ? "Finding sites…" : "Find my sites"}
         </Button>
       ) : (
         <>
-          <label className="block text-xs font-medium text-zinc-600">
-            Client name
-            <input
-              type="text"
-              value={clientName}
-              onChange={(e) => setClientName(e.target.value)}
-              className="mt-1 w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm text-zinc-900 focus:border-primary-400 focus:outline-none"
-            />
-          </label>
+          {mode !== "key-account" && (
+            <label className="block text-xs font-medium text-zinc-600">
+              Client name
+              <input
+                type="text"
+                value={clientName}
+                onChange={(e) => setClientName(e.target.value)}
+                className="mt-1 w-full rounded-lg border border-zinc-200 px-3 py-2 text-sm text-zinc-900 focus:border-primary-400 focus:outline-none"
+              />
+            </label>
+          )}
           {sites.length > 0 && (
             <div className="rounded-lg border border-zinc-200 bg-white">
               <div className="flex items-center justify-between border-b border-zinc-100 px-3 py-2">
@@ -590,15 +649,27 @@ function LocusAddLoginForm({ onCreated }: { onCreated: () => void }) {
               </ul>
             </div>
           )}
-          <Button disabled={busy !== null || !picked.size} onClick={create} className="w-full py-2 text-sm">
+          <Button
+            disabled={busy !== null || !canCreate}
+            onClick={create}
+            className="w-full py-2 text-sm"
+          >
             {busy === "create"
-              ? "Creating client…"
-              : `Create client with ${picked.size} site${picked.size === 1 ? "" : "s"}`}
+              ? mode === "key-account"
+                ? "Connecting…"
+                : "Creating client…"
+              : mode === "key-account"
+                ? `Connect ${picked.size} site${picked.size === 1 ? "" : "s"}`
+                : `Create client with ${picked.size} site${picked.size === 1 ? "" : "s"}`}
           </Button>
           <button
             type="button"
             className="w-full text-xs text-zinc-500 hover:underline"
-            onClick={() => { setSites(null); setPicked(new Set()); setErr(null); }}
+            onClick={() => {
+              setSites(null);
+              setPicked(new Set());
+              setErr(null);
+            }}
           >
             ← use a different login
           </button>
@@ -611,25 +682,136 @@ function LocusAddLoginForm({ onCreated }: { onCreated: () => void }) {
 }
 
 /**
- * AddClientByLoginModal — the "click a portal, sign in, done" flow.
+ * UtilityCloudForm — the cloud-capture connect form for a utility the operator
+ * has ALREADY chosen in the search. This is the old CloudAddLoginForm with its
+ * own utility picker removed: the search above is the picker now, so there's
+ * one search box in this modal instead of two.
  *
- * Earlier versions of this modal sat operators on a "Watching for sign-in…"
- * babysitting page after picking a portal. That was its own friction
- * surface — Ford called it "the live capture page" — and it added a
- * cognitive layer the operator never needed.
+ * We store the login server-side (POST /v1/cloud-capture/credentials) and the
+ * backend spins up a client named from the login (ensure_client_for_login),
+ * then the headless harvester signs in and fills that client's arrays.
+ */
+function UtilityCloudForm({
+  utility,
+  onCreated,
+}: {
+  utility: SmartHubEntry;
+  onCreated: () => void;
+}) {
+  const toast = useToast();
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [consent, setConsent] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  async function submit() {
+    const user = username.trim();
+    if (!user) {
+      toast.show("Enter the login's username or email.", "info");
+      return;
+    }
+    if (!password) {
+      toast.show("Enter the login's password.", "info");
+      return;
+    }
+    if (!consent) {
+      toast.show("Tick the box to store this login securely.", "info");
+      return;
+    }
+    setSaving(true);
+    try {
+      await setCloudCredential({
+        provider: utility.provider,
+        username: user,
+        password,
+        login_host: utility.host || null,
+        enable: true,
+        consent: true,
+      });
+      toast.success(
+        `Connected ${utility.name}. We'll pull this login's bills on the next sync ` +
+          `and its arrays will appear automatically — no need to re-enter anything.`,
+      );
+      onCreated();
+    } catch (e) {
+      toast.show(
+        e instanceof Error ? e.message : "Couldn't save that login — try again.",
+        "error",
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <p className="text-sm font-semibold text-zinc-900">
+        Connect {utility.name}
+      </p>
+      <p className="text-xs text-zinc-500">
+        Give us the login and we create the client from it — no signing into a
+        portal, no extension. Their arrays fill in as we pull the bills.
+      </p>
+
+      <div className="grid gap-2 sm:grid-cols-2">
+        <input
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          placeholder="Login username or email"
+          autoComplete="off"
+          className="rounded-lg border border-cream-border px-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-primary-400 focus:outline-none focus:ring-2 focus:ring-primary-500/30"
+        />
+        <input
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          type="password"
+          placeholder="Login password"
+          autoComplete="new-password"
+          className="rounded-lg border border-cream-border px-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-400 focus:border-primary-400 focus:outline-none focus:ring-2 focus:ring-primary-500/30"
+        />
+      </div>
+
+      <label className="flex items-start gap-2 text-xs text-zinc-600">
+        <input
+          type="checkbox"
+          checked={consent}
+          onChange={(e) => setConsent(e.target.checked)}
+          className="mt-0.5 h-4 w-4 shrink-0 rounded border-cream-border text-primary-600 focus:ring-primary-500/40"
+        />
+        <span>
+          Store this login securely on our servers so we can pull {utility.name}
+          &rsquo;s bills automatically. Remove it anytime in the credential vault.
+        </span>
+      </label>
+
+      <Button
+        onClick={() => void submit()}
+        disabled={saving || !username.trim() || !password || !consent}
+        className="w-full py-2.5 text-sm"
+      >
+        {saving ? "Connecting…" : "Add client from this login"}
+      </Button>
+    </div>
+  );
+}
+
+/**
+ * AddClientByLoginModal — two sections, no repetition.
  *
- * New flow:
- *   1. Operator picks GMP or a SmartHub utility (the SmartHub list is loaded
- *      live from /v1/providers, so it scales as we add utilities nationwide).
- *   2. We close the modal immediately and open the portal in a fresh
- *      foreground tab (extension wipes session cookies first).
- *   3. Operator signs in. The extension POSTs /v1/sync. Backend creates
- *      a Client. SO_CAPTURE_LANDED fires globally.
- *   4. A separate <CaptureListener> mounted in ClientsSection toasts
- *      "<Client name> added" and refreshes the list. The operator sees
- *      that toast from the dashboard tab whenever they come back.
- *   5. To add another, the operator clicks "+ Add client" again. Each
- *      click is a discrete decision; no chained-countdown decision tree.
+ * Section 1 lists every login already feeding generation reports (utility and
+ * monitoring together) with a plain status line, so the operator sees what
+ * they've got before adding anything. Section 2 is a single search across the
+ * utility catalog AND the monitoring-vendor catalog; picking one result reveals
+ * the one form that entry needs.
+ *
+ * Earlier versions stacked three near-identical credential forms — an
+ * unassigned-login picker, a utility form with its own utility picker, and a
+ * Locus form — three password fields on one screen. That's gone.
+ *
+ * The extension path underneath is unchanged: on a non-cloud tenant, picking a
+ * utility still opens its portal in a fresh tab after a cookie wipe, the
+ * extension POSTs /v1/sync, and <CaptureListener> in ClientsSection toasts the
+ * new client. This modal just closes on the way.
  */
 export function AddClientByLoginModal({
   open,
@@ -639,18 +821,22 @@ export function AddClientByLoginModal({
   cloudMode = false,
 }: Props) {
   const toast = useToast();
+  const navigate = useNavigate();
   // Cloud mode never needs extension probe UI — skip live probe noise.
   const ext = useExtensionStatus(open && !cloudMode);
 
-  // SmartHub portals, loaded live from the provider catalog (rows with a
-  // smarthub_host). Falls back to an empty list on error — GMP + the manual
-  // path always work regardless.
+  // The two catalogs behind the one search. SmartHub portals come from the
+  // provider catalog (rows with a smarthub_host); monitoring vendors come from
+  // the inverter-vendor catalog. Either failing is non-fatal — whatever loaded
+  // is searchable, and manual entry always works.
   const [smarthubPortals, setSmarthubPortals] = useState<SmartHubEntry[]>([]);
-  const [portalsLoaded, setPortalsLoaded] = useState(false);
+  const [vendors, setVendors] = useState<InverterVendorEntry[]>([]);
+  const [catalogLoaded, setCatalogLoaded] = useState(false);
   const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState<CatalogEntry | null>(null);
 
   // Operator location for "nearest utilities first". null = not requested or
-  // denied (we fall back to alphabetical). geoState tracks the UX of the ask.
+  // denied (we fall back to catalog order). geoState tracks the UX of the ask.
   const [coords, setCoords] = useState<{ lat: number; lng: number } | null>(null);
   const [geoState, setGeoState] = useState<
     "idle" | "prompting" | "granted" | "denied" | "unsupported"
@@ -675,6 +861,14 @@ export function AddClientByLoginModal({
     );
   }
 
+  // Close the modal and land the operator on the staging pool, where the sites
+  // a login can see get filed under clients. Same route in both routers (the
+  // standalone app and the embed's MemoryRouter).
+  const goReview = useCallback(() => {
+    onClose();
+    navigate("/discover");
+  }, [navigate, onClose]);
+
   // Re-probe whenever the modal opens so a freshly-installed extension
   // is detected without a page reload.
   useEffect(() => {
@@ -682,65 +876,115 @@ export function AddClientByLoginModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  // Load the SmartHub portal list once the modal opens (cached after first load).
+  // Load both catalogs once the modal opens (cached after first load).
   useEffect(() => {
-    if (!open || portalsLoaded) return;
+    if (!open || catalogLoaded) return;
     let cancelled = false;
     (async () => {
-      try {
-        const providers = await getProviders();
-        if (cancelled) return;
-        const portals: SmartHubEntry[] = providers
-          .filter((p) => p.scrape_status === "live" && p.smarthub_host)
-          .map((p) => ({
-            provider: p.code,
-            name: p.label,
-            hint: p.state || "SmartHub",
-            stateCode: (p.state || "").toUpperCase(),
-            url: p.portal_url || `https://${p.smarthub_host}/`,
-            host: p.smarthub_host || "",
-          }))
-          .sort((a, b) => a.name.localeCompare(b.name));
-        setSmarthubPortals(portals);
-      } catch {
-        // Non-fatal: GMP + manual entry still work. Leave the list empty.
-      } finally {
-        if (!cancelled) setPortalsLoaded(true);
-      }
+      const [providers, vendorList] = await Promise.all([
+        getProviders().catch(() => []),
+        getInverterVendors().catch(() => []),
+      ]);
+      if (cancelled) return;
+      const portals: SmartHubEntry[] = providers
+        .filter((p) => p.scrape_status === "live" && p.smarthub_host)
+        .map((p) => ({
+          provider: p.code,
+          name: p.label,
+          hint: p.state || "SmartHub",
+          stateCode: (p.state || "").toUpperCase(),
+          url: p.portal_url || `https://${p.smarthub_host}/`,
+          host: p.smarthub_host || "",
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+      setSmarthubPortals(portals);
+      setVendors(vendorList);
+      setCatalogLoaded(true);
     })();
     return () => {
       cancelled = true;
     };
-  }, [open, portalsLoaded]);
+  }, [open, catalogLoaded]);
 
-  // Filter by the search box first, then rank. When the operator has shared
-  // their location, rank by distance to each utility's state centroid (nearest
-  // first; unknown-state utilities sink to the bottom). Otherwise keep the
-  // alphabetical order the list was built with.
-  const filteredPortals = useMemo(() => {
+  // The one merged catalog the search runs over: GMP (special-cased — it's not
+  // a SmartHub co-op, it has its own version-aware login URL) + every live
+  // SmartHub utility + every monitoring vendor.
+  const catalog = useMemo<CatalogEntry[]>(() => {
+    const gmp: SmartHubEntry = {
+      provider: "gmp",
+      name: GMP_FRIENDLY,
+      hint: "VT",
+      stateCode: "VT",
+      url: "",
+      host: "",
+    };
+    const utilities: CatalogEntry[] = [gmp, ...smarthubPortals].map((u) => ({
+      key: `utility:${u.provider}`,
+      kind: "utility",
+      code: u.provider,
+      label: u.name,
+      hint: u.hint,
+      utility: u,
+    }));
+    const monitors: CatalogEntry[] = vendors.map((v) => ({
+      key: `monitoring:${v.code}`,
+      kind: "monitoring",
+      code: v.code,
+      label: v.label,
+      hint: "",
+      vendor: v,
+    }));
+    return [...utilities, ...monitors];
+  }, [smarthubPortals, vendors]);
+
+  // Typing filters both kinds into one list. An empty query shows a short
+  // default set (GMP, the account-level monitors, then the nearest few
+  // utilities) so the box is never blank. Distance ranking kicks in once the
+  // operator has shared their location; otherwise catalog order stands.
+  const results = useMemo<CatalogEntry[]>(() => {
     const q = query.trim().toLowerCase();
-    const base = !q
-      ? smarthubPortals
-      : smarthubPortals.filter(
-          (p) =>
-            p.name.toLowerCase().includes(q) ||
-            p.hint.toLowerCase().includes(q) ||
-            p.provider.toLowerCase().includes(q),
-        );
+    const withMiles = (e: CatalogEntry): CatalogEntry =>
+      coords && e.utility
+        ? { ...e, miles: milesToState(coords, e.utility.stateCode) }
+        : { ...e, miles: null };
+    const byDistance = (a: CatalogEntry, b: CatalogEntry) => {
+      // Unknown distance (no/blank state, or a monitoring vendor) sorts last.
+      if (a.miles == null && b.miles == null) return 0;
+      if (a.miles == null) return 1;
+      if (b.miles == null) return -1;
+      return a.miles - b.miles;
+    };
 
-    if (!coords) return base.map((p) => ({ ...p, miles: null as number | null }));
+    if (!q) {
+      const featured = [
+        "utility:gmp",
+        "monitoring:locus",
+        "monitoring:alsoenergy",
+        "monitoring:solaredge",
+      ];
+      const head = featured
+        .map((k) => catalog.find((e) => e.key === k))
+        .filter((e): e is CatalogEntry => !!e)
+        .map(withMiles);
+      const rest = catalog
+        .filter((e) => e.kind === "utility" && !featured.includes(e.key))
+        .map(withMiles)
+        .sort(byDistance)
+        .slice(0, 6);
+      return [...head, ...rest];
+    }
 
-    return base
-      .map((p) => ({ ...p, miles: milesToState(coords, p.stateCode) }))
-      .sort((a, b) => {
-        // Unknown distance (no/blank state) always sorts last.
-        if (a.miles == null && b.miles == null)
-          return a.name.localeCompare(b.name);
-        if (a.miles == null) return 1;
-        if (b.miles == null) return -1;
-        return a.miles - b.miles || a.name.localeCompare(b.name);
-      });
-  }, [smarthubPortals, query, coords]);
+    return catalog
+      .filter(
+        (e) =>
+          e.label.toLowerCase().includes(q) ||
+          e.code.toLowerCase().includes(q) ||
+          e.hint.toLowerCase().includes(q),
+      )
+      .map(withMiles)
+      .sort(byDistance)
+      .slice(0, 30);
+  }, [catalog, query, coords]);
 
   /**
    * pick — open a utility's login portal in a fresh tab after a cookie wipe.
@@ -835,6 +1079,13 @@ export function AddClientByLoginModal({
   const extensionAbsent = ext.status === "absent";
   const extensionUnknown = ext.status === "unknown";
 
+  // Every "we made something" path ends the same way: refresh the parent's
+  // roster and get out of the way.
+  const finish = () => {
+    void onCaptured();
+    onClose();
+  };
+
   return (
     <Modal
       open={open}
@@ -855,145 +1106,46 @@ export function AddClientByLoginModal({
       }
     >
       <div className="space-y-4">
-        {/* PRIMARY path (Ford 2026-07-16): reuse a login you've already linked,
-            + a big button to add more logins. The connect-a-new-portal picker
-            is demoted below the divider. */}
-        <LinkedLoginsPicker
-          onCreated={() => {
-            void onCaptured();
-            onClose();
-          }}
-          onAddMore={() => {
-            onClose();
-            const w = window as { __aoOpenCredentialVault?: (focus?: boolean) => void };
-            if (typeof w.__aoOpenCredentialVault === "function") {
-              w.__aoOpenCredentialVault(true);
-            } else {
-              // Fallback: route the host to the Master account tab where the
-              // credential vault lives.
-              try {
-                window.location.hash = "#account";
-              } catch {
-                /* ignore */
-              }
-            }
-          }}
-        />
+        {/* ── 1. What you already have ── */}
+        <ConnectedLoginsList onCreated={finish} onReview={goReview} />
 
-        {cloudMode ? (
-          <>
-            <div className="flex items-center gap-3 pt-1">
-              <span className="h-px flex-1 bg-cream-border" />
-              <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
-                or add a new login
-              </span>
-              <span className="h-px flex-1 bg-cream-border" />
-            </div>
-            <CloudAddLoginForm
-              portals={smarthubPortals}
-              onCreated={() => {
-                void onCaptured();
-                onClose();
-              }}
-            />
-          </>
-        ) : (
-          <>
-            <div className="flex items-center gap-3 pt-1">
-              <span className="h-px flex-1 bg-cream-border" />
-              <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
-                or connect a new portal
-              </span>
-              <span className="h-px flex-1 bg-cream-border" />
-            </div>
-            <ExtensionStatusBanner status={ext.status} version={ext.version} />
-
-            {extensionUsable && (
-              <p className="text-sm text-zinc-600">
-                Pick the portal your client signs into. We&apos;ll open it in
-                a fresh tab — sign in there as the new client, and their
-                arrays appear in your dashboard automatically.
-              </p>
-            )}
-            {extensionUnpaired && (
-              <p className="text-sm text-zinc-600">
-                Your extension is installed but not paired to this account yet.
-                You can still pick a portal — after sign-in we&apos;ll fall back
-                to a manual refresh.
-              </p>
-            )}
-            {extensionAbsent && (
-              <p className="text-sm text-zinc-600">
-                Without the extension, auto-capture can&apos;t finish.{" "}
-                <b className="text-zinc-900">Add manually instead</b> — it&apos;s
-                quick, and the extension will continue capturing data on future logins.
-              </p>
-            )}
-            {extensionUnknown && (
-              <p className="text-sm text-zinc-500">
-                Checking your extension&hellip;
-              </p>
-            )}
-          </>
-        )}
-
-        {/* Locus (SolarNOC) monitoring login → client → arrays. Orthogonal to
-            the utility flows above, so it's always offered. */}
         <div className="flex items-center gap-3 pt-1">
           <span className="h-px flex-1 bg-cream-border" />
           <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
-            or connect a solar monitor
+            connect a login
           </span>
           <span className="h-px flex-1 bg-cream-border" />
         </div>
-        <LocusAddLoginForm
-          onCreated={() => {
-            void onCaptured();
-            onClose();
-          }}
-        />
 
-        {!cloudMode && (<>
-        <div className={extensionAbsent ? "opacity-50" : ""}>
-          {/* GMP — its own button, not SmartHub */}
-          <PortalCard
-            label="Green Mountain Power"
-            hint="Most VT solar clients"
-            cta="Open GMP portal →"
-            onClick={() => pick("gmp", GMP_FRIENDLY)}
-            disabled={extensionUnknown}
-          />
-
-          {/* SmartHub utilities group — loaded live from /v1/providers so the
-              list grows automatically as we add utilities nationwide. */}
-          <div className="mt-4">
-            <div className="mb-2 flex items-baseline justify-between gap-2">
-              <p className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
-                SmartHub utilities
-              </p>
-              {smarthubPortals.length > 0 && (
-                <span className="text-xs text-zinc-400">
-                  {smarthubPortals.length} supported
-                </span>
-              )}
-            </div>
+        {/* ── 2. One search across utilities + monitoring, then one form ── */}
+        {selected === null ? (
+          <div className="space-y-2">
+            <p className="text-xs text-zinc-500">
+              Find the utility or monitoring portal your client signs into.
+            </p>
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search for your utility or monitoring portal…"
+              aria-label="Search for your utility or monitoring portal"
+              className="w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm focus:border-primary-400 focus:outline-none focus:ring-1 focus:ring-primary-400"
+            />
 
             {/* Nearest-first control. Asks for browser location, then ranks the
-                list by distance to each utility's state. Pure convenience —
-                denial/absence falls back silently to the alphabetical list. */}
+                utilities by distance to their state. Pure convenience —
+                denial/absence falls back silently to the catalog order. */}
             {smarthubPortals.length > 1 && (
-              <div className="mb-2">
+              <div>
                 {geoState !== "granted" ? (
                   <button
                     type="button"
                     onClick={requestLocation}
                     disabled={geoState === "prompting"}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-2.5 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:border-emerald-400 hover:text-emerald-600 disabled:opacity-60"
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-2.5 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:border-primary-400 hover:text-primary-600 disabled:opacity-60"
                   >
                     <span aria-hidden>📍</span>
-                    {geoState === "prompting"
-                      ? "Locating…"
-                      : "Sort by nearest to me"}
+                    {geoState === "prompting" ? "Locating…" : "Sort by nearest to me"}
                   </button>
                 ) : (
                   <div className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-2.5 py-1.5 text-xs font-medium text-emerald-700">
@@ -1003,7 +1155,7 @@ export function AddClientByLoginModal({
                 )}
                 {geoState === "denied" && (
                   <span className="ml-2 text-xs text-zinc-400">
-                    Location off — showing A–Z. Search by state instead.
+                    Location off — search by state instead.
                   </span>
                 )}
                 {geoState === "unsupported" && (
@@ -1014,64 +1166,129 @@ export function AddClientByLoginModal({
               </div>
             )}
 
-            {smarthubPortals.length > 6 && (
-              <input
-                type="text"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search utilities by name or state…"
-                className="mb-2 w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm focus:border-emerald-400 focus:outline-none focus:ring-1 focus:ring-emerald-400"
-              />
+            {!catalogLoaded && (
+              <p className="text-xs text-zinc-400">Loading portals&hellip;</p>
             )}
 
-            {!portalsLoaded && (
-              <p className="text-xs text-zinc-400">Loading supported utilities…</p>
-            )}
-            {portalsLoaded && smarthubPortals.length === 0 && (
+            <ul className="max-h-64 space-y-1 overflow-y-auto">
+              {results.map((e) => (
+                <li key={e.key}>
+                  <button
+                    type="button"
+                    onClick={() => setSelected(e)}
+                    className="flex w-full items-center gap-2 rounded-lg border border-cream-border bg-white px-3 py-2 text-left transition-colors hover:border-primary-400 hover:bg-primary-50/40"
+                  >
+                    <span className="min-w-0 flex-1 truncate text-sm text-zinc-900">
+                      {e.label}
+                    </span>
+                    {e.hint && (
+                      <span className="shrink-0 text-xs text-zinc-400">
+                        {e.hint}
+                        {e.miles != null ? ` · ~${Math.round(e.miles)} mi` : ""}
+                      </span>
+                    )}
+                    <span
+                      className={
+                        "shrink-0 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide " +
+                        (e.kind === "monitoring"
+                          ? "bg-primary-50 text-primary-700"
+                          : "bg-zinc-100 text-zinc-500")
+                      }
+                    >
+                      {e.kind === "monitoring" ? "Monitoring" : "Utility"}
+                    </span>
+                  </button>
+                </li>
+              ))}
+            </ul>
+
+            {catalogLoaded && results.length === 0 && (
               <p className="text-xs text-zinc-500">
-                Couldn&apos;t load the utility list. You can still use GMP above
-                or add the client manually.
+                Nothing matches &ldquo;{query}&rdquo;. Submit the utility below
+                and we&apos;ll add it.
               </p>
             )}
 
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-              {filteredPortals.map((p) => (
-                <PortalCard
-                  key={p.provider}
-                  label={p.name}
-                  hint={
-                    p.miles != null
-                      ? `${p.hint} · ~${Math.round(p.miles)} mi`
-                      : p.hint
-                  }
-                  cta="Open portal →"
-                  onClick={() => pick(p.provider, p.name, p.url)}
-                  disabled={extensionUnknown}
-                />
-              ))}
-            </div>
-            {portalsLoaded &&
-              smarthubPortals.length > 0 &&
-              filteredPortals.length === 0 && (
-                <p className="mt-1 text-xs text-zinc-500">
-                  No supported utility matches &ldquo;{query}&rdquo;. Submit it
-                  below and we&apos;ll add it.
-                </p>
-              )}
+            {/* Escape hatch: the operator's client uses a utility we don't list
+                yet. Submitting routes to a Hermes agent that adds it to the repo. */}
+            <SubmitUtilityForm />
           </div>
+        ) : (
+          <div className="space-y-3">
+            <button
+              type="button"
+              onClick={() => setSelected(null)}
+              className="text-xs font-medium text-zinc-500 hover:underline"
+            >
+              ← back to search
+            </button>
 
-          {/* Escape hatch: the operator's client uses a utility we don't list
-              yet. Submitting routes to a Hermes agent that adds it to the repo. */}
-          <SubmitUtilityForm />
-        </div>
+            {selected.kind === "monitoring" && selected.vendor && (
+              <MonitorConnectForm
+                vendor={selected.vendor}
+                onCreated={finish}
+                onReview={goReview}
+              />
+            )}
 
-        <p className="text-xs text-zinc-500">
-          <b className="text-zinc-700">Adding multiple clients?</b> Stay in the
-          portal tab and sign out, then sign into the next client's account.
-          Each sign-in captures another client automatically — you don't need
-          to come back here between them.
-        </p>
-        </>)}
+            {selected.kind === "utility" && selected.utility && cloudMode && (
+              <UtilityCloudForm utility={selected.utility} onCreated={finish} />
+            )}
+
+            {/* Extension tenant: unchanged behaviour — we don't take the
+                password, we open the portal and let the extension capture. */}
+            {selected.kind === "utility" && selected.utility && !cloudMode && (
+              <div className="space-y-3">
+                <ExtensionStatusBanner status={ext.status} version={ext.version} />
+                {extensionUsable && (
+                  <p className="text-sm text-zinc-600">
+                    We&apos;ll open {selected.label} in a fresh tab — sign in
+                    there as the new client, and their arrays appear in your
+                    dashboard automatically.
+                  </p>
+                )}
+                {extensionUnpaired && (
+                  <p className="text-sm text-zinc-600">
+                    Your extension is installed but not paired to this account
+                    yet. You can still open the portal — after sign-in
+                    we&apos;ll fall back to a manual refresh.
+                  </p>
+                )}
+                {extensionAbsent && (
+                  <p className="text-sm text-zinc-600">
+                    Without the extension, auto-capture can&apos;t finish.{" "}
+                    <b className="text-zinc-900">Add manually instead</b> —
+                    it&apos;s quick, and the extension will continue capturing
+                    data on future logins.
+                  </p>
+                )}
+                {extensionUnknown && (
+                  <p className="text-sm text-zinc-500">
+                    Checking your extension&hellip;
+                  </p>
+                )}
+                <div className={extensionAbsent ? "opacity-50" : ""}>
+                  <PortalCard
+                    label={selected.label}
+                    hint={selected.hint || "Sign in as the client"}
+                    cta={`Open ${selected.label} →`}
+                    onClick={() =>
+                      pick(selected.code, selected.label, selected.utility?.url)
+                    }
+                    disabled={extensionUnknown}
+                  />
+                </div>
+                <p className="text-xs text-zinc-500">
+                  <b className="text-zinc-700">Adding multiple clients?</b> Stay
+                  in the portal tab and sign out, then sign into the next
+                  client&apos;s account. Each sign-in captures another client
+                  automatically — you don&apos;t need to come back here between
+                  them.
+                </p>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </Modal>
   );
@@ -1143,7 +1360,7 @@ function PortalCard({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      className="group flex flex-col items-start gap-1 rounded-xl border-2 border-zinc-200 bg-white p-4 text-left transition-all hover:border-emerald-400 hover:bg-emerald-50/50 disabled:cursor-not-allowed disabled:opacity-50"
+      className="group flex w-full flex-col items-start gap-1 rounded-xl border-2 border-zinc-200 bg-white p-4 text-left transition-all hover:border-emerald-400 hover:bg-emerald-50/50 disabled:cursor-not-allowed disabled:opacity-50"
     >
       <span className="text-base font-semibold text-zinc-900 group-hover:text-emerald-600">
         {label}
@@ -1157,12 +1374,12 @@ function PortalCard({
 }
 
 /**
- * SubmitUtilityForm — the "Don't see your utility?" escape hatch shown at the
- * bottom of the portal list. Collapsed to a single text button by default
- * (click is tax — don't make operators read a form they rarely need). On
- * expand it collects the utility name + optional portal/region/notes and POSTs
- * to /v1/account/request-utility, which emails the SO team and fires the
- * Hermes agent webhook that adds the utility to the repo and opens a PR.
+ * SubmitUtilityForm — the "Don't see your utility?" escape hatch shown under
+ * the search results. Collapsed to a single text button by default (click is
+ * tax — don't make operators read a form they rarely need). On expand it
+ * collects the utility name + optional portal/region/notes and POSTs to
+ * /v1/account/request-utility, which emails the SO team and fires the Hermes
+ * agent webhook that adds the utility to the repo and opens a PR.
  */
 function SubmitUtilityForm() {
   const toast = useToast();
@@ -1284,4 +1501,3 @@ function SubmitUtilityForm() {
     </div>
   );
 }
-

@@ -2792,6 +2792,64 @@ export async function connectLocusAccount(
   );
 }
 
+// ─── AlsoEnergy (PowerTrack) account connect ────────────────────────────────
+
+/** Preview every AlsoEnergy / PowerTrack site under a login. Saves nothing —
+ *  the operator picks before anything is created, same as Locus. */
+export async function discoverAlsoEnergy(
+  username: string,
+  password: string,
+): Promise<LocusDiscoverResult> {
+  return request<LocusDiscoverResult>(
+    "/v1/array-owners/alsoenergy/discover",
+    { body: { username, password } },
+  );
+}
+
+/** Connect an AlsoEnergy login's sites and file them under a client. Omit
+ *  siteIds to connect every site the login can see. Pass clientId to attach
+ *  them to that client. */
+export async function connectAlsoEnergyAccount(
+  username: string,
+  password: string,
+  opts?: { siteIds?: number[]; clientId?: number },
+): Promise<ConnectAccountResult> {
+  return request<ConnectAccountResult>(
+    "/v1/array-owners/alsoenergy/connect-account",
+    {
+      body: {
+        username,
+        password,
+        ...(opts?.siteIds !== undefined ? { site_ids: opts.siteIds } : {}),
+        ...(opts?.clientId !== undefined ? { client_id: opts.clientId } : {}),
+      },
+    },
+  );
+}
+
+// ─── monitoring vendor catalog ──────────────────────────────────────────────
+
+/** One monitoring vendor from GET /v1/array-owners/inverter-vendors — the
+ *  connect-form spec the dashboard renders. `connect_mode` says which surface
+ *  to show: "key" (paste credentials into the listed fields), "account" (one
+ *  credential, then discover the whole account), "consent" (owner approves in
+ *  their own portal — not wired into Add-a-client yet). `available` is false
+ *  for vendors we can only take a manual CSV for; `note` explains why. */
+export interface InverterVendorEntry {
+  code: string;
+  label: string;
+  available: boolean;
+  note: string | null;
+  connect_mode: "key" | "account" | "consent";
+  fields: { name: string; label: string; secret?: boolean }[];
+}
+
+/** The monitoring-vendor catalog. Merged with the utility provider catalog to
+ *  build the single "Connect a login" search in the Add-a-client modal. */
+export async function getInverterVendors(): Promise<InverterVendorEntry[]> {
+  return request<InverterVendorEntry[]>("/v1/array-owners/inverter-vendors");
+}
+
 // ─── portal access roster (v1.9.112 multi-login vault) ─────────────────────
 
 /** One (client, portal-identity) row from GET /v1/portal-access. */
