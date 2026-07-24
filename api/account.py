@@ -3268,8 +3268,18 @@ def create_client(body: ClientCreate,
                 c.name = name
         else:
             raise HTTPException(500, "Couldn't generate a unique placeholder name after 20 tries")
+        # A client created from a KNOWN login inherits that login's world NOW —
+        # the deleted predecessor's arrays + accounts + history re-attach
+        # synchronously instead of waiting for the next harvester pass
+        # (Ford 2026-07-24: "it should be preloaded and ready to go").
+        from .login_world import attach_prior_login_world  # noqa: PLC0415
+        restored = attach_prior_login_world(db, t.id, c)
+        if restored:
+            db.commit()
+            _emit(t.id, "arrays.changed")
+            _emit(t.id, "generation.updated")
         _emit(t.id, "clients.changed", {"client_id": c.id})
-        return {"ok": True, "client": _client_to_dict(c, 0)}
+        return {"ok": True, "client": _client_to_dict(c, restored)}
 
 
 # ── Merge-suggestion + merge endpoints ──────────────────────────────────

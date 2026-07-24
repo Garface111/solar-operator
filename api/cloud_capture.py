@@ -186,10 +186,9 @@ def ensure_client_for_login(db, tenant, provider: str, username: str) -> None:
         ).order_by(Client.id).limit(1)
     ).scalar_one_or_none()
 
-    # Suffix on the (tenant_id, name) unique constraint — two logins can derive
-    # the same display name, and the constraint doesn't exclude soft-deleted
-    # rows. Retry inside a SAVEPOINT so a collision never rolls back the
-    # credential save that shares this outer transaction.
+    # Suffix on the (tenant_id, name) live-rows unique index — two logins can
+    # derive the same display name. Retry inside a SAVEPOINT so a collision
+    # never rolls back the credential save that shares this outer transaction.
     for attempt in range(20):
         name = base_name if attempt == 0 else f"{base_name} {attempt + 1}"
         try:
@@ -199,11 +198,20 @@ def ensure_client_for_login(db, tenant, provider: str, username: str) -> None:
                     _bind(target)
                     if target.name_edited_at is None:
                         target.name = name
+                    bound = target
                 else:
                     c = Client(tenant_id=tenant.id, name=name, active=True)
                     _bind(c)
                     db.add(c)
+                    bound = c
                 db.flush()
+            # A KNOWN login's world re-attaches NOW (deleted predecessor's
+            # arrays + accounts + history) instead of waiting for the next
+            # harvester pass — same doctrine as create_client (Ford 2026-07-24).
+            from .login_world import attach_prior_login_world  # noqa: PLC0415
+            restored = attach_prior_login_world(db, tenant.id, bound)
+            if restored:
+                bound.capture_pending = False  # it already has its world
             return
         except IntegrityError:
             if target is not None and target.name_edited_at is not None:

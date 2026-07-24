@@ -68,6 +68,59 @@ def test_live_duplicate_still_rejected(client):
     assert r.status_code == 409
 
 
+def test_recreate_from_known_login_resurrects_its_world(client):
+    """Ford's Pbozuwa flow, full circle: a client created from a login we
+    already know inherits its deleted predecessor's arrays + utility accounts
+    + generation history SYNCHRONOUSLY — no waiting for the next harvester
+    pass, no '0 of 0 arrays ready'."""
+    from datetime import date
+
+    from api.models import Array, DailyGeneration, UtilityAccount
+
+    tid = _tenant()
+    # Original client created from the VEC login, with an array + account + data.
+    r = client.post("/v1/account/clients", headers=_auth(tid),
+                    json={"name": "Pbozuwa", "vec_username": "pbozuwa@gmail.com",
+                          "vec_autopopulate": True})
+    old_cid = r.json()["client"]["id"]
+    with SessionLocal() as db:
+        arr = Array(tenant_id=tid, client_id=old_cid, name="6578300",
+                    fuel_type="solar")
+        db.add(arr)
+        db.flush()
+        db.add(UtilityAccount(tenant_id=tid, array_id=arr.id, provider="vec",
+                              account_number="6578300"))
+        db.add(DailyGeneration(tenant_id=tid, array_id=arr.id,
+                               day=date(2026, 6, 1), kwh=123.0,
+                               source="utility_meter"))
+        aid = arr.id
+        db.commit()
+
+    r = client.delete(f"/v1/account/clients/{old_cid}", headers=_auth(tid))
+    assert r.status_code == 200, r.text
+    with SessionLocal() as db:
+        assert db.get(Array, aid).deleted_at is not None  # went down with it
+
+    # Re-add from the same login (the "Use this login →" shape).
+    r = client.post("/v1/account/clients", headers=_auth(tid),
+                    json={"name": "Pbozuwa", "vec_username": "pbozuwa@gmail.com",
+                          "vec_autopopulate": True})
+    assert r.status_code == 200, r.text
+    body = r.json()["client"]
+    new_cid = body["id"]
+    assert body.get("array_count") == 1  # preloaded, not "0 of 0"
+
+    with SessionLocal() as db:
+        arr = db.get(Array, aid)
+        assert arr.deleted_at is None and arr.client_id == new_cid
+        ua = db.execute(select(UtilityAccount).where(
+            UtilityAccount.array_id == aid)).scalar_one()
+        assert ua.deleted_at is None
+        rows = db.execute(select(DailyGeneration).where(
+            DailyGeneration.array_id == aid)).scalars().all()
+        assert len(rows) == 1  # history never left
+
+
 def test_undo_renames_when_name_was_retaken(client):
     """Delete → recreate the name → undo the delete: the RESTORED client comes
     back renamed '(restored)' instead of the undo 500ing on the partial index."""
