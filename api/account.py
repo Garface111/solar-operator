@@ -483,7 +483,8 @@ class ArrayUpdate(BaseModel):
 HARD_DELETE_GRACE_DAYS = 30
 
 
-def _array_to_dict(a: Array, accounts: list[UtilityAccount]) -> dict:
+def _array_to_dict(a: Array, accounts: list[UtilityAccount],
+                   vendor: str | None = None) -> dict:
     return {
         "id": a.id,
         "name": a.name,
@@ -496,6 +497,11 @@ def _array_to_dict(a: Array, accounts: list[UtilityAccount]) -> dict:
         # SolarEdge: expose connected status + site_id, never the raw key.
         "solaredge_connected": bool(a.solaredge_api_key),
         "solaredge_site_id": a.solaredge_site_id,
+        # Monitoring vendor this array is connected through (locus/alsoenergy/
+        # fronius/…), so the roster's Logins chips can show EVERY login kind,
+        # not just utilities (Ford 2026-07-24: "Locus doesn't have a chip").
+        # Legacy column-based SolarEdge shows as "solaredge" too.
+        "vendor": vendor or ("solaredge" if a.solaredge_api_key else None),
         "deleted_at": a.deleted_at.isoformat() if a.deleted_at else None,
         "accounts": [
             {
@@ -4684,7 +4690,22 @@ def list_client_arrays(
         accts_by_array: dict[int, list] = {aid: [] for aid in array_ids}
         for acc in all_accts:
             accts_by_array.setdefault(acc.array_id, []).append(acc)
-        out = [_array_to_dict(a, accts_by_array.get(a.id, [])) for a in arrays]
+        # Monitoring vendor per array (one connection per array) so the
+        # roster's Logins chips cover Locus/AlsoEnergy/… — not just utilities.
+        vendor_by_array: dict[int, str] = {}
+        if array_ids:
+            from .models import InverterConnection  # noqa: PLC0415
+            for conn_row in db.execute(
+                select(InverterConnection).where(
+                    InverterConnection.array_id.in_(array_ids)
+                )
+            ).scalars().all():
+                vendor_by_array[conn_row.array_id] = conn_row.vendor
+        out = [
+            _array_to_dict(a, accts_by_array.get(a.id, []),
+                           vendor=vendor_by_array.get(a.id))
+            for a in arrays
+        ]
     return {"ok": True, "client_id": client_id, "arrays": out}
 
 

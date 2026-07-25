@@ -112,6 +112,19 @@ function relativeTime(iso: string | null): string {
 }
 
 /** Returns [{ util, count, maskedAccounts }] for chip display in the table row. */
+/** Chip label per monitoring vendor — short like the utility tickers. */
+const VENDOR_CHIP: Record<string, string> = {
+  locus: "LOCUS",
+  alsoenergy: "ALSO",
+  solaredge: "SEDGE",
+  fronius: "FRON",
+  sma: "SMA",
+  chint: "CHINT",
+  enphase: "ENPH",
+  solis: "SOLIS",
+  tigo: "TIGO",
+};
+
 function utilityChips(
   arrays: ArrayRow[] | undefined,
 ): Array<{ util: string; count: number; maskedAccounts: string[] }> {
@@ -127,10 +140,24 @@ function utilityChips(
       const masked = num.length > 4 ? "···" + num.slice(-4) : num;
       if (!entry.masked.includes(masked)) entry.masked.push(masked);
     }
+    // Monitoring connections get chips too — every login kind shows, not
+    // just utilities (Ford 2026-07-24: "Locus doesn't have a chip"). Count =
+    // arrays connected through that vendor under this client.
+    if (arr.vendor) {
+      const label = VENDOR_CHIP[arr.vendor] ?? arr.vendor.toUpperCase().slice(0, 6);
+      if (!byUtil.has(label)) byUtil.set(label, { count: 0, masked: [] });
+      byUtil.get(label)!.count++;
+    }
   }
   const ORDER = ["GMP", "VEC", "WEC"];
   return Array.from(byUtil.entries())
-    .sort(([a], [b]) => ORDER.indexOf(a) - ORDER.indexOf(b))
+    .sort(([a], [b]) => {
+      const ia = ORDER.indexOf(a);
+      const ib = ORDER.indexOf(b);
+      // Utilities first (catalog order), then vendor chips alphabetically.
+      if (ia !== -1 || ib !== -1) return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+      return a.localeCompare(b);
+    })
     .map(([util, { count, masked }]) => ({ util, count, maskedAccounts: masked }));
 }
 
@@ -204,6 +231,9 @@ const UTIL_THEME: Record<string, { pill: string; border: string; bg: string }> =
   WEC: { pill: "bg-amber-100 text-amber-800", border: "border-amber-200", bg: "bg-amber-50" },
 };
 const DEFAULT_UTIL_THEME = { pill: "bg-zinc-100 text-zinc-700", border: "border-zinc-200", bg: "bg-zinc-50" };
+// Monitoring-vendor chips share one violet look so metered utility logins and
+// monitor logins read as two different kinds at a glance.
+const MONITOR_THEME = { pill: "bg-violet-100 text-violet-700", border: "border-violet-200", bg: "bg-violet-50" };
 
 // ─── Small components ────────────────────────────────────────────────────────
 
@@ -1105,7 +1135,10 @@ function ClientTableRow({
             return (
               <div className="flex flex-wrap gap-1" title={tooltip}>
                 {chips.map((ch) => {
-                  const th = UTIL_THEME[ch.util] ?? DEFAULT_UTIL_THEME;
+                  const isMonitor = Object.values(VENDOR_CHIP).includes(ch.util);
+                  const th =
+                    UTIL_THEME[ch.util] ??
+                    (isMonitor ? MONITOR_THEME : DEFAULT_UTIL_THEME);
                   return (
                     <span
                       key={ch.util}
@@ -1508,7 +1541,11 @@ function ExpandedPanel({
           )}
 
           {loginGroups.length > 0 && (
-            <div className="max-h-[420px] space-y-2.5 overflow-y-auto pr-1">
+            // No inner max-h/overflow here: a nested scroll container inside
+            // the expanded panel LATCHES the mouse wheel mid-page (Ford
+            // 2026-07-24: "scrolling gets caught and stuck over a client
+            // row"). Let the panel grow; the page scrolls as one surface.
+            <div className="space-y-2.5 pr-1">
               {loginGroups.map((group) => {
                 const th = UTIL_THEME[group.util] ?? DEFAULT_UTIL_THEME;
                 return (

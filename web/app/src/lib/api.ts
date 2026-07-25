@@ -326,6 +326,9 @@ export interface ArrayRow {
   excluded: boolean;
   accounts: UtilityAccount[];
   solaredge_connected: boolean;
+  /** Monitoring vendor this array is connected through (locus, alsoenergy,
+   *  fronius, …) — null for utility-only arrays. Feeds the Logins chips. */
+  vendor?: string | null;
   solaredge_site_id: number | null;
   /** ISO timestamp set when the array is soft-deleted. Null for active arrays. */
   deleted_at?: string | null;
