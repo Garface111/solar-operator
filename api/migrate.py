@@ -168,29 +168,42 @@ def main():
         # already guaranteed live rows are unique among themselves, so building
         # the partial index cannot violate. (Postgres only — SQLite dev/test DBs
         # get the partial index from Base.metadata via create_all.)
-        if engine.dialect.name == "postgresql":
+        # ⚠ DEADLOCK LESSON (2026-07-24, deploy dda588c0 FAILED): even with
+        # IF EXISTS, ALTER TABLE ... DROP CONSTRAINT takes an
+        # AccessExclusiveLock on the table — re-running it on EVERY deploy
+        # fought live traffic and deadlocked. Only issue the ALTER when the
+        # constraint actually exists (one catalog read), and bound the wait
+        # with lock_timeout so a busy table skips cleanly and retries on the
+        # next deploy instead of failing the whole release.
+        def _swap_constraint_for_live_index(table: str, constraint: str,
+                                            index: str) -> None:
+            exists = conn.execute(text(
+                "SELECT 1 FROM pg_constraint WHERE conname = :c"
+            ), {"c": constraint}).scalar()
+            if exists:
+                try:
+                    conn.execute(text("SET lock_timeout = '5s'"))
+                    conn.execute(text(
+                        f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {constraint}"))
+                    print(f"  ↪ {table}: dropped {constraint}")
+                except Exception as exc:  # noqa: BLE001 — retried next deploy
+                    print(f"  ⚠ {table}: couldn't drop {constraint} now "
+                          f"({exc}) — will retry next deploy")
+                    return
+                finally:
+                    conn.execute(text("SET lock_timeout = DEFAULT"))
             conn.execute(text(
-                "ALTER TABLE arrays DROP CONSTRAINT IF EXISTS uq_array_per_tenant"))
-            conn.execute(text(
-                "CREATE UNIQUE INDEX IF NOT EXISTS uq_array_per_tenant_live "
-                "ON arrays (tenant_id, name) WHERE deleted_at IS NULL"))
-            print("  ↪ arrays: uq_array_per_tenant → partial uq_array_per_tenant_live "
-                  "(live rows only)")
+                f"CREATE UNIQUE INDEX IF NOT EXISTS {index} "
+                f"ON {table} (tenant_id, name) WHERE deleted_at IS NULL"))
 
-        # 2026-07-24: same live-only treatment for CLIENT names. The old
-        # uq_client_per_tenant UNIQUE(tenant_id, name) spanned soft-deleted
-        # rows, so deleting a client and re-adding it from the same login hit
-        # "A client with that name already exists" (the ghost reserved the
-        # name — exactly the array bug of 2026-07-16, one table over).
-        # Idempotent + safe: live rows are already unique among themselves.
         if engine.dialect.name == "postgresql":
-            conn.execute(text(
-                "ALTER TABLE clients DROP CONSTRAINT IF EXISTS uq_client_per_tenant"))
-            conn.execute(text(
-                "CREATE UNIQUE INDEX IF NOT EXISTS uq_client_per_tenant_live "
-                "ON clients (tenant_id, name) WHERE deleted_at IS NULL"))
-            print("  ↪ clients: uq_client_per_tenant → partial "
-                  "uq_client_per_tenant_live (live rows only)")
+            _swap_constraint_for_live_index(
+                "arrays", "uq_array_per_tenant", "uq_array_per_tenant_live")
+            # 2026-07-24: same live-only treatment for CLIENT names (deleting
+            # a client and re-adding it from the same login hit "name already
+            # exists" — the ghost reserved the name).
+            _swap_constraint_for_live_index(
+                "clients", "uq_client_per_tenant", "uq_client_per_tenant_live")
 
         # 2026-06-03 Phase-1 expansion: Client layer
         # Idempotency: create_all() above already created `clients` table
