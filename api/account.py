@@ -3127,6 +3127,23 @@ def list_clients(authorization: Optional[str] = Header(default=None)):
         ).all()
         counts = {row.client_id: row.n for row in array_counts_rows}
 
+        # Missing NEPOOL-GIS ids per client (same one-query shape) — drives
+        # the roster row's amber "N IDs missing" chip (Ford 2026-07-24). Same
+        # array population as the count above, minus excluded arrays: an
+        # excluded array never ships, so its blank ID isn't actionable.
+        missing_rows = db.execute(
+            select(Array.client_id, func.count(Array.id).label("n"))
+            .where(
+                Array.client_id.in_([c.id for c in clients]),
+                Array.deleted_at.is_(None),
+                Array.excluded.is_(False),
+                not_vendor_only(),
+                func.coalesce(func.trim(Array.nepool_gis_id), "") == "",
+            )
+            .group_by(Array.client_id)
+        ).all()
+        nepool_missing = {row.client_id: row.n for row in missing_rows}
+
         # "Last checked" — the most recent SUCCESSFUL cloud-capture harvest per
         # login (last_harvest_ok), so a client whose meter simply hasn't issued a
         # new bill still shows the harvester is alive and signing in. Matched to
@@ -3151,9 +3168,12 @@ def list_clients(authorization: Optional[str] = Header(default=None)):
                     best = ts
             return best
 
-        out = [_client_to_dict(c, array_count=counts.get(c.id, 0),
-                               last_checked_at=_client_checked(c))
-               for c in clients]
+        out = []
+        for c in clients:
+            d = _client_to_dict(c, array_count=counts.get(c.id, 0),
+                                last_checked_at=_client_checked(c))
+            d["nepool_missing"] = nepool_missing.get(c.id, 0)
+            out.append(d)
     return {"ok": True, "clients": out}
 
 

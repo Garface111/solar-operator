@@ -1098,6 +1098,41 @@ function ClientTableRow({
                 placeholder
               </span>
             )}
+            {(client.nepool_missing ?? 0) > 0 && (
+              // Amber missing-GIS chip (Ford 2026-07-24). Clicking it expands
+              // this client and focuses its first empty NEPOOL-ID field — the
+              // per-row twin of the banner's "Take me to the next NEPOOL ID".
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  window.dispatchEvent(new CustomEvent("so:nepool:expand-client", {
+                    detail: { clientId: client.id },
+                  }));
+                  setTimeout(() => {
+                    const el = document.querySelector<HTMLElement>(
+                      `[data-nepool-client-id="${client.id}"][data-nepool-empty]`,
+                    );
+                    if (!el) return;
+                    el.scrollIntoView({ behavior: "smooth", block: "center" });
+                    setTimeout(() => {
+                      el.classList.add("ring-2", "ring-amber-400");
+                      setTimeout(() => el.classList.remove("ring-2", "ring-amber-400"), 1500);
+                      el.querySelector<HTMLButtonElement>("[data-nepool-field] button")?.click();
+                      setTimeout(() => {
+                        const input = el.querySelector<HTMLInputElement>("[data-nepool-field] input");
+                        input?.focus();
+                        input?.select?.();
+                      }, 60);
+                    }, 400);
+                  }, 650);
+                }}
+                title={`${client.nepool_missing} array${client.nepool_missing === 1 ? " is" : "s are"} missing a NEPOOL-GIS ID — click to fill it in`}
+                className="shrink-0 rounded-full bg-amber-100 px-1.5 py-0.5 text-[9px] font-semibold text-amber-800 transition-colors hover:bg-amber-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
+              >
+                {client.nepool_missing} ID{client.nepool_missing === 1 ? "" : "s"} missing
+              </button>
+            )}
           </div>
           {client.contact_email && (
             <span

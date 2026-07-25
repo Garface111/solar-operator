@@ -271,6 +271,7 @@ function buildNodesFromApi(
       name: client.name,
       contact_email: client.contact_email ?? null,
       logins: client.logins as Partial<Record<Utility, string | null>> | undefined,
+      vendorLogins: client.vendor_logins,
       pinned: client.canvas_pinned ?? false,
       accounts: dedupedAccounts.map((acc) => {
         const key = acc.array_id != null

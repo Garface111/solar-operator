@@ -404,6 +404,49 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
               loginId={group.loginId}
             />
           ))}
+
+          {/* Monitoring logins (Locus/AlsoEnergy/…) — same LOGIN-row idiom in
+              the monitor violet. Vendor arrays have no UtilityAccount, so
+              without these a monitor-only client was an EMPTY card (Ford
+              2026-07-24, Johnson Hardware). Render-only: monitor arrays
+              re-home via the clients table, not canvas drag. */}
+          {(client.vendorLogins ?? []).map((vl) => (
+            <div
+              key={`${vl.vendor}:${vl.login}`}
+              className="mb-1.5 rounded-lg border border-violet-200 bg-violet-50 px-2.5 py-2"
+            >
+              <div className="flex items-center gap-1.5">
+                <span className="h-2 w-2 rounded-full bg-violet-400" />
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-violet-700">
+                  Login {vl.vendor}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-right text-[10px] text-violet-700/70">
+                  {vl.arrays.length} array{vl.arrays.length === 1 ? "" : "s"}
+                </span>
+              </div>
+              <div className="mt-1 truncate text-[10px] text-zinc-500">
+                signed in as <span className="text-zinc-700">{vl.login}</span>
+              </div>
+              <div className="mt-1.5 space-y-1">
+                {vl.arrays.map((arr) => (
+                  <div
+                    key={arr.id}
+                    className="flex items-center justify-between gap-2 rounded-md bg-white/80 px-2 py-1.5"
+                  >
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-violet-300" />
+                      <span className="truncate text-xs text-zinc-800">{arr.name}</span>
+                    </span>
+                    {arr.mwh_per_qtr != null && (
+                      <span className="shrink-0 text-[10px] tabular-nums text-zinc-400">
+                        {arr.mwh_per_qtr} MWh/qtr
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
         </div>
       )}
 

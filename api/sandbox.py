@@ -13,12 +13,15 @@ from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from .account import tenant_from_session, require_not_demo
 from .db import SessionLocal
 from .fuels import normalize_fuel
-from .models import Array, Bill, Client, UtilityAccount, now
+from .models import (
+    Array, Bill, Client, DailyGeneration, InverterConnection, UtilityAccount,
+    now,
+)
 from .email_templates import quarter_context
 
 HARD_DELETE_GRACE_DAYS = 30
@@ -101,31 +104,27 @@ def get_canvas(authorization: Optional[str] = Header(default=None)):
         qc = quarter_context()
         q_start_dt = datetime.combine(qc["_start_date"], datetime.min.time())
         q_end_dt = datetime.combine(qc["_end_date"], datetime.max.time())
-        bills_in_q = db.execute(
-            select(Bill).where(
-                Bill.tenant_id == tenant.id,
-                Bill.kwh_generated.is_not(None),
-            )
-        ).scalars().all()
-        kwh_by_account: dict[int, int] = defaultdict(int)
-        bills_seen: set[int] = set()
-        for b in bills_in_q:
-            # Use period_start if present, else bill_date — both are nullable
-            # but at least one is set on parsed bills.
-            ref_dt = b.period_start or b.bill_date
-            if ref_dt is None:
-                continue
-            if not (q_start_dt <= ref_dt <= q_end_dt):
-                continue
-            if not b.kwh_generated or b.kwh_generated <= 0:
-                continue
-            kwh_by_account[b.account_id] += b.kwh_generated
-            bills_seen.add(b.account_id)
-        # Accounts with bills landed but 0 generation in-quarter still get 0.0
-        # (real signal: "we have data, this quarter was zero"). Accounts with
-        # no bills at all stay None ("no data yet, don't claim zero").
+        # ONE aggregate query. The old version hydrated EVERY generated Bill
+        # row for the tenant into ORM objects just to sum a quarter — ~5s of
+        # the canvas load on a 100-account tenant (Ford 2026-07-24 "takes far
+        # too long, times out"). period_start-else-bill_date matches the old
+        # Python fallback logic; accounts with no positive in-quarter
+        # generation stay None ("no data yet, don't claim zero").
+        _ref = func.coalesce(Bill.period_start, Bill.bill_date)
         mwh_per_acct: dict[int, float] = {
-            acc_id: round(k / 1000.0, 3) for acc_id, k in kwh_by_account.items()
+            acc_id: round(float(kwh) / 1000.0, 3)
+            for acc_id, kwh in db.execute(
+                select(Bill.account_id, func.sum(Bill.kwh_generated))
+                .where(
+                    Bill.tenant_id == tenant.id,
+                    Bill.kwh_generated > 0,
+                    _ref.is_not(None),
+                    _ref >= q_start_dt,
+                    _ref <= q_end_dt,
+                )
+                .group_by(Bill.account_id)
+            ).all()
+            if kwh
         }
 
         # Group accounts by which array they belong to.
@@ -149,6 +148,54 @@ def get_canvas(authorization: Optional[str] = Header(default=None)):
         for arr in arrays:
             if arr.client_id is not None:
                 arrays_by_client[arr.client_id].append(arr)
+
+        # ── Monitoring logins per client ─────────────────────────────────
+        # Vendor-connected arrays (Locus/AlsoEnergy/…) have no UtilityAccount,
+        # so without this a Locus-only client rendered an EMPTY canvas card
+        # (Ford 2026-07-24: "the Locus login needs to be in the Johnson client
+        # in the same style as GMP and VEC"). One login group per
+        # (vendor, credential), arrays beneath, with the same most-recent-
+        # complete-quarter MWh — from DailyGeneration, their actual feed.
+        vconns = db.execute(
+            select(InverterConnection, Array)
+            .join(Array, Array.id == InverterConnection.array_id)
+            .where(
+                Array.tenant_id == tenant.id,
+                Array.deleted_at.is_(None),
+                Array.client_id.is_not(None),
+            )
+        ).all()
+        vconn_array_ids = [arr.id for _c, arr in vconns]
+        mwh_by_array: dict[int, float] = {}
+        if vconn_array_ids:
+            for aid, kwh in db.execute(
+                select(DailyGeneration.array_id, func.sum(DailyGeneration.kwh))
+                .where(
+                    DailyGeneration.array_id.in_(vconn_array_ids),
+                    DailyGeneration.day >= qc["_start_date"],
+                    DailyGeneration.day <= qc["_end_date"],
+                )
+                .group_by(DailyGeneration.array_id)
+            ).all():
+                if kwh:
+                    mwh_by_array[aid] = round(float(kwh) / 1000.0, 3)
+        vendor_logins_by_client: dict[int, dict] = defaultdict(dict)
+        for conn, arr in vconns:
+            cfg = conn.config or {}
+            label = str(cfg.get("username") or "").strip()
+            if not label:
+                key_tail = str(cfg.get("api_key") or "")[-4:]
+                label = f"key ••••{key_tail}" if key_tail else conn.vendor
+            gkey = f"{conn.vendor}:{label.lower()}"
+            entry = vendor_logins_by_client[arr.client_id].setdefault(gkey, {
+                "vendor": conn.vendor, "login": label, "arrays": [],
+            })
+            entry["arrays"].append({
+                "id": arr.id,
+                "name": arr.name,
+                "fuel_type": getattr(arr, "fuel_type", None) or "solar",
+                "mwh_per_qtr": mwh_by_array.get(arr.id),
+            })
 
         # Build client output
         clients_out = []
@@ -176,6 +223,9 @@ def get_canvas(authorization: Optional[str] = Header(default=None)):
                     "GMP": c.gmp_email or c.gmp_username or None,
                     "VEC": c.vec_email or c.vec_username or None,
                 },
+                "vendor_logins": list(
+                    vendor_logins_by_client.get(c.id, {}).values()
+                ),
             })
 
         # Origin client lookup — any client referenced by a non-null

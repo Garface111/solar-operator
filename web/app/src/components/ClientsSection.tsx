@@ -246,32 +246,37 @@ export function ClientsSection({ expandClientId }: Props) {
     const arrayId = Number(target.dataset.nepoolArrayId);
     lastFocusedNepoolArrayIdRef.current = arrayId;
 
-    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    // Let the row's grid-rows EXPANSION ANIMATION finish before scrolling —
+    // scrolling against mid-animation geometry landed the viewport in the
+    // wrong place and read as "the button does nothing" (Ford 2026-07-24).
     setTimeout(() => {
-      target.classList.add("ring-2", "ring-amber-400", "animate-pulse");
-      setTimeout(
-        () => target.classList.remove("ring-2", "ring-amber-400", "animate-pulse"),
-        1500,
-      );
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+      setTimeout(() => {
+        target.classList.add("ring-2", "ring-amber-400", "animate-pulse");
+        setTimeout(
+          () => target.classList.remove("ring-2", "ring-amber-400", "animate-pulse"),
+          1500,
+        );
 
-      // InlineNepoolField / EditableField: click the button to enter edit mode.
-      const editBtn = target.querySelector<HTMLButtonElement>(
-        "[data-nepool-field] button",
-      );
-      if (editBtn) {
-        editBtn.click();
-        setTimeout(() => {
-          const input = target.querySelector<HTMLInputElement>(
-            "[data-nepool-field] input",
-          );
-          if (input) {
-            input.focus();
-            input.select?.();
-          }
-        }, 60);
-      }
-      setGuidingNepool(false);
-    }, 500);
+        // InlineNepoolField / EditableField: click the button to enter edit mode.
+        const editBtn = target.querySelector<HTMLButtonElement>(
+          "[data-nepool-field] button",
+        );
+        if (editBtn) {
+          editBtn.click();
+          setTimeout(() => {
+            const input = target.querySelector<HTMLInputElement>(
+              "[data-nepool-field] input",
+            );
+            if (input) {
+              input.focus();
+              input.select?.();
+            }
+          }, 60);
+        }
+        setGuidingNepool(false);
+      }, 450);
+    }, 350);
   }
 
   async function handleTakeToNextNepool() {

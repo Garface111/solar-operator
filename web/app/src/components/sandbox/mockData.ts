@@ -45,6 +45,14 @@ export interface ClientData {
   accounts: UtilityAccount[];
   /** Per-utility login credential surface (optional; populated from API). */
   logins?: Partial<Record<Utility, string | null>>;
+  /** Monitoring logins (Locus/AlsoEnergy/…) with their arrays — vendor
+   *  arrays have no UtilityAccount, so these render as their own violet
+   *  LOGIN rows (a monitor-only client is never an empty card). */
+  vendorLogins?: {
+    vendor: string;
+    login: string;
+    arrays: { id: number; name: string; fuel_type: string; mwh_per_qtr: number | null }[];
+  }[];
   /** Pinned/starred — sorts to top of any list, renders with a gold star. */
   pinned?: boolean;
 }

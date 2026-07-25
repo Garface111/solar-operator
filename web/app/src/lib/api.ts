@@ -342,6 +342,9 @@ export interface ClientRow {
   report_frequency: string | null;
   active: boolean;
   array_count: number;
+  /** Reportable arrays under this client still missing a NEPOOL-GIS id —
+   *  drives the roster row's amber "N IDs missing" chip. */
+  nepool_missing?: number;
   last_delivery_at: string | null;
   notes: string | null;
   gmp_email: string | null;
@@ -2434,6 +2437,14 @@ export interface CanvasClientData {
   /** Retired clients are hidden from the roster in the embed — the canvas
    *  applies the same rule as the table via lib/rosterFilter.ts. */
   active?: boolean;
+  /** Monitoring logins (Locus/AlsoEnergy/…) with their arrays — vendor arrays
+   *  have no UtilityAccount, so without this a monitor-only client rendered
+   *  an empty canvas card. */
+  vendor_logins?: {
+    vendor: string;
+    login: string;
+    arrays: { id: number; name: string; fuel_type: string; mwh_per_qtr: number | null }[];
+  }[];
   canvas_x: number | null;
   canvas_y: number | null;
   canvas_pinned: boolean;
