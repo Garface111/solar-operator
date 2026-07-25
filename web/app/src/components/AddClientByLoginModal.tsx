@@ -222,29 +222,29 @@ function ConnectedLoginsList({
     }
   }
 
-  return (
-    <div className="space-y-3">
-      <div>
-        <p className="text-sm font-semibold text-zinc-900">
-          Logins feeding your generation reports
-        </p>
-        <p className="mt-0.5 text-xs text-zinc-500">
-          Every utility and monitoring login we hold, and what it&apos;s
-          bringing in.
-        </p>
-      </div>
+  // ── group by provider ──────────────────────────────────────────────────
+  // Ford (2026-07-24): ~40 GMP logins rendered as 40 rows — "an insane amount
+  // of scrolling". One collapsible group per provider, collapsed by default
+  // when the list is big; a small list (≤5 logins) stays expanded so tiny
+  // accounts never pay an extra click.
+  const groups = new Map<string, ConnectedLogin[]>();
+  for (const r of rows ?? []) {
+    const list = groups.get(r.provider) ?? [];
+    list.push(r);
+    groups.set(r.provider, list);
+  }
+  const autoExpand = (rows?.length ?? 0) <= 5;
+  const [expandedProviders, setExpandedProviders] = useState<Set<string>>(new Set());
+  const isExpanded = (p: string) => autoExpand || expandedProviders.has(p);
+  const toggleProvider = (p: string) =>
+    setExpandedProviders((prev) => {
+      const next = new Set(prev);
+      if (next.has(p)) next.delete(p);
+      else next.add(p);
+      return next;
+    });
 
-      {rows === null ? (
-        <div className="rounded-xl border border-cream-border px-4 py-3 text-sm text-zinc-500">
-          Loading your logins&hellip;
-        </div>
-      ) : rows.length === 0 ? (
-        <div className="rounded-xl border border-dashed border-cream-border px-4 py-3 text-sm text-zinc-600">
-          No logins connected yet — add one below.
-        </div>
-      ) : (
-        <ul className="space-y-2">
-          {rows.map((r) => {
+  const renderRow = (r: ConnectedLogin) => {
             const attachable = !!r.unassigned && !!ATTACHABLE[r.provider];
             const isOpen = openFor === r.key;
             const newCount = r.counts?.new ?? 0;
@@ -317,9 +317,90 @@ function ConnectedLoginsList({
                   </div>
                 )}
               </li>
+    );
+  };
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <p className="text-sm font-semibold text-zinc-900">Your logins</p>
+        <p className="mt-0.5 text-xs text-zinc-500">
+          Every utility and monitoring login we hold, grouped by portal, and
+          what each is bringing in.
+        </p>
+      </div>
+
+      {rows === null ? (
+        <div className="rounded-xl border border-cream-border px-4 py-3 text-sm text-zinc-500">
+          Loading your logins&hellip;
+        </div>
+      ) : rows.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-cream-border px-4 py-3 text-sm text-zinc-600">
+          No logins connected yet — add one on the right.
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {[...groups.entries()].map(([provider, list]) => {
+            const label = list[0]?.label || provider.toUpperCase();
+            const arrays = list.reduce((n, r) => n + (r.counts?.imported ?? 0), 0);
+            const fresh = list.reduce((n, r) => n + (r.counts?.new ?? 0), 0);
+            const errs = list.filter((r) => r.lastError).length;
+            const open = isExpanded(provider);
+            return (
+              <div
+                key={provider}
+                className="rounded-xl border border-cream-border bg-white shadow-sm"
+              >
+                <button
+                  type="button"
+                  onClick={() => toggleProvider(provider)}
+                  aria-expanded={open}
+                  className="flex w-full flex-wrap items-center justify-between gap-x-3 gap-y-1 rounded-xl px-3 py-2.5 text-left focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40"
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    <span
+                      aria-hidden
+                      className={
+                        "text-zinc-400 transition-transform " +
+                        (open ? "rotate-90" : "")
+                      }
+                    >
+                      ▸
+                    </span>
+                    <span className="truncate text-sm font-semibold text-zinc-900">
+                      {label}
+                    </span>
+                  </span>
+                  <span className="flex shrink-0 items-center gap-2 text-xs">
+                    <span className="text-zinc-500">
+                      {list.length} login{list.length === 1 ? "" : "s"}
+                    </span>
+                    {arrays > 0 && (
+                      <span className="text-zinc-400">
+                        {arrays} array{arrays === 1 ? "" : "s"}
+                      </span>
+                    )}
+                    {fresh > 0 && (
+                      <span className="rounded-full bg-primary-50 px-2 py-0.5 font-medium text-primary-700">
+                        {fresh} new
+                      </span>
+                    )}
+                    {errs > 0 && (
+                      <span className="rounded-full bg-amber-50 px-2 py-0.5 font-medium text-amber-700">
+                        {errs} need{errs === 1 ? "s" : ""} attention
+                      </span>
+                    )}
+                  </span>
+                </button>
+                {open && (
+                  <ul className="space-y-2 px-2 pb-2">
+                    {list.map((r) => renderRow(r))}
+                  </ul>
+                )}
+              </div>
             );
           })}
-        </ul>
+        </div>
       )}
     </div>
   );
@@ -1100,6 +1181,7 @@ export function AddClientByLoginModal({
     <Modal
       open={open}
       onClose={onClose}
+      wide
       title="Add a client"
       footer={
         <>
@@ -1115,19 +1197,26 @@ export function AddClientByLoginModal({
         </>
       }
     >
-      <div className="space-y-4">
-        {/* ── 1. What you already have ── */}
-        <ConnectedLoginsList onCreated={finish} onReview={goReview} />
-
-        <div className="flex items-center gap-3 pt-1">
-          <span className="h-px flex-1 bg-cream-border" />
-          <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
-            connect a login
-          </span>
-          <span className="h-px flex-1 bg-cream-border" />
+      {/* Double-wide, two panes (Ford 2026-07-24): LEFT = what you already
+          have (logins grouped by portal, each naming what it feeds); RIGHT =
+          connect a login. Side by side on desktop so neither buries the other;
+          stacked on narrow screens. Each pane scrolls independently against
+          the viewport so 40 GMP logins can't push the connect pane away. */}
+      <div className="grid gap-6 md:grid-cols-2">
+        <div className="min-w-0 md:max-h-[calc(100vh-16rem)] md:overflow-y-auto md:pr-1">
+          <ConnectedLoginsList onCreated={finish} onReview={goReview} />
         </div>
 
-        {/* ── 2. One search across utilities + monitoring, then one form ── */}
+        <div className="min-w-0 space-y-3 md:max-h-[calc(100vh-16rem)] md:overflow-y-auto md:border-l md:border-cream-border md:pl-6">
+        <div>
+          <p className="text-sm font-semibold text-zinc-900">Connect a login</p>
+          <p className="mt-0.5 text-xs text-zinc-500">
+            The login becomes a client; what it can see becomes the client&apos;s
+            arrays.
+          </p>
+        </div>
+
+        {/* One search across utilities + monitoring, then one form */}
         {selected === null ? (
           <div className="space-y-2">
             <p className="text-xs text-zinc-500">
@@ -1299,6 +1388,7 @@ export function AddClientByLoginModal({
             )}
           </div>
         )}
+        </div>
       </div>
     </Modal>
   );

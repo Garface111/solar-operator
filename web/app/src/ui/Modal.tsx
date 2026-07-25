@@ -10,11 +10,14 @@ interface ModalProps {
   /** Hide the top-right ✕ close button (e.g. when the modal must be
    *  confirmed/denied explicitly). Defaults to false. */
   hideCloseButton?: boolean;
+  /** Double-wide dialog for side-by-side layouts (e.g. Add-a-client's
+   *  logins | connect panes). Defaults to false (max-w-md). */
+  wide?: boolean;
 }
 
 /** Centered dialog with a dimmed backdrop. Closes on Escape, backdrop
  *  click, or the ✕ button in the top-right corner. */
-export function Modal({ open, onClose, title, children, footer, hideCloseButton }: ModalProps) {
+export function Modal({ open, onClose, title, children, footer, hideCloseButton, wide }: ModalProps) {
   useEffect(() => {
     if (!open) return;
     function onKey(e: KeyboardEvent) {
@@ -40,7 +43,10 @@ export function Modal({ open, onClose, title, children, footer, hideCloseButton 
         // Flex column + capped height so a long body scrolls *inside* the
         // dialog instead of growing it past the viewport (which would push the
         // footer buttons off-screen). py-8 backdrop = 4rem of vertical inset.
-        className="relative flex max-h-[calc(100vh-4rem)] w-full max-w-md flex-col rounded-xl border border-zinc-200 bg-white shadow-xl"
+        className={
+          "relative flex max-h-[calc(100vh-4rem)] w-full flex-col rounded-xl border border-zinc-200 bg-white shadow-xl " +
+          (wide ? "max-w-5xl" : "max-w-md")
+        }
       >
         {!hideCloseButton && (
           <button

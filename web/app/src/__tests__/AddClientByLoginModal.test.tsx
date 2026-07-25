@@ -133,7 +133,7 @@ describe("AddClientByLoginModal", () => {
   it("merges both login sources into one list with plain status lines", async () => {
     renderModal();
 
-    await screen.findByText("Locus (SolarNOC)");
+    expect((await screen.findAllByText("Locus (SolarNOC)")).length).toBeGreaterThan(0);
     expect(screen.getByText(/3 arrays in your system · 2 new to review/)).toBeTruthy();
 
     // The GMP login is in BOTH sources — one row, keeping the pool's error
