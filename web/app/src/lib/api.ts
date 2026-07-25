@@ -2741,6 +2741,33 @@ export async function connectSolarEdgeAccount(
   );
 }
 
+// ─── pull status: is a client's data still arriving? ────────────────────────
+
+/** One vendor-connected array's pull state. Live mid-run percentages ride the
+ *  job.updated SSE events; this is the poll fallback + settled state. */
+export interface PullStatusArray {
+  array_id: number;
+  name: string;
+  vendor: string;
+  connection_id: number;
+  status: "pending" | "error" | "done";
+  error: string | null;
+  days: number;
+  first_day: string | null;
+  last_day: string | null;
+}
+
+export interface PullStatus {
+  ok: boolean;
+  /** Number of arrays whose history pull hasn't completed yet. */
+  pulling: number;
+  arrays: PullStatusArray[];
+}
+
+export async function getClientPullStatus(clientId: number): Promise<PullStatus> {
+  return request<PullStatus>(`/v1/account/clients/${clientId}/pull-status`);
+}
+
 // ─── Locus (SolarNOC) account discovery — "one login, all its sites" ────────
 
 /** One Locus site returned by discover (preview — saves nothing). */

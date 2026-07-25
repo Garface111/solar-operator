@@ -196,6 +196,16 @@ def backfill_connection_history(
                 events.publish(tenant_id, "generation.updated", {
                     "array_id": arr.id, "year": yr,
                 })
+            # Progress on EVERY chunk (even empty years) so the UI's pull
+            # strip can show a real percentage — Ford (2026-07-24) watched an
+            # empty client for 46s with zero indication anything was running.
+            events.publish(tenant_id, "job.updated", {
+                "kind": "history_backfill", "status": "running",
+                "connection_id": conn_id, "array_id": arr.id,
+                "year": yr,
+                "years_done": years_probed,
+                "years_total": today.year - start_year + 1,
+            })
 
         # The pass COMPLETED — stamp regardless of failed years. Partial
         # failures go to last_error (tagged) so the healer retries them; a

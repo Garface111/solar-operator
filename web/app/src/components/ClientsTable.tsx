@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "react-router-dom";
 import { lazyWithRetry } from "../lib/lazyWithRetry";
@@ -33,6 +33,8 @@ import {
   downloadGeneration,
   mergeClientInto,
   recentReportQuarters,
+  getClientPullStatus,
+  type PullStatus,
 } from "../lib/api";
 
 const REPORT_QUARTERS = recentReportQuarters(8);
@@ -362,6 +364,141 @@ function MoreMenu({
         </div>,
         portalTarget,
       )}
+    </div>
+  );
+}
+
+// ─── PullStatusStrip ─────────────────────────────────────────────────────────
+
+/** Live "your data is arriving" strip for a client's vendor-connected arrays.
+ *
+ *  Ford (2026-07-24) connected a Locus login, the connect worked, and 9 years
+ *  of history landed in 46 seconds — but the card showed NOTHING the whole
+ *  time, which reads as broken. This renders each in-flight history pull with
+ *  a real percentage (job.updated SSE events carry years_done/years_total),
+ *  falls back to a 5s poll of /pull-status when the stream is quiet, and
+ *  surfaces a completed-with-errors pull in amber instead of silence.
+ *  Renders nothing once everything is settled and clean. */
+function PullStatusStrip({ clientId }: { clientId: number }) {
+  const [status, setStatus] = useState<PullStatus | null>(null);
+  const [live, setLive] = useState<Map<number, { year: number; pct: number }>>(
+    () => new Map(),
+  );
+
+  const load = useCallback(() => {
+    getClientPullStatus(clientId).then(setStatus).catch(() => {});
+  }, [clientId]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  // Live mid-run progress straight off the event stream.
+  useEffect(() => {
+    function onJob(e: Event) {
+      const d = (e as CustomEvent).detail as {
+        kind?: string; status?: string; array_id?: number;
+        year?: number; years_done?: number; years_total?: number;
+      } | undefined;
+      if (!d || d.kind !== "history_backfill") return;
+      if (d.status === "running" && d.array_id != null && d.years_total) {
+        setLive((prev) => {
+          const next = new Map(prev);
+          next.set(d.array_id!, {
+            year: d.year ?? 0,
+            pct: Math.min(
+              99,
+              Math.round(((d.years_done ?? 0) / d.years_total!) * 100),
+            ),
+          });
+          return next;
+        });
+      } else {
+        // done / partial / failed — settle from the source of truth.
+        setLive((prev) => {
+          const next = new Map(prev);
+          if (d.array_id != null) next.delete(d.array_id);
+          return next;
+        });
+        load();
+      }
+    }
+    window.addEventListener("so:job-updated", onJob);
+    return () => window.removeEventListener("so:job-updated", onJob);
+  }, [load]);
+
+  // New arrays appearing (connect finishing) also change what's pulling.
+  useEffect(() => {
+    let t: ReturnType<typeof setTimeout> | null = null;
+    function onSync() {
+      if (t) return;
+      t = setTimeout(() => {
+        t = null;
+        load();
+      }, 500);
+    }
+    window.addEventListener("so:live-sync", onSync);
+    return () => {
+      window.removeEventListener("so:live-sync", onSync);
+      if (t) clearTimeout(t);
+    };
+  }, [load]);
+
+  // Poll fallback while anything is still pulling (SSE down ≠ frozen UI).
+  useEffect(() => {
+    if (!status || status.pulling === 0) return;
+    const t = setTimeout(load, 5000);
+    return () => clearTimeout(t);
+  }, [status, load]);
+
+  if (!status) return null;
+  const pending = status.arrays.filter((a) => a.status === "pending");
+  const errored = status.arrays.filter((a) => a.status === "error");
+  if (pending.length === 0 && errored.length === 0) return null;
+
+  return (
+    <div className="mb-3 space-y-1.5">
+      {pending.map((a) => {
+        const lp = live.get(a.array_id);
+        return (
+          <div
+            key={a.array_id}
+            className="rounded-lg border border-primary-200 bg-primary-50/60 px-3 py-2"
+          >
+            <div className="flex items-center justify-between gap-2 text-xs">
+              <span className="flex min-w-0 items-center gap-2 font-medium text-primary-800">
+                <Spinner className="h-3 w-3 shrink-0" />
+                <span className="truncate">
+                  Pulling {a.name}&apos;s generation history…
+                </span>
+              </span>
+              <span className="shrink-0 tabular-nums text-primary-700">
+                {lp
+                  ? `${lp.pct}% · ${lp.year}`
+                  : a.days > 0
+                    ? `${a.days.toLocaleString()} days so far`
+                    : "starting…"}
+              </span>
+            </div>
+            <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-primary-100">
+              <div
+                className="h-full rounded-full bg-primary-500 transition-all duration-500"
+                style={{ width: `${lp?.pct ?? 6}%` }}
+              />
+            </div>
+          </div>
+        );
+      })}
+      {errored.map((a) => (
+        <p
+          key={a.array_id}
+          className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900"
+        >
+          {a.name}: history pull hit a problem — {a.error}. Retrying hourly on
+          its own; the data pulled so far ({a.days.toLocaleString()} days) is
+          already usable.
+        </p>
+      ))}
     </div>
   );
 }
@@ -1345,6 +1482,10 @@ function ExpandedPanel({
               onSendReports={handleSendToMe}
             />
           </div>
+
+          {/* Data still arriving? Say so, with a real percentage — never an
+              empty card while a 9-year history pull runs (Ford 2026-07-24). */}
+          <PullStatusStrip clientId={client.id} />
 
           {loadingArrays && (
             <div className="flex items-center gap-2 text-xs text-zinc-400">

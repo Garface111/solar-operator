@@ -5458,6 +5458,74 @@ def ignore_discovery_candidates(
         return discovery.set_ignored(db, t.id, body.candidate_ids, body.ignored)
 
 
+# ─── Pull status: is this client's data still arriving? ──────────────────
+
+@router.get("/v1/account/clients/{client_id}/pull-status")
+def client_pull_status(
+    client_id: int,
+    authorization: Optional[str] = Header(default=None),
+) -> dict:
+    """What's still being pulled for this client's arrays, so the UI can show
+    live progress instead of an empty card (Ford 2026-07-24: connect worked
+    and 9 years of history landed in 46s — but the card showed nothing the
+    whole time, which reads as broken).
+
+    Per vendor-connected array: pending (history never completed), error
+    (completed with failed years / crashed — last_error says why), or done
+    (with days + date range so "9 years loaded" is showable). Live mid-run
+    percentages ride the job.updated SSE events; this endpoint is the poll
+    fallback and the source of the settled state.
+    """
+    from .models import DailyGeneration, InverterConnection  # noqa: PLC0415
+
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        client = db.execute(
+            select(Client).where(
+                Client.id == client_id, Client.tenant_id == t.id,
+                Client.deleted_at.is_(None),
+            )
+        ).scalar_one_or_none()
+        if client is None:
+            raise HTTPException(404, "client not found")
+
+        rows = db.execute(
+            select(InverterConnection, Array)
+            .join(Array, Array.id == InverterConnection.array_id)
+            .where(Array.client_id == client_id, Array.deleted_at.is_(None))
+        ).all()
+
+        arrays = []
+        pulling = 0
+        for conn, arr in rows:
+            n, first, last = db.execute(
+                select(
+                    func.count(),
+                    func.min(DailyGeneration.day),
+                    func.max(DailyGeneration.day),
+                ).where(DailyGeneration.array_id == arr.id)
+            ).one()
+            if conn.history_backfilled_at is None:
+                status = "pending"
+                pulling += 1
+            elif conn.last_error:
+                status = "error"
+            else:
+                status = "done"
+            arrays.append({
+                "array_id": arr.id,
+                "name": arr.name,
+                "vendor": conn.vendor,
+                "connection_id": conn.id,
+                "status": status,
+                "error": conn.last_error,
+                "days": int(n or 0),
+                "first_day": first.isoformat() if first else None,
+                "last_day": last.isoformat() if last else None,
+            })
+        return {"ok": True, "pulling": pulling, "arrays": arrays}
+
+
 # ─── Next-run preview ────────────────────────────────────────────────────
 
 @router.get("/v1/account/reports/next-run")
