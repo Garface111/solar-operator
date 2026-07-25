@@ -20,9 +20,9 @@ describe("BottomTabBar", () => {
     ).toBeTruthy();
   });
 
-  it("renders exactly four tab links", () => {
+  it("renders exactly three tab links (Discover retired 2026-07-24)", () => {
     renderWithRouter();
-    expect(screen.getAllByRole("link")).toHaveLength(4);
+    expect(screen.getAllByRole("link")).toHaveLength(3);
   });
 
   it("renders Clients tab", () => {
@@ -30,9 +30,9 @@ describe("BottomTabBar", () => {
     expect(screen.getByTestId("bottom-tab-clients")).toBeTruthy();
   });
 
-  it("renders Discover tab", () => {
+  it("does not render a Discover tab (retired 2026-07-24)", () => {
     renderWithRouter();
-    expect(screen.getByTestId("bottom-tab-discover")).toBeTruthy();
+    expect(screen.queryByTestId("bottom-tab-discover")).toBeNull();
   });
 
   it("does not render an Arrays tab (retired)", () => {
@@ -53,7 +53,6 @@ describe("BottomTabBar", () => {
   it("all tab labels are visible", () => {
     renderWithRouter();
     expect(screen.getByText("Clients")).toBeTruthy();
-    expect(screen.getByText("Discover")).toBeTruthy();
     expect(screen.getByText("Reports")).toBeTruthy();
     expect(screen.getByText("Account")).toBeTruthy();
   });
@@ -61,7 +60,6 @@ describe("BottomTabBar", () => {
   it("each tab has an accessible aria-label", () => {
     renderWithRouter();
     expect(screen.getByRole("link", { name: "Clients" })).toBeTruthy();
-    expect(screen.getByRole("link", { name: "Discover" })).toBeTruthy();
     expect(screen.getByRole("link", { name: "Reports" })).toBeTruthy();
     expect(screen.getByRole("link", { name: "Account" })).toBeTruthy();
   });

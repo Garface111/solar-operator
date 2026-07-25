@@ -33,7 +33,6 @@ const BASE_TABS = [
   // the staging pool of everything the saved logins can see, before the
   // operator picks what's actually theirs. Not brand-varied: "Discover" reads
   // the same to a NEPOOL filer and an Array Operator owner.
-  { key: "discover", shortLabel: "Discover", to: "/discover" },
   { key: "reports", shortLabel: "Reports", to: "/reports" },
 ] as const;
 
@@ -236,8 +235,7 @@ export default function DashboardLayout({ onSignOut }: Props) {
   const tabs: Tab[] = [
     { ...BASE_TABS[0], label: brand.accountTabLabel },
     { ...BASE_TABS[1], label: brand.clientsTabLabel },
-    { ...BASE_TABS[2], label: "Discover" },
-    { ...BASE_TABS[3], label: brand.reportsTabLabel },
+    { ...BASE_TABS[2], label: brand.reportsTabLabel },
   ];
 
   return (

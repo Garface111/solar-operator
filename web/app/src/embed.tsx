@@ -30,7 +30,6 @@ import {
 import { ToastProvider } from "./ui/Toast";
 import { Spinner } from "./ui/Spinner";
 import ClientsTab from "./screens/ClientsTab";
-import DiscoverTab from "./screens/DiscoverTab";
 import NepoolReportsTab from "./screens/NepoolReportsTab";
 import { SetupProgress } from "./components/SetupProgress";
 import { lazyWithRetry } from "./lib/lazyWithRetry";
@@ -61,7 +60,6 @@ function SectionSpinner() {
  *  logins can see); Reports is one tab further over. */
 const SECTIONS = [
   { to: "/clients", label: "Clients" },
-  { to: "/discover", label: "Discover" },
   { to: "/reports", label: "Reports" },
 ] as const;
 
@@ -181,7 +179,6 @@ function EmbedApp() {
           <Route path="/reports" element={<NepoolReportsTab />} />
           <Route path="/clients" element={<ClientsTab />} />
           <Route path="/clients/:clientId" element={<ClientsTab />} />
-          <Route path="/discover" element={<DiscoverTab />} />
           <Route
             path="/verify/:clientId"
             element={

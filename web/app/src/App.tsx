@@ -17,7 +17,6 @@ const CaptureTimeline = lazyWithRetry(() => import("./components/dev/CaptureTime
 const VerifyAccuracy = lazyWithRetry(() => import("./screens/VerifyAccuracy"));
 
 const AccountTab = lazyWithRetry(() => import("./screens/AccountTab"));
-const DiscoverTab = lazyWithRetry(() => import("./screens/DiscoverTab"));
 const ReportsTab = lazyWithRetry(() => import("./screens/ReportsTab"));
 const TrendsView = lazyWithRetry(() => import("./screens/TrendsView"));
 const EnergyHistoryView = lazyWithRetry(() => import("./screens/EnergyHistoryView"));
@@ -241,16 +240,6 @@ function AuthGate() {
         <Route path="/arrays" element={<Navigate to="/clients" replace />} />
         {/* Deep link that auto-expands a single client. */}
         <Route path="/clients/:clientId" element={<ClientsTab />} />
-        {/* The staging pool — everything the saved logins can see, before the
-            operator decides any of it belongs in their system. */}
-        <Route
-          path="/discover"
-          element={
-            <Suspense fallback={<TabSpinner />}>
-              <DiscoverTab />
-            </Suspense>
-          }
-        />
         <Route
           path="/reports"
           element={

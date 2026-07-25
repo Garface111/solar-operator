@@ -23,15 +23,6 @@ function ReportsIcon() {
   );
 }
 
-function DiscoverIcon() {
-  return (
-    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <circle cx="11" cy="11" r="7" />
-      <line x1="21" y1="21" x2="16.65" y2="16.65" />
-    </svg>
-  );
-}
-
 function AccountIcon() {
   return (
     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -63,7 +54,6 @@ export function BottomTabBar({
 
   const tabs = [
     { label: clientsLabel, short: clientsLabel, to: "/clients", Icon: ClientsIcon, testId: "clients" },
-    { label: "Discover", short: "Discover", to: "/discover", Icon: DiscoverIcon, testId: "discover" },
     { label: reportsLabel, short: reportsShort, to: "/reports", Icon: ReportsIcon, testId: "reports" },
     { label: accountLabel, short: accountLabel, to: "/account", Icon: AccountIcon, testId: "account" },
   ];

@@ -1,5 +1,4 @@
-import { useEffect, useState, useMemo, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useState, useMemo } from "react";
 import { Modal } from "../ui/Modal";
 import { Button } from "../ui/Button";
 import { useToast } from "../ui/Toast";
@@ -120,10 +119,8 @@ function mergeKey(provider: string, username: string): string {
  */
 function ConnectedLoginsList({
   onCreated,
-  onReview,
 }: {
   onCreated: () => void;
-  onReview: () => void;
 }) {
   const toast = useToast();
   const [rows, setRows] = useState<ConnectedLogin[] | null>(null);
@@ -247,7 +244,6 @@ function ConnectedLoginsList({
   const renderRow = (r: ConnectedLogin) => {
             const attachable = !!r.unassigned && !!ATTACHABLE[r.provider];
             const isOpen = openFor === r.key;
-            const newCount = r.counts?.new ?? 0;
             return (
               <li
                 key={r.key}
@@ -275,16 +271,6 @@ function ConnectedLoginsList({
                     </Button>
                   )}
                 </div>
-
-                {newCount > 0 && (
-                  <button
-                    type="button"
-                    onClick={onReview}
-                    className="mt-2 text-xs font-medium text-primary-600 hover:underline"
-                  >
-                    Review {newCount} site{newCount === 1 ? "" : "s"} →
-                  </button>
-                )}
 
                 {isOpen && (
                   <div className="mt-3 flex flex-col gap-2 sm:flex-row">
@@ -500,16 +486,14 @@ interface PickSite {
  *                   account in one call (it enumerates sites server-side)
  *   • solaredge   → API key → discover → pick sites → connect-account. That
  *                   endpoint takes no client_id, so we don't claim a client;
- *                   the sites land in Discover for the operator to file.
+ *                   the connected arrays get assigned from the arrays list.
  */
 function MonitorConnectForm({
   vendor,
   onCreated,
-  onReview,
 }: {
   vendor: InverterVendorEntry;
   onCreated: () => void;
-  onReview: () => void;
 }) {
   const toast = useToast();
   const mode = monitorMode(vendor);
@@ -581,15 +565,15 @@ function MonitorConnectForm({
     setErr(null);
     try {
       if (mode === "key-account") {
-        // This endpoint has no client_id — connect the sites, then point the
-        // operator at Discover to file them under a client.
+        // This endpoint has no client_id — the connected sites appear as
+        // arrays; the operator files them under clients from the array views.
         const res = await connectSolarEdgeAccount(apiKey.trim(), [...picked]);
         toast.success(
-          `${res.connected.length} SolarEdge array${res.connected.length === 1 ? "" : "s"} connected. ` +
-            `File them under a client in Discover.`,
+          `${res.connected.length} SolarEdge array${res.connected.length === 1 ? "" : "s"} connected — ` +
+            `assign them to a client from the arrays list.`,
         );
         notifyFleetChanged("modal");
-        onReview();
+        onCreated();
         return;
       }
       const name = clientName.trim() || nameFromLogin(username);
@@ -912,7 +896,6 @@ export function AddClientByLoginModal({
   cloudMode = false,
 }: Props) {
   const toast = useToast();
-  const navigate = useNavigate();
   // Cloud mode never needs extension probe UI — skip live probe noise.
   const ext = useExtensionStatus(open && !cloudMode);
 
@@ -952,13 +935,6 @@ export function AddClientByLoginModal({
     );
   }
 
-  // Close the modal and land the operator on the staging pool, where the sites
-  // a login can see get filed under clients. Same route in both routers (the
-  // standalone app and the embed's MemoryRouter).
-  const goReview = useCallback(() => {
-    onClose();
-    navigate("/discover");
-  }, [navigate, onClose]);
 
   // Re-probe whenever the modal opens so a freshly-installed extension
   // is detected without a page reload.
@@ -1204,7 +1180,7 @@ export function AddClientByLoginModal({
           the viewport so 40 GMP logins can't push the connect pane away. */}
       <div className="grid gap-6 md:grid-cols-2">
         <div className="min-w-0 md:max-h-[calc(100vh-16rem)] md:overflow-y-auto md:pr-1">
-          <ConnectedLoginsList onCreated={finish} onReview={goReview} />
+          <ConnectedLoginsList onCreated={finish} />
         </div>
 
         <div className="min-w-0 space-y-3 md:max-h-[calc(100vh-16rem)] md:overflow-y-auto md:border-l md:border-cream-border md:pl-6">
@@ -1326,7 +1302,6 @@ export function AddClientByLoginModal({
               <MonitorConnectForm
                 vendor={selected.vendor}
                 onCreated={finish}
-                onReview={goReview}
               />
             )}
 

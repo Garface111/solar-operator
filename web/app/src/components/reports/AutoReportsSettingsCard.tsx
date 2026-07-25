@@ -5,14 +5,11 @@ import {
   type Account,
   type EmailTemplatePreviewResult,
   updateCcOnReports,
-  updateAccountFrequency,
   previewEmailTemplate,
 } from "../../lib/api";
 
-const CADENCE_OPTIONS = [
-  { value: "quarterly", label: "Quarterly" },
-  { value: "monthly", label: "Monthly" },
-] as const;
+// Report cadence is ALWAYS quarterly (Ford 2026-07-24) — the Quarterly/Monthly
+// selector was removed; the backend default stays "quarterly" untouched.
 
 interface Props {
   account: Account;
@@ -27,8 +24,6 @@ export function AutoReportsSettingsCard({
 }: Props) {
   const toast = useToast();
   const [savingCc, setSavingCc] = useState(false);
-  const [savingFreq, setSavingFreq] = useState(false);
-
   const [preview, setPreview] = useState<EmailTemplatePreviewResult | null>(null);
   const [previewLoading, setPreviewLoading] = useState(true);
   const [previewError, setPreviewError] = useState<string | null>(null);
@@ -73,24 +68,6 @@ export function AutoReportsSettingsCard({
     }
   }
 
-  async function setFrequency(freq: string) {
-    if (freq === account.report_frequency) return;
-    setSavingFreq(true);
-    try {
-      const val = await updateAccountFrequency(freq);
-      onAccountChange({ report_frequency: val });
-      toast.success(`Report cadence set to ${val}`);
-    } catch (err) {
-      toast.error(
-        err instanceof Error ? err.message : "Couldn't update cadence",
-      );
-    } finally {
-      setSavingFreq(false);
-    }
-  }
-
-  const currentFreq = account.report_frequency ?? "quarterly";
-
   const fromName = account.send_from_name || account.name || "NEPOOL Operator";
   const fromEmail = account.send_from_email || account.email || "admin@solaroperator.org";
 
@@ -101,45 +78,9 @@ export function AutoReportsSettingsCard({
       </h2>
 
       <div className="rounded-xl border border-cream-border bg-cream shadow-sm">
-        {/* Region A: Cadence */}
+        {/* CC me toggle (cadence selector removed — reports are always
+            quarterly, Ford 2026-07-24) */}
         <div className="px-5 py-4">
-          <p className="text-sm font-medium text-zinc-800">Report cadence</p>
-          <p className="mt-0.5 text-xs text-zinc-400">
-            How often reports are generated and sent.
-          </p>
-          <div
-            role="radiogroup"
-            aria-label="Report cadence"
-            className="mt-3 flex w-fit rounded-xl border border-zinc-200 bg-zinc-50 p-1"
-          >
-            {CADENCE_OPTIONS.map((opt) => {
-              const selected = currentFreq === opt.value;
-              return (
-                <button
-                  key={opt.value}
-                  type="button"
-                  role="radio"
-                  aria-checked={selected}
-                  disabled={savingFreq}
-                  onClick={() => setFrequency(opt.value)}
-                  className={[
-                    "rounded-lg px-4 py-1.5 text-sm font-medium transition-colors",
-                    "focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40",
-                    "disabled:cursor-not-allowed disabled:opacity-50",
-                    selected
-                      ? "bg-primary-500 text-white shadow-sm"
-                      : "text-zinc-500 hover:text-zinc-800",
-                  ].join(" ")}
-                >
-                  {opt.label}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Region B: CC me toggle */}
-        <div className="border-t border-cream-border px-5 py-4">
           <div className="flex items-center justify-between gap-4">
             <div>
               <p className="text-sm font-medium text-zinc-800">
