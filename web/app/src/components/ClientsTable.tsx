@@ -1577,6 +1577,26 @@ function ExpandedPanel({
               })}
             </div>
           )}
+          {/* ── Arrays live HERE, filling the left column's dead space —
+              Ford (2026-07-24): "you have to scroll down to access the
+              arrays, and it's just a mess. Fill this dense space." Import
+              actions stay in the right column's DATA dropdown. ── */}
+          <div className="mt-5">
+            <div className="mb-2">
+              <h4 className="text-[10px] font-semibold uppercase tracking-wide text-zinc-400">
+                Arrays
+              </h4>
+            </div>
+            <ArrayList
+              clientId={client.id}
+              refreshSignal={arrayRefreshSignal}
+              onCountChange={(count) => {
+                onChange({ ...client, array_count: count });
+                onArraysCacheInvalidate();
+              }}
+              onUndo={onUndo}
+            />
+          </div>
         </div>
 
         {/* ── Right: the redesigned report card (Ford's boxed region).
@@ -1819,25 +1839,6 @@ function ExpandedPanel({
             </div>
           </div>
         </div>
-      </div>
-
-      {/* Arrays section — import actions moved into the right-column DATA
-          dropdown ("Import data ▾"), so the header is just the label now. */}
-      <div className="mt-6">
-        <div className="mb-2">
-          <h4 className="text-[10px] font-semibold uppercase tracking-wide text-zinc-400">
-            Arrays
-          </h4>
-        </div>
-        <ArrayList
-          clientId={client.id}
-          refreshSignal={arrayRefreshSignal}
-          onCountChange={(count) => {
-            onChange({ ...client, array_count: count });
-            onArraysCacheInvalidate();
-          }}
-          onUndo={onUndo}
-        />
       </div>
 
       {/* Footer: delete / reactivate */}
