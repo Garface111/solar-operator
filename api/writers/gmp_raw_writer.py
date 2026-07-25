@@ -37,7 +37,8 @@ from ..generation_sources import (
     VENDOR_TELEMETRY_SOURCES,
 )
 from ..models import (
-    Array, Bill, Client, DailyGeneration, GmpDailyGeneration, Tenant, UtilityAccount,
+    Array, Bill, Client, DailyGeneration, GmpDailyGeneration, InverterConnection,
+    Tenant, UtilityAccount,
 )
 from ..report_arrays import is_vendor_only_array
 from ..reports import gmp_daily_read
@@ -616,6 +617,22 @@ def build_quarterly_summary_workbook(
             if ua.array_id is not None:
                 uas_by_array[ua.array_id].append(ua)
 
+        # Vendor site ids for accountless arrays, so the Account # column is
+        # never blank when the array has a real external identity. Ford
+        # (2026-07-24): the Locus site id was riding in the NAME column
+        # ("Johnson Farm & Garden (3669325)") while Account # sat empty — the
+        # identifier belongs in the identifier column.
+        site_by_array: dict[int, str] = {}
+        if array_ids:
+            for conn in db.execute(
+                select(InverterConnection).where(
+                    InverterConnection.array_id.in_(array_ids)
+                )
+            ).scalars().all():
+                sid = (conn.config or {}).get("site_id")
+                if sid is not None:
+                    site_by_array[conn.array_id] = str(sid)
+
         rows = []  # (name, account_number, monthly_dict)
         for arr in arrays:
             uas = uas_by_array.get(arr.id) or []
@@ -623,14 +640,17 @@ def build_quarterly_summary_workbook(
                 # No utility account — either a bare onboarding stub (all zeros,
                 # so the operator sees the gap) or a monitoring-only array
                 # (Locus / AlsoEnergy / eGauge). Use the array-level feed:
-                # utility daily wins a month, else monitoring, else 0. Account #
-                # is blank — these arrays settle off a monitor, not a meter.
+                # utility daily wins a month, else monitoring, else 0. The
+                # Account # column carries the array's NEPOOL GIS id when set,
+                # else the monitor's site id — these arrays settle off a
+                # monitor, not a meter, but they still have an identity.
                 util = _daily_generation_by_month(db, arr.id, start, end)
                 mon = _monitoring_months(db, arr.id, months, start, end)
                 monthly = {
                     k: float(util.get(k) or mon.get(k) or 0.0) for k in months
                 }
-                rows.append((arr.name, "", monthly))
+                ident = (arr.nepool_gis_id or "").strip() or site_by_array.get(arr.id, "")
+                rows.append((arr.name, ident, monthly))
                 continue
             solo = ua_count.get(arr.id, 0) == 1
             for ua in uas:

@@ -3221,11 +3221,17 @@ def solaredge_connect_account(
         by_name: dict[str, list[int]] = defaultdict(list)
         names_lower: set[str] = set()
         # uq_array_per_tenant spans soft-deleted rows, so the new-array collision
-        # guard must check ALL names (live + soft-deleted), else a site colliding
+        # (name-collision guard below is scoped to LIVE rows; see comment there)
         # with a deleted array's name slips through → INSERT → UniqueViolation 500.
+        # LIVE names only: uniqueness is a partial index scoped to live rows
+        # (uq_array_per_tenant_live), so a deleted array no longer reserves its
+        # name. Counting ghosts here forced ugly "(siteid)" suffixes onto clean
+        # names — Ford's "Johnson Farm & Garden (3669325)" (2026-07-24).
         all_names_lower: set[str] = {
             n.strip().lower() for (n,) in db.execute(
-                select(Array.name).where(Array.tenant_id == tenant.id)
+                select(Array.name).where(
+                    Array.tenant_id == tenant.id, Array.deleted_at.is_(None)
+                )
             ).all()
         }
         arr_by_id = {a.id: a for a in arrays}
@@ -3506,11 +3512,17 @@ def locus_connect_account(
         by_name: dict[str, list[int]] = defaultdict(list)
         names_lower: set[str] = set()
         # uq_array_per_tenant spans soft-deleted rows — the new-array collision
-        # guard must check ALL names (live + soft-deleted) or a site colliding with
+        # (name-collision guard below is scoped to LIVE rows; see comment there)
         # a deleted array's name slips through → INSERT → UniqueViolation 500.
+        # LIVE names only: uniqueness is a partial index scoped to live rows
+        # (uq_array_per_tenant_live), so a deleted array no longer reserves its
+        # name. Counting ghosts here forced ugly "(siteid)" suffixes onto clean
+        # names — Ford's "Johnson Farm & Garden (3669325)" (2026-07-24).
         all_names_lower: set[str] = {
             n.strip().lower() for (n,) in db.execute(
-                select(Array.name).where(Array.tenant_id == tenant.id)
+                select(Array.name).where(
+                    Array.tenant_id == tenant.id, Array.deleted_at.is_(None)
+                )
             ).all()
         }
         # Onboarding: resolve the client the connected sites should live under
@@ -3787,11 +3799,17 @@ def fronius_connect_account(
         by_name: dict[str, list[int]] = defaultdict(list)
         names_lower: set[str] = set()
         # uq_array_per_tenant spans soft-deleted rows — the new-array collision
-        # guard must check ALL names (live + soft-deleted) or a system colliding
+        # (name-collision guard below is scoped to LIVE rows; see comment there)
         # with a deleted array's name slips through → INSERT → UniqueViolation.
+        # LIVE names only: uniqueness is a partial index scoped to live rows
+        # (uq_array_per_tenant_live), so a deleted array no longer reserves its
+        # name. Counting ghosts here forced ugly "(siteid)" suffixes onto clean
+        # names — Ford's "Johnson Farm & Garden (3669325)" (2026-07-24).
         all_names_lower: set[str] = {
             n.strip().lower() for (n,) in db.execute(
-                select(Array.name).where(Array.tenant_id == tenant.id)
+                select(Array.name).where(
+                    Array.tenant_id == tenant.id, Array.deleted_at.is_(None)
+                )
             ).all()
         }
         arr_by_id = {a.id: a for a in arrays}
@@ -4125,9 +4143,15 @@ def alsoenergy_connect_account(
         by_site_id: dict[int, list[int]] = defaultdict(list)
         by_name: dict[str, list[int]] = defaultdict(list)
         names_lower: set[str] = set()
+        # LIVE names only: uniqueness is a partial index scoped to live rows
+        # (uq_array_per_tenant_live), so a deleted array no longer reserves its
+        # name. Counting ghosts here forced ugly "(siteid)" suffixes onto clean
+        # names — Ford's "Johnson Farm & Garden (3669325)" (2026-07-24).
         all_names_lower: set[str] = {
             n.strip().lower() for (n,) in db.execute(
-                select(Array.name).where(Array.tenant_id == tenant.id)
+                select(Array.name).where(
+                    Array.tenant_id == tenant.id, Array.deleted_at.is_(None)
+                )
             ).all()
         }
         # Onboarding: resolve the destination client, verified tenant-owned so
@@ -7168,9 +7192,15 @@ def sma_connect_account(
 
         by_system_id: dict[str, list[int]] = defaultdict(list)
         by_name: dict[str, list[int]] = defaultdict(list)
+        # LIVE names only: uniqueness is a partial index scoped to live rows
+        # (uq_array_per_tenant_live), so a deleted array no longer reserves its
+        # name. Counting ghosts here forced ugly "(siteid)" suffixes onto clean
+        # names — Ford's "Johnson Farm & Garden (3669325)" (2026-07-24).
         all_names_lower: set[str] = {
             n.strip().lower() for (n,) in db.execute(
-                select(Array.name).where(Array.tenant_id == tenant.id)
+                select(Array.name).where(
+                    Array.tenant_id == tenant.id, Array.deleted_at.is_(None)
+                )
             ).all()
         }
         arr_by_id = {a.id: a for a in arrays}
