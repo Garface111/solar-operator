@@ -5,44 +5,25 @@ import { ClientsSection } from "../components/ClientsSection";
 import SandboxCanvas from "../components/sandbox/SandboxCanvas";
 
 /**
- * Clients tab — the spatial sandbox sits on top, the list view below.
+ * Clients tab — ONE page (Ford 2026-07-24): the table on top, the spatial
+ * sandbox directly below it, filling what used to be dead space. The old
+ * Table/Sandbox pill toggle is gone — "find one client and edit one field"
+ * happens in the list, "where am I, what do I have" lives in the canvas,
+ * and you see both without choosing.
  *
- * Bruce wants the canvas to be THE interaction, not a separate destination.
- * The list stays as the dense reference view underneath: "where am I, what
- * do I have, what's it worth" lives in the canvas; "find one client and edit
- * one field" stays cheaper in the list. Same data, two views, one tab.
+ * The canvas keeps its own fullscreen toggle (fixed overlay) for real spatial
+ * work; Esc exits it.
  */
 export default function ClientsTab() {
-  // Supports deep links to a specific client: /clients/:clientId auto-expands
-  // the list-view card. The canvas autopans to the same client on load.
+  // Deep links to a specific client: /clients/:clientId auto-expands the
+  // list-view card. The canvas autopans to the same client on load.
   const { clientId } = useParams();
 
   // CSS-based fullscreen — the canvas keeps its React tree (ReactFlow state,
   // walkthrough, undo stack) and only the wrapper classes change, so toggling
-  // never remounts SandboxCanvas. State lives here because the wrapper does.
+  // never remounts SandboxCanvas.
   const [isFullscreen, setIsFullscreen] = useState(false);
   const toggleFullscreen = useCallback(() => setIsFullscreen((v) => !v), []);
-
-  // Sub-tab: Table (default, left) vs Sandbox (optional spatial view).
-  // Both stay MOUNTED (hidden, never unmounted) so the canvas keeps its
-  // ReactFlow / undo / walkthrough state across switches. Persisted.
-  // Ford 2026-07-15: Table is the default; Sandbox is opt-in.
-  const [subtab, setSubtab] = useState<"sandbox" | "spreadsheet">(() => {
-    try {
-      const v = localStorage.getItem("so:clients:subtab");
-      if (v === "sandbox") return "sandbox";
-      return "spreadsheet";
-    } catch {
-      return "spreadsheet";
-    }
-  });
-  const selectSubtab = useCallback((v: "sandbox" | "spreadsheet") => {
-    setSubtab(v);
-    try { localStorage.setItem("so:clients:subtab", v); } catch { /* ignore */ }
-    // The canvas was display:none (zero-size) while hidden — nudge ReactFlow to
-    // remeasure on re-show so it doesn't paint into a collapsed box.
-    if (v === "sandbox") setTimeout(() => window.dispatchEvent(new Event("resize")), 60);
-  }, []);
 
   // Lock body scroll while the overlay covers the viewport; restore on exit.
   useEffect(() => {
@@ -72,56 +53,16 @@ export default function ClientsTab() {
     return () => window.removeEventListener("keydown", handler);
   }, [isFullscreen]);
 
-  // Sandbox fills under top nav + Table/Sandbox pill. Table keeps the classic
-  // max-w-4xl gutters (dead space L/R) — only sandbox is full-bleed.
-  // ~3.5rem TabBar + ~0.75rem main pad + ~2.25rem pill + gaps ≈ 6.75rem.
-  const sandboxFillClass =
-    "relative rounded-2xl h-[calc(100dvh-6.75rem)] min-h-[28rem] w-full";
-  const isSandbox = subtab === "sandbox";
-
-  // Let DashboardLayout hide the site footer only while the large sandbox is up.
-  useEffect(() => {
-    const on = isSandbox && !isFullscreen;
-    document.body.classList.toggle("so-clients-sandbox", on);
-    return () => document.body.classList.remove("so-clients-sandbox");
-  }, [isSandbox, isFullscreen]);
-
   return (
-    <div
-      className={
-        isSandbox && !isFullscreen ? "flex flex-col gap-3" : "space-y-4"
-      }
-    >
-      {/* Centered pill toggle under the top tabs — not full-width, not tiny. */}
-      {!isFullscreen && (
-        <div className="flex w-full shrink-0 justify-center">
-          <div
-            role="tablist"
-            aria-label="Clients view"
-            className="inline-flex items-center gap-1 rounded-full border border-zinc-200 bg-white p-1 shadow-sm"
-          >
-            {(["spreadsheet", "sandbox"] as const).map((v) => (
-              <button
-                key={v}
-                type="button"
-                role="tab"
-                aria-selected={subtab === v}
-                onClick={() => selectSubtab(v)}
-                className={[
-                  "rounded-full px-5 py-1.5 text-sm font-semibold leading-none transition-colors",
-                  subtab === v
-                    ? "bg-primary-500 text-white shadow-sm"
-                    : "text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900",
-                ].join(" ")}
-              >
-                {v === "spreadsheet" ? "Table" : "Sandbox"}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
+    <div className="space-y-4">
+      {/* Spreadsheet / list — classic centered column, always visible. */}
+      <div className="mx-auto w-full max-w-4xl">
+        <ClientsSection expandClientId={clientId ? Number(clientId) : undefined} />
+      </div>
 
-      {/* Spatial canvas — full-bleed under the top bars. Fullscreen = fixed overlay. */}
+      {/* Spatial canvas — full-bleed BELOW the table, always visible on sm+.
+          Fullscreen = fixed overlay. It mounts visible now, so ReactFlow
+          measures real geometry on first paint (no display:none races). */}
       <section
         aria-label="Clients sandbox"
         className={[
@@ -129,9 +70,9 @@ export default function ClientsTab() {
           // Tailwind resolves conflicts by stylesheet order (not class order),
           // and `relative` beats `fixed`, collapsing the section to 0 height.
           "overflow-hidden border border-zinc-200 bg-zinc-50 shadow-sm",
-          // Sub-tab: hide (don't unmount) when the Spreadsheet view is active.
-          isSandbox || isFullscreen ? "" : "hidden",
-          isFullscreen ? "fixed inset-0 z-[100]" : sandboxFillClass,
+          isFullscreen
+            ? "fixed inset-0 z-[100]"
+            : "relative h-[calc(100dvh-10rem)] min-h-[26rem] w-full rounded-2xl",
         ].join(" ")}
       >
         {/* Mobile notice — overlays the canvas below 640px. The canvas still
@@ -160,7 +101,7 @@ export default function ClientsTab() {
             Sandbox works best on a wider screen.
           </p>
           <p className="text-xs text-zinc-400">
-            Scroll down for the client list.
+            Scroll up for the client list.
           </p>
         </div>
 
@@ -171,17 +112,6 @@ export default function ClientsTab() {
           />
         </ReactFlowProvider>
       </section>
-
-      {/* Spreadsheet / list — classic centered column with L/R deadspace
-          (max-w-4xl), matching Account / Automatic Reports. Hidden (not
-          unmounted) while Sandbox is active. */}
-      <div
-        className={
-          subtab === "spreadsheet" ? "mx-auto w-full max-w-4xl" : "hidden"
-        }
-      >
-        <ClientsSection expandClientId={clientId ? Number(clientId) : undefined} />
-      </div>
     </div>
   );
 }
