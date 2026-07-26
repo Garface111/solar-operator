@@ -20,6 +20,49 @@ TOOL_DEFS_EXTRA: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "open_setup_widget",
+            "description": (
+                "MOBILE: render an interactive setup card INSIDE this chat so the owner "
+                "finishes the job here instead of being sent to the desktop site. Use it "
+                "the moment a mobile owner asks to connect arrays/inverters, turn on "
+                "auto-refresh (cloud capture), link utility bills, or enable online pay — "
+                "these are the four 'Set up with Agent' cards on the Account tab. "
+                "NEVER ask for a password in chat: the card collects it in a native secure "
+                "field that never enters this transcript. Call setup_status first when you "
+                "want to say what is already done, then open the card for the top gap. "
+                "Say what the card does in one line; do not narrate the form fields."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pillar": {
+                        "type": "string",
+                        "enum": ["arrays", "auto_refresh", "utility_bills"],
+                        "description": (
+                            "Which setup to open. arrays=inverter/monitoring vendor "
+                            "account; auto_refresh=server-side capture login so data "
+                            "flows without a browser tab; utility_bills=utility portal "
+                            "login for real bill data. For online pay call "
+                            "start_payments_connect instead — it owns that flow."
+                        ),
+                    },
+                    "provider": {
+                        "type": "string",
+                        "description": (
+                            "Optional pre-selected vendor/utility code (solaredge, locus, "
+                            "fronius, sma, alsoenergy, chint, gmp, a SmartHub co-op code…). "
+                            "Pass it when the owner already named one."
+                        ),
+                    },
+                },
+                "required": ["pillar"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "create_offtaker",
             "description": (
                 "CREATE a new offtaker (BillingReportSubscription) for THIS tenant. "
@@ -182,8 +225,30 @@ def run_mobile_tool(
     if name == "payments_connect_status":
         return _payments_connect_status(tenant, db)
     if name == "start_payments_connect":
-        return _start_payments_connect(args, tenant, session, db, user_text=user_text)
+        return _normalise(_start_payments_connect(args, tenant, session, db, user_text=user_text))
+    if name == "open_setup_widget":
+        return _open_setup_widget(args, tenant, db)
     return None
+
+
+def _normalise(out: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Promote a legacy {"ui_command": ...} return into the shape the tool loop
+    actually collects.
+
+    api/energy_agent.py only appends a command when out["status"] == "ui_command"
+    and reads out["command"]. _start_payments_connect returned {"ui_command": ...}
+    with no status, so its "Open Stripe Connect" action was silently dropped and
+    the agent could only paste the URL as text -- part of why every mobile setup
+    ended in "go to the website".
+    """
+    if not isinstance(out, dict):
+        return out
+    cmd = out.get("ui_command")
+    if cmd and not out.get("command"):
+        out = dict(out)
+        out["command"] = cmd
+        out.setdefault("status", "ui_command")
+    return out
 
 
 def _share_to_fraction(share_pct) -> float | None:
@@ -633,3 +698,74 @@ def _start_payments_connect(args, tenant, session, db, *, user_text: str = "") -
     except Exception as e:
         log.exception("start_payments_connect failed")
         return {"ok": False, "error": str(e)[:300]}
+
+
+# ── Setup widgets (the four mobile "Set up with Agent" cards) ───────────────
+# Each pillar maps to endpoints that already exist and are armed in prod. The
+# card is rendered by the /m AgentSheet; the agent only chooses WHICH card and
+# says one line about it. Passwords are typed into a native field and posted
+# straight to the vault endpoint -- they never pass through the model.
+_PILLARS = {
+    "arrays": {
+        "title": "Connect arrays / inverters",
+        "blurb": "Sign in to your monitoring vendor so production data flows.",
+        "endpoint": "/v1/array-owners/{vendor}/connect-account",
+        "vendors": ["solaredge", "locus", "fronius", "alsoenergy", "sma"],
+    },
+    "auto_refresh": {
+        "title": "Turn on auto-refresh",
+        "blurb": "Save a monitoring login so capture runs 24/7 without a browser tab.",
+        "endpoint": "/v1/cloud-capture/credentials",
+        "vendors": ["solaredge", "locus", "fronius", "sma", "chint"],
+        "needs_consent": True,
+    },
+    "utility_bills": {
+        "title": "Link utility bills",
+        "blurb": "Sign in to your utility so invoices use the real bill as source of truth.",
+        "endpoint": "/v1/cloud-capture/credentials",
+        "providers_url": "/v1/providers",
+        "needs_consent": True,
+        "needs_login_host": True,
+    },
+}
+
+
+def _open_setup_widget(args, tenant, db) -> dict:
+    pillar = (args.get("pillar") or "").strip().lower()
+    spec = _PILLARS.get(pillar)
+    if not spec:
+        return {
+            "ok": False,
+            "error": "unknown_pillar",
+            "message": f"Unknown setup pillar {pillar!r}.",
+        }
+    if bool(getattr(tenant, "is_demo", False)):
+        return {
+            "ok": False,
+            "error": "demo_blocked",
+            "message": "Demo accounts cannot save real logins. This needs a live account.",
+        }
+
+    cmd: dict[str, Any] = {
+        "type": "setup_widget",
+        "pillar": pillar,
+        "title": spec["title"],
+        "blurb": spec["blurb"],
+    }
+    for k in ("endpoint", "vendors", "providers_url", "needs_consent",
+              "needs_login_host", "tool"):
+        if k in spec:
+            cmd[k] = spec[k]
+    picked = (args.get("provider") or "").strip().lower()
+    if picked:
+        cmd["provider"] = picked
+
+    return {
+        "ok": True,
+        "status": "ui_command",
+        "command": cmd,
+        "message": (
+            f"Opened the '{spec['title']}' card in this chat. "
+            "Tell the owner it is right here — do not send them to the website."
+        ),
+    }
