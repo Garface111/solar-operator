@@ -84,7 +84,9 @@ Network + DB at the edges; the math core (`expected_kwh_from_poa`,
 from __future__ import annotations
 
 import logging
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
@@ -147,6 +149,62 @@ from .generation_sources import MEASURED_SOURCES as _MEASURED_SOURCES
 MEASURED_DAILY_SOURCES = _MEASURED_SOURCES | {"vendor"}
 _OPEN_METEO_TIMEOUT = httpx.Timeout(20.0, connect=8.0)
 _OPEN_METEO_TZ = "America/New_York"   # all current customers are New-England VT
+
+# ── shared pooled client + concurrent prefetch ────────────────────────────────
+# Measured on prod 2026-07-25 (Ford: "the Analysis tab takes too long"):
+# /verification/summary spent 8.5s wall, of which ~8.4s was EIGHT separate TLS
+# handshakes to archive-api.open-meteo.com — one per distinct site location,
+# issued SERIALLY from the per-array loop. Two fixes, both here:
+#   1. one module-level pooled Client → keep-alive reuses the TLS session
+#      instead of a fresh handshake per call;
+#   2. prefetch_poa_daily() warms every distinct location CONCURRENTLY before
+#      the caller's loop, so N locations cost ~1 round-trip of wall time.
+# The existing TTL cache is unchanged and still does the across-request work;
+# this only fixes the cold-cache stampede.
+_HTTP_LOCK = threading.Lock()
+_http_client: httpx.Client | None = None
+
+
+def _client() -> httpx.Client:
+    """Process-wide pooled HTTP client for Open-Meteo (thread-safe to share)."""
+    global _http_client
+    if _http_client is None:
+        with _HTTP_LOCK:
+            if _http_client is None:
+                _http_client = httpx.Client(
+                    timeout=_OPEN_METEO_TIMEOUT,
+                    limits=httpx.Limits(max_keepalive_connections=8,
+                                        max_connections=16),
+                )
+    return _http_client
+
+
+def prefetch_poa_daily(
+    keys: "list[tuple[float, float, float, float]]",
+    start: date, end: date, *, forecast: bool = False,
+    max_workers: int = 8,
+) -> None:
+    """Warm the POA cache for many (lat, lng, tilt, az) locations at once.
+
+    Fire-and-forget: fetch_poa_daily already caches and returns {} on failure,
+    so a miss here just means the caller pays for that one location inline.
+    """
+    todo = [
+        k for k in dict.fromkeys(keys)
+        if _cache_get(
+            _poa_cache,
+            (round(k[0], 4), round(k[1], 4), round(k[2], 1), round(k[3], 1),
+             start.isoformat(), end.isoformat(), bool(forecast)),
+        ) is None
+    ]
+    if len(todo) <= 1:
+        return  # nothing to parallelize
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(todo))) as ex:
+        list(ex.map(
+            lambda k: fetch_poa_daily(k[0], k[1], k[2], k[3], start, end,
+                                      forecast=forecast),
+            todo,
+        ))
 
 # A "clear/sunny" day for the legibility highlight Ford asked for: POA at or above
 # this fraction of the window's best day. Surfaced so the UI can spotlight the
@@ -292,7 +350,7 @@ def fetch_poa_daily(
     if cached is not None:
         return cached
     try:
-        r = httpx.get(base, params=params, timeout=_OPEN_METEO_TIMEOUT)
+        r = _client().get(base, params=params)
         if r.status_code != 200:
             log.warning("open-meteo POA %s -> HTTP %s: %s", base, r.status_code, r.text[:200])
             return {}
@@ -319,11 +377,10 @@ def fetch_current_weather_code(lat: float, lng: float) -> Optional[int]:
     if cached is not None:
         return cached
     try:
-        r = httpx.get(
+        r = _client().get(
             "https://api.open-meteo.com/v1/forecast",
             params={"latitude": round(lat, 3), "longitude": round(lng, 3),
                     "current_weather": True, "timezone": _OPEN_METEO_TZ},
-            timeout=_OPEN_METEO_TIMEOUT,
         )
         if r.status_code != 200:
             return None

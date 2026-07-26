@@ -321,6 +321,33 @@ def build_portfolio_verification(
             )
         ).scalars().all()
 
+        # Warm every distinct site location's POA CONCURRENTLY before the loop.
+        # These were fetched lazily inside the loop — 8 sites meant 8 serial
+        # Open-Meteo round-trips, ~8.4s of the endpoint's 8.5s (measured on
+        # prod 2026-07-25). Geocoding must happen first since it can fill in
+        # lat/lng; it's a local no-op for arrays that already have coords.
+        _pre_keys: list[tuple[float, float, float, float]] = []
+        for arr in arrays:
+            if arr.expected_kwh_per_kw_day is not None:
+                continue  # uses its own ratio; never needs POA
+            if not _ensure_array_geocoded(db, arr):
+                continue
+            if arr.latitude is None or arr.longitude is None:
+                continue
+            _pre_keys.append((
+                arr.latitude, arr.longitude,
+                arr.tilt_deg if arr.tilt_deg is not None
+                else forecasting.default_tilt_deg(arr.latitude),
+                arr.azimuth_deg if arr.azimuth_deg is not None
+                else forecasting.DEFAULT_AZIMUTH_DEG,
+            ))
+        if _pre_keys:
+            try:
+                forecasting.prefetch_poa_daily(_pre_keys, start, end)
+            except Exception:  # noqa: BLE001 — warmup is best-effort
+                log.warning("POA prefetch failed; falling back to inline fetch",
+                            exc_info=True)
+
         for arr in arrays:
             nameplate = _array_nameplate_kw(db, arr)
             has_loc = _ensure_array_geocoded(db, arr)
