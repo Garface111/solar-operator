@@ -38,6 +38,7 @@ from sqlalchemy import DateTime, Float, Integer, String, Text, func, select
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .account import require_not_demo, tenant_from_session
+from . import ratelimit
 from .db import SessionLocal
 from .models import Array, Base, Client, Tenant
 from .notify import send_internal_alert
@@ -10909,6 +10910,32 @@ def _realtime_session_config(voice: str | None = None) -> dict:
     return cfg
 
 
+# ── Metered-model spend cap (Ford 2026-07-25 security pass) ─────────────────
+# Every endpoint below reaches a PAID model (Anthropic / xAI / OpenAI Realtime).
+# They are all authenticated, so the risk is not an anonymous flood -- it is the
+# bill: a runaway client retry loop or a stuck voice session can spend without
+# limit. Budgets are deliberately far above real human use (a busy operator runs
+# a handful of turns a minute) and exist to bound a malfunction, not to ration.
+def _llm_budget(t, kind: str = "chat") -> None:
+    """Cap paid-model calls per tenant: a burst window plus an hourly ceiling."""
+    burst, hourly = {
+        "chat":     (30, 250),   # text + streamed turns
+        "voice":    (40, 300),   # voice weave narrates in more, smaller turns
+        "upload":   (20, 120),   # vision/attachment analysis
+        "realtime": (15,  80),   # each mint opens a billable WebRTC session
+    }.get(kind, (30, 250))
+    tid = getattr(t, "id", None)
+    ratelimit.enforce_tenant(
+        tid, f"ea_{kind}_burst", max_hits=burst, window_s=300,
+        message="That is a lot of requests at once — give it a moment and try again.",
+    )
+    ratelimit.enforce_tenant(
+        tid, f"ea_{kind}_hour", max_hits=hourly, window_s=3600,
+        message="You have hit this hour's Energy Agent limit. It resets shortly — "
+                "reach out if you need a higher ceiling.",
+    )
+
+
 @router.post("/v1/energy-agent/realtime-session")
 def realtime_session(body: dict | None = None, authorization: str | None = Header(default=None)):
     """Mint ephemeral OpenAI Realtime client secret (never expose OPENAI_API_KEY).
@@ -10916,6 +10943,7 @@ def realtime_session(body: dict | None = None, authorization: str | None = Heade
     Browser uses the secret only for WebRTC; prefer /realtime-call (unified) when possible.
     """
     t = _auth(authorization)
+    _llm_budget(t, "realtime")
     if not OPENAI_API_KEY:
         raise HTTPException(
             503,
@@ -10981,6 +11009,7 @@ async def realtime_call(request: Request, authorization: str | None = Header(def
     Key never leaves the server. Body is raw application/sdp.
     """
     t = _auth(authorization)
+    _llm_budget(t, "realtime")
     if not OPENAI_API_KEY:
         raise HTTPException(
             503,
@@ -11073,6 +11102,7 @@ async def chat_upload(
 ):
     """Attach a file or image for Energy Agent to analyze on the next chat turn."""
     t = _auth(authorization)
+    _llm_budget(t, "upload")
     require_not_demo(t)
     _ea_ensure_asset_table()
     _EA_ASSET_DIR.mkdir(parents=True, exist_ok=True)
@@ -11154,6 +11184,8 @@ def voice_consult_stream(body: ChatIn, authorization: str | None = Header(defaul
     import threading as _threading
 
     t = _auth(authorization)
+
+    _llm_budget(t, "voice")
     msg = (body.message or "").strip() or "Help with what the owner just asked."
     sid = body.session_id
     ctx = dict(body.context or {})
@@ -11233,7 +11265,8 @@ def chat_stream(body: ChatIn, authorization: str | None = Header(default=None)):
     import queue as _queue
     import threading as _threading
 
-    _auth(authorization)  # surface a real 401 before the stream opens
+    _t = _auth(authorization)  # surface a real 401 before the stream opens
+    _llm_budget(_t, "chat")   # metered brain: cap spend before the stream opens
 
     q: "_queue.Queue" = _queue.Queue()
     _SENTINEL = object()
@@ -11269,6 +11302,7 @@ def chat_stream(body: ChatIn, authorization: str | None = Header(default=None)):
 @router.post("/v1/energy-agent/chat")
 def chat(body: ChatIn, authorization: str | None = Header(default=None)):
     t = _auth(authorization)
+    _llm_budget(t, "chat")
     msg = (body.message or "").strip()
     attach_ids = list(body.attachment_ids or [])[:12]
     if not msg and not attach_ids:
