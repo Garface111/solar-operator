@@ -227,7 +227,7 @@ def run_mobile_tool(
     if name == "start_payments_connect":
         return _normalise(_start_payments_connect(args, tenant, session, db, user_text=user_text))
     if name == "open_setup_widget":
-        return _open_setup_widget(args, tenant, db)
+        return _open_setup_widget(args, tenant, db, session)
     return None
 
 
@@ -730,7 +730,28 @@ _PILLARS = {
 }
 
 
-def _open_setup_widget(args, tenant, db) -> dict:
+def _client_is_mobile(session) -> bool:
+    """True when this chat is the /m app (or the native shell), which is the only
+    client that renders setup_widget."""
+    import json as _json
+
+    raw = getattr(session, "context_json", None)
+    if not raw:
+        return False
+    try:
+        ctx = _json.loads(raw) or {}
+    except Exception:
+        return False
+    if not isinstance(ctx, dict):
+        return False
+    if bool(ctx.get("mobile")):
+        return True
+    surface = str(ctx.get("surface") or "").lower()
+    client = str(ctx.get("client") or "").lower()
+    return "mobile" in surface or client in ("owner-web", "owner-native")
+
+
+def _open_setup_widget(args, tenant, db, session=None) -> dict:
     pillar = (args.get("pillar") or "").strip().lower()
     spec = _PILLARS.get(pillar)
     if not spec:
@@ -744,6 +765,17 @@ def _open_setup_widget(args, tenant, db) -> dict:
             "ok": False,
             "error": "demo_blocked",
             "message": "Demo accounts cannot save real logins. This needs a live account.",
+        }
+    if session is not None and not _client_is_mobile(session):
+        return {
+            "ok": False,
+            "error": "not_mobile",
+            "message": (
+                "The in-chat setup card only renders in the phone app, and this "
+                "session is not it. Walk the owner through the desktop screen "
+                "instead (Account → Connect feeds), or use portal_links. Do NOT "
+                "tell them a card opened."
+            ),
         }
 
     cmd: dict[str, Any] = {
