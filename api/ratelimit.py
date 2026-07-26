@@ -6,8 +6,10 @@ runs a single web replica today, so a process-local limiter is sufficient; if we
 scale to multiple replicas this should move to Redis (each replica would then
 enforce its own share — still a meaningful brake, just less precise).
 
-Protects UNAUTHENTICATED endpoints that are cheap to call but expensive or
-abusable downstream:
+Protects endpoints that are cheap to call but expensive or abusable
+downstream. Unauthenticated ones are keyed by IP; authenticated ones whose
+cost is metered per account (the paid model calls) are keyed by TENANT via
+enforce_tenant():
   - /v1/auth/password-login  → brute-force guessing
   - /v1/auth/request         → email-bombing a victim + Resend cost
   - /v1/onboarding/start     → spam tenant + email creation
@@ -77,4 +79,28 @@ def enforce(
     ip = client_ip(request)
     key = ip if key_extra is None else f"{ip}|{key_extra}"
     if not allow(bucket, key, max_hits=max_hits, window_s=window_s):
+        raise HTTPException(429, message)
+
+
+def enforce_tenant(
+    tenant_id: Optional[str],
+    bucket: str,
+    *,
+    max_hits: int,
+    window_s: float,
+    message: str = "You are sending requests faster than we can serve them — "
+                   "give it a moment and try again.",
+) -> None:
+    """Rate limit by TENANT rather than client IP.
+
+    For AUTHENTICATED endpoints whose cost is metered per account (the paid
+    model calls behind Energy Agent). IP is the wrong key there: it is shared
+    behind NAT, trivially rotated, and the bill follows the tenant, not the
+    network. A missing tenant_id never blocks.
+    """
+    if os.getenv("PYTEST_CURRENT_TEST"):
+        return
+    if not tenant_id:
+        return
+    if not allow(bucket, str(tenant_id), max_hits=max_hits, window_s=window_s):
         raise HTTPException(429, message)
