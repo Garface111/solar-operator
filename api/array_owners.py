@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 import math
 import os
 import re
@@ -423,6 +424,45 @@ def _cached_fetch_live(vendor: str, config: dict) -> Optional[dict]:
     return live
 
 
+def _prewarm_live(pairs: "list[tuple[str, dict]]", *, max_workers: int = 8) -> None:
+    """Warm the live-power cache for many vendor connections CONCURRENTLY.
+
+    /overview polls each connected vendor for current power inside its
+    per-array loop — six connections meant six SERIAL vendor round-trips
+    (~3.9s measured on prod 2026-07-25, dominated by TLS). Warming them in
+    parallel first turns that into roughly one round-trip; the loop below then
+    hits the cache and keeps its existing per-array error handling.
+
+    Best-effort: every exception is swallowed here so a dead vendor degrades to
+    the inline call in the loop (which records the real per-array error state).
+    """
+    todo = []
+    seen: set = set()
+    for vendor, config in pairs:
+        try:
+            key = _cache_key(vendor, config)
+        except Exception:  # noqa: BLE001 — unhashable/odd config: let the loop handle it
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        cached = _overview_cache.get(key)
+        if cached is not None and (now() - cached[0]) < _CACHE_TTL:
+            continue
+        todo.append((vendor, config))
+    if len(todo) <= 1:
+        return
+
+    def _one(pair):
+        try:
+            _cached_fetch_live(pair[0], pair[1])
+        except Exception:  # noqa: BLE001 — surfaced per-array by the caller
+            pass
+
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(todo))) as ex:
+        list(ex.map(_one, todo))
+
+
 def _connect_inverter(db, arr: Array, vendor: str, config: dict) -> dict:
     """Validate `config` against the vendor's live API, then upsert the
     connection. Raises InverterError/InverterAuthError on bad credentials —
@@ -720,6 +760,33 @@ def array_owners_overview(authorization: str | None = Header(default=None)) -> d
                 .order_by(UtilityAccount.id)
             ).all():
                 provider_by_array.setdefault(aid, provider)
+
+        # Warm every vendor's live power CONCURRENTLY before the loop — these
+        # were six SERIAL vendor round-trips (~3.9s on prod 2026-07-25), the
+        # single biggest cost left on the dashboard/Analysis load. The loop
+        # below is unchanged: it still calls _cached_fetch_live per array and
+        # keeps its per-array error handling; it just hits a warm cache now.
+        _live_pairs: list[tuple[str, dict]] = []
+        for _arr in arrays:
+            _c = conn_by_array.get(_arr.id)
+            if _c is None and _arr.solaredge_api_key and _arr.solaredge_site_id:
+                _c = SimpleNamespace(
+                    vendor="solaredge",
+                    config={"api_key": _arr.solaredge_api_key,
+                            "site_id": _arr.solaredge_site_id},
+                    status="ok",
+                )
+            if _c is None:
+                continue
+            _m = VENDORS.get(_c.vendor)
+            if _m is not None and getattr(_m, "SUPPORTS_LIVE", False):
+                _live_pairs.append((_c.vendor, _c.config))
+        if _live_pairs:
+            try:
+                _prewarm_live(_live_pairs)
+            except Exception:  # noqa: BLE001 — warmup is best-effort
+                log.warning("live-power prewarm failed; falling back inline",
+                            exc_info=True)
 
         # Cache energy rates by provider so identical providers don't re-derive.
         _rate_cache: dict[object, float] = {}
