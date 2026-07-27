@@ -320,10 +320,14 @@ def test_connect_account_duplicate_site_names(client, monkeypatch):
 
 
 def test_connect_account_name_collides_with_soft_deleted_array(client, monkeypatch):
-    """REGRESSION (uq_array_per_tenant class): a soft-deleted array still RESERVES
-    its name in the unique constraint. A SolarEdge site whose name matches a
-    SOFT-DELETED array must NOT 500 — the new-array name-collision guard checks
-    ALL names (live + deleted) and disambiguates with the site id."""
+    """A soft-deleted array must NOT reserve its name — the new array REUSES it.
+
+    CONTRACT UPDATED 2026-07-25: uniqueness is now a partial index scoped to
+    LIVE rows (uq_array_per_tenant_live), so a deleted array's ghost no longer
+    reserves anything. The connect guards therefore compare against live names
+    only. The old behavior suffixed the site id onto a perfectly free name,
+    which is how Ford got "Johnson Farm & Garden (3669325)" in his master
+    spreadsheet. Still must not 500."""
     from datetime import datetime
     tid = _make_tenant()
     # Pre-existing SOFT-DELETED array named "Solar Barn".
@@ -340,10 +344,10 @@ def test_connect_account_name_collides_with_soft_deleted_array(client, monkeypat
     assert resp.status_code == 200, resp.text
     out = resp.json()
     assert len(out["created"]) == 1
-    # The live array is disambiguated ("Solar Barn (7)"), not colliding.
+    # The dead array's name is free — the live array takes it CLEAN, no suffix.
     arrays = _arrays_for(tid)
     assert len(arrays) == 1
-    assert arrays[0].name == "Solar Barn (7)"
+    assert arrays[0].name == "Solar Barn"
     assert arrays[0].solaredge_site_id == 7
 
 

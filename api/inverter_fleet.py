@@ -719,6 +719,9 @@ def discover_and_persist(db, tenant: Tenant, *, force_refresh: bool = False) -> 
     arrays = db.execute(
         select(Array).where(Array.tenant_id == tenant.id, Array.deleted_at.is_(None))
     ).scalars().all()
+    # Live array ids — an inverter homed anywhere else is an orphan whose array
+    # was soft-deleted (see the ORPHAN RESCUE branch below).
+    _live_array_ids = {a.id for a in arrays}
 
     existing = {
         (iv.vendor, iv.serial): iv
@@ -820,6 +823,28 @@ def discover_and_persist(db, tenant: Tenant, *, force_refresh: bool = False) -> 
                 iv.source_array_id = iv.source_array_id or home_arr.id
                 if iv.deleted_at is not None:
                     iv.deleted_at = None
+                # ORPHAN RESCUE (Ford 2026-07-26: "why isn't my Locus data
+                # showing up — 0 units"). Delete-and-re-add soft-deletes the
+                # old Array and makes a NEW one; the vendor site is unchanged,
+                # so discovery finds the SAME (vendor, serial) and takes this
+                # branch — which never re-homes. The inverters stayed pinned to
+                # the dead array forever: invisible in the fleet tree, 0 units
+                # in Table view, while daily generation kept flowing (the two
+                # paths are independent). "Never clobber the owner's
+                # arrangement" still holds for LIVE arrays; a home array that
+                # is deleted or gone is not an arrangement, it's a tombstone.
+                # `arrays` above is LIVE arrays only, so "not in that set" ==
+                # the home array is soft-deleted or gone.
+                if iv.array_id not in _live_array_ids:
+                    orphaned_from = iv.array_id
+                    iv.array_id = home_arr.id
+                    iv.position = next_pos[home_arr.id]
+                    next_pos[home_arr.id] += 1
+                    iv.source_array_id = home_arr.id
+                    log.info(
+                        "fleet: re-homed orphan inverter %s/%s from dead array "
+                        "%s -> %s", vendor, serial, orphaned_from, home_arr.id,
+                    )
             # metadata refresh (cheap, safe). An OWNER-renamed inverter
             # (name_is_custom) is part of "their arrangement is sacred" — the
             # telemetry name must NOT clobber it, exactly like array_id/position
