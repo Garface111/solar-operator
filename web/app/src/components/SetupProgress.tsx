@@ -35,19 +35,26 @@ export function SetupProgress() {
   const navigate = useNavigate();
   const toast = useToast();
   const [steps, setSteps] = useState<Step[] | null>(null);
-  const [dismissed, setDismissed] = useState(false);
+  // Read the dismiss flag SYNCHRONOUSLY, not in an effect. It gates the data
+  // fetch below, and an effect would set it only AFTER the first render — by
+  // which point the three API calls have already gone out.
+  const [dismissed, setDismissed] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(DISMISS_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
   const [turningOn, setTurningOn] = useState(false);
   const [reload, setReload] = useState(0);
 
   useEffect(() => {
-    try {
-      if (localStorage.getItem(DISMISS_KEY) === "1") setDismissed(true);
-    } catch {
-      /* ignore */
-    }
-  }, []);
-
-  useEffect(() => {
+    // Dismissed means this strip never renders (see the guard before the JSX),
+    // so fetching its data is pure waste. There was no dismiss guard here at
+    // all — the flag was only consulted at RENDER — so every established
+    // operator paid three API calls on every embed mount for a strip they never
+    // see. getReports(4) was the expensive one: 16s before the Bill column diet.
+    if (dismissed) return;
     let cancelled = false;
     (async () => {
       const [clientsR, statsR, reportsR] = await Promise.allSettled([
@@ -135,7 +142,7 @@ export function SetupProgress() {
     return () => {
       cancelled = true;
     };
-  }, [reload]);
+  }, [reload, dismissed]);
 
   /** The commit: auto-send for every client. This STARTS BILLING, so quote the
    *  exact cost and get an explicit yes first — never charge on a bare click. */
