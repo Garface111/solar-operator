@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.orm import Session
 
 from .rates import DEFAULT_RATE_USD_PER_KWH, get_energy_rate
@@ -502,10 +502,99 @@ def _sane_credit_rate(r: float) -> bool:
     return CREDIT_RATE_LO < r < CREDIT_RATE_HI
 
 
+# ─── 4a. Per-SESSION memo for the reference-rate lookups ──────────────────
+#
+# WHY SESSION-SCOPED AND NOT A MODULE GLOBAL. These medians price REAL offtaker
+# invoices for banked months. A process-global (or lru_cache) memo would keep
+# serving a pre-ingest median for the life of the worker — silently making STALE
+# MONEY after new bills land. `Session.info` is a plain per-INSTANCE dict, so a
+# memo parked there is bounded by one Session object.
+#
+# CAREFUL: `Session.info` is NOT cleared by `Session.close()` — a closed Session
+# is reusable and would otherwise carry a pre-close median into the next unit of
+# work. So the memo is dropped by an `after_transaction_end` listener, which
+# fires on commit, rollback AND close, i.e. at the real unit-of-work boundary.
+# `after_flush` is kept as well so an autoflush Session cannot read a median
+# computed before its own pending write.
+#
+# The scoping is safe because there is NO `scoped_session` and NO shared Session
+# anywhere in api/: db.py:338 defines `SessionLocal = sessionmaker(...)` and
+# every path that reaches these functions opens its own `with SessionLocal() as
+# db:` — each route (billing/routes.py /vacancy, /exchange/suggestions,
+# /draft-offtaker, /audit-by-array), the background sweep thread
+# (billing/routes.py "the thread OWNS its session"), the scheduler's per-tenant
+# prewarm, and every invoice build (billing/delivery.py build_manual_match opens
+# three of its own). `get_db()` exists in db.py but has ZERO `Depends(get_db)`
+# uses — do not cite it as the request-scoping mechanism.
+#
+# SEMANTIC CHANGE, ACCEPTED DELIBERATELY: within one unit of work the fleet
+# sample is now pinned to one snapshot. Under READ COMMITTED the old code could
+# straddle a concurrent bill ingest and blend two different fleet medians into a
+# single response, pricing different arrays off different samples. Pinning is
+# strictly more deterministic — the same direction as the order_by/limit fix
+# this module already documents.
+
+_RATE_MEMO_KEY = "_rate_schedule_memo"
+
+
+def _rate_memo(db) -> Optional[dict]:
+    """This Session's memo dict — or None when `db` is not a Session.
+
+    The isinstance gate is load-bearing, not defensive noise. A raw
+    `Connection` also exposes a dict `.info`, but that dict lives on the POOLED
+    DBAPI connection and survives checkin — memoizing there would silently
+    become a process-lifetime median cache, i.e. exactly the stale-money failure
+    this design exists to prevent. No caller passes a Connection today; this
+    makes that unreachable rather than merely unexercised.
+    """
+    if not isinstance(db, Session):
+        return None
+    info = db.info
+    memo = info.get(_RATE_MEMO_KEY)
+    if memo is None:
+        memo = {}
+        info[_RATE_MEMO_KEY] = memo
+    return memo
+
+
+def clear_rate_memo(db) -> None:
+    """Drop this Session's reference-rate memo (auto-called at write/UOW boundaries)."""
+    try:
+        db.info.pop(_RATE_MEMO_KEY, None)
+    except (AttributeError, TypeError):
+        pass
+
+
+@event.listens_for(Session, "after_transaction_end")
+@event.listens_for(Session, "after_flush")
+def _purge_rate_memo(session, *_args):  # noqa: ANN001, ARG001
+    """Purge at every unit-of-work boundary.
+
+    `after_transaction_end` covers commit, rollback AND close (verified against
+    SQLAlchemy 2.0.35). It also fires when a SAVEPOINT released by
+    `Session.begin_nested()` ends — that only costs us the cache, never
+    correctness. `after_flush` additionally covers a mid-transaction write under
+    a Session configured with autoflush=True.
+
+    Registered on the Session CLASS so the guarantee holds for Sessions built
+    outside SessionLocal (tests, future sessionmakers). It pops one dict key and
+    cannot raise, so the per-boundary cost is microseconds.
+    """
+    clear_rate_memo(session)
+
+
 def _account_credit_rate(db, utility_account_id: int) -> Optional[float]:
     """Median net-metering credit rate ($/kWh) over an account's CASHED months
-    (solar_credit_usd > 0). None when the account has never cashed a credit."""
+    (solar_credit_usd > 0). None when the account has never cashed a credit.
+
+    Memoized per Session on utility_account_id: a pure function of (account, DB
+    state), and /vacancy calls it once per BILL for the same host account (up to
+    12 identical queries per array). Query, filters and median are untouched."""
     from .models import Bill
+    memo = _rate_memo(db)
+    key = ("account_credit_rate", utility_account_id)
+    if memo is not None and key in memo:
+        return memo[key]
     rows = db.execute(
         select(Bill.solar_credit_usd, Bill.kwh_sent_to_grid).where(
             Bill.account_id == utility_account_id,
@@ -513,18 +602,55 @@ def _account_credit_rate(db, utility_account_id: int) -> Optional[float]:
             Bill.kwh_sent_to_grid.isnot(None), Bill.kwh_sent_to_grid > 0)
     ).all()
     rates = [float(c) / float(k) for c, k in rows if k]
-    return _median([r for r in rates if _sane_credit_rate(r)])
+    out = _median([r for r in rates if _sane_credit_rate(r)])
+    if memo is not None:
+        # Re-fetch: under a Session with autoflush=True the query above can
+        # trigger a flush, whose after_flush purge drops the dict we grabbed
+        # before it. Storing into the CURRENT dict keeps the memo effective;
+        # storing into the stale one would only cost us the cache, never
+        # correctness.
+        #
+        # AUTOFLUSH, READ SIDE: a memo HIT returns before any SQL is emitted, so
+        # a pending-unflushed Bill that the pre-patch query would have
+        # autoflushed into view is not seen. SessionLocal sets autoflush=False,
+        # so this cannot happen in the app; a test that builds a bare
+        # sessionmaker(bind=engine) (autoflush defaults True) and writes bills
+        # WITHOUT flushing between two reads would see it. Flush or commit
+        # between the write and the read — the after_flush purge then makes the
+        # second read re-measure.
+        _store = _rate_memo(db)
+        if _store is not None:
+            _store[key] = out
+    return out
 
 
-def _fleet_credit_rate(db, *, provider: str, age_bucket: str,
-                       min_samples: int = 8) -> Optional[float]:
-    """Median credit rate across the fleet's CASHED bills in this provider + age
-    cell (so a never-cashing account is valued like its peers). None if too few.
+def _fleet_credit_samples(db, *, provider: str) -> dict[str, list[float]]:
+    """The fleet's SANE cashed credit rates for one provider, split by age bucket.
 
-    Excludes non-production (demo/synthetic) tenants — their seeded bills carry
-    invented rates that would poison the reference median used to price REAL
-    banked-month offtaker invoices. See SYNTHETIC_TENANT_IDS."""
+    ONE query per provider per Session — this is the entire cost of
+    _fleet_credit_rate. The SQL below filters on `provider` ONLY; the age_bucket
+    test has ALWAYS been applied in Python after the fetch, so the same
+    up-to-20,000-row sample answers EVERY bucket and every caller. Before this,
+    each (bucket × call) re-ran it: one prod /vacancy re-fetched 20,000 rows 50
+    times (1,000,000 rows, 3.3s of SQL and ~5s of Python).
+
+    MONEY-CRITICAL — THE SAMPLE IS UNCHANGED. The statement (WHERE clauses,
+    `order_by(period_end DESC, id DESC)`, `.limit(20000)`) is byte-for-byte the
+    one that has always run, and rows are visited in the same order; we merely
+    PARTITION them into the two buckets in one pass instead of re-fetching and
+    discarding the other bucket's rows on every call. Each bucket therefore ends
+    up with exactly the same rate values in exactly the same order as the old
+    per-bucket loop produced, so `_median` returns the identical number. See the
+    DETERMINISM note inside: WHICH 20,000 rows are sampled is invoice-dollar
+    load-bearing and is deliberately untouched.
+    """
     from .models import Bill, UtilityAccount, Array, Tenant
+
+    memo = _rate_memo(db)
+    key = ("fleet_credit_samples", provider)
+    if memo is not None and key in memo:
+        return memo[key]
+
     q = (select(Bill.solar_credit_usd, Bill.kwh_sent_to_grid,
                 Array.first_connect_date, Bill.period_end)
          .join(UtilityAccount, Bill.account_id == UtilityAccount.id)
@@ -541,16 +667,35 @@ def _fleet_credit_rate(db, *, provider: str, age_bucket: str,
          # drifted ~0.4% between two builds of the SAME period. Newest-first
          # makes the sample stable AND most representative of current rates.
          .order_by(Bill.period_end.desc(), Bill.id.desc()))
-    rates = []
+    buckets: dict[str, list[float]] = {"le11": [], "gt11": []}
     for cu, k, fc, pe in db.execute(q.limit(20000)).all():
         if not k:
             continue
         ped = pe.date() if isinstance(pe, datetime) else pe
-        if array_age_bucket(fc, ped) != age_bucket:
-            continue
+        bucket = array_age_bucket(fc, ped)
         r = float(cu) / float(k)
         if _sane_credit_rate(r):
-            rates.append(r)
+            buckets.setdefault(bucket, []).append(r)
+    if memo is not None:
+        _store = _rate_memo(db)      # see _account_credit_rate: autoflush re-fetch
+        if _store is not None:
+            _store[key] = buckets
+    return buckets
+
+
+def _fleet_credit_rate(db, *, provider: str, age_bucket: str,
+                       min_samples: int = 8) -> Optional[float]:
+    """Median credit rate across the fleet's CASHED bills in this provider + age
+    cell (so a never-cashing account is valued like its peers). None if too few.
+
+    Excludes non-production (demo/synthetic) tenants — their seeded bills carry
+    invented rates that would poison the reference median used to price REAL
+    banked-month offtaker invoices. See SYNTHETIC_TENANT_IDS.
+
+    The sample fetch lives in _fleet_credit_samples (one query per provider per
+    Session). `min_samples` is applied HERE, at read time, so the memo stays
+    correct for any min_samples a caller passes — it is not part of the key."""
+    rates = _fleet_credit_samples(db, provider=provider).get(age_bucket) or []
     return _median(rates) if len(rates) >= min_samples else None
 
 

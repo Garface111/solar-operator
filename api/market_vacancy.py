@@ -56,6 +56,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 from sqlalchemy import select
+from sqlalchemy.orm import load_only
 
 from .models import now as _now
 
@@ -237,7 +238,25 @@ def array_vacancy(db, array, *, window_months: int = VACANCY_WINDOW_MONTHS) -> O
 
     since = _now() - timedelta(days=int(window_months) * 31 + 5)
     bills = db.execute(
-        select(Bill).where(
+        # COLUMN DIET (enumerated, not guessed). Bill is a data sponge: it also
+        # carries `pdf_bytes` (LargeBinary — the ENTIRE bill PDF, persisted
+        # in-row) and `raw_text`, and a full-entity load dragged both across the
+        # wire for every bill of every array (46 queries × 479 rows = 1.29s on
+        # ten_ford_demo_100) even though nothing here reads them.
+        # Everything this function and its callees touch on a Bill row:
+        #   kwh_sent_to_grid  — the pool (array_vacancy:273, :286)
+        #   raw_json          — split_excess_line_items(:274) and, inside
+        #                       _bill_credit_rate(:154), excess_credit_rate_from_bill
+        #   solar_credit_usd  — the banked-month test (:293)
+        #   period_end        — expiry math (:295) and the age bucket
+        #                       (_bill_credit_rate:165)
+        # (id comes along automatically as the PK.) _bill_credit_rate reads
+        # NOTHING else off the bill. If a future edit does touch another column
+        # SQLAlchemy loads it lazily — an extra query, never a wrong number.
+        select(Bill).options(
+            load_only(Bill.kwh_sent_to_grid, Bill.raw_json,
+                      Bill.solar_credit_usd, Bill.period_end)
+        ).where(
             Bill.account_id == host_id,
             Bill.period_end.isnot(None),
             Bill.period_end >= since,

@@ -24,7 +24,7 @@ from datetime import date
 from typing import Optional
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from sqlalchemy import func
 
@@ -90,6 +90,24 @@ def _bill_for_array_period(
     """
     q = (
         select(Bill)
+        # COLUMN DIET (enumerated, not guessed). This loads EVERY bill for the
+        # array (no LIMIT), and a full-entity load pulled `pdf_bytes` (the whole
+        # bill PDF, LargeBinary, persisted in-row) and `raw_text` with each one —
+        # for a bill-audit surface that never reads either. Every Bill attribute
+        # any consumer of this function touches:
+        #   account_id       — single-meter detection (_allocation_check:263)
+        #   period_start/_end— period label + window match (:434-436, :99-108)
+        #   kwh_generated    — the gmp_kwh verdict (:421) and this query's filter
+        #   kwh_consumed     — group_host_bill.group_excess_pool:72 / bill_anatomy:113
+        #   kwh_sent_to_grid — group_excess_pool:70 / bill_anatomy:114
+        #   total_cost       — bill_anatomy:115
+        #   raw_json         — bill_anatomy → _net_billed_from_raw:117
+        # (id comes along automatically as the PK.) A future read of another
+        # column loads it lazily — an extra query, never a wrong number.
+        .options(load_only(
+            Bill.account_id, Bill.period_start, Bill.period_end,
+            Bill.kwh_generated, Bill.kwh_consumed, Bill.kwh_sent_to_grid,
+            Bill.total_cost, Bill.raw_json))
         .join(UtilityAccount, Bill.account_id == UtilityAccount.id)
         .where(UtilityAccount.array_id == array_id,
                Bill.kwh_generated.isnot(None))
