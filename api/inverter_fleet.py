@@ -1039,6 +1039,49 @@ def _flag_no_energy_register(inv_rows: list[dict]) -> None:
         r["no_energy_register"] = bool(not _produced(r) and not _has_history(r))
 
 
+def _blank_derived_power_on_dead_register(
+    inv_rows: list[dict], borrow: dict | None = None,
+) -> None:
+    """A dead-register unit may show ONLY a power reading of its own — never one
+    we derived.
+
+    Both ways we fill a missing per-device wattage are meaningless for this unit:
+
+      * ALLOCATION splits the site total by each inverter's share of TODAY'S
+        energy. A unit whose energy register is dead has a share of zero, so its
+        allocation is noise.
+      * CROSS-TENANT BORROW takes another tenant's reading for the same serial.
+        For a widely-duplicated serial that is somebody else's inverter having a
+        different day.
+
+    Bruce's Tannery #7 (S/N 191213319) showed "~8.3 kW" — the highest of its
+    seven — while SMA's own portal showed it at 1,256 W and no monthly or yearly
+    energy at all. The 8.3 was 8267.6 W borrowed off a seeded demo tenant. The
+    one inverter with a real metering fault was rendered as the site's best
+    performer, which is precisely backwards from what the operator needs to see.
+
+    So: keep a genuine own measurement (power_estimated False AND not borrowed),
+    otherwise show nothing. An empty cell next to "NO ENERGY DATA" is honest; a
+    fabricated number that outranks healthy units is not.
+    """
+    for r in inv_rows:
+        if not r.get("no_energy_register"):
+            continue
+        cpw = r.get("current_power_w")
+        if cpw is None:
+            continue
+        # NB the row key is "sn", not "serial" — using the wrong one here fails
+        # SILENTLY (no match, no error) and quietly restores the bug.
+        key = (str(r.get("vendor") or "").lower(), str(r.get("sn")))
+        lent = (borrow or {}).get(key)
+        borrowed = lent is not None and float(lent) == float(cpw)
+        if r.get("power_estimated") or borrowed:
+            r["current_power_w"] = None
+            r["power_suppressed_reason"] = (
+                "borrowed_from_another_tenant" if borrowed else "site_split_estimate"
+            )
+
+
 def _array_alert(inv_rows: list[dict]) -> dict:
     worst, worst_rank, bad = "ok", 0, 0
     for inv in inv_rows:
@@ -1084,6 +1127,18 @@ def _cross_tenant_live_by_serial(db, inverters: list) -> dict:
     # Also exclude demo/test/seed tenants so sample data never bleeds into a real
     # fleet (the same Fronius GUIDs live in ~10 demo tenants).
     fresh_after = now() - _POWER_LIVE_FRESH
+    # DEMO EXCLUSION — by the tenant's own flag, not by the shape of its id.
+    # This used to be `NOT tenant_id LIKE 'ten_demo%'`, which silently missed
+    # every demo tenant whose id does not START with that: ten_ford_demo_100 and
+    # ten_anna_800 both carry SEEDED readings on real SMA serials (8267.6 W and
+    # 12127.2 W on 191213319 alone), and a real fleet sharing that serial could
+    # borrow them and display invented watts. rate_schedule.SYNTHETIC_TENANT_IDS
+    # already names ten_ford_demo_100 as synthetic for exactly this reason — the
+    # money path excluded it while this one did not. Tenant.is_demo is the
+    # authoritative signal; the two LIKE guards stay as belt-and-braces for rows
+    # whose flag was never set.
+    from .rate_schedule import SYNTHETIC_TENANT_IDS as _SYNTH
+    _demo_tenants = select(Tenant.id).where(Tenant.is_demo.is_(True))
     rows = db.execute(
         select(Inverter).where(
             Inverter.serial.in_(wanted_serials),
@@ -1091,6 +1146,8 @@ def _cross_tenant_live_by_serial(db, inverters: list) -> dict:
             Inverter.last_power_w.isnot(None),
             Inverter.last_power_at.isnot(None),
             Inverter.last_power_at >= fresh_after,
+            Inverter.tenant_id.notin_(_demo_tenants),
+            Inverter.tenant_id.notin_(tuple(_SYNTH)),
             ~Inverter.tenant_id.like("ten_demo%"),
             ~Inverter.tenant_id.like("%readonly%"),
         )
@@ -1768,6 +1825,7 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
         # e.g. Tannery #7) so every surface renders an honest "no energy data"
         # state instead of a harsh Error/Offline. Mirrors the digest predicate.
         _flag_no_energy_register(inv_rows)
+        _blank_derived_power_on_dead_register(inv_rows, borrow_live)
 
         # vendor mix for the array chip. Derived from actual Inverter rows when
         # any exist — but a FRESHLY-connected array (discover/connect-account
