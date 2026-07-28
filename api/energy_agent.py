@@ -1000,6 +1000,46 @@ def repair_email_surface_digest(db, tenant_id: str, *, limit: int = 20) -> str:
         return ""
 
 
+def repair_mail_landed_since(db, tenant_id: str, since) -> list[dict]:
+    """Inbound repair email that arrived AFTER `since` — i.e. mid-turn.
+
+    A turn builds its whole picture of the world (including the email digest)
+    when it starts. A crew reply that lands while the model is thinking is
+    invisible to it, so the owner can read "no reply yet" seconds after a reply
+    actually arrived — precisely what happened on ticket #74. Rather than let a
+    stale answer stand, the turn appends what landed.
+    """
+    if since is None:
+        return []
+    try:
+        from sqlalchemy import select as _select
+
+        from .models import RepairCheckIn, RepairTicket
+        rows = db.execute(
+            _select(RepairCheckIn)
+            .where(
+                RepairCheckIn.tenant_id == tenant_id,
+                RepairCheckIn.direction == "inbound",
+                RepairCheckIn.channel == "email",
+                RepairCheckIn.created_at > since,
+            )
+            .order_by(RepairCheckIn.created_at)
+        ).scalars().all()
+        out = []
+        for r in rows:
+            t = db.get(RepairTicket, r.ticket_id) if r.ticket_id else None
+            out.append({
+                "ticket_id": r.ticket_id,
+                "site": (t.site_name if t else None) or "a site",
+                "from": r.sent_to or "",
+                "body": " ".join((r.body or "").split())[:220],
+            })
+        return out
+    except Exception as exc:  # noqa: BLE001 — never break a turn over this
+        log.warning("mid-turn inbound check failed: %s", exc)
+        return []
+
+
 def _find_resumable_session(
     db,
     tenant_id: str,
@@ -10084,6 +10124,15 @@ def _agent_turn(
     source: str = "text",
     on_event=None,
 ) -> dict:
+    # When the owner actually asked. Both EaMessage rows used to be inserted at
+    # the END of the turn, so created_at was PERSIST time for the question too —
+    # on prod ticket #74 the user row and the assistant row landed 4 MICROSECONDS
+    # apart. Anything that happened while the turn was running (a repair email
+    # mirrored into chat) therefore got an EARLIER timestamp than the question
+    # that preceded it, and the transcript re-ordered itself: the agent appeared
+    # to answer "no reply yet" directly beneath the reply it had supposedly
+    # missed. Its answer was true when asked; only the ordering lied.
+    turn_started_at = _now()
     budget = _check_budget(db, tenant.id)
     if not budget["ok"]:
         return {
@@ -10599,6 +10648,33 @@ def _agent_turn(
     _panel_text, _authored_spoken = _split_spoken(final_text)
     final_text = _tidy_chat_text(_panel_text)
 
+    # Mail that landed WHILE this turn was thinking. Everything above was
+    # answered from a snapshot taken at turn start, so a crew reply arriving
+    # mid-turn would otherwise leave a confidently wrong answer on screen — the
+    # ticket #74 case, where "no reply yet" was written seconds after the reply
+    # arrived. Correct it in the same breath instead of waiting to be caught.
+    try:
+        _late_mail = repair_mail_landed_since(db, tenant.id, turn_started_at)
+    except Exception:  # noqa: BLE001
+        _late_mail = []
+    if _late_mail:
+        _seen = set()
+        _bits = []
+        for m in _late_mail:
+            key = (m["ticket_id"], m["body"][:60])
+            if key in _seen:
+                continue
+            _seen.add(key)
+            _bits.append(f"{m['site']} (#{m['ticket_id']}): “{m['body']}”")
+        if _bits:
+            _one = len(_bits) == 1
+            final_text = (
+                f"{final_text}\n\n"
+                f"Just in — {'a reply' if _one else 'replies'} landed while I was "
+                f"writing that, so it may already be out of date: "
+                + "; ".join(_bits[:3])
+            ).strip()
+
     user_meta: dict[str, Any] = {}
     if context:
         user_meta["context"] = context
@@ -10610,6 +10686,10 @@ def _agent_turn(
         ]
     db.add(EaMessage(
         session_id=session.id, tenant_id=tenant.id, role="user",
+        # Stamped when the question ARRIVED, not when the turn finished — see
+        # turn_started_at above. Without this a long turn back-dates the question
+        # past every event that landed while it was thinking.
+        created_at=turn_started_at,
         content=(store_user or user_text)[:8000],
         meta_json=json.dumps(user_meta, default=str) if user_meta else None,
     ))
