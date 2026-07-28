@@ -2545,8 +2545,21 @@ def utility_bill_archive_manifest(authorization: Optional[str] = Header(default=
     from ..models import Bill, UtilityAccount, Array
     bills_out: list[dict] = []
     with SessionLocal() as db:
+        # COLUMN DIET (2026-07-28): the old bare select(Bill, UtilityAccount, Array)
+        # hydrated pdf_bytes for up to 20k rows (~16KB avg each) just to len() it —
+        # tens of MB off the DB per request, >26s on a ~5k-bill fleet, which 504'd
+        # at the Netlify edge and made the archive unopenable. Enumerate the columns
+        # and compute the size in SQL (PG length(bytea) = octet count, identical to
+        # len(pdf_bytes)); filter/order/dedupe semantics unchanged.
         rows = db.execute(
-            select(Bill, UtilityAccount, Array)
+            select(
+                Bill.id, Bill.account_id, Bill.period_start, Bill.period_end,
+                Bill.bill_date, Bill.kwh_generated,
+                func.length(Bill.pdf_bytes).label("pdf_size"),
+                UtilityAccount.provider, UtilityAccount.nickname,
+                UtilityAccount.account_number,
+                Array.name.label("array_name"),
+            )
             .join(UtilityAccount, Bill.account_id == UtilityAccount.id)
             .outerjoin(Array, UtilityAccount.array_id == Array.id)
             .where(Bill.tenant_id == t.id, Bill.pdf_bytes.isnot(None))
@@ -2559,14 +2572,14 @@ def utility_bill_archive_manifest(authorization: Optional[str] = Header(default=
         ).all()
         # Dedupe: freshest bill row wins per (account_id, period_end|bill_date).
         seen_keys: set = set()
-        for b, ua, arr in rows:
-            key = (b.account_id, b.period_end or b.bill_date or b.id)
+        for r in rows:
+            key = (r.account_id, r.period_end or r.bill_date or r.id)
             if key in seen_keys:
                 continue
             seen_keys.add(key)
-            pe = b.period_end
-            ps = b.period_start
-            bd = b.bill_date
+            pe = r.period_end
+            ps = r.period_start
+            bd = r.bill_date
             pe_s = pe.strftime("%Y-%m-%d") if pe is not None else None
             ps_s = ps.strftime("%Y-%m-%d") if ps is not None else None
             bd_s = bd.strftime("%Y-%m-%d") if bd is not None else None
@@ -2575,19 +2588,18 @@ def utility_bill_archive_manifest(authorization: Optional[str] = Header(default=
                 month = pe.strftime("%Y-%m")
             elif bd is not None:
                 month = bd.strftime("%Y-%m")
-            provider = (ua.provider or "utility").strip().lower()
+            provider = (r.provider or "utility").strip().lower()
             prov_lab = provider.upper() if len(provider) <= 6 else provider.title()
-            nick = (ua.nickname or "").strip()
-            arr_name = (arr.name if arr is not None else None) or None
-            acct_num = (ua.account_number or "").strip()
+            nick = (r.nickname or "").strip()
+            arr_name = r.array_name or None
+            acct_num = (r.account_number or "").strip()
             label = nick or arr_name or (f"{prov_lab} {acct_num}" if acct_num else f"{prov_lab} account")
             per_slug = month or "bill"
             safe_label = _re.sub(r"[^A-Za-z0-9._-]+", "-", label).strip("-") or "account"
             fname = f"{provider}_bill_{safe_label}_{per_slug}.pdf"
-            size = len(b.pdf_bytes) if b.pdf_bytes else 0
             bills_out.append({
-                "id": b.id,
-                "account_id": b.account_id,
+                "id": r.id,
+                "account_id": r.account_id,
                 "provider": provider,
                 "provider_label": prov_lab,
                 "account_label": label,
@@ -2597,10 +2609,10 @@ def utility_bill_archive_manifest(authorization: Optional[str] = Header(default=
                 "period_end": pe_s,
                 "bill_date": bd_s,
                 "month": month,
-                "kwh_generated": b.kwh_generated,
-                "size": size,
+                "kwh_generated": r.kwh_generated,
+                "size": r.pdf_size or 0,
                 "filename": fname,
-                "download": f"/v1/array-operator/billing/files/gmp-bill/{b.id}",
+                "download": f"/v1/array-operator/billing/files/gmp-bill/{r.id}",
             })
     return {"ok": True, "bills": bills_out, "count": len(bills_out)}
 
