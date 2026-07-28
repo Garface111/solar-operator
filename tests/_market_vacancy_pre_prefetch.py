@@ -1,3 +1,28 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# FROZEN VERBATIM SNAPSHOT of api/market_vacancy.py as of git 423a304d — the
+# implementation that existed BEFORE the tenant-wide prefetch landed.
+#
+# This is the reference side of tests/test_vacancy_prefetch_equivalence.py. It
+# exists because /vacancy prices real offtaker invoices: the only convincing
+# proof a latency patch moved no money is running the OLD arithmetic and the NEW
+# arithmetic over the same seeded fleet and diffing the JSON byte for byte.
+#
+# DO NOT EDIT, and do not "fix" anything here — its entire value is being the
+# code that shipped. It is deliberately NOT read from git HEAD at test time:
+# once the patch lands, HEAD *is* the new implementation, and such a test would
+# compare the new code against itself and pass vacuously.
+#
+# Regenerate (only when rebasing this proof onto a different baseline):
+#
+#     git show 423a304d:api/market_vacancy.py \
+#       | sed -E "s/^( *)from [.](.*)/\1from api.\2/" \
+#       > tests/_market_vacancy_pre_prefetch.py
+#
+# ...then re-add this header. That sed is the ONLY edit: relative intra-package
+# imports are rewritten to absolute so the snapshot can live outside the api
+# package. Nothing else is touched. Kept as comments rather than a docstring so
+# the snapshot´s own docstring and its `from __future__` import stay first.
+# ─────────────────────────────────────────────────────────────────────────────
 """Offtaker Exchange — vacancy computation (v0, single-player-valuable).
 
 Group net metering's structural waste is UNALLOCATED EXCESS: an array's host
@@ -52,14 +77,13 @@ instrumentation that makes the market visible first.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import load_only
 
-from .models import now as _now
+from api.models import now as _now
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +131,7 @@ def split_excess_line_items(raw_json: Optional[dict]) -> dict:
 
     Reuses the same _EXCESS_CODES the invoice engine parses, so the shape is real.
     """
-    from .rate_schedule import _EXCESS_CODES, _f
+    from api.rate_schedule import _EXCESS_CODES, _f
 
     out = {"shared_kwh": 0.0, "credited_kwh": 0.0, "has_lines": False}
     if not isinstance(raw_json, dict):
@@ -137,29 +161,21 @@ def _host_account_id(db, array_id: int) -> Optional[int]:
     """The net-meter group HOST account = the lowest UtilityAccount.id on the array
     (mirrors delivery._array_group_excess_for_sub_inner and the frontend's
     hostByArray). None when the array has no utility account."""
-    from .models import UtilityAccount
+    from api.models import UtilityAccount
     return db.execute(
         select(UtilityAccount.id).where(UtilityAccount.array_id == array_id)
         .order_by(UtilityAccount.id)
     ).scalars().first()
 
 
-def _bill_credit_rate(db, bill, host_account_id: int, *,
-                      host_account=None, array=None) -> float:
+def _bill_credit_rate(db, bill, host_account_id: int) -> float:
     """The $/kWh to value retained excess at, honestly: the bill's own stated
     credited-line rate → the host account's cashing history → the fleet reference
-    → DEFAULT_CREDIT_RATE. Never a fabricated flat default when a real one exists.
-
-    `host_account` / `array` let a caller hand in rows it already holds (the
-    tenant-wide prefetch, or `array_vacancy`'s own host lookup) so the fleet
-    fallback stops re-`get`ting them once per bill. Neither can change the
-    answer: `host_account` is only ever passed the row this `db.get` returns,
-    and `array` is IGNORED unless its id matches the account's `array_id` — the
-    exact row the `db.get(Array, ...)` below would have produced."""
-    from .rate_schedule import (excess_credit_rate_from_bill, _account_credit_rate,
+    → DEFAULT_CREDIT_RATE. Never a fabricated flat default when a real one exists."""
+    from api.rate_schedule import (excess_credit_rate_from_bill, _account_credit_rate,
                                 _fleet_credit_rate, array_age_bucket,
                                 DEFAULT_CREDIT_RATE)
-    from .models import UtilityAccount, Array
+    from api.models import UtilityAccount, Array
 
     r = excess_credit_rate_from_bill(bill.raw_json) if getattr(bill, "raw_json", None) else None
     if r is not None:
@@ -169,13 +185,8 @@ def _bill_credit_rate(db, bill, host_account_id: int, *,
     if r is not None:
         return round(float(r), 6)
     # fleet median for provider + age bucket
-    acct = host_account if host_account is not None else db.get(UtilityAccount, host_account_id)
-    if not (acct and acct.array_id):
-        arr = None
-    elif array is not None and getattr(array, "id", None) == acct.array_id:
-        arr = array
-    else:
-        arr = db.get(Array, acct.array_id)
+    acct = db.get(UtilityAccount, host_account_id)
+    arr = db.get(Array, acct.array_id) if acct and acct.array_id else None
     provider = (acct.provider if acct else None)
     ped = bill.period_end.date() if isinstance(bill.period_end, datetime) else bill.period_end
     age = array_age_bucket(arr.first_connect_date if arr else None, ped)
@@ -186,35 +197,17 @@ def _bill_credit_rate(db, bill, host_account_id: int, *,
     return round(DEFAULT_CREDIT_RATE, 6)
 
 
-def _registry_allocated_frac(db, array_id: int, *, subs=None) -> Optional[float]:
+def _registry_allocated_frac(db, array_id: int) -> Optional[float]:
     """Σ(array_share_pct ?? allocation_pct) over the array's ENABLED offtaker
     subscriptions — the registry-side view of how much of the array is spoken for.
-    None when no enabled subscription references this array (registry can't speak).
-
-    `subs` accepts rows the tenant-wide prefetch already fetched (an EMPTY list
-    is a real answer — "no enabled subscriptions" — and returns None just as the
-    query would). The summation below stays the one and only place this number
-    is computed, either way."""
-    from .models import BillingReportSubscription
-    if subs is None:
-        subs = db.execute(
-            # COLUMN DIET (enumerated, not guessed). This function reads exactly
-            # TWO attributes off a subscription, but BillingReportSubscription is
-            # a worse data sponge than Bill: it carries `source_workbook`
-            # (LargeBinary — the ENTIRE uploaded billing workbook, persisted
-            # in-row because Railway's disk is ephemeral) plus `parsed_map`, and
-            # the full-entity load dragged that workbook across the wire for
-            # every offtaker of every array on every /vacancy call.
-            select(BillingReportSubscription.array_share_pct,
-                   BillingReportSubscription.allocation_pct).where(
-                BillingReportSubscription.array_id == array_id,
-                BillingReportSubscription.enabled.is_(True),
-            # DETERMINISM: float addition is not associative, so the row order of
-            # an unordered SELECT is faintly load-bearing on the 4-dp rounding
-            # the caller applies. Same class as the `Bill.id.desc()` tiebreaker
-            # in energy-history; costs nothing, removes a source of drift.
-            ).order_by(BillingReportSubscription.id)
-        ).all()
+    None when no enabled subscription references this array (registry can't speak)."""
+    from api.models import BillingReportSubscription
+    subs = db.execute(
+        select(BillingReportSubscription).where(
+            BillingReportSubscription.array_id == array_id,
+            BillingReportSubscription.enabled.is_(True),
+        )
+    ).scalars().all()
     if not subs:
         return None
     total = 0.0
@@ -227,149 +220,16 @@ def _registry_allocated_frac(db, array_id: int, *, subs=None) -> Optional[float]
     return total
 
 
-# ── tenant-wide prefetch (kills the per-array N+1) ────────────────────────────
-
-@dataclass(frozen=True)
-class VacancyPrefetch:
-    """Every row `array_vacancy` would otherwise fetch one array at a time,
-    fetched ONCE for a whole tenant. FOUR queries replace four-per-array.
-
-    Each map is COMPLETE for `array_ids` by construction — built from a single
-    query over exactly that id set — so a MISSING KEY IS THE REAL ANSWER ("this
-    array has no utility account" / "no enabled subscriptions" / "no host bill in
-    the window"), never a cache miss to paper over. That is what makes this safe
-    on a path that prices real offtaker invoices: there is no staleness window
-    and no invalidation to get wrong, because the prefetch is built and consumed
-    inside one `tenant_vacancy` call and dies with it.
-
-    `covers()` makes the contract checkable rather than assumed: `array_vacancy`
-    ignores a prefetch that wasn't built for the array in front of it and falls
-    back to the single-array queries, so a mismatched prefetch can only ever cost
-    queries — it can never quietly answer with another array's numbers."""
-    array_ids: frozenset
-    host_id_by_array: dict
-    account_by_id: dict
-    subs_by_array: dict
-    bills_by_account: dict
-
-    def covers(self, array_id) -> bool:
-        return array_id in self.array_ids
-
-
-def _prefetch_vacancy(db, arrays, *, window_months: int = VACANCY_WINDOW_MONTHS) -> VacancyPrefetch:
-    """The four tenant-wide queries behind `VacancyPrefetch`.
-
-    A prod-shaped fleet (46 arrays) issued 232 SELECTs for one /vacancy — five
-    per array (host lookup, registry lookup, host-account get, the bills SELECT,
-    and the host/array gets inside `_bill_credit_rate`). Every one is a cheap
-    indexed single-row read, so this is round-trip cost, not scan cost — but
-    /vacancy gates all four Invoices subtabs plus the default Marketplace subtab,
-    so 230 sequential round trips is the whole latency.
-
-    Each query below is the SAME predicate set as the per-array query it
-    replaces, widened from `= id` to `IN (ids)`:
-
-      1. host account per array. `_host_account_id` is `ORDER BY id LIMIT 1`
-         over `array_id = X`; `MIN(id) GROUP BY array_id` returns that identical
-         row (id is a non-null PK). Deliberately carries NO tenant filter, exactly
-         as `_host_account_id` never had one — adding one here would be a
-         behaviour change smuggled in as an optimisation.
-      2. the host-account rows themselves, on a column diet: `provider` and
-         `array_id` are the only attributes anything downstream reads, and
-         UtilityAccount carries `service_address` + `extra` (a provider-specific
-         raw JSON blob) that nothing here touches.
-      3. enabled subscriptions for all arrays at once, partitioned by array_id.
-      4. host bills for all host accounts at once, partitioned by account_id.
-         Partitioning preserves per-account order because the ORDER BY is a TOTAL
-         order (period_end, then the unique id) — a stable split of a totally
-         ordered sequence keeps each key's relative order exactly.
-    """
-    from .models import UtilityAccount, BillingReportSubscription, Bill
-
-    array_ids = [a.id for a in arrays]
-    host_id_by_array: dict = {}
-    account_by_id: dict = {}
-    subs_by_array: dict = {}
-    bills_by_account: dict = {}
-
-    if array_ids:
-        for aid, hid in db.execute(
-            select(UtilityAccount.array_id, func.min(UtilityAccount.id))
-            .where(UtilityAccount.array_id.in_(array_ids))
-            .group_by(UtilityAccount.array_id)
-        ).all():
-            if hid is not None:
-                host_id_by_array[aid] = hid
-
-        for row in db.execute(
-            select(BillingReportSubscription.array_id,
-                   BillingReportSubscription.array_share_pct,
-                   BillingReportSubscription.allocation_pct)
-            .where(BillingReportSubscription.array_id.in_(array_ids),
-                   BillingReportSubscription.enabled.is_(True))
-            .order_by(BillingReportSubscription.array_id,
-                      BillingReportSubscription.id)   # see _registry_allocated_frac
-        ).all():
-            subs_by_array.setdefault(row.array_id, []).append(row)
-
-    host_ids = sorted(host_id_by_array.values())
-    if host_ids:
-        for acct in db.execute(
-            select(UtilityAccount).options(
-                load_only(UtilityAccount.provider, UtilityAccount.array_id)
-            ).where(UtilityAccount.id.in_(host_ids))
-        ).scalars().all():
-            account_by_id[acct.id] = acct
-
-        since = _now() - timedelta(days=int(window_months) * 31 + 5)
-        for b in db.execute(
-            # Same column diet as the single-array query below, plus `account_id`
-            # — we now partition on it, and leaving it out of load_only would
-            # lazy-load it per bill and rebuild the N+1 we came here to kill.
-            select(Bill).options(
-                load_only(Bill.account_id, Bill.kwh_sent_to_grid, Bill.raw_json,
-                          Bill.solar_credit_usd, Bill.period_end)
-            ).where(
-                Bill.account_id.in_(host_ids),
-                Bill.period_end.isnot(None),
-                Bill.period_end >= since,
-                Bill.kwh_sent_to_grid.isnot(None),
-                Bill.kwh_sent_to_grid > 0,
-            ).order_by(Bill.period_end.desc(), Bill.id.desc())
-        ).scalars().all():
-            bills_by_account.setdefault(b.account_id, []).append(b)
-
-    return VacancyPrefetch(
-        array_ids=frozenset(array_ids),
-        host_id_by_array=host_id_by_array,
-        account_by_id=account_by_id,
-        subs_by_array=subs_by_array,
-        bills_by_account=bills_by_account,
-    )
-
-
 # ── per-array vacancy ─────────────────────────────────────────────────────────
 
-def array_vacancy(db, array, *, window_months: int = VACANCY_WINDOW_MONTHS,
-                  prefetch: Optional[VacancyPrefetch] = None) -> Optional[dict]:
+def array_vacancy(db, array, *, window_months: int = VACANCY_WINDOW_MONTHS) -> Optional[dict]:
     """Trailing-window vacancy for ONE array. Returns a JSON-friendly dict, or None
-    when the array has no host account at all (nothing to measure).
-
-    `prefetch` is the tenant-wide fetch `tenant_vacancy` builds; without it (the
-    /exchange/demand/{id}/draft-offtaker path) this issues its own queries exactly
-    as it always has. Both routes run the same arithmetic on the same rows."""
-    from .models import Bill
+    when the array has no host account at all (nothing to measure)."""
+    from api.models import Bill
 
     array_id = array.id
-    pre = prefetch if (prefetch is not None and prefetch.covers(array_id)) else None
-
-    if pre is not None:
-        host_id = pre.host_id_by_array.get(array_id)
-        reg_alloc = _registry_allocated_frac(
-            db, array_id, subs=pre.subs_by_array.get(array_id, []))
-    else:
-        host_id = _host_account_id(db, array_id)
-        reg_alloc = _registry_allocated_frac(db, array_id)
+    host_id = _host_account_id(db, array_id)
+    reg_alloc = _registry_allocated_frac(db, array_id)
     reg_vac = (max(0.0, 1.0 - reg_alloc) if reg_alloc is not None else None)
 
     base = {
@@ -397,46 +257,38 @@ def array_vacancy(db, array, *, window_months: int = VACANCY_WINDOW_MONTHS,
                                    "the host GMP/VEC login to measure vacancy.")
         return base
 
-    from .models import UtilityAccount
-    host = (pre.account_by_id.get(host_id) if pre is not None
-            else db.get(UtilityAccount, host_id))
+    from api.models import UtilityAccount
+    host = db.get(UtilityAccount, host_id)
     base["provider"] = (host.provider if host else None)
 
-    if pre is not None:
-        bills = pre.bills_by_account.get(host_id, [])
-    else:
-        since = _now() - timedelta(days=int(window_months) * 31 + 5)
-        bills = db.execute(
-            # COLUMN DIET (enumerated, not guessed). Bill is a data sponge: it also
-            # carries `pdf_bytes` (LargeBinary — the ENTIRE bill PDF, persisted
-            # in-row) and `raw_text`, and a full-entity load dragged both across the
-            # wire for every bill of every array (46 queries × 479 rows = 1.29s on
-            # ten_ford_demo_100) even though nothing here reads them.
-            # Everything this function and its callees touch on a Bill row:
-            #   kwh_sent_to_grid  — the pool
-            #   raw_json          — split_excess_line_items and, inside
-            #                       _bill_credit_rate, excess_credit_rate_from_bill
-            #   solar_credit_usd  — the banked-month test
-            #   period_end        — expiry math and the age bucket
-            # (id comes along automatically as the PK.) _bill_credit_rate reads
-            # NOTHING else off the bill. If a future edit does touch another column
-            # SQLAlchemy loads it lazily — an extra query, never a wrong number.
-            select(Bill).options(
-                load_only(Bill.kwh_sent_to_grid, Bill.raw_json,
-                          Bill.solar_credit_usd, Bill.period_end)
-            ).where(
-                Bill.account_id == host_id,
-                Bill.period_end.isnot(None),
-                Bill.period_end >= since,
-                Bill.kwh_sent_to_grid.isnot(None),
-                Bill.kwh_sent_to_grid > 0,
-            # DETERMINISM: `period_end DESC` alone is NOT a total order, and the
-            # `bills[:window_months]` slice below then picks an arbitrary winner
-            # among tied months — the same latent nondeterminism the energy-history
-            # `Bill.id.desc()` fix closed, on a path that prices invoices. The
-            # prefetch orders identically, so both routes see one fixed sequence.
-            ).order_by(Bill.period_end.desc(), Bill.id.desc())
-        ).scalars().all()
+    since = _now() - timedelta(days=int(window_months) * 31 + 5)
+    bills = db.execute(
+        # COLUMN DIET (enumerated, not guessed). Bill is a data sponge: it also
+        # carries `pdf_bytes` (LargeBinary — the ENTIRE bill PDF, persisted
+        # in-row) and `raw_text`, and a full-entity load dragged both across the
+        # wire for every bill of every array (46 queries × 479 rows = 1.29s on
+        # ten_ford_demo_100) even though nothing here reads them.
+        # Everything this function and its callees touch on a Bill row:
+        #   kwh_sent_to_grid  — the pool (array_vacancy:273, :286)
+        #   raw_json          — split_excess_line_items(:274) and, inside
+        #                       _bill_credit_rate(:154), excess_credit_rate_from_bill
+        #   solar_credit_usd  — the banked-month test (:293)
+        #   period_end        — expiry math (:295) and the age bucket
+        #                       (_bill_credit_rate:165)
+        # (id comes along automatically as the PK.) _bill_credit_rate reads
+        # NOTHING else off the bill. If a future edit does touch another column
+        # SQLAlchemy loads it lazily — an extra query, never a wrong number.
+        select(Bill).options(
+            load_only(Bill.kwh_sent_to_grid, Bill.raw_json,
+                      Bill.solar_credit_usd, Bill.period_end)
+        ).where(
+            Bill.account_id == host_id,
+            Bill.period_end.isnot(None),
+            Bill.period_end >= since,
+            Bill.kwh_sent_to_grid.isnot(None),
+            Bill.kwh_sent_to_grid > 0,
+        ).order_by(Bill.period_end.desc())
+    ).scalars().all()
 
     if not bills:
         # No settled host bills with excess in the window. Registry may still speak.
@@ -472,7 +324,7 @@ def array_vacancy(db, array, *, window_months: int = VACANCY_WINDOW_MONTHS,
             # corrects the confidence when it disagrees.
             retained = pool
         retained = max(0.0, min(retained, pool))
-        rate = _bill_credit_rate(db, b, host_id, host_account=host, array=array)
+        rate = _bill_credit_rate(db, b, host_id)
         last_rate = rate
         value = retained * rate
         pool_total += pool
@@ -532,37 +384,18 @@ def tenant_vacancy(db, tenant_id: str, *, window_months: int = VACANCY_WINDOW_MO
     """Vacancy across ALL of one tenant's arrays (tenant-scoped; no cross-tenant
     read). Arrays are ordered most-vacant-dollars first — the money leak on top.
     """
-    from .models import Array
+    from api.models import Array
 
     arrays = db.execute(
-        # COLUMN DIET (enumerated, not guessed). Everything this module touches on
-        # an Array row:
-        #   excluded           — the skip test just below
-        #   name               — array_vacancy's "array_name"
-        #   first_connect_date — the age bucket, inside _bill_credit_rate
-        # (id comes along as the PK, and is what `covers()` and the prefetch maps
-        # key on.) Nothing here reads anything else.
-        #
-        # This one is not merely wire bytes: `Array.solaredge_api_key` is an
-        # EncryptedStr, so the full-entity load ran an AES DECRYPT PER ARRAY on
-        # every /vacancy call — and hydrated a vendor secret into a read path
-        # that has no business holding one. A future edit that does touch another
-        # column gets a lazy load: an extra query, never a wrong number.
-        select(Array).options(
-            load_only(Array.name, Array.excluded, Array.first_connect_date)
-        ).where(Array.tenant_id == tenant_id)
+        select(Array).where(Array.tenant_id == tenant_id)
         .order_by(Array.id)
     ).scalars().all()
 
-    # Build the tenant-wide prefetch from the arrays we will actually measure —
-    # excluded arrays are skipped below, so there is no reason to drag their host
-    # bills across the wire.
-    live = [a for a in arrays if not getattr(a, "excluded", False)]
-    pre = _prefetch_vacancy(db, live, window_months=window_months)
-
     rows = []
-    for a in live:
-        v = array_vacancy(db, a, window_months=window_months, prefetch=pre)
+    for a in arrays:
+        if getattr(a, "excluded", False):
+            continue
+        v = array_vacancy(db, a, window_months=window_months)
         if v is None:
             continue
         # Only surface arrays that either measured a host bill or have an offtaker
