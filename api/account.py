@@ -39,6 +39,7 @@ from starlette.background import BackgroundTask
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import select, func, or_
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import load_only
 
 from . import branding
 from .bill_attribution import distribute_kwh_by_calendar_day
@@ -1165,6 +1166,32 @@ def account_sponge_status(provider: str = "gmp",
     return sponge_status(t.id, provider)
 
 
+# Exactly the columns account_energy_history reads — nothing else. A bare
+# select(Bill) drags raw_json (JSON), raw_text (Text) and pdf_bytes (LargeBinary,
+# avg ~16 KB/row, max 1.4 MB) for every row: measured on ten_ford_demo_100 that
+# is 66,537 rows and 12.18s of an 18.10s request, plus the 66,438 json.loads
+# calls cProfile attributes to deserializing raw_json — roughly a gigabyte over
+# the wire. Same fix and same reasoning as _BILL_AUDIT_COLS in
+# api/reconciliation/reconcile.py (bill audit 24.3s -> 2.0s).
+#
+# raiseload=True IS set here, unlike the reconcile.py version. There the Session
+# is shared with classify.py's _latest_parsed_bill, which legitimately reads
+# Bill.raw_text, so raiseload would break a real caller. Here the Session is
+# opened and closed inside this function and touches nothing else, so raiseload
+# is a pure guard: add a field to the periods dict below without adding its
+# column here and you get a loud InvalidRequestError in dev instead of 66,537
+# silent per-row lazy SELECTs in prod. It also blocks b.account (the relationship
+# off Bill.account_id) — no caller here wants it. If the guard ever proves too
+# strict, drop raiseload=True, NOT the load_only.
+_ENERGY_HISTORY_COLS = load_only(
+    Bill.id, Bill.tenant_id, Bill.period_start, Bill.period_end, Bill.bill_date,
+    Bill.billing_days, Bill.kwh_generated, Bill.kwh_consumed,
+    Bill.kwh_sent_to_grid, Bill.kwh_gross_generated, Bill.is_net_metered,
+    Bill.total_cost, Bill.net_credit, Bill.avg_rate_cents_kwh, Bill.supplier,
+    raiseload=True,
+)
+
+
 @router.get("/v1/account/energy-history")
 def account_energy_history(authorization: Optional[str] = Header(default=None)):
     """The absorbed energy record — the owner's years of GMP history, organized.
@@ -1174,7 +1201,7 @@ def account_energy_history(authorization: Optional[str] = Header(default=None)):
     from .models import Bill
     with SessionLocal() as db:
         rows = db.execute(
-            select(Bill).where(Bill.tenant_id == t.id)
+            select(Bill).options(_ENERGY_HISTORY_COLS).where(Bill.tenant_id == t.id)
             .order_by(Bill.period_end.desc().nullslast(), Bill.bill_date.desc().nullslast())
         ).scalars().all()
         periods = []
@@ -5304,6 +5331,32 @@ def _quarter_to_reference_date(year: int, q: int) -> date:
 
 # ─── Reports history ─────────────────────────────────────────────────────
 
+# The ONLY Bill columns get_reports AND get_reports_next_run read. Without this,
+# select(Bill) drags raw_json + raw_text + the pdf_bytes LargeBinary (avg ~16 KB
+# per row, max 1.4 MB) for 66k rows — roughly a gigabyte over the wire to build a
+# 1 KB response. Measured: 11.86s of get_reports' 16.78s. Same fix as
+# _BILL_AUDIT_COLS in api/reconciliation/reconcile.py.
+#
+# CRITICAL — BOTH callers iterate `bills` AFTER their `with SessionLocal()` block
+# has closed. SessionLocal is expire_on_commit=False (api/db.py), so columns
+# loaded here stay readable on the detached instance — but a column NOT in this
+# list has no loaded value and cannot lazy-refresh against a closed Session: it
+# raises DetachedInstanceError IN PRODUCTION, where tests on a thin tenant may
+# never reach the branch. Adding any new b.<attr> read to EITHER loop REQUIRES
+# adding that column here. b.account will raise regardless.
+#
+# No raiseload=True: once the session closes you get a hard error either way, and
+# it would break any future in-session caller. That differs from
+# _ENERGY_HISTORY_COLS above, whose objects never leave their session.
+#
+# Deliberately ONE constant shared by both endpoints rather than two identical
+# lists that can drift apart silently. The coupling is the point.
+_BILL_QUARTER_COLS = load_only(
+    Bill.id, Bill.account_id, Bill.kwh_generated,
+    Bill.period_start, Bill.bill_date,
+)
+
+
 @router.get("/v1/account/reports")
 def get_reports(
     quarters: int = 6,
@@ -5359,7 +5412,9 @@ def get_reports(
 
         bills: list[Bill] = (
             db.execute(
-                select(Bill).where(Bill.account_id.in_(account_ids))
+                select(Bill)
+                .options(_BILL_QUARTER_COLS)
+                .where(Bill.account_id.in_(account_ids))
             ).scalars().all()
             if account_ids else []
         )
@@ -5660,7 +5715,9 @@ def get_reports_next_run(
 
         bills: list[Bill] = (
             db.execute(
-                select(Bill).where(Bill.account_id.in_(account_ids))
+                select(Bill)
+                .options(_BILL_QUARTER_COLS)
+                .where(Bill.account_id.in_(account_ids))
             ).scalars().all()
             if account_ids
             else []

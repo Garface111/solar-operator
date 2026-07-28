@@ -28,6 +28,7 @@ from datetime import date, datetime, timezone
 from typing import Optional
 
 from sqlalchemy import select
+from sqlalchemy.orm import load_only
 
 from ..bill_attribution import distribute_kwh_by_calendar_day
 from ..db import SessionLocal
@@ -44,6 +45,25 @@ _MONTH_NAMES = [
     "", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ]
+
+# Exactly the Bill columns aggregate_fleet reads. FOUR of them — kwh_generated,
+# period_start, period_end, bill_date — are read INDIRECTLY, inside
+# distribute_kwh_by_calendar_day(b) (api/bill_attribution.py), which is handed the
+# whole Bill. Miss one and every row lazy-refreshes.
+#
+# A bare select(Bill) drags raw_json + raw_text + pdf_bytes (LargeBinary, avg
+# ~16 KB/row, max 1.4 MB): measured 66,072 rows and ~12.1s of this endpoint's
+# 17.8s. Same fix as _BILL_AUDIT_COLS in api/reconciliation/reconcile.py.
+#
+# No raiseload: the Bill objects stay inside the with-block here, so a missing
+# column degrades to slow rather than a 500 — and raiseload would also block
+# b.account for any future in-session caller. billing_days is deliberately
+# ABSENT: distribute_kwh_by_calendar_day does not read it (verified).
+_BILL_FLEET_COLS = load_only(
+    Bill.id, Bill.account_id,
+    Bill.kwh_consumed, Bill.total_cost, Bill.net_credit,
+    Bill.kwh_generated, Bill.period_start, Bill.period_end, Bill.bill_date,
+)
 
 
 # ── data shape ────────────────────────────────────────────────────────────
@@ -140,7 +160,9 @@ def aggregate_fleet(tenant: Tenant) -> FleetAggregate:
             lambda: defaultdict(float))
         if acct_to_array:
             bills = db.execute(
-                select(Bill).where(Bill.account_id.in_(list(acct_to_array.keys())))
+                select(Bill)
+                .options(_BILL_FLEET_COLS)
+                .where(Bill.account_id.in_(list(acct_to_array.keys())))
             ).scalars().all()
             for b in bills:
                 aid = acct_to_array.get(b.account_id)
