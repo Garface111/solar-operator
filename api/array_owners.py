@@ -908,6 +908,23 @@ def array_owners_overview(authorization: str | None = Header(default=None)) -> d
         # Cache energy rates by provider so identical providers don't re-derive.
         _rate_cache: dict[object, float] = {}
 
+        # Vendor-offline continuity for EVERY array in two queries. This was
+        # four SELECTs per array inside the loop below — 54% of this endpoint's
+        # runtime on a 53-array tenant. On failure we fall back per-array.
+        _pf_all: dict[int, dict] = {}
+        try:
+            from . import production_fallback as _pf_bulk
+            _pf_all = _pf_bulk.compute_production_fallback_bulk(db, array_ids)
+        except Exception:  # noqa: BLE001
+            # Only a handful of arrays fleet-wide ever carry a non-null source,
+            # so a silently-failing bulk renders IDENTICALLY to correct output
+            # on screen. This log line is the only signal — keep it alertable.
+            log.exception(
+                "production_fallback bulk failed for %d arrays; "
+                "falling back to per-array", len(array_ids),
+            )
+            _pf_all = {}
+
         for arr in arrays:
             today_kwh = today_by_array.get(arr.id, 0.0)
             # has_today: a row exists for today (distinct from "summed to 0").
@@ -965,14 +982,16 @@ def array_owners_overview(authorization: str | None = Header(default=None)) -> d
             health = _health(has_live_source, last_day, overview_ok, today)
 
             # Vendor-offline continuity flag (utility stands in for dead inverter feed).
-            try:
-                from . import production_fallback as _pf
-                _pfall = _pf.compute_production_fallback(db, arr.id)
-            except Exception:
-                _pfall = {
-                    "active": False, "source": None,
-                    "days_filled": 0, "vendor_last_day": None,
-                }
+            _pfall = _pf_all.get(arr.id)
+            if _pfall is None:   # bulk unavailable — original per-array path
+                try:
+                    from . import production_fallback as _pf
+                    _pfall = _pf.compute_production_fallback(db, arr.id)
+                except Exception:
+                    _pfall = {
+                        "active": False, "source": None,
+                        "days_filled": 0, "vendor_last_day": None,
+                    }
 
             entry = {
                 "array_id": arr.id,

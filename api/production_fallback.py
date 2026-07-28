@@ -19,7 +19,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import case, func, select
 
 from . import generation_sources
 from .models import DailyGeneration, local_today
@@ -178,6 +178,144 @@ def compute_production_fallback(
         "days_filled": days_filled if active else 0,
         "vendor_last_day": last_any.isoformat() if last_any else None,
     }
+
+
+def compute_production_fallback_bulk(
+    db, array_ids, *, days: int = 14, today: date | None = None
+) -> dict[int, dict]:
+    """``compute_production_fallback`` for many arrays in TWO queries, not 4×N.
+
+    The per-array version fires four SELECTs (vendor_last_day,
+    vendor_last_positive_day, the 14-day window, and often
+    _utility_source_label). Called once per array from the overview loop that
+    was 54% of the endpoint's runtime.
+
+    Every classification decision stays in PYTHON, on the raw source string.
+    Do NOT push ``lower(trim(coalesce(source,'')))`` into SQL to pre-filter:
+    ``str.strip()`` strips ``\\t\\n\\r\\f\\v`` but SQL ``trim()`` strips only
+    spaces, so a source stored as ``'chint\\n'`` would be a vendor row to the
+    window loop and a non-vendor row to the grouped query — flipping
+    ``active``, ``source``, ``days_filled`` and ``vendor_last_day`` at once.
+    Grouping by the raw source is cheap anyway: the whole table holds a
+    handful of distinct source values, so it is a few rows per array.
+
+    Returns ``{array_id: block}`` with an entry for every id passed in.
+    """
+    ids = [int(a) for a in (array_ids or [])]
+    if not ids:
+        return {}
+    today = today or local_today()
+    cutoff = today - timedelta(days=VENDOR_DEAD_DAYS)
+    window_start = today - timedelta(days=max(1, days) - 1)
+
+    # ── q1 ── vendor_last_day + vendor_last_positive_day + the utility label,
+    # one grouped pass. row_number() reproduces the originals' LIMIT-400 and
+    # LIMIT-60 row caps exactly (uq_daily_array_day makes day unique per array,
+    # so the ordering has no ties and the cap is deterministic).
+    rn = func.row_number().over(
+        partition_by=DailyGeneration.array_id,
+        order_by=DailyGeneration.day.desc(),
+    ).label("rn")
+    sub = (
+        select(
+            DailyGeneration.array_id.label("aid"),
+            DailyGeneration.source.label("src"),
+            DailyGeneration.day.label("d"),
+            DailyGeneration.kwh.label("k"),
+            rn,
+        )
+        .where(DailyGeneration.array_id.in_(ids))
+        .subquery()
+    )
+    last_any: dict[int, date] = {}
+    last_pos: dict[int, date] = {}
+    ulab: dict[int, tuple[date, str]] = {}
+    for aid, src, mx_any, mx_pos, mx_u60 in db.execute(
+        select(
+            sub.c.aid,
+            sub.c.src,
+            func.max(sub.c.d),
+            func.max(case((sub.c.k > _ZERO_EPS, sub.c.d))),
+            func.max(case((sub.c.rn <= 60, sub.c.d))),
+        )
+        .where(sub.c.rn <= 400)
+        .group_by(sub.c.aid, sub.c.src)
+    ).all():
+        if is_vendor_source(src):
+            if mx_any is not None and (aid not in last_any or mx_any > last_any[aid]):
+                last_any[aid] = mx_any
+            if mx_pos is not None and (aid not in last_pos or mx_pos > last_pos[aid]):
+                last_pos[aid] = mx_pos
+        elif is_utility_source(src) and mx_u60 is not None:
+            # Most recent utility day inside the 60-row window wins the label —
+            # an explicit max, not the old "ascending order, last write wins".
+            prev = ulab.get(aid)
+            if prev is None or mx_u60 > prev[0]:
+                ulab[aid] = (mx_u60, (src or "").strip().lower() or None)
+
+    # ── q2 ── the `days`-wide window for every array at once.
+    by_day_all: dict[int, dict[date, list[tuple[str, float]]]] = {}
+    for aid, day, src, kwh in db.execute(
+        select(DailyGeneration.array_id, DailyGeneration.day,
+               DailyGeneration.source, DailyGeneration.kwh)
+        .where(
+            DailyGeneration.array_id.in_(ids),
+            DailyGeneration.day >= window_start,
+            DailyGeneration.day <= today,
+        )
+    ).all():
+        by_day_all.setdefault(aid, {}).setdefault(day, []).append(
+            ((src or "").strip().lower(), float(kwh or 0.0))
+        )
+
+    out: dict[int, dict] = {}
+    for aid in ids:
+        _lp = last_pos.get(aid)
+        dead = not (_lp is not None and _lp >= cutoff)
+        last_any_d = last_any.get(aid)
+        by_day = by_day_all.get(aid) or {}
+
+        # ── everything below is compute_production_fallback's body, verbatim ──
+        days_filled = 0
+        has_utility = False
+        util_src: Optional[str] = None
+        for day, entries in by_day.items():
+            util = [(s, k) for s, k in entries if is_utility_source(s)]
+            vend = [(s, k) for s, k in entries if is_vendor_source(s)]
+            if util:
+                has_utility = True
+                if util_src is None:
+                    util_src = util[0][0]
+                util_kwh = max(k for _, k in util)
+                vend_kwh = max((k for _, k in vend), default=None)
+                if vend_kwh is None or vend_kwh <= _ZERO_EPS:
+                    if util_kwh > _ZERO_EPS:
+                        days_filled += 1
+                elif dead and util_kwh > vend_kwh:
+                    pass
+
+        _e = ulab.get(aid)
+        _label = _e[1] if _e else None
+        if util_src is None and has_utility:
+            util_src = _label
+        elif util_src is None:
+            util_src = _label
+            if util_src:
+                has_utility = True
+
+        active = bool(dead and has_utility and days_filled > 0)
+        out[aid] = {
+            "active": active,
+            "source": (
+                util_src if active
+                else (util_src if dead and has_utility else None)
+            ),
+            "days_filled": days_filled if active else 0,
+            "vendor_last_day": (
+                last_any_d.isoformat() if last_any_d else None
+            ),
+        }
+    return out
 
 
 def should_gap_fill_vendor_zero(
