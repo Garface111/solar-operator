@@ -452,6 +452,22 @@ def array_vacancy(db, array, *, window_months: int = VACANCY_WINDOW_MONTHS,
                                        "connect the utility login to measure vacancy.")
         return base
 
+    # ⚠️ TWO KNOWN ISSUES IN THE LOOP BELOW, both PRE-EXISTING and both left alone
+    # here on purpose — they move real dollars, so they are Ford's call, not a
+    # side effect of a latency patch (2026-07-28 audit, SHARED-BACKLOG):
+    #
+    #   1. A DUPLICATED MONTH IS COUNTED TWICE. Nothing dedupes bills by period,
+    #      and prod carries 1,137 (account_id, period_end) groups with more than
+    #      one excess bill — every one a RE-CAPTURE of the same month (same kWh,
+    #      pulled twice). Each copy adds its own pool/retained/value, inflating
+    #      that array's vacancy. The fix is to keep the freshest capture per
+    #      period, which LOWERS vacancy_usd on affected arrays.
+    #   2. `credit_rate` is `last_rate` — the rate of the LAST bill iterated,
+    #      i.e. the OLDEST month in the window, not the newest. Almost certainly
+    #      not what "the credit rate" is meant to mean on the dashboard.
+    #
+    # Both are why the bills query above is pinned with `Bill.id.desc()`: until a
+    # dedupe exists, ties are real, and an unpinned ORDER BY let the planner pick.
     pool_total = 0.0
     retained_total = 0.0
     value_total = 0.0

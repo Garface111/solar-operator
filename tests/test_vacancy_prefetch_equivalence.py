@@ -462,6 +462,70 @@ def test_a_split_tie_keeps_the_FRESHEST_capture():
         results[0]["credit_rate"], "fresh", fresh_rate, "stale", stale_rate)
 
 
+def test_a_fully_included_tie_is_deterministic_but_credit_rate_reads_the_older_row():
+    """The honest other half of the tiebreaker, pinned so it cannot surprise anyone.
+
+    `id DESC` decides which capture SURVIVES a window cut (previous test). It does
+    NOT decide which capture `credit_rate` reports when BOTH rows of a tie sit
+    inside the window: `credit_rate` is `last_rate`, the LAST bill iterated, and
+    `id DESC` puts the freshest FIRST — so the last row of a fully-included tie is
+    the OLDER capture. That is what moved the 5 prod fields (0.18398 -> 0.24288 and
+    0.18397 -> 0.25987 on 3 arrays): pre-patch the planner happened to emit those
+    tied pairs id-ascending, so `last_rate` landed on the newer row.
+
+    No money moves either way — every bill is valued at its OWN rate, asserted
+    below — but this is a display field reading the older of two captures, which
+    is worth knowing rather than discovering. Two deeper issues live underneath it
+    and are deliberately NOT fixed here (they would move real dollars and are
+    Ford's call): `credit_rate` is defined as the OLDEST bill in the window rather
+    than the newest, and a duplicated month is counted TWICE into pool/retained/
+    value. See the SHARED-BACKLOG entry."""
+    tid = "ten_vacfull_" + secrets.token_hex(3)
+    STALE = (40, 10.4)      # $0.26/kWh,  captured first  -> LOWER id
+    FRESH = (40, 7.36)      # $0.184/kWh, captured second -> HIGHER id
+    with SessionLocal() as db:
+        db.add(Tenant(id=tid, tenant_key=secrets.token_hex(8), name=tid,
+                      contact_email=f"{tid}@e.com", active=True,
+                      product="array_operator"))
+        db.flush()
+        arr = _mk_array(db, tid, "TiedInside")
+        acct = _mk_account(db, tid, arr.id, "host")
+        base = _now() - timedelta(days=3)
+        # 5 months x 2 captures = 10 bills, all inside a 12-row window: no cut,
+        # so both rows of every tie are iterated and the LAST one decides.
+        for i in range(5):
+            pe = base - timedelta(days=30 * i)
+            for dup, (ckwh, cusd) in enumerate((STALE, FRESH)):
+                db.add(Bill(tenant_id=tid, account_id=acct.id,
+                            period_start=pe - timedelta(days=29), period_end=pe,
+                            kwh_generated=9000, kwh_sent_to_grid=5000.0,
+                            solar_credit_usd=None, is_net_metered=True,
+                            pulled_at=_now() - timedelta(days=30 - dup * 29),
+                            raw_json=_excess_json(shared_kwh=1000,
+                                                  credited_kwh=ckwh,
+                                                  credited_usd=cusd)))
+        _mk_subs(db, tid, arr.id, [0.3])
+        db.commit()
+        aid = arr.id
+
+    stale_rate = round(STALE[1] / STALE[0], 5)
+    results = []
+    for _ in range(5):
+        with SessionLocal() as db:
+            results.append(array_vacancy(db, db.get(Array, aid)))
+    assert len({json.dumps(r, sort_keys=True) for r in results}) == 1, results[0]
+    assert results[0]["months_of_history"] == 10          # the double count, visible
+    assert results[0]["credit_rate"] == pytest.approx(stale_rate), results[0]
+
+    # Money is tie-order independent: each bill is valued at its own rate, so the
+    # pre-patch and post-patch totals agree even though credit_rate does not.
+    with SessionLocal() as db:
+        o = old.array_vacancy(db, db.get(Array, aid))
+    for f in ("vacancy_kwh", "vacancy_usd", "pool_kwh", "vacancy_frac",
+              "expiring_soon_kwh", "expiring_soon_usd", "months_of_history"):
+        assert o[f] == results[0][f], f
+
+
 # ── 3. N+1 IS DEAD ────────────────────────────────────────────────────────────
 
 def test_sql_statement_count_is_constant_as_the_fleet_grows():
