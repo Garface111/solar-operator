@@ -71,7 +71,7 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
     #                         what would have gone out while no customer does.
     if os.getenv("EMAIL_DRY_RUN", "").strip().lower() in ("1", "true", "yes", "on"):
         logger.warning("EMAIL_DRY_RUN set — NOT sending. to=%s subject=%s", to, subject)
-        logger.info("EMAIL(dry) → to=%s subject=%s\n%s", to, subject, text or html[:500])
+        logger.info("EMAIL(dry) → to=%s subject=%s\n%s", to, subject, text or (html or "")[:500])
         # Dry-run: report ok to callers but never fake a Resend id.
         return True
     _sink = os.getenv("EMAIL_SINK_TO", "").strip()
@@ -85,7 +85,7 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
         bcc = None
     if not RESEND_API_KEY:
         logger.warning("RESEND_API_KEY not set — logging email instead of sending.")
-        logger.info("EMAIL → to=%s subject=%s\n%s", to, subject, text or html[:500])
+        logger.info("EMAIL → to=%s subject=%s\n%s", to, subject, text or (html or "")[:500])
         return False
 
     try:
@@ -100,8 +100,14 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
         "from": from_addr or branding.from_address(product),
         "to": [to] if isinstance(to, str) else list(to),
         "subject": subject,
-        "html": html,
     }
+    # html is optional: a TEXT-ONLY send (html="" / None) produces a real
+    # plain-text email rather than a multipart one. Gmail then renders it in the
+    # reader's own font like any person-to-person mail, instead of showing our
+    # HTML mirror's serif styling. Sending an empty html part would defeat that,
+    # so omit the key entirely rather than passing "".
+    if html:
+        params["html"] = html
     if text:
         params["text"] = text
     if cc:
@@ -1251,31 +1257,30 @@ def send_repair_checkin_email(
     message_id: str | None = None,
     in_reply_to: str | None = None,
     references: str | None = None,
+    cc: list[str] | str | None = None,
 ) -> bool:
     """O&M / installer status check-in for a repair ticket.
 
     Plain professional text (no brand chrome). From and Reply-To are identical
     Energy Agent addresses so Reply goes back into the agent inbox.
+
+    `cc` makes the thread three-way — normally the site owner, once the agent has
+    judged that the tech said something only the owner can answer. It is a real
+    CC (not BCC) on purpose: everyone on the thread can see who else is on it,
+    which is what keeps the conversation honest.
     """
-    # Minimal HTML mirror of plain text — system fonts, white page, no color bars.
-    paras = []
-    for block in (body_text or "").split("\n\n"):
-        block = block.strip("\n")
-        if not block:
-            continue
-        paras.append(
-            "<p style='margin:0 0 1em 0;font-family:Georgia,\"Times New Roman\",serif;"
-            "font-size:15px;line-height:1.55;color:#111111;'>"
-            + _escape(block).replace("\n", "<br>\n")
-            + "</p>"
-        )
-    html = (
-        "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
-        "<meta name='color-scheme' content='light only'></head>"
-        "<body style='margin:0;padding:24px;background:#ffffff;color:#111111;'>"
-        f"{''.join(paras) or '<p></p>'}"
-        "</body></html>"
-    )
+    # TEXT ONLY — no HTML part at all. This used to send an HTML mirror styled
+    # `font-family: Georgia, "Times New Roman", serif`, which is why these read
+    # as a pre-rendered document on desktop Gmail rather than as mail a person
+    # typed: Gmail honoured our serif stack instead of the reader's own font.
+    # Mobile looked cleaner only because it fell back differently.
+    #
+    # A repair thread is a human conversation with a crew — and now, once the
+    # owner is CC'd, a three-way one — so it should arrive looking exactly like
+    # every other plain email in the thread. Do NOT reintroduce an HTML part
+    # here: any styling we send is styling the recipient did not choose, and it
+    # is what made these look machine-generated.
+    html = ""
     from_addr = REPAIR_MAIL_FROM
     # Hard rule: Reply-To == From (ignore mismatched reply_to / env split)
     same = from_addr
@@ -1293,6 +1298,7 @@ def send_repair_checkin_email(
         text=body_text,
         from_addr=from_addr,
         reply_to=same,
+        cc=cc or None,
         headers=thread_headers or None,
         product="array_operator",
     )

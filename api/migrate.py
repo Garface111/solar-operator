@@ -1555,6 +1555,27 @@ def main():
             added.append("repair_tickets.email_refs")
             print("  + repair_tickets.email_refs")
 
+        # 2026-07-28 Three-way threads — the agent can CC the owner into the crew
+        # conversation when the tech says something only the owner can answer.
+        if not column_exists(conn, "repair_tickets", "owner_looped_in_at"):
+            conn.execute(text(
+                "ALTER TABLE repair_tickets ADD COLUMN owner_looped_in_at TIMESTAMP NULL"
+            ))
+            added.append("repair_tickets.owner_looped_in_at")
+            print("  + repair_tickets.owner_looped_in_at")
+        if not column_exists(conn, "repair_tickets", "owner_loop_reason"):
+            conn.execute(text(
+                "ALTER TABLE repair_tickets ADD COLUMN owner_loop_reason VARCHAR(300) NULL"
+            ))
+            added.append("repair_tickets.owner_loop_reason")
+            print("  + repair_tickets.owner_loop_reason")
+        if not column_exists(conn, "repair_checkins", "cc_emails"):
+            conn.execute(text(
+                "ALTER TABLE repair_checkins ADD COLUMN cc_emails VARCHAR(400) NULL"
+            ))
+            added.append("repair_checkins.cc_emails")
+            print("  + repair_checkins.cc_emails")
+
         # 2026-07-17 Per-ticket check-in cadence (hours). Null → tenant default.
         if not column_exists(conn, "repair_tickets", "checkin_interval_hours"):
             conn.execute(text(

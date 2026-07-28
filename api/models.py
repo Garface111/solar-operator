@@ -2443,6 +2443,19 @@ class RepairTicket(Base):
     # Stamped when we escalate a week-long-down fault to the OWNER by email
     # (asking for action + a repair contact). Prevents re-escalating the same case.
     owner_escalated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Stamped the first time the agent CC'd the owner into the crew thread, making
+    # it a three-way conversation (owner + tech + agent). Distinct from
+    # owner_escalated_at, which is a SEPARATE email to the owner alone.
+    #
+    # Load-bearing for correctness, not just audit: once set, the owner stays on
+    # every subsequent message of this thread. Silently dropping someone off a
+    # thread they have been reading — and possibly replying to — is exactly the
+    # kind of misrepresentation the loop-in feature exists to avoid.
+    owner_looped_in_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # The agent's own stated reason for pulling the owner in, kept so the Repairs
+    # UI (and a human auditing the thread later) can see WHY it judged the owner
+    # necessary rather than having to infer it from the email body.
+    owner_loop_reason: Mapped[str | None] = mapped_column(String(300), nullable=True)
     # Email threading (RFC In-Reply-To / References) so the crew conversation
     # stays ONE Gmail thread: last_msgid = the message to reply to; refs = the
     # accumulated Message-ID chain.
@@ -2471,7 +2484,15 @@ class RepairCheckIn(Base):
     direction: Mapped[str] = mapped_column(String(12), default="outbound")  # outbound|inbound|note
     subject: Mapped[str | None] = mapped_column(String(300), nullable=True)
     body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # For an OUTBOUND row this is the recipient; for an INBOUND row it is the
+    # sender (see ingest_inbound_email). That overload predates this comment —
+    # it is why _party_for() is applied to it when rebuilding thread context.
     sent_to: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # Comma-joined CC list on an outbound message — normally the site owner once
+    # the agent has looped them in. Recorded so the thread history shows exactly
+    # who received each message; the agent reads this back when reconstructing
+    # who was present for what.
+    cc_emails: Mapped[str | None] = mapped_column(String(400), nullable=True)
     sent_ok: Mapped[bool] = mapped_column(Boolean, default=False)
     via: Mapped[str] = mapped_column(String(16), default="agent")  # agent|auto|manual|owner
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)

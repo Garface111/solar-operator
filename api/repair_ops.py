@@ -304,6 +304,12 @@ def serialize_ticket(
         "checkin_interval_hours": getattr(t, "checkin_interval_hours", None),
         "scheduled_for": _iso(t.scheduled_for),
         "tech_note": t.tech_note,
+        # Three-way thread state — the Repairs UI shows a "you're on this thread"
+        # chip so the owner is never surprised by a crew email landing in their
+        # inbox, and can see the agent's stated reason for adding them.
+        "owner_looped_in_at": _iso(getattr(t, "owner_looped_in_at", None)),
+        "owner_looped_in": bool(getattr(t, "owner_looped_in_at", None)),
+        "owner_loop_reason": getattr(t, "owner_loop_reason", None),
         "opened_at": _iso(t.opened_at),
         "resolved_at": _iso(t.resolved_at),
         "cancelled_at": _iso(t.cancelled_at),
@@ -459,6 +465,7 @@ def serialize_checkin(c: RepairCheckIn) -> dict:
         "subject": c.subject,
         "body": c.body,
         "sent_to": c.sent_to,
+        "cc_emails": c.cc_emails,
         "sent_ok": bool(c.sent_ok),
         "via": c.via,
         "created_at": _iso(c.created_at),
@@ -505,10 +512,17 @@ def build_email_surface_digest(db, tenant_id: str, *, limit: int = 20) -> str:
         if len(body) > 280:
             body = body[:277].rsplit(" ", 1)[0] + "…"
         when = _iso(r.created_at) or ""
+        # Show the CC list verbatim. This digest is injected into every agent
+        # turn as ground truth, so if the owner was copied on a message the agent
+        # must be able to see that — otherwise it will tell them "I emailed the
+        # crew" about a mail they personally received, or offer to loop them into
+        # a thread they are already on.
+        cc = (r.cc_emails or "").strip()
         if direction == "inbound":
-            head = f"IN from {who or 'tech'}"
+            head = f"IN from {who or 'unknown sender'}"
         elif direction == "outbound":
-            head = f"OUT to {who or 'tech'}" + (f" ({via})" if via else "")
+            head = f"OUT to {who or 'tech'}" + (f" cc {cc}" if cc else "")
+            head += f" ({via})" if via else ""
         else:
             head = f"{direction}"
         lines.append(
@@ -1007,11 +1021,23 @@ def send_checkin(
     # contact.email is set (including when it equals the owner email for testing).
     send_body = body
 
+    # Once the owner has been looped into this thread they stay on EVERY message
+    # of it, including scheduled follow-ups sent from here. Otherwise a cadence
+    # check-in would quietly continue a conversation the owner is part of behind
+    # their back — and any crew reply to it would land in a thread they can no
+    # longer see in full.
+    _cc: list[str] = []
+    if ticket.owner_looped_in_at is not None:
+        _owner = owner_email_for(tenant)
+        if _owner and _norm_email(go_to) != _owner:
+            _cc.append(_owner)
+
     _thk, _our_msgid = _thread_send_kwargs(ticket)
     ok = notify.send_repair_checkin_email(
         to=go_to,
         subject=subject,
         body_text=send_body,
+        cc=_cc or None,
         **_thk,
     )
     if ok:
@@ -1026,6 +1052,7 @@ def send_checkin(
         subject=subject,
         body=send_body,
         sent_to=go_to,
+        cc_emails=", ".join(_cc)[:400] or None,
         sent_ok=bool(ok),
         via=via,
     )
@@ -1595,6 +1622,40 @@ RULES:
 - If they need the owner, say you'll notify the owner and set needs_owner=true
 - Reply TO the person who wrote — conversational, not a form letter
 
+LOOPING IN THE OWNER (loop_in_owner) — a tool you have, not one you must use:
+Setting loop_in_owner=true CC's the site owner on this reply, making the thread a
+real three-way conversation. Once added they stay on every later message.
+
+Use it when the thread genuinely cannot move without the owner, e.g.:
+- The crew asks a question only the owner can answer (site access, gate/key
+  codes, which unit to prioritise, who is paying, approval for a cost)
+- They quote a price, propose paid work, or raise a warranty/liability question
+- They ask to speak to the owner, or ask you to tell/ask the owner something
+- They report something materially worse or different from the ticket (more
+  equipment down, damage, a safety issue)
+- They are unresponsive/stalled and the owner should decide how to proceed
+
+Do NOT use it for:
+- Routine scheduling you can handle ("we'll come Tuesday")
+- Status updates, parts ETAs, or acknowledgements
+- "Thanks" / pleasantries / a case that is simply progressing
+- Anything you can answer from the ticket facts you already have
+The owner hired you so their inbox stays quiet. Every unnecessary CC costs you
+their trust. When in doubt, handle it and tell them in chat instead.
+
+WRITING TO A THREE-WAY THREAD (when the owner is on it):
+- Everyone can see everything. Never say anything to one party you would not say
+  in front of the other.
+- Address the person whose answer you need; greet the others naturally.
+- ATTRIBUTE. "Ford confirmed the gate code is 1234" — never state the owner's
+  decision as if it were your own, and never imply they approved something they
+  have not.
+- Do not claim you have "passed along", "confirmed with", or "checked with" the
+  owner unless that actually happened in this thread. If you need the owner, add
+  them and ask — do not describe an action you did not take.
+- Keep the crew in the loop: if the owner answers you, reply to the CREW with
+  the owner copied, not to the owner alone.
+
 Respond ONLY with JSON (no markdown fences):
 {
   "send": true,
@@ -1602,6 +1663,8 @@ Respond ONLY with JSON (no markdown fences):
   "body": "full plain-text email body including sign-off and [AO-TICKET-N]",
   "status": null or "scheduled" or "in_progress" or "resolved" or "waiting_reply",
   "needs_owner": false,
+  "loop_in_owner": false,
+  "loop_in_reason": "one short phrase naming what only the owner can answer (or null)",
   "owner_chat": "one sentence for the owner about what happened and what you replied (or null)",
   "reason": "brief internal why"
 }
@@ -1615,6 +1678,66 @@ def _is_agent_mailbox(email: str | None) -> bool:
     if "agent.arrayoperator.com" in e:
         return True
     return any(tok in e for tok in _AGENT_MAIL_LOCALS)
+
+
+def _norm_email(email: str | None) -> str:
+    """Bare lowercase address — strips a display name and angle brackets."""
+    e = (email or "").strip()
+    if not e:
+        return ""
+    if "<" in e and ">" in e:
+        e = e[e.rfind("<") + 1:e.rfind(">")]
+    return e.strip().strip(",;").lower()
+
+
+def owner_email_for(tenant: Tenant) -> str | None:
+    """The site owner's address — the human this agent works for."""
+    e = _norm_email(getattr(tenant, "contact_email", None))
+    return e if _email_ok(e) else None
+
+
+def _party_for(
+    email: str | None,
+    tenant: Tenant,
+    contact: ServiceContact | None,
+) -> str:
+    """Who is this address on the thread: 'agent' | 'owner' | 'tech' | 'other'.
+
+    Once the owner is CC'd, a repair thread has three participants and the agent
+    MUST NOT confuse them — replying to the owner as though they were the crew,
+    or attributing the owner's words to the tech, is precisely the
+    misrepresentation this feature has to avoid. Every place that reconstructs
+    the conversation goes through here.
+
+    Order matters: the agent mailbox is checked first (it can never be a
+    counterparty), then the owner (whose address is authoritative from the
+    tenant record), then the assigned service contact. Anyone else on a
+    forwarded/CC'd thread is 'other' — a real case (the tech loops in their own
+    dispatcher) and deliberately NOT collapsed into 'tech', because we cannot
+    verify who they are.
+    """
+    e = _norm_email(email)
+    if not e:
+        return "other"
+    if _is_agent_mailbox(e):
+        return "agent"
+    if e == (owner_email_for(tenant) or object()):
+        return "owner"
+    if contact is not None and _norm_email(getattr(contact, "email", None)) == e:
+        return "tech"
+    return "other"
+
+
+def _party_label(party: str, contact: ServiceContact | None) -> str:
+    """Human label for a party, for use in LLM context and chat lines."""
+    if party == "owner":
+        return "SITE OWNER"
+    if party == "tech":
+        name = (getattr(contact, "name", None) or "").strip()
+        return f"TECH ({name})" if name else "TECH"
+    if party == "agent":
+        return "ENERGY AGENT (me)"
+    return "OTHER PARTY"
 
 
 def _looks_like_auto_reply(subject: str | None, body: str | None) -> bool:
@@ -1817,18 +1940,62 @@ def _build_convo_context(
         lines.append(f"peer_index: {evidence.get('peer_index')}")
     if ticket.description:
         lines.append(f"ticket_description: {ticket.description}")
-    lines.append("thread (oldest→newest):")
+    # ── who is on this thread ────────────────────────────────────────────────
+    # Spelled out explicitly because a three-way thread is the whole point of
+    # the loop-in tool, and the one thing the model must never do is mix up who
+    # said what — attributing the owner's words to the crew (or vice versa) and
+    # then acting on it.
+    looped = ticket.owner_looped_in_at is not None
+    lines.append(f"owner_is_on_this_thread: {'yes' if looped else 'no'}")
+    if looped:
+        lines.append(f"owner_looped_in_at: {_iso(ticket.owner_looped_in_at)}")
+        if ticket.owner_loop_reason:
+            lines.append(f"owner_loop_reason: {ticket.owner_loop_reason}")
+    sender_party = _party_for(from_email, tenant, contact)
+    lines.append(
+        f"latest_reply_is_from: {_party_label(sender_party, contact)} "
+        f"<{_norm_email(from_email)}>"
+    )
+
+    lines.append("thread (oldest→newest, each line tagged with WHO wrote it):")
     for row in history[-12:]:
-        who = row.direction or "note"
         via = row.via or ""
         body_prev = re.sub(r"\s+", " ", (row.body or "")[:500]).strip()
-        lines.append(f"  [{who}/{via}] {body_prev}")
+        if row.direction == "outbound":
+            who = "ME (Energy Agent)"
+            dest = row.sent_to or ""
+            if row.cc_emails:
+                dest = f"{dest} cc:{row.cc_emails}"
+            lines.append(f"  [{who} → {dest}] {body_prev}")
+        elif row.direction == "inbound":
+            p = _party_for(row.sent_to, tenant, contact)
+            lines.append(
+                f"  [{_party_label(p, contact)} <{_norm_email(row.sent_to)}>] {body_prev}"
+            )
+        else:
+            lines.append(f"  [internal note/{via}] {body_prev}")
     lines.append("--- latest inbound to answer ---")
+    lines.append(
+        f"(this message was written by {_party_label(sender_party, contact)})"
+    )
     lines.append(inbound_body[:3500])
     lines.append(
         f"Remember: include [AO-TICKET-{ticket.id}] in the body. "
         "Drive toward schedule / fix / owner action."
     )
+    if sender_party == "owner":
+        lines.append(
+            "NOTE: the SITE OWNER wrote this, not the crew. Your reply goes TO "
+            "the crew with the owner copied. Relay what the owner decided and "
+            "attribute it to them by name — never present it as your own "
+            "instruction, and never invent an approval they did not give."
+        )
+    elif not looped:
+        lines.append(
+            "The owner is NOT on this thread yet. Set loop_in_owner=true ONLY if "
+            "answering genuinely requires them (see the rules). Otherwise handle "
+            "it yourself."
+        )
     return "\n".join(lines)
 
 
@@ -1968,6 +2135,11 @@ def plan_repair_email_reply(
         st = plan.get("status")
         if st and st not in VALID_TICKET_STATUSES:
             plan["status"] = None
+        # Default OFF. A missing/garbled field must never silently CC a human.
+        plan["loop_in_owner"] = bool(plan.get("loop_in_owner"))
+        plan["loop_in_reason"] = (
+            str(plan.get("loop_in_reason") or "").strip()[:300] or None
+        )
 
     return plan
 
@@ -2009,15 +2181,36 @@ def continue_repair_email_conversation(
     if _convo_reply_count_today(db, ticket.id) >= _MAX_CONVO_REPLIES_PER_DAY:
         result["skipped"] = "daily_cap"
         return result
-    if _last_outbound_too_soon(db, ticket.id):
+
+    contact = get_contact(db, tenant.id, ticket.contact_id) if ticket.contact_id else None
+    owner_addr = owner_email_for(tenant)
+    sender_party = _party_for(from_email, tenant, contact)
+
+    # The anti-chatter gap does NOT apply to the owner's own message. This path
+    # drops a skipped reply entirely rather than queueing it, so applying the gap
+    # here would mean the owner answers the crew's question and that answer is
+    # silently never relayed — the worst failure this feature could have. The
+    # daily cap above still bounds everything, and an owner reply is a deliberate
+    # human act, not runaway auto-chatter.
+    if sender_party != "owner" and _last_outbound_too_soon(db, ticket.id):
         result["skipped"] = "too_soon"
         return result
 
-    # Prefer replying to the person who wrote (open-ended: whoever responds)
-    to = (from_email or "").strip()
-    contact = get_contact(db, tenant.id, ticket.contact_id) if ticket.contact_id else None
+    # ── recipient routing ────────────────────────────────────────────────────
+    # Default: reply to whoever wrote (open-ended — the crew, their dispatcher,
+    # whoever picked it up).
+    #
+    # EXCEPTION that matters: when the SITE OWNER is the one who wrote, replying
+    # only to them would silently drop the crew out of a thread they are part of
+    # and waiting on. So the answer goes TO the crew with the owner copied —
+    # the owner's input is relayed to the people who can act on it, and the
+    # owner sees exactly what was relayed in their own inbox.
+    to = _norm_email(from_email)
+    tech_addr = _norm_email(getattr(contact, "email", None))
+    if sender_party == "owner" and _email_ok(tech_addr):
+        to = tech_addr
     if not _email_ok(to):
-        to = (contact.email if contact else None) or getattr(tenant, "contact_email", None) or ""
+        to = tech_addr or (owner_addr or "")
     if not _email_ok(to):
         result["skipped"] = "no_recipient"
         return result
@@ -2039,6 +2232,51 @@ def continue_repair_email_conversation(
     if not body:
         result["skipped"] = "empty_body"
         return result
+
+    # ── three-way thread composition ─────────────────────────────────────────
+    # The owner joins if the agent judged this message needs them, OR if they
+    # were already looped in earlier. Once on the thread they stay on it: quietly
+    # dropping someone who has been reading (and replying to) a thread is its own
+    # kind of dishonesty, and it would strand a question they had already
+    # answered.
+    already_looped = ticket.owner_looped_in_at is not None
+    wants_loop = bool(plan.get("loop_in_owner"))
+    cc_list: list[str] = []
+    newly_looped = False
+    if owner_addr and _norm_email(to) != owner_addr:
+        if already_looped or wants_loop:
+            cc_list.append(owner_addr)
+            newly_looped = not already_looped
+    # If the owner IS the addressee there is nothing to CC — they are already
+    # reading it. Still record that the thread is now owner-visible.
+    if owner_addr and _norm_email(to) == owner_addr and wants_loop:
+        newly_looped = not already_looped
+
+    if newly_looped:
+        reason = plan.get("loop_in_reason") or ""
+        # Deterministic honesty guard: a CC the recipient cannot see coming reads
+        # as going behind their back, and we cannot rely on the model to always
+        # disclose it. If the body does not already say the owner is being added,
+        # say so plainly. Cheap sentence; buys the thread its credibility.
+        low = body.lower()
+        discloses = any(
+            k in low for k in ("copying", "copied", "cc'ing", "ccing", "cc:",
+                               "adding", "added", "looping", "looped")
+        )
+        if not discloses:
+            owner_name = (
+                getattr(tenant, "operator_name", None)
+                or getattr(tenant, "company_name", None)
+                or getattr(tenant, "name", None)
+                or "the site owner"
+            )
+            note = f"I've copied {owner_name} (the site owner) on this"
+            note += f" so they can weigh in on {reason}." if reason else "."
+            ref = f"[AO-TICKET-{ticket.id}]"
+            if ref in body:
+                body = body.replace(ref, f"{note}\n\n{ref}", 1)
+            else:
+                body = f"{body.rstrip()}\n\n{note}\n"
 
     # Apply status from plan carefully — never resolve on LLM alone without
     # clear fix language in the tech's message (prevents "screw you" → closed).
@@ -2072,6 +2310,7 @@ def continue_repair_email_conversation(
             to=to,
             subject=subject,
             body_text=body,
+            cc=cc_list or None,
             **_thk,
         )
         if ok:
@@ -2091,11 +2330,19 @@ def continue_repair_email_conversation(
         subject=subject,
         body=body,
         sent_to=to,
+        cc_emails=", ".join(cc_list)[:400] or None,
         sent_ok=bool(ok),
         via="conversation",
     )
     db.add(row)
     if ok:
+        # Stamp only after a confirmed send — a failed send must not leave the
+        # ticket believing the owner is on a thread they never received.
+        if newly_looped:
+            ticket.owner_looped_in_at = now()
+            ticket.owner_loop_reason = (
+                plan.get("loop_in_reason") or plan.get("reason") or None
+            )
         ticket.last_checkin_at = now()
         ticket.checkin_count = (ticket.checkin_count or 0) + 1
         if ticket.status == "open":
@@ -2116,8 +2363,22 @@ def continue_repair_email_conversation(
         body_prev = re.sub(r"\s+", " ", body).strip()
         if len(body_prev) > 320:
             body_prev = body_prev[:317].rsplit(" ", 1)[0] + "…"
+        # Say plainly when the owner has just been put on the thread — they are
+        # about to get an email they did not ask for, and should know why from us
+        # first rather than being surprised by it.
+        lead = ""
+        if newly_looped:
+            why = plan.get("loop_in_reason")
+            lead = (
+                f"I've brought you onto the email thread with "
+                f"{(contact.name if contact and contact.name else to)}"
+                + (f" — {why}. " if why else ". ")
+            )
+        elif sender_party == "owner":
+            lead = "Relayed your answer to the crew (you're copied). "
+        cc_note = f", cc {', '.join(cc_list)}" if cc_list else ""
         chat_line = (
-            f"{owner_chat} (via email to {to}). "
+            f"{lead}{owner_chat} (via email to {to}{cc_note}). "
             f"I wrote: \"{body_prev}\""
         )[:900]
         _safe_mind_emit(
@@ -2131,9 +2392,13 @@ def continue_repair_email_conversation(
                 "importance": 85,
                 "ticket_id": ticket.id,
                 "to": to,
+                "cc": list(cc_list),
                 "site_name": ticket.site_name,
                 "via": "conversation",
                 "needs_owner": bool(plan.get("needs_owner")),
+                "owner_looped_in": bool(ticket.owner_looped_in_at),
+                "owner_newly_looped_in": newly_looped,
+                "loop_in_reason": plan.get("loop_in_reason"),
                 "preview": body[:300],
             },
             speak_as_mind=chat_line[:500],
@@ -2147,6 +2412,11 @@ def continue_repair_email_conversation(
         result["sent"] = True
         result["checkin_id"] = row.id
         result["to"] = to
+        result["cc"] = list(cc_list)
+        result["owner_looped_in"] = bool(ticket.owner_looped_in_at)
+        result["owner_newly_looped_in"] = newly_looped
+        result["loop_in_reason"] = plan.get("loop_in_reason")
+        result["sender_party"] = sender_party
         result["owner_chat"] = owner_chat
         result["chat_line"] = chat_line
         result["needs_owner"] = bool(plan.get("needs_owner"))
@@ -2275,22 +2545,36 @@ def ingest_inbound_email(
     )
 
     # Push into Energy Agent chat (mind event stream) so an open session sees
-    # the tech reply without the owner prompting.
-    speak = _repair_reply_speak_line(ticket, from_email=from_email, body=cleaned)
+    # the reply without the owner prompting. Attribute it to the right party —
+    # once the owner is CC'd they can reply here too, and labelling their own
+    # message "Tech reply" would be false on the owner's own screen.
+    _inb_contact = (
+        get_contact(db, ticket.tenant_id, ticket.contact_id)
+        if ticket.contact_id else None
+    )
+    _inb_party = _party_for(from_email, tenant, _inb_contact)
+    speak = _repair_reply_speak_line(
+        ticket, from_email=from_email, body=cleaned, party=_inb_party,
+    )
+    _title_who = {
+        "owner": "Owner reply", "tech": "Tech reply", "other": "Reply",
+    }.get(_inb_party, "Tech reply")
     _safe_mind_emit(
         db,
         ticket.tenant_id,
         "repair_inbound",
-        f"Tech reply on ticket #{ticket.id}",
+        f"{_title_who} on ticket #{ticket.id}",
         ref_id=str(ticket.id),
         payload={
             "origin": "repair",
             "importance": 90,
             "ticket_id": ticket.id,
             "from_email": from_email,
+            "from_party": _inb_party,
             "site_name": ticket.site_name,
             "inv_name": ticket.inv_name,
             "status": ticket.status,
+            "owner_looped_in": bool(ticket.owner_looped_in_at),
             "preview": cleaned[:400],
             "resend_email_id": resend_email_id,
         },
@@ -2333,12 +2617,17 @@ def ingest_inbound_email(
         "status": ticket.status,
         "checkin_id": row.id,
         "speak": speak,
+        "from_party": _inb_party,
         "conversation": {
             "sent": bool(convo.get("sent")),
             "skipped": convo.get("skipped"),
             "to": convo.get("to"),
+            "cc": convo.get("cc") or [],
             "checkin_id": convo.get("checkin_id"),
             "needs_owner": convo.get("needs_owner"),
+            "owner_looped_in": convo.get("owner_looped_in"),
+            "owner_newly_looped_in": convo.get("owner_newly_looped_in"),
+            "loop_in_reason": convo.get("loop_in_reason"),
         },
     }
 
@@ -2479,15 +2768,27 @@ def _repair_reply_speak_line(
     *,
     from_email: str | None,
     body: str,
+    party: str | None = None,
 ) -> str:
-    """One chat-ready line when a tech replies (shown unprompted in EA)."""
+    """One chat-ready line when someone replies (shown unprompted in EA).
+
+    `party` comes from _party_for. Once the owner is CC'd onto a thread they can
+    reply to it themselves, and calling that "the repair team" would be a plain
+    falsehood in the owner's own chat — so the speaker is named for what they are.
+    """
     site = ticket.site_name or "the site"
     inv = ticket.inv_name or ticket.serial or "the inverter"
     who = "the repair team"
+    if party == "owner":
+        who = "You"
+    elif party == "other":
+        who = "Someone on the thread"
     if ticket.contact_id:
         # contact may not be loaded; use email local-part as soft name
         pass
-    if from_email:
+    # Name the sender from their address ONLY when we have not already named
+    # them by role above — otherwise an owner reply reads as a stranger's.
+    if from_email and party not in ("owner", "other"):
         local = from_email.split("@", 1)[0].replace(".", " ").strip()
         if local:
             who = local.title() if len(local) < 24 else from_email
