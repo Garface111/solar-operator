@@ -99,6 +99,53 @@ def get_daily_series(
             db.close()
 
 
+def get_daily_series_bulk(
+    array_ids: list[int], *, db: Optional[Session] = None,
+) -> dict[int, dict]:
+    """get_daily_series() for MANY arrays in 2 queries. {array_id: {day: kwh}}.
+
+    Added 2026-07-27: fleet-trends called get_daily_series() once per array,
+    and each call cost 2 queries (account lookup + the daily aggregate) — 194
+    of its 461 queries. Same rows, same cross-meter SUM, same rounding; arrays
+    with no GMP accounts are simply absent, exactly as the per-array function
+    returns []. Callers that need meters/intervals must keep using
+    get_daily_series() — this returns only day→kwh.
+    """
+    _own = db is None
+    if _own:
+        db = SessionLocal()
+    try:
+        if not array_ids:
+            return {}
+        # array_id → its GMP account ids (the per-array helper, batched).
+        acct_rows = db.execute(
+            select(UtilityAccount.array_id, UtilityAccount.id).where(
+                UtilityAccount.array_id.in_(array_ids),
+                UtilityAccount.provider == "gmp",
+                UtilityAccount.deleted_at.is_(None),
+            )
+        ).all()
+        acct_ids = [a for _aid, a in acct_rows]
+        if not acct_ids:
+            return {}
+        out: dict[int, dict] = {}
+        # Group by array so multi-meter arrays SUM across their meters, which
+        # is what the per-array query does via account_id.in_(acct_ids).
+        for aid, d, k in db.execute(
+            select(UtilityAccount.array_id, GmpDailyGeneration.day,
+                   func.sum(GmpDailyGeneration.kwh))
+            .join(UtilityAccount,
+                  UtilityAccount.id == GmpDailyGeneration.account_id)
+            .where(GmpDailyGeneration.account_id.in_(acct_ids))
+            .group_by(UtilityAccount.array_id, GmpDailyGeneration.day)
+        ).all():
+            out.setdefault(aid, {})[d] = round(float(k or 0.0), 4)
+        return out
+    finally:
+        if _own:
+            db.close()
+
+
 def get_monthly_totals(
     array_id: int,
     *,

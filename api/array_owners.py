@@ -118,6 +118,10 @@ STALE_DAYS = 3
 _CACHE_TTL = timedelta(minutes=5)
 _overview_cache: dict[str, tuple[datetime, Optional[dict]]] = {}
 
+# Sentinel for "caller did not supply this optional arg" where None is a
+# meaningful value (a provider genuinely can be None).
+_UNSET = object()
+
 
 def _cache_key(vendor: str, config: dict) -> str:
     return vendor + ":" + json.dumps(config, sort_keys=True, default=str)
@@ -547,7 +551,7 @@ def _array_provider(db, array_id: int) -> str | None:
     ).scalar_one_or_none()
 
 
-def _array_energy_rate(db, tenant, arr) -> tuple[float, str]:
+def _array_energy_rate(db, tenant, arr, *, provider=_UNSET) -> tuple[float, str]:
     """Resolve a $/kWh rate for EST. VALUE math with honest provenance.
 
     Preference order (never fabricates):
@@ -557,8 +561,13 @@ def _array_energy_rate(db, tenant, arr) -> tuple[float, str]:
 
     Returns (rate, source) where source ∈
     bill_or_schedule | tenant_default | vt_utility_default.
+
+    `provider` may be supplied by a caller that already batched the lookup
+    (see _prefetch_fleet_trends); omitted, it is resolved per array as before.
+    The body below is otherwise unchanged.
     """
-    provider = _array_provider(db, arr.id)
+    if provider is _UNSET:
+        provider = _array_provider(db, arr.id)
     try:
         from .rate_schedule import resolve_net_rate
         rr = resolve_net_rate(
@@ -581,6 +590,114 @@ def _array_energy_rate(db, tenant, arr) -> tuple[float, str]:
         except (TypeError, ValueError):
             pass
     return float(get_energy_rate(provider)), "vt_utility_default"
+
+
+def _array_energy_rate_memo(db, tenant, arr, *, provider, memo) -> tuple[float, str]:
+    """_array_energy_rate with a per-request memo.
+
+    rate_schedule.resolve_net_rate reads a full RateSchedule table scan with no
+    array predicate, so a 53-array fleet paid 53 identical queries for at most a
+    handful of distinct answers. The key covers exactly resolve_net_rate's
+    array-derived inputs (provider, region, first_connect_date); period_end is
+    hardcoded None at the call site. If a fourth array-derived input is ever
+    added there, extend this key.
+
+    Deliberately a WRAPPER: the memo write stays OUTSIDE _array_energy_rate's
+    internal try/except, so a memo failure can never silently downgrade an array
+    from bill_or_schedule to vt_utility_default.
+    """
+    key = (provider, getattr(arr, "region", None),
+           getattr(arr, "first_connect_date", None))
+    if key in memo:
+        return memo[key]
+    val = _array_energy_rate(db, tenant, arr, provider=provider)
+    memo[key] = val
+    return val
+
+
+def _prefetch_fleet_trends(db, array_ids: list[int]) -> tuple[dict, dict, Optional[dict]]:
+    """Batch every per-array read fleet-trends needs into ~5 queries.
+
+    WHY (Ford 2026-07-27, "make every tab load instantly"): the endpoint issued
+    seven per-array query families inside two fleet loops — 461 round trips on a
+    53-array tenant, 1.31s of SQL — and read the fleet's ENTIRE daily history
+    TWICE (the scoped loop built per_day, then the by_array loop rebuilt the
+    identical map). 194 of those queries chased a GMP sponge holding 0 rows.
+
+    Returns (merged, inv_kw, prov_by_arr):
+      merged[array_id]      = (per_day {day: kwh}, per_day_src {day: family})
+      inv_kw[array_id]      = summed nameplate kW
+      prov_by_arr           = {array_id: provider}, or None if the lookup FAILED
+                              (None means "unknown → fall back per array"; an
+                              empty dict would read as "every array has no
+                              provider" and silently change rate provenance).
+
+    NB: batching, NOT concurrency. A SQLAlchemy Session is not thread-safe, and
+    against a single DB one query beats 53 concurrent ones.
+    """
+    from .reports import gmp_daily_read as _gdr
+
+    pd_all: dict[int, dict] = {}
+    pds_all: dict[int, dict] = {}
+    if array_ids:
+        # No ORDER BY: uq_daily_array_day makes (array_id, day) unique, so the
+        # last-wins assignment below can never see a tie. Sorting here cost
+        # 40ms and spilled an external merge to disk.
+        for aid, d, kwh, src in db.execute(
+            select(DailyGeneration.array_id, DailyGeneration.day,
+                   DailyGeneration.kwh, DailyGeneration.source)
+            .where(DailyGeneration.array_id.in_(array_ids))
+        ).all():
+            if d is None or kwh is None:
+                continue
+            pd_all.setdefault(aid, {})[d] = float(kwh)
+            pds_all.setdefault(aid, {})[d] = _source_family(src)
+
+    gmp: dict[int, dict] = {}
+    try:
+        gmp = _gdr.get_daily_series_bulk(array_ids, db=db)
+    except Exception:  # noqa: BLE001 — same guard as the old per-array try
+        log.warning("fleet-trends GMP bulk read failed; GMP fill skipped for "
+                    "%d arrays", len(array_ids), exc_info=True)
+        gmp = {}
+
+    merged: dict[int, tuple[dict, dict]] = {}
+    for aid in array_ids:
+        per_day = dict(pd_all.get(aid) or {})
+        per_day_src = dict(pds_all.get(aid) or {})
+        for d, k in (gmp.get(aid) or {}).items():
+            if d is not None and d not in per_day:
+                per_day[d] = float(k or 0.0)
+                per_day_src[d] = "gmp"   # sponge is always the GMP meter
+        merged[aid] = (per_day, per_day_src)
+
+    inv_kw: dict[int, float] = {}
+    try:
+        for aid, kw in db.execute(
+            select(Inverter.array_id, Inverter.nameplate_kw).where(
+                Inverter.array_id.in_(array_ids),
+                Inverter.deleted_at.is_(None),
+                Inverter.nameplate_kw.isnot(None),
+            )
+        ).all():
+            if kw:
+                inv_kw[aid] = inv_kw.get(aid, 0.0) + float(kw)
+    except Exception:  # noqa: BLE001
+        pass
+
+    prov_by_arr: Optional[dict] = {}
+    try:
+        for aid, p in db.execute(
+            select(UtilityAccount.array_id, UtilityAccount.provider).where(
+                UtilityAccount.array_id.in_(array_ids),
+                UtilityAccount.deleted_at.is_(None),
+            )
+        ).all():
+            prov_by_arr.setdefault(aid, p)   # matches _array_provider's limit(1)
+    except Exception:  # noqa: BLE001
+        prov_by_arr = None   # NOT {} — see docstring
+
+    return merged, inv_kw, prov_by_arr
 
 
 def _value_model(
@@ -1064,7 +1181,11 @@ def array_owners_fleet_trends(
             if not scoped:
                 raise HTTPException(404, "array not found")
 
-        from .reports import gmp_daily_read as _gdr
+        # Batch every per-array read up front (see _prefetch_fleet_trends).
+        # FULL fleet, not just `scoped`: the by_array loop below needs them all.
+        _ids = [a.id for a in arrays]
+        _merged, _inv_kw, _prov = _prefetch_fleet_trends(db, _ids)
+        _rate_memo: dict[tuple, tuple[float, str]] = {}
 
         for arr in scoped:
             # Per-day kWh for this array, merged across BOTH sources:
@@ -1074,28 +1195,10 @@ def array_owners_fleet_trends(
             # Prefer the CSV value on any day both have (avoid double-count); fall
             # back to the GMP value to fill gaps. Result feeds fleet totals,
             # month×year, the 30-day daily bars, and per-array lifetime.
-            per_day: dict = {}
-            per_day_src: dict = {}   # day → canonical source family
-            rows = db.execute(
-                select(DailyGeneration.day, DailyGeneration.kwh,
-                       DailyGeneration.source).where(
-                    DailyGeneration.array_id == arr.id,
-                )
-            ).all()
-            for d, kwh, src in rows:
-                if d is None or kwh is None:
-                    continue
-                per_day[d] = float(kwh)
-                per_day_src[d] = _source_family(src)
-            # GMP daily sponge — only fills days the CSV table doesn't already cover.
-            try:
-                for pt in _gdr.get_daily_series(arr.id, db=db):
-                    d = pt["day"]
-                    if d is not None and d not in per_day:
-                        per_day[d] = float(pt["kwh"] or 0.0)
-                        per_day_src[d] = "gmp"   # sponge is always the GMP meter
-            except Exception:  # noqa: BLE001 — never let a read-contract hiccup sink trends
-                pass
+            # Prefetched above (DailyGeneration + GMP-sponge fill already
+            # merged). Read-only here and in the by_array loop — neither
+            # mutates these dicts, so sharing the objects is safe.
+            per_day, per_day_src = _merged[arr.id]
 
             arr_ym: dict[tuple[int, int], float] = defaultdict(float)
             arr_life = 0.0
@@ -1111,25 +1214,22 @@ def array_owners_fleet_trends(
             # System size (kWp) — sum live inverter nameplate so Analytics can show
             # specific yield (kWh/kWp) like SolarEdge/SMA. Honest: arrays with no
             # nameplate on record simply don't contribute (frontend prompts to add).
-            try:
-                nps = db.execute(
-                    select(Inverter.nameplate_kw).where(
-                        Inverter.array_id == arr.id,
-                        Inverter.deleted_at.is_(None),
-                        Inverter.nameplate_kw.isnot(None),
-                    )
-                ).scalars().all()
-                arr_kw = sum(float(x) for x in nps if x)
-                if arr_kw > 0:
-                    capacity_kw += arr_kw
-                    capacity_known_arrays += 1
-            except Exception:  # noqa: BLE001
-                pass
+            arr_kw = _inv_kw.get(arr.id, 0.0)   # prefetched above
+            if arr_kw > 0:
+                capacity_kw += arr_kw
+                capacity_known_arrays += 1
             # Per-array rate for EST. VALUE — prefer bill/schedule resolution,
             # then tenant default, else VT utility table. Weighted by lifetime
             # kWh so a large GMP site isn't drowned by a small VEC one.
             try:
-                arr_rate, arr_src = _array_energy_rate(db, tenant, arr)
+                if _prov is None:
+                    # Provider prefetch failed — fall back to the per-array
+                    # lookup rather than treating "unknown" as "no provider".
+                    arr_rate, arr_src = _array_energy_rate(db, tenant, arr)
+                else:
+                    arr_rate, arr_src = _array_energy_rate_memo(
+                        db, tenant, arr, provider=_prov.get(arr.id),
+                        memo=_rate_memo)
                 rate_sources_seen.add(arr_src)
                 rate_simple_sum += arr_rate
                 rate_n += 1
@@ -1144,20 +1244,11 @@ def array_owners_fleet_trends(
         # two-source merge as the aggregation, but only for the lifetime/years
         # summary each row needs.
         for arr in arrays:
-            per_day: dict = {}
-            for d, kwh in db.execute(
-                select(DailyGeneration.day, DailyGeneration.kwh).where(
-                    DailyGeneration.array_id == arr.id)
-            ).all():
-                if d is not None and kwh is not None:
-                    per_day[d] = float(kwh)
-            try:
-                for pt in _gdr.get_daily_series(arr.id, db=db):
-                    dd = pt["day"]
-                    if dd is not None and dd not in per_day:
-                        per_day[dd] = float(pt["kwh"] or 0.0)
-            except Exception:  # noqa: BLE001
-                pass
+            # Was a SECOND full read of the fleet's entire daily history (the
+            # scoped loop above already built exactly this map, then threw it
+            # away) — 149k rows materialized twice, ~0.85s of the 2.2s. Same
+            # prefetch, read-only.
+            per_day, _src_unused = _merged[arr.id]
             life = round(sum(per_day.values()), 1)
             kwh_by_year: dict[int, float] = {}
             kwh_by_ym: dict[tuple[int, int], float] = {}
