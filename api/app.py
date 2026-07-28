@@ -479,9 +479,99 @@ if _SO_DEV_ENABLED:
     )
 
 
+# ── POA prewarm ───────────────────────────────────────────────────────────────
+# /v1/array-owners/verification/summary measured 2.10s cold / 0.04s warm on prod
+# (2026-07-27). The entire gap is archive-api.open-meteo.com; the endpoint's own
+# work is ~40ms. forecasting.py already pools the client and fetches locations
+# concurrently, but its TTL cache is per PROCESS — so the first Analysis open in
+# every web worker, after every deploy and every 6h after that, pays full price.
+# This keeps that cache warm in the background so a real user never does.
+#
+# Read-only and best-effort: it never geocodes (that writes rows), only uses
+# arrays that already have coordinates, and never lets an exception escape.
+_POA_PREWARM_INTERVAL_S = int(os.environ.get("POA_PREWARM_INTERVAL_S", "900"))
+
+
+def _poa_prewarm_pass() -> int:
+    """One warm pass over every live array's location. Returns locations warmed."""
+    from datetime import timedelta
+    from sqlalchemy import exists as _exists
+
+    from . import forecasting
+    from .models import Inverter as _Inv
+
+    # Mirror build_portfolio_verification's default window exactly, or the cache
+    # key won't match and this warms nothing: window_days=30, end=yesterday.
+    today = datetime.utcnow().date()
+    end = today - timedelta(days=1)
+    start = end - timedelta(days=29)
+
+    keys: list[tuple[float, float, float, float]] = []
+    with SessionLocal() as db:
+        for arr in db.execute(
+            select(Array).where(
+                Array.deleted_at.is_(None),
+                Array.excluded.is_(False),
+                Array.latitude.isnot(None),
+                Array.longitude.isnot(None),
+                # Arrays with their own expected ratio never consult POA.
+                Array.expected_kwh_per_kw_day.is_(None),
+                _exists().where(_Inv.array_id == Array.id,
+                                _Inv.deleted_at.is_(None)),
+            )
+        ).scalars().all():
+            keys.append((
+                arr.latitude, arr.longitude,
+                arr.tilt_deg if arr.tilt_deg is not None
+                else forecasting.default_tilt_deg(arr.latitude),
+                arr.azimuth_deg if arr.azimuth_deg is not None
+                else forecasting.DEFAULT_AZIMUTH_DEG,
+            ))
+
+    distinct = list(dict.fromkeys(keys))
+    if not distinct:
+        return 0
+    # prefetch handles the many-cold case concurrently but returns early when
+    # only one key is cold (nothing to parallelize), so follow with a direct
+    # pass: every already-warm key is a cache hit, and the lone straggler —
+    # the common steady-state case — actually gets fetched.
+    forecasting.prefetch_poa_daily(distinct, start, end)
+    for k in distinct:
+        forecasting.fetch_poa_daily(k[0], k[1], k[2], k[3], start, end)
+    return len(distinct)
+
+
+def _poa_prewarm_loop() -> None:
+    import time as _time
+    log = logging.getLogger("uvicorn.error")
+    while True:
+        try:
+            n = _poa_prewarm_pass()
+            if n:
+                log.info("POA prewarm: %d distinct locations warm", n)
+        except Exception:
+            # Never kill the thread — a failed pass just means the next real
+            # request pays the cold fetch, exactly as it did before this existed.
+            log.warning("POA prewarm pass failed", exc_info=True)
+        _time.sleep(_POA_PREWARM_INTERVAL_S)
+
+
 @app.on_event("startup")
 def _startup():
     init_db()
+    # Warm the weather cache in the background (see _poa_prewarm_loop above).
+    # Daemon so it can never hold up shutdown. POA_PREWARM=0 disables.
+    # Never under pytest: TestClient's startup would fire real Open-Meteo
+    # requests from the suite.
+    import sys as _sys
+    if os.environ.get("POA_PREWARM", "1") != "0" and "pytest" not in _sys.modules:
+        try:
+            import threading
+            threading.Thread(target=_poa_prewarm_loop, name="poa-prewarm",
+                             daemon=True).start()
+        except Exception:
+            logging.getLogger("uvicorn.error").warning(
+                "could not start POA prewarm thread", exc_info=True)
     # Process split: web serves HTTP only when RUN_SCHEDULER=0; worker owns
     # APScheduler. Default RUN_SCHEDULER=1 keeps single-process
     # deploys working until ops set web→0 / worker→1.
