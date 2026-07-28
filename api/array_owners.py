@@ -32,7 +32,7 @@ import httpx  # noqa: F401 — kept so tests can monkeypatch array_owners.httpx.
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import exists, func, select
+from sqlalchemy import case, exists, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
@@ -846,14 +846,23 @@ def array_owners_overview(authorization: str | None = Header(default=None)) -> d
         est_today: set[int] = set()
         est_window: set[int] = set()
         if array_ids:
-            for aid, day in db.execute(
-                select(DailyGeneration.array_id, DailyGeneration.day)
+            # Group by array, NOT by (array, day). Only two booleans per array
+            # are wanted — "has any estimated day" and "has one today" — but
+            # grouping by day made this return one row per estimated day: on a
+            # 53-array tenant, 139,123 rows to fill two sets of 53 ids, which
+            # was ~45% of this endpoint's wall time in Python row-building
+            # alone. max(case(...)) rather than bool_or so SQLite tests match.
+            for aid, is_today in db.execute(
+                select(
+                    DailyGeneration.array_id,
+                    func.max(case((DailyGeneration.day == today, 1), else_=0)),
+                )
                 .where(DailyGeneration.array_id.in_(array_ids),
                        DailyGeneration.source == "bill_prorate")
-                .group_by(DailyGeneration.array_id, DailyGeneration.day)
+                .group_by(DailyGeneration.array_id)
             ).all():
                 est_window.add(aid)
-                if day == today:
+                if is_today:
                     est_today.add(aid)
 
         # ── batched InverterConnection + provider lookups (was N+1) ───────────
