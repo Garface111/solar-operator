@@ -1202,7 +1202,18 @@ def account_energy_history(authorization: Optional[str] = Header(default=None)):
     with SessionLocal() as db:
         rows = db.execute(
             select(Bill).options(_ENERGY_HISTORY_COLS).where(Bill.tenant_id == t.id)
-            .order_by(Bill.period_end.desc().nullslast(), Bill.bill_date.desc().nullslast())
+            # Bill.id breaks ties. Without it this sort is badly under-determined:
+            # 64,839 of ten_ford_demo_100's 66,537 rows (97%) share a
+            # (period_end, bill_date) key — the largest single tie group is 1,066
+            # rows — so Postgres was free to return them in any arrangement, and
+            # DID reshuffle them when load_only above narrowed the projection and
+            # changed the plan. Verified at the time: identical row count,
+            # identical multiset, identical summary totals; only the order of tied
+            # rows moved. A PG upgrade, an ANALYZE, or a new index could have done
+            # the same thing at any moment. The PK makes the order total and stable.
+            .order_by(Bill.period_end.desc().nullslast(),
+                      Bill.bill_date.desc().nullslast(),
+                      Bill.id.desc())
         ).scalars().all()
         periods = []
         for b in rows:
