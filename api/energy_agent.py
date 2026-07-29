@@ -5836,6 +5836,13 @@ def _reminder_fleet_state(db, tenant: Tenant) -> dict:
     cols, _summary = _fleet_tree_columns(db, tenant)
     down_ids: set[str] = set()
     down_by_array: dict[Any, set] = {}
+    # "we can't see it" is not "it went down" (the same distinction
+    # api/jobs/morning_fleet_digest.py already protects, Paul Bozuwa 2026-07-19)
+    # — comm_gap means the data feed went quiet, not that the hardware failed.
+    # Tracked per-id (ephemeral, rebuilt every evaluation — never persisted to
+    # armed_json) purely so the fired/initial-note copy can say the honest
+    # thing for each id; membership in down_ids/down_by_array is unchanged.
+    status_by_id: dict[str, str] = {}
     attention: set = set()
     arrays: dict[Any, dict] = {}
     name_to_aid: dict[str, Any] = {}
@@ -5852,15 +5859,20 @@ def _reminder_fleet_state(db, tenant: Tenant) -> dict:
         dset = set()
         # 14-day hard failure (dead / fault / comm_gap)
         for inv in col.get("inverters") or []:
-            if (inv.get("status") or "ok").lower() in _DOWN_STATUSES:
+            status = (inv.get("status") or "ok").lower()
+            if status in _DOWN_STATUSES:
                 iid = str(inv.get("sn") or inv.get("name") or inv.get("inverter_id"))
-                dset.add(f"{aid}:{iid}")
+                key = f"{aid}:{iid}"
+                dset.add(key)
+                status_by_id[key] = status
         # Real-time outage: an inverter dark while its peers produce (daylight only,
         # so night's "everything asleep" never counts as down).
         if row.get("is_daylight"):
             for la in row.get("live_anomalies") or []:
                 if (la.get("live") or "") == "dark":
-                    dset.add(f"{aid}:{la.get('name')}")
+                    key = f"{aid}:{la.get('name')}"
+                    dset.add(key)
+                    status_by_id[key] = "dead"
         if dset:
             down_by_array[aid] = dset
             down_ids |= dset
@@ -5873,6 +5885,7 @@ def _reminder_fleet_state(db, tenant: Tenant) -> dict:
         pass
     return {
         "down_ids": down_ids, "down_by_array": down_by_array,
+        "status_by_id": status_by_id,
         "attention_arrays": attention, "arrays": arrays,
         "name_to_aid": name_to_aid, "array_ok": array_ok,
         "hours_since_capture": hours,
@@ -5924,9 +5937,21 @@ def _evaluate_reminder(rem: "EaReminder", state: dict) -> tuple[bool, str]:
         current = state["down_by_array"].get(aid, set()) if aid is not None else state["down_ids"]
         new_down = current - baseline
         if new_down:
-            names = [i.split(":", 1)[-1] for i in sorted(new_down)]
+            status_by_id = state.get("status_by_id") or {}
+            quiet = sorted(i for i in new_down if status_by_id.get(i) == "comm_gap")
+            hard = sorted(i for i in new_down if i not in quiet)
             where = f" at {aname}" if aname else ""
-            return True, f"{len(new_down)} inverter(s) just went down{where}: {', '.join(names)}."
+            sentences = []
+            if hard:
+                names = [i.split(":", 1)[-1] for i in hard]
+                sentences.append(f"{len(hard)} inverter(s) just went down{where}: {', '.join(names)}.")
+            if quiet:
+                names = [i.split(":", 1)[-1] for i in quiet]
+                sentences.append(
+                    f"{len(quiet)} inverter(s) went quiet (no data — could be hardware or just a "
+                    f"lapsed utility login, not necessarily a real outage){where}: {', '.join(names)}."
+                )
+            return True, " ".join(sentences)
         return False, ""
     if wt == "array_recovered":
         aid, aname = _reminder_resolve_array(state, params)
@@ -6037,8 +6062,16 @@ def _reminder_initial_note(rem: "EaReminder", state: dict) -> str | None:
         aid, aname = _reminder_resolve_array(state, params)
         cur = state["down_by_array"].get(aid, set()) if aid is not None else state["down_ids"]
         if cur:
+            status_by_id = state.get("status_by_id") or {}
+            quiet = [i for i in cur if status_by_id.get(i) == "comm_gap"]
+            hard = [i for i in cur if i not in quiet]
             where = f"{aname} " if aname else ""
-            return f"Heads up — {where}already has {len(cur)} inverter(s) down right now."
+            bits = []
+            if hard:
+                bits.append(f"{len(hard)} inverter(s) down")
+            if quiet:
+                bits.append(f"{len(quiet)} gone quiet (no data)")
+            return f"Heads up — {where}already has " + " and ".join(bits) + " right now."
     elif wt == "array_recovered":
         aid, aname = _reminder_resolve_array(state, params)
         if aid is not None and state["array_ok"].get(aid):
