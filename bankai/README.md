@@ -87,6 +87,21 @@ Rule kinds (create in dashboard, via API, or by asking the chat agent):
 | `bill_reminder` | alert N days before an auto-detected recurring bill | `days_before` |
 | `weekly_digest` | weekly cashflow + upcoming-bills summary email | `weekday` |
 
+## Choosing what powers the chat (`LLM_BACKEND`)
+
+| backend | pays with | setup |
+|---|---|---|
+| `anthropic` (default) | Anthropic API credits | `ANTHROPIC_API_KEY` |
+| `claude-cli` | your **Claude subscription** (Pro/Max) | Claude Code installed + logged in on the same machine (`claude` on PATH) |
+| `grok` | your **xAI/Grok credits** | `XAI_API_KEY` (model via `GROK_MODEL`, default `grok-4`) |
+
+All three get the same finance tools. `claude-cli` runs headless `claude -p` per turn
+and hands it the tools through a built-in MCP server (`bankai.agent.mcp_server`), so
+no API key is needed — usage counts against the subscription's limits instead.
+`claude-cli` is best for a home server / laptop; on a cloud host (Railway) use
+`anthropic` or `grok` since the CLI login isn't available there. Replies via
+`claude-cli` are slower (one CLI session per message).
+
 ## Configuration (`.env`)
 
 See `.env.example`. SQLite (`bankai.db`) by default; set `DATABASE_URL` for Postgres

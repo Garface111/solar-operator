@@ -54,7 +54,7 @@ def handle_inbound(session: Session, sender: str, text: str) -> str:
     sms.broadcast(f"{sender}: {text}", exclude=sender)
 
     history = build_history(session)
-    reply, _ = agent_chat.run_turn(session, history, channel="sms")
+    reply = agent_chat.run_turn(session, history, channel="sms")
 
     session.add(ChatMessage(channel="sms", role="assistant", speaker="copilot", content=reply))
     session.flush()

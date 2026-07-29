@@ -51,7 +51,7 @@ def test_handle_inbound_relays_and_broadcasts(session, monkeypatch):
     monkeypatch.setattr(sms, "send_sms", lambda to, body: sent.append((to, body)) or True)
     monkeypatch.setattr(
         thread.agent_chat, "run_turn",
-        lambda s, messages, channel="web": ("Your net worth is $10.", messages),
+        lambda s, messages, channel="web": "Your net worth is $10.",
     )
 
     reply = thread.handle_inbound(session, "Ford", "what's our net worth?")

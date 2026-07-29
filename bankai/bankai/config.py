@@ -28,6 +28,14 @@ DATABASE_URL = _env("DATABASE_URL") or f"sqlite:///{BASE_DIR / 'bankai.db'}"
 
 ANTHROPIC_MODEL = _env("ANTHROPIC_MODEL", "claude-opus-5")
 
+# --- LLM backend: anthropic (API key) | claude-cli (Claude subscription via
+# headless `claude -p`) | grok (xAI API credits) ---
+LLM_BACKEND = _env("LLM_BACKEND", "anthropic")
+XAI_API_KEY = _env("XAI_API_KEY")
+GROK_MODEL = _env("GROK_MODEL", "grok-4")
+CLAUDE_CLI_BIN = _env("CLAUDE_CLI_BIN", "claude")
+CLAUDE_CLI_MODEL = _env("CLAUDE_CLI_MODEL")  # empty = the CLI's default model
+
 SIMPLEFIN_ACCESS_URL = _env("SIMPLEFIN_ACCESS_URL")
 
 NOTIFY_EMAILS = [e.strip() for e in _env("NOTIFY_EMAILS").split(",") if e.strip()]
