@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BankAI — household finances</title>
+<style>
+  :root { --bg:#101418; --panel:#1a2027; --line:#2a323c; --text:#e8ecf1; --dim:#93a1b1;
+          --accent:#4fa3ff; --good:#5fc98e; --bad:#e0716f; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:15px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display:flex; justify-content:space-between; align-items:center;
+           padding:14px 22px; border-bottom:1px solid var(--line); }
+  header h1 { font-size:17px; margin:0; letter-spacing:.02em; }
+  main { display:grid; grid-template-columns: 1fr 420px; gap:18px; padding:18px 22px;
+         max-width:1250px; margin:0 auto; }
+  @media (max-width: 980px) { main { grid-template-columns:1fr; } }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+            padding:16px 18px; margin-bottom:18px; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim);
+       margin:0 0 10px; }
+  table { width:100%; border-collapse:collapse; font-size:13.5px; }
+  td, th { padding:5px 8px; text-align:left; border-bottom:1px solid var(--line); }
+  th { color:var(--dim); font-weight:600; }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .pos { color:var(--good); } .neg { color:var(--bad); }
+  .big { font-size:28px; font-weight:650; margin:2px 0 8px; }
+  .muted { color:var(--dim); font-size:12.5px; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:7px;
+           padding:8px 14px; font-size:14px; cursor:pointer; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--dim); }
+  input, select { background:var(--bg); color:var(--text); border:1px solid var(--line);
+                  border-radius:7px; padding:8px 10px; font-size:14px; }
+  #login { max-width:340px; margin:18vh auto; text-align:center; }
+  #login input { width:100%; margin-bottom:10px; }
+  #chatlog { height:420px; overflow-y:auto; display:flex; flex-direction:column; gap:10px;
+             padding:4px 2px; }
+  .msg { padding:9px 12px; border-radius:10px; max-width:92%; white-space:pre-wrap;
+         font-size:14px; }
+  .msg.user { background:#28303a; align-self:flex-end; }
+  .msg.bot  { background:#20344a; align-self:flex-start; }
+  #chatform { display:flex; gap:8px; margin-top:10px; }
+  #chatform input { flex:1; }
+  form.inline { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<div id="login">
+  <h1>BankAI</h1>
+  <p class="muted">Household finance copilot — enter the shared password.</p>
+  <input id="pw" type="password" placeholder="Password" autofocus>
+  <button onclick="doLogin()">Sign in</button>
+  <p id="loginerr" class="muted"></p>
+</div>
+
+<div id="appwrap" class="hidden">
+<header>
+  <h1>BankAI <span class="muted">— read-only household finances</span></h1>
+  <div>
+    <button class="ghost" onclick="syncNow()" id="syncbtn">Sync now</button>
+    <span id="syncstate" class="muted"></span>
+  </div>
+</header>
+<main>
+  <div>
+    <section>
+      <h2>Net worth</h2>
+      <div class="big" id="networth">—</div>
+      <table id="accounts"></table>
+    </section>
+    <section>
+      <h2>This month</h2>
+      <div id="month" class="muted">—</div>
+      <table id="categories"></table>
+    </section>
+    <section>
+      <h2>Upcoming bills <span class="muted">(auto-detected)</span></h2>
+      <table id="bills"></table>
+    </section>
+    <section>
+      <h2>Recent transactions</h2>
+      <table id="txns"></table>
+    </section>
+    <section>
+      <h2>Import CSV statement</h2>
+      <form class="inline" id="csvform">
+        <input type="file" id="csvfile" accept=".csv" required>
+        <input type="text" id="csvaccount" placeholder="Account name" required>
+        <select id="csvkind">
+          <option value="checking">checking</option><option value="savings">savings</option>
+          <option value="credit">credit</option><option value="investment">investment</option>
+        </select>
+        <select id="csvowner">
+          <option value="joint">joint</option><option value="ford">ford</option>
+          <option value="spouse">spouse</option>
+        </select>
+        <button type="submit">Import</button>
+        <span id="csvstatus" class="muted"></span>
+      </form>
+    </section>
+    <section>
+      <h2>Rules &amp; reminders</h2>
+      <table id="rules"></table>
+      <p class="muted">Create rules here or just ask the copilot ("remind us every 25th to
+      check the credit card"). Recent notifications:</p>
+      <table id="firings"></table>
+    </section>
+  </div>
+  <div>
+    <section>
+      <h2>Copilot <button class="ghost" style="float:right" onclick="resetChat()">reset</button></h2>
+      <div id="chatlog"></div>
+      <form id="chatform">
+        <input id="chatinput" placeholder="Ask about your money…" autocomplete="off">
+        <button type="submit">Send</button>
+      </form>
+    </section>
+  </div>
+</main>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const fmt = (n) => (n < 0 ? "-" : "") + "$" + Math.abs(n).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, opts);
+  if (r.status === 401) { show(false); throw new Error("auth"); }
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  return r.json();
+}
+
+function show(loggedIn) {
+  $("login").classList.toggle("hidden", loggedIn);
+  $("appwrap").classList.toggle("hidden", !loggedIn);
+}
+
+async function doLogin() {
+  try {
+    await api("/api/login", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({password: $("pw").value})});
+    show(true); refresh();
+  } catch (e) { $("loginerr").textContent = "Wrong password."; }
+}
+$("pw").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
+
+function rows(el, html) { $(el).innerHTML = html; }
+
+async function refresh() {
+  const o = await api("/api/overview");
+  $("networth").textContent = fmt(o.net_worth.total);
+  rows("accounts", "<tr><th>Account</th><th>Kind</th><th>Owner</th><th class=num>Balance</th></tr>" +
+    o.net_worth.accounts.map(a =>
+      `<tr><td>${a.name}</td><td>${a.kind}</td><td>${a.owner}</td>` +
+      `<td class="num ${a.balance < 0 ? "neg" : ""}">${fmt(a.balance)}</td></tr>`).join(""));
+  const m = o.this_month;
+  $("month").textContent = `Income ${fmt(m.income)}  ·  Spend ${fmt(Math.abs(m.spend))}  ·  Net ${fmt(m.net)}`;
+  rows("categories", m.by_category.filter(c => c.total < 0).slice(0, 8).map(c =>
+    `<tr><td>${c.category}</td><td class="num neg">${fmt(Math.abs(c.total))}</td></tr>`).join(""));
+  rows("bills", "<tr><th>Expected</th><th>Merchant</th><th class=num>~Amount</th></tr>" +
+    o.upcoming_bills.map(b =>
+      `<tr><td>${b.expected_date}</td><td>${b.merchant}</td>` +
+      `<td class=num>${fmt(Math.abs(b.avg_amount))}</td></tr>`).join("") ||
+    "<tr><td class=muted>None detected yet — import more history.</td></tr>");
+  $("syncstate").textContent = o.last_sync ?
+    `last sync ${o.last_sync.at.slice(0, 16).replace("T", " ")} (${o.last_sync.status})` :
+    (o.simplefin_configured ? "not synced yet" : "SimpleFIN not configured — CSV import works");
+  const txns = await api("/api/transactions?limit=40");
+  rows("txns", "<tr><th>Date</th><th>Description</th><th>Category</th><th class=num>Amount</th></tr>" +
+    txns.map(t => `<tr><td>${t.posted}</td><td>${t.description.slice(0, 48)}</td>` +
+      `<td class=muted>${t.category}</td>` +
+      `<td class="num ${t.amount < 0 ? "neg" : "pos"}">${fmt(t.amount)}</td></tr>`).join(""));
+  const r = await api("/api/rules");
+  rows("rules", "<tr><th>Rule</th><th>Kind</th><th>Status</th><th></th></tr>" + r.rules.map(x =>
+    `<tr><td>${x.name}</td><td class=muted>${x.kind}</td>` +
+    `<td class=muted>${x.enabled ? "on" : "off"}${x.created_by === "agent" ? " · via chat" : ""}</td>` +
+    `<td>${x.enabled ? `<button class=ghost onclick="delRule('${x.id}')">disable</button>` : ""}</td></tr>`).join(""));
+  rows("firings", r.recent_firings.map(f =>
+    `<tr><td class=muted>${f.fired_at.slice(0, 16).replace("T", " ")}</td><td>${f.subject}</td>` +
+    `<td class=muted>${f.delivered ? "emailed" : "logged"}</td></tr>`).join(""));
+}
+
+async function syncNow() {
+  $("syncbtn").disabled = true; $("syncstate").textContent = "syncing…";
+  try { await api("/api/sync", {method: "POST"}); await api("/api/rules/run", {method: "POST"}); }
+  finally { $("syncbtn").disabled = false; refresh(); }
+}
+
+async function delRule(id) { await api("/api/rules/" + id, {method: "DELETE"}); refresh(); }
+
+$("csvform").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const fd = new FormData();
+  fd.append("file", $("csvfile").files[0]);
+  fd.append("account_name", $("csvaccount").value);
+  fd.append("kind", $("csvkind").value);
+  fd.append("owner", $("csvowner").value);
+  $("csvstatus").textContent = "importing…";
+  try {
+    const res = await api("/api/import/csv", {method: "POST", body: fd});
+    $("csvstatus").textContent = `added ${res.added}, skipped ${res.skipped} duplicates`;
+    refresh();
+  } catch (err) { $("csvstatus").textContent = err.message; }
+});
+
+function addMsg(text, cls) {
+  const div = document.createElement("div");
+  div.className = "msg " + cls; div.textContent = text;
+  $("chatlog").appendChild(div); $("chatlog").scrollTop = 1e9;
+  return div;
+}
+
+$("chatform").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const text = $("chatinput").value.trim();
+  if (!text) return;
+  $("chatinput").value = "";
+  addMsg(text, "user");
+  const pending = addMsg("…", "bot");
+  try {
+    const res = await api("/api/chat", {method: "POST",
+      headers: {"Content-Type": "application/json"}, body: JSON.stringify({message: text})});
+    pending.textContent = res.reply;
+    refresh();  // the agent may have created rules
+  } catch (err) { pending.textContent = "Error: " + err.message; }
+});
+
+async function resetChat() { await api("/api/chat/reset", {method: "POST"}); $("chatlog").innerHTML = ""; }
+
+// Auto-login check: overview 401s if not authenticated.
+api("/api/overview").then(() => { show(true); refresh(); }).catch(() => show(false));
+</script>
+</body>
+</html>

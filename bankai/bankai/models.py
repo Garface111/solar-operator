@@ -1,0 +1,112 @@
+"""SQLAlchemy models — the ongoing household finance model."""
+from __future__ import annotations
+
+import uuid
+from datetime import date, datetime
+
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+)
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+
+
+def _uid(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:16]}"
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class Account(Base):
+    __tablename__ = "accounts"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _uid("acct"))
+    source: Mapped[str] = mapped_column(String(20), default="csv")  # simplefin | csv
+    external_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(120))
+    institution: Mapped[str] = mapped_column(String(120), default="")
+    kind: Mapped[str] = mapped_column(String(20), default="checking")  # checking|savings|credit|investment|other
+    owner: Mapped[str] = mapped_column(String(40), default="joint")  # ford | spouse | joint
+    currency: Mapped[str] = mapped_column(String(8), default="USD")
+    balance: Mapped[float | None] = mapped_column(Float, nullable=True)
+    balance_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    transactions: Mapped[list["Transaction"]] = relationship(back_populates="account")
+
+
+class Transaction(Base):
+    __tablename__ = "transactions"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _uid("txn"))
+    account_id: Mapped[str] = mapped_column(ForeignKey("accounts.id"), index=True)
+    external_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    posted: Mapped[date] = mapped_column(Date, index=True)
+    amount: Mapped[float] = mapped_column(Float)  # negative = outflow
+    description: Mapped[str] = mapped_column(Text, default="")
+    normalized_desc: Mapped[str] = mapped_column(String(200), default="", index=True)
+    category: Mapped[str] = mapped_column(String(60), default="uncategorized", index=True)
+    pending: Mapped[bool] = mapped_column(Boolean, default=False)
+    fingerprint: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    account: Mapped[Account] = relationship(back_populates="transactions")
+
+
+class BalanceSnapshot(Base):
+    __tablename__ = "balance_snapshots"
+    __table_args__ = (Index("ix_snapshot_account_date", "account_id", "date", unique=True),)
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _uid("snap"))
+    account_id: Mapped[str] = mapped_column(ForeignKey("accounts.id"))
+    date: Mapped[date] = mapped_column(Date)
+    balance: Mapped[float] = mapped_column(Float)
+
+
+class Rule(Base):
+    __tablename__ = "rules"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _uid("rule"))
+    name: Mapped[str] = mapped_column(String(120))
+    kind: Mapped[str] = mapped_column(String(30))  # reminder|balance_below|large_transaction|bill_reminder|weekly_digest
+    params: Mapped[dict] = mapped_column(JSON, default=dict)
+    message: Mapped[str] = mapped_column(Text, default="")
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_by: Mapped[str] = mapped_column(String(20), default="user")  # user | agent
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    firings: Mapped[list["RuleFiring"]] = relationship(back_populates="rule")
+
+
+class RuleFiring(Base):
+    __tablename__ = "rule_firings"
+    __table_args__ = (Index("ix_firing_rule_key", "rule_id", "dedupe_key", unique=True),)
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _uid("fire"))
+    rule_id: Mapped[str] = mapped_column(ForeignKey("rules.id"))
+    dedupe_key: Mapped[str] = mapped_column(String(200))
+    fired_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    subject: Mapped[str] = mapped_column(String(200), default="")
+    body: Mapped[str] = mapped_column(Text, default="")
+    delivered: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    rule: Mapped[Rule] = relationship(back_populates="firings")
+
+
+class SyncLog(Base):
+    __tablename__ = "sync_logs"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _uid("sync"))
+    source: Mapped[str] = mapped_column(String(20))
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    status: Mapped[str] = mapped_column(String(20), default="ok")  # ok | error
+    detail: Mapped[str] = mapped_column(Text, default="")
