@@ -18,6 +18,20 @@ from . import sms
 
 HISTORY_LIMIT = 40
 
+WELCOME_TEXT = (
+    "Welcome to BankAI, your household finance copilot. You'll get replies to your "
+    "questions plus any account alerts you set up; message frequency varies. "
+    "Msg & data rates may apply. Reply HELP for help, STOP to opt out."
+)
+HELP_TEXT = (
+    "BankAI household finance copilot: text questions about your linked accounts or "
+    "ask to set up reminders. Msg & data rates may apply. Reply STOP to opt out."
+)
+# Twilio's default opt-out handling intercepts these upstream; handled here too as
+# defense in depth — an opted-out number must never get a reply.
+STOP_KEYWORDS = {"STOP", "STOPALL", "UNSUBSCRIBE", "CANCEL", "END", "QUIT"}
+START_KEYWORDS = {"START", "UNSTOP", "YES", "JOIN"}
+
 
 def build_history(session: Session, limit: int = HISTORY_LIMIT) -> list[dict]:
     rows = (
@@ -42,11 +56,44 @@ def build_history(session: Session, limit: int = HISTORY_LIMIT) -> list[dict]:
     return messages
 
 
+def _sender_number(sender: str) -> str | None:
+    return sms.household_phones().get(sender)
+
+
+def _is_first_contact(session: Session, sender: str) -> bool:
+    return (
+        session.execute(
+            select(ChatMessage.id)
+            .where(ChatMessage.channel == "sms", ChatMessage.speaker == sender)
+            .limit(1)
+        ).scalar_one_or_none()
+        is None
+    )
+
+
 def handle_inbound(session: Session, sender: str, text: str) -> str:
     """Process one inbound SMS from a household member; returns the copilot reply."""
     text = text.strip()
     if not text:
         return ""
+
+    keyword = text.upper()
+    number = _sender_number(sender)
+    if keyword in STOP_KEYWORDS:
+        return ""  # never reply to an opt-out
+    if keyword == "HELP":
+        if number:
+            sms.send_sms(number, HELP_TEXT)
+        return HELP_TEXT
+    first_contact = _is_first_contact(session, sender)
+    if first_contact and number:
+        sms.send_sms(number, WELCOME_TEXT)
+    if keyword in START_KEYWORDS:
+        # Bare opt-in keyword: welcome (sent above on first contact) is the reply.
+        if not first_contact and number:
+            sms.send_sms(number, WELCOME_TEXT)
+        return WELCOME_TEXT
+
     session.add(ChatMessage(channel="sms", role="user", speaker=sender, content=text))
     session.flush()
 

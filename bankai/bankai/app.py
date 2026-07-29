@@ -97,6 +97,22 @@ def health():
     return {"ok": True}
 
 
+# Public compliance pages (referenced by Twilio A2P / toll-free verification).
+@app.get("/privacy", response_class=HTMLResponse)
+def privacy():
+    return (STATIC_DIR / "privacy.html").read_text()
+
+
+@app.get("/terms", response_class=HTMLResponse)
+def terms():
+    return (STATIC_DIR / "terms.html").read_text()
+
+
+@app.get("/optin", response_class=HTMLResponse)
+def optin():
+    return (STATIC_DIR / "optin.html").read_text()
+
+
 @app.get("/api/overview")
 def overview(_: str = Depends(require_auth)):
     with session_scope() as session:
