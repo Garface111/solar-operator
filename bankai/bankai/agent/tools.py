@@ -24,6 +24,8 @@ from ..models import Account, Document, MemoryNote, Rule, Transaction
 from .. import vault
 from ..rules.engine import RULE_KINDS
 
+READ_PAGE_CHARS = 30_000
+
 TOOLS: list[dict] = [
     {
         "name": "get_accounts",
@@ -276,6 +278,53 @@ def _dispatch(session: Session, name: str, args: dict):
             return {"error": "rule not found"}
         rule.enabled = False
         return {"disabled": True, "rule_id": rule.id, "name": rule.name}
+    if name == "list_documents":
+        docs = session.execute(select(Document).order_by(Document.added_at)).scalars().all()
+        return [
+            {
+                "document_id": d.id,
+                "title": d.title,
+                "category": d.category,
+                "filename": d.filename,
+                "size_bytes": d.size_bytes,
+                "added_at": d.added_at.isoformat(),
+                "total_chars": len(d.content_text),
+                "summary": d.summary or "(not yet annotated — read it, then annotate_document)",
+            }
+            for d in docs
+        ]
+    if name == "read_document":
+        doc = session.get(Document, args["document_id"])
+        if not doc:
+            return {"error": "document not found — call list_documents for valid ids"}
+        text = doc.content_text
+        start = max(0, int(args.get("start_char") or 0))
+        chunk = text[start:start + READ_PAGE_CHARS]
+        result = {
+            "document_id": doc.id,
+            "title": doc.title,
+            "category": doc.category,
+            "total_chars": len(text),
+            "start_char": start,
+            "text": chunk,
+        }
+        if start + len(chunk) < len(text):
+            result["next_start_char"] = start + len(chunk)
+        if not text.strip():
+            result["note"] = (
+                "no extractable text — likely a scanned image; ask the household for a "
+                "text-layer copy or the key facts"
+            )
+        return result
+    if name == "search_documents":
+        return vault.search_documents(session, args.get("query") or "")
+    if name == "annotate_document":
+        doc = session.get(Document, args["document_id"])
+        if not doc:
+            return {"error": "document not found — call list_documents for valid ids"}
+        doc.summary = args["summary"]
+        session.flush()
+        return {"annotated": True, "document_id": doc.id, "title": doc.title}
     raise ValueError(f"unknown tool {name}")
 
 

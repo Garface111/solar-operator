@@ -25,6 +25,16 @@ def test_delete_memory(session):
     assert "error" in missing
 
 
+def test_persona_keeps_the_guardrails(session):
+    """The collector persona must always carry its limits and vault duties."""
+    system = build_system(session, "web")
+    assert "not a licensed attorney" in system
+    assert "calm but intense collector" in system
+    assert "Document intake checklist" in system
+    assert "annotate_document" in system
+    assert "cannot move money" in system
+
+
 def test_memory_injected_into_system_prompt(session):
     assert "persistent memory notes" not in build_system(session, "web")
     execute_tool(session, "save_memory",

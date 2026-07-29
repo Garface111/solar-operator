@@ -103,6 +103,20 @@
       </form>
     </section>
     <section>
+      <h2>Document vault</h2>
+      <p class="muted">Deeds, mortgage papers, contracts, insurance policies, estate documents,
+      tax records — the copilot reads, files, and remembers everything you put here
+      (PDF, Word, or plain text).</p>
+      <form class="inline" id="docform">
+        <input type="file" id="docfile" accept=".pdf,.docx,.txt,.md,.rtf,.csv" required>
+        <input type="text" id="doctitle" placeholder="Title (optional)">
+        <select id="doccategory"></select>
+        <button type="submit">Add to vault</button>
+        <span id="docstatus" class="muted"></span>
+      </form>
+      <table id="docs"></table>
+    </section>
+    <section>
       <h2>Rules &amp; reminders</h2>
       <table id="rules"></table>
       <p class="muted">Create rules here or just ask the copilot ("remind us every 25th to
@@ -149,7 +163,7 @@ async function doLogin() {
   try {
     await api("/api/login", {method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({password: $("pw").value})});
-    show(true); refresh();
+    show(true); refresh(); loadThread(); loadMemories(); loadDocs();
   } catch (e) { $("loginerr").textContent = "Wrong password."; }
 }
 $("pw").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
@@ -246,6 +260,43 @@ async function loadMemories() {
 
 async function delMemory(id) { await api("/api/memories/" + id, {method: "DELETE"}); loadMemories(); }
 
+async function loadDocs() {
+  const d = await api("/api/documents");
+  const sel = $("doccategory");
+  if (!sel.options.length) d.categories.forEach(c => {
+    const opt = document.createElement("option"); opt.value = opt.textContent = c; sel.appendChild(opt);
+  });
+  rows("docs", d.documents.map(x =>
+    `<tr><td><b>${x.title}</b><br><span class=muted>${x.summary ? x.summary.slice(0, 180) :
+      "not yet read by the copilot — ask it to review this"}</span></td>` +
+    `<td class=muted>${x.category}</td>` +
+    `<td class="num muted">${x.size_bytes < 1024 ? x.size_bytes + " B" : (x.size_bytes / 1024).toFixed(0) + " KB"}</td>` +
+    `<td><button class=ghost onclick="delDoc('${x.id}')">remove</button></td></tr>`).join("") ||
+    "<tr><td class=muted>Vault is empty — start with the deed, mortgage note, and insurance policies.</td></tr>");
+}
+
+async function delDoc(id) {
+  if (!confirm("Remove this document from the vault? The original file is deleted too.")) return;
+  await api("/api/documents/" + id, {method: "DELETE"}); loadDocs();
+}
+
+$("docform").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const fd = new FormData();
+  fd.append("file", $("docfile").files[0]);
+  fd.append("title", $("doctitle").value);
+  fd.append("category", $("doccategory").value);
+  $("docstatus").textContent = "reading…";
+  try {
+    const res = await api("/api/documents", {method: "POST", body: fd});
+    $("docstatus").textContent = res.created
+      ? `filed "${res.title}" — ${res.chars.toLocaleString()} chars extracted`
+      : "already in the vault (same file)";
+    $("docfile").value = ""; $("doctitle").value = "";
+    loadDocs();
+  } catch (err) { $("docstatus").textContent = err.message; }
+});
+
 $("chatform").addEventListener("submit", async (e) => {
   e.preventDefault();
   const text = $("chatinput").value.trim();
@@ -258,12 +309,12 @@ $("chatform").addEventListener("submit", async (e) => {
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({message: text, speaker: $("speaker").value})});
     pending.textContent = res.reply;
-    refresh(); loadMemories();  // the agent may have created rules or memories
+    refresh(); loadMemories(); loadDocs();  // the agent may have created rules, memories, or annotations
   } catch (err) { pending.textContent = "Error: " + err.message; }
 });
 
 // Auto-login check: overview 401s if not authenticated.
-api("/api/overview").then(() => { show(true); refresh(); loadThread(); loadMemories(); }).catch(() => show(false));
+api("/api/overview").then(() => { show(true); refresh(); loadThread(); loadMemories(); loadDocs(); }).catch(() => show(false));
 </script>
 </body>
 </html>

@@ -53,7 +53,7 @@ speaker ("how are we doing against the grocery budget?" → recalled $500 budget
 (`pytest tests` from `bankai/`; repo root pytest.ini only runs solar-operator's own
 `tests/`, so no interference).
 
-## IN FLIGHT — document vault (user's latest ask, ~40% done, UNFINISHED)
+## Document vault — DONE (2026-07-29, verified live)
 
 User wants the copilot to be a "calm but intense collector" of ALL household records
 (home purchase, contracts, legal docs), able to hold files, reread them on demand,
@@ -61,37 +61,27 @@ and act protectively with their long-term wealth + best life in mind ("essential
 try to become our lawyer"). Agreed guardrail: max analysis but it must know it's not
 a licensed attorney and say when a real professional should review something.
 
-Done (uncommitted or in this WIP commit):
-- `models.py`: `Document` model (title/category/filename/sha256 unique/size/
-  content_text/summary/added_at).
-- `vault.py`: `extract_text` (PDF via pypdf, .docx via zipfile+regex, plaintext),
-  `add_document` (sha256 dedupe, original bytes saved to `documents/` dir),
-  `delete_document`, `search_documents` (snippet search). `CATEGORIES` list.
-- `agent/tools.py`: imports updated AND the four tool DEFINITIONS were added
-  (`list_documents`, `read_document` (paged, 30k chars/call, `start_char`),
-  `search_documents`, `annotate_document`).
-
-NOT done:
-1. `agent/tools.py` `_dispatch()` handlers for those four tools (defs exist,
-   executors DO NOT — calling them now hits `unknown tool`). Implement:
-   list → id/title/category/size/added/summary; read → paged slice + total_chars;
-   search → `vault.search_documents`; annotate → set `doc.summary`.
-2. `requirements.txt`: add `pypdf>=4.0`.
-3. `app.py`: endpoints `POST /api/documents` (UploadFile+title+category, 15MB cap),
-   `GET /api/documents`, `DELETE /api/documents/{id}` (use `vault.delete_document`).
-4. `static/index.html`: Documents section (upload form + table + delete).
-5. `.gitignore` (repo root): add `bankai/documents/`.
-6. **Persona rewrite** in `chat.py SYSTEM_PROMPT` — the intentions ask. Draft spirit:
-   calm, precise, quietly relentless about completing its picture; protective,
-   long-term wealth AND quality of life; proactively (gently, one ask at a time)
-   requests missing records (deed, mortgage note, insurance policies, wills, titles);
-   maintains memory notes incl. a "Document intake checklist" and "Household picture";
-   rereads source docs when details matter; not-a-lawyer/advisor flag for
-   consequential moves. Keep the existing grounding + read-only + speaker rules.
-7. Tests: extraction (txt + generated docx; pdf path can be try/except-skipped),
-   vault add/dedupe/search/delete, tool dispatch for the four tools, endpoint-level
-   optional. Keep the all-pure-logic/no-network pattern.
-8. Run `pytest tests`, then commit + push (see Git rules below).
+All shipped and verified (64/64 tests; live server smoke: upload → dedupe → list →
+original saved to `documents/` → dashboard renders it, all confirmed end-to-end):
+- `models.py` `Document` + `vault.py` (PDF/docx/text extraction, sha256 dedupe,
+  disk originals, snippet search).
+- `agent/tools.py`: four vault tools DEFINED **and DISPATCHED** — `list_documents`,
+  `read_document` (paged, `READ_PAGE_CHARS`=30k, `next_start_char` continuation,
+  thin-text warning for scans), `search_documents`, `annotate_document`. They flow
+  through all three backends + the MCP server automatically (all consume `TOOLS`).
+- `app.py`: `GET/POST /api/documents` (15MB cap, returns `created` false on dupe),
+  `DELETE /api/documents/{id}`. GET also returns `categories` for the UI.
+- `static/index.html`: Document vault section (upload form + table + remove with
+  confirm; agent annotations surface under each title). Also fixed a pre-existing
+  gap: `doLogin()` now loads thread/memories/docs (before, fresh logins showed an
+  empty chat until reload).
+- Persona rewrite in `chat.py SYSTEM_PROMPT`: calm-but-intense collector, protective
+  long-term stance, one-ask-at-a-time record requests, standing "Household picture" +
+  "Document intake checklist" memory notes, reread-the-source rule, and the
+  not-a-licensed-professional guardrail — locked by `test_persona_keeps_the_guardrails`.
+- `requirements.txt` +`pypdf>=4.0`; `.gitignore` covers `bankai/documents/`.
+- Tests: `tests/test_vault.py` (extraction incl. generated docx + pypdf blank-page,
+  add/dedupe/delete/search, all four tool dispatches incl. paging) + persona test.
 
 ## Where things live
 
@@ -145,8 +135,10 @@ NOT done:
 
 ## Suggested order for the next agent
 
-1. Finish the vault (items 1–5 above), rewrite the persona (item 6), tests (7), run
-   suite, commit, push to the designated branch.
-2. Give the user the corrected clone/run commands for FordBrain.
-3. When the user creates the `bankai` repo: migrate (steps above), close PR #101.
-4. Then the deploy story (Railway config) if the user wants the SMS webhook public.
+1. ~~Finish the vault~~ DONE (see above; corrected clone/run commands were also
+   already given to the user).
+2. When the user creates the `bankai` repo: migrate (steps above), close PR #101.
+   NOTE: the `/home/user/bankai-standalone` staging tree lived in the CCR cloud
+   container and may be gone — if so, re-stage from `bankai/` (fresh `git init`,
+   copy tree excluding .git/db/env/venv/__pycache__/documents).
+3. Then the deploy story (Railway config) if the user wants the SMS webhook public.

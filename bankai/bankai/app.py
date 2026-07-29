@@ -13,7 +13,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from . import config
+from . import config, vault
 from .connectors import simplefin
 from .connectors.csv_import import import_csv
 from .connectors.ofx_import import import_ofx
@@ -21,7 +21,7 @@ from .db import init_db, session_scope
 from .messaging import sms
 from .messaging import thread as sms_thread
 from .intelligence.insights import net_worth, net_worth_history, spending_summary, upcoming_bills
-from .models import ChatMessage, MemoryNote, Rule, RuleFiring, SyncLog, Transaction
+from .models import ChatMessage, Document, MemoryNote, Rule, RuleFiring, SyncLog, Transaction
 from .rules.engine import RULE_KINDS
 from .scheduler import run_rules_once, start_background_tasks
 
@@ -281,6 +281,72 @@ def chat_history(limit: int = 60, _: str = Depends(require_auth)):
             }
             for m in reversed(rows)
         ]
+
+
+MAX_DOCUMENT_BYTES = 15 * 1024 * 1024
+
+
+@app.get("/api/documents")
+def list_documents(_: str = Depends(require_auth)):
+    with session_scope() as session:
+        docs = session.execute(
+            select(Document).order_by(Document.added_at.desc())
+        ).scalars().all()
+        return {
+            "categories": vault.CATEGORIES,
+            "documents": [
+                {
+                    "id": d.id,
+                    "title": d.title,
+                    "category": d.category,
+                    "filename": d.filename,
+                    "size_bytes": d.size_bytes,
+                    "chars": len(d.content_text),
+                    "summary": d.summary,
+                    "added_at": d.added_at.isoformat(),
+                }
+                for d in docs
+            ],
+        }
+
+
+@app.post("/api/documents")
+async def upload_document(
+    file: UploadFile = File(...),
+    title: str = Form(""),
+    category: str = Form("other"),
+    _: str = Depends(require_auth),
+):
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "Empty file")
+    if len(data) > MAX_DOCUMENT_BYTES:
+        raise HTTPException(413, "File exceeds the 15 MB limit")
+    with session_scope() as session:
+        doc, created = vault.add_document(
+            session,
+            filename=file.filename or "upload",
+            data=data,
+            title=title.strip() or None,
+            category=category,
+        )
+        return {
+            "id": doc.id,
+            "created": created,
+            "title": doc.title,
+            "category": doc.category,
+            "chars": len(doc.content_text),
+        }
+
+
+@app.delete("/api/documents/{doc_id}")
+def delete_document(doc_id: str, _: str = Depends(require_auth)):
+    with session_scope() as session:
+        doc = session.get(Document, doc_id)
+        if not doc:
+            raise HTTPException(404, "document not found")
+        vault.delete_document(session, doc)
+        return {"ok": True}
 
 
 @app.get("/api/memories")
