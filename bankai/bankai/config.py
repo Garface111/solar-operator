@@ -42,6 +42,12 @@ SIMPLEFIN_ACCESS_URL = _env("SIMPLEFIN_ACCESS_URL")
 RENTCAST_API_KEY = _env("RENTCAST_API_KEY")
 REALESTATE_REFRESH_DAYS = int(_env("REALESTATE_REFRESH_DAYS", "7") or 7)
 
+# --- Email document harvesting (Gmail app password over IMAP; read-only usage) ---
+GMAIL_ADDRESS = _env("GMAIL_ADDRESS")
+GMAIL_APP_PASSWORD = _env("GMAIL_APP_PASSWORD")
+IMAP_HOST = _env("IMAP_HOST", "imap.gmail.com")
+EMAIL_HARVEST_DAYS = int(_env("EMAIL_HARVEST_DAYS", "7") or 7)
+
 NOTIFY_EMAILS = [e.strip() for e in _env("NOTIFY_EMAILS").split(",") if e.strip()]
 NOTIFY_FROM = _env("NOTIFY_FROM", "bankai@localhost")
 RESEND_API_KEY = _env("RESEND_API_KEY")

@@ -5,7 +5,7 @@ import hashlib
 import hmac
 import logging
 from contextlib import asynccontextmanager
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from . import config, realestate, vault
-from .connectors import simplefin
+from .connectors import email_harvest, simplefin
 from .connectors.csv_import import import_csv
 from .connectors.ofx_import import import_ofx
 from .db import init_db, session_scope
@@ -24,6 +24,7 @@ from .messaging import thread as sms_thread
 from .intelligence.insights import net_worth, net_worth_history, spending_summary, upcoming_bills
 from .models import (
     Account,
+    AgentAction,
     BalanceSnapshot,
     ChatMessage,
     Comp,
@@ -487,6 +488,71 @@ def delete_comp(comp_id: str, _: str = Depends(require_auth)):
 MAX_DOCUMENT_BYTES = 15 * 1024 * 1024
 
 
+@app.post("/api/email/harvest")
+def email_harvest_now(_: str = Depends(require_auth)):
+    if not email_harvest.configured():
+        raise HTTPException(
+            400, "email is not connected — set GMAIL_ADDRESS + GMAIL_APP_PASSWORD in .env"
+        )
+    with session_scope() as session:
+        return email_harvest.harvest(session)
+
+
+@app.get("/api/actions")
+def list_agent_actions(_: str = Depends(require_auth)):
+    with session_scope() as session:
+        actions = session.execute(
+            select(AgentAction).order_by(AgentAction.proposed_at.desc()).limit(50)
+        ).scalars().all()
+        return [
+            {
+                "id": a.id, "kind": a.kind, "title": a.title, "rationale": a.rationale,
+                "to_email": a.to_email, "subject": a.subject, "body": a.body,
+                "status": a.status, "result": a.result,
+                "proposed_at": a.proposed_at.isoformat(),
+                "executed_at": a.executed_at.isoformat() if a.executed_at else None,
+            }
+            for a in actions
+        ]
+
+
+@app.post("/api/actions/{action_id}/execute")
+def execute_agent_action(action_id: str, _: str = Depends(require_auth)):
+    """The human approval gate: this click IS the authorization."""
+    with session_scope() as session:
+        action = session.get(AgentAction, action_id)
+        if not action:
+            raise HTTPException(404, "action not found")
+        if action.status != "proposed":
+            raise HTTPException(400, f"action is already {action.status}")
+        try:
+            if action.kind == "email_support":
+                receipt = email_harvest.send_email(action.to_email, action.subject, action.body)
+            else:
+                raise RuntimeError(f"no executor for kind {action.kind!r}")
+            action.status = "executed"
+            action.result = receipt
+        except Exception as exc:
+            action.status = "failed"
+            action.result = str(exc)[:1000]
+        action.executed_at = datetime.utcnow()
+        session.flush()
+        return {"status": action.status, "result": action.result}
+
+
+@app.post("/api/actions/{action_id}/decline")
+def decline_agent_action(action_id: str, _: str = Depends(require_auth)):
+    with session_scope() as session:
+        action = session.get(AgentAction, action_id)
+        if not action:
+            raise HTTPException(404, "action not found")
+        if action.status != "proposed":
+            raise HTTPException(400, f"action is already {action.status}")
+        action.status = "declined"
+        action.result = "declined from the dashboard"
+        return {"status": "declined"}
+
+
 @app.get("/api/documents")
 def list_documents(_: str = Depends(require_auth)):
     with session_scope() as session:
@@ -495,6 +561,7 @@ def list_documents(_: str = Depends(require_auth)):
         ).scalars().all()
         return {
             "categories": vault.CATEGORIES,
+            "email_configured": email_harvest.configured(),
             "documents": [
                 {
                     "id": d.id,

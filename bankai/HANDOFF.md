@@ -112,6 +112,41 @@ live (84/84 tests):
   NEXT: Ford signs up at rentcast.io (free) → `RENTCAST_API_KEY` in .env → weekly
   autonomous refresh replaces hand-gathered comps.
 
+## Super-helper upgrade — DONE (2026-07-29, verified live; email awaits app password)
+
+Ford's ask: "all the bells and whistles for long term financial brilliance… voracious
+consumption of personal data… access to my email… it should check in ('still using
+your PlayStation subscription?') and try to cancel it." Built (100/100 tests):
+- `intelligence/forecast.py`: `cash_flow_forecast` (replays every recurring series
+  on its cadence over the liquid balance; lowest-point detection; honest "one-offs
+  not included" note) + `spending_anomalies` (category spikes vs trailing 3-month
+  baseline, large first-time merchants).
+- `connectors/email_harvest.py`: Gmail/IMAP document harvester — X-GM-RAW Gmail
+  query syntax, standing financial/legal sweep (DEFAULT_QUERY), attachment
+  extraction (pdf/docx/txt/rtf/csv, 15MB cap), sha-dedupe into the vault with
+  sender/subject/date provenance; `send_email` (SMTP, same app password) for
+  approved outbound. NEEDS: GMAIL_ADDRESS + GMAIL_APP_PASSWORD in .env (Google
+  2-step verification → App passwords). `EMAIL_HARVEST_DAYS` weekly scheduler loop.
+- **Action gate** (the "tries to cancel it" architecture): `AgentAction` model +
+  `propose_action`/`list_actions` tools; portal "Copilot actions" panel where a
+  HUMAN clicks Approve & run (or Decline); executor kind `email_support` sends
+  from the household's own address; every outcome audit-logged. The agent cannot
+  execute anything itself — the click is the authorization.
+- New agent tools: cash_flow_forecast, spending_anomalies, search_email,
+  harvest_email_documents, subscription_audit (annualized costs + likely-sub
+  flags), propose_action, list_actions → 18 tools total, all backends + MCP.
+- **Web access for the brain**: claude-cli backend now allows WebSearch/WebFetch.
+- **Monthly review loop**: on each new month the scheduler posts a real agent
+  turn into the shared thread (MONTHLY_REVIEW_PROMPT; marker = MemoryNote "Last
+  monthly review"; first tick only initializes so deploys don't surprise-fire).
+- Persona: inbox reach ("hunt there FIRST… never curiosity"), initiative rules
+  (one check-in at a time, approval gate, usage-can't-be-seen-in-bank-data).
+- LIVE VERIFY: real turn ran subscription_audit + cash_flow_forecast +
+  spending_anomalies, self-diagnosed the forecast's missing-paycheck blind spot,
+  asked the PlayStation check-in verbatim, flagged the two ~$9-10k monthly
+  transfers as the real question. DEFERRED HONESTLY: browser-driving cancellation
+  (computer use) — needs its own session; the action-gate slot is where it plugs in.
+
 ## Where things live
 
 - Working tree: `/home/user/solar-operator/bankai/` on branch

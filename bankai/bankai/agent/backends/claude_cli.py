@@ -62,7 +62,7 @@ def run(session: Session, system: str, messages: list[dict]) -> str:
         "--mcp-config",
         _mcp_config(),
         "--allowedTools",
-        "mcp__bankai__*",
+        "mcp__bankai__*,WebSearch,WebFetch",
         "--max-turns",
         "15",
     ]

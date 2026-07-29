@@ -137,7 +137,7 @@ def test_claude_cli_command_and_parse(session, monkeypatch):
     cmd = captured["cmd"]
     assert cmd[0] == config.CLAUDE_CLI_BIN and cmd[1] == "-p"
     assert "--append-system-prompt" in cmd and "SYSTEM" in cmd
-    assert "--allowedTools" in cmd and "mcp__bankai__*" in cmd
+    assert "--allowedTools" in cmd and "mcp__bankai__*,WebSearch,WebFetch" in cmd
     mcp_cfg = json.loads(cmd[cmd.index("--mcp-config") + 1])
     assert "bankai" in mcp_cfg["mcpServers"]
     assert "[Ford] net worth?" in cmd[2]

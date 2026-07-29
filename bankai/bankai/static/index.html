@@ -130,6 +130,7 @@
         <input type="text" id="doctitle" placeholder="Title (optional)">
         <select id="doccategory"></select>
         <button type="submit">Add to vault</button>
+        <button type="button" class="ghost" id="emailsweep">Sweep email for documents</button>
         <span id="docstatus" class="muted"></span>
       </form>
       <table id="docs"></table>
@@ -151,6 +152,12 @@
         <input id="chatinput" placeholder="Ask about your money…" autocomplete="off">
         <button type="submit">Send</button>
       </form>
+    </section>
+    <section>
+      <h2>Copilot actions <span class="muted">— nothing runs without your click</span></h2>
+      <p class="muted">Real-world actions the copilot proposes (cancellation emails etc.).
+      Approve &amp; run executes them from your own email address; everything is logged.</p>
+      <table id="actions"></table>
     </section>
     <section>
       <h2>Copilot memory</h2>
@@ -181,7 +188,7 @@ async function doLogin() {
   try {
     await api("/api/login", {method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({password: $("pw").value})});
-    show(true); refresh(); loadThread(); loadMemories(); loadDocs(); loadProperties();
+    show(true); refresh(); loadThread(); loadMemories(); loadDocs(); loadProperties(); loadActions();
   } catch (e) { $("loginerr").textContent = "Wrong password."; }
 }
 $("pw").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
@@ -300,6 +307,9 @@ async function delMemory(id) { await api("/api/memories/" + id, {method: "DELETE
 
 async function loadDocs() {
   const d = await api("/api/documents");
+  EMAIL_ON = d.email_configured;
+  $("emailsweep").title = EMAIL_ON ? "Search the inbox for financial/legal documents"
+    : "Set GMAIL_ADDRESS + GMAIL_APP_PASSWORD in .env to enable";
   const sel = $("doccategory");
   if (!sel.options.length) d.categories.forEach(c => {
     const opt = document.createElement("option"); opt.value = opt.textContent = c; sel.appendChild(opt);
@@ -429,6 +439,45 @@ async function toggleAuto(id, on) {
   loadProperties();
 }
 
+let EMAIL_ON = false;
+
+$("emailsweep").addEventListener("click", async () => {
+  if (!EMAIL_ON) {
+    $("docstatus").textContent = "connect email first: GMAIL_ADDRESS + GMAIL_APP_PASSWORD in .env";
+    return;
+  }
+  $("docstatus").textContent = "sweeping inbox…";
+  try {
+    const r = await api("/api/email/harvest", {method: "POST"});
+    $("docstatus").textContent =
+      `scanned ${r.messages_scanned} emails — filed ${r.documents_filed} new, ${r.duplicates_skipped} already known`;
+    loadDocs();
+  } catch (err) { $("docstatus").textContent = err.message; }
+});
+
+async function loadActions() {
+  const actions = await api("/api/actions");
+  rows("actions", actions.map(a => {
+    const buttons = a.status === "proposed"
+      ? `<button onclick="runAction('${a.id}')">Approve &amp; run</button> ` +
+        `<button class=ghost onclick="declineAction('${a.id}')">Decline</button>`
+      : `<span class=muted>${a.status}${a.result ? " — " + a.result.slice(0, 80) : ""}</span>`;
+    return `<tr><td><b>${a.title}</b><br>` +
+      `<span class=muted>${a.kind === "email_support" ? "email to " + a.to_email + ": “" + a.subject + "”" : a.kind}</span><br>` +
+      `<span class=muted>${a.rationale.slice(0, 140)}</span></td>` +
+      `<td>${buttons}</td></tr>`;
+  }).join("") || "<tr><td class=muted>No proposals yet — the copilot will bring ideas here for your approval.</td></tr>");
+}
+
+async function runAction(id) {
+  if (!confirm("Approve and run this action now? It will send for real.")) return;
+  const r = await api("/api/actions/" + id + "/execute", {method: "POST"});
+  alert("Result: " + r.status + (r.result ? " — " + r.result : ""));
+  loadActions();
+}
+
+async function declineAction(id) { await api("/api/actions/" + id + "/decline", {method: "POST"}); loadActions(); }
+
 async function delDoc(id) {
   if (!confirm("Remove this document from the vault? The original file is deleted too.")) return;
   await api("/api/documents/" + id, {method: "DELETE"}); loadDocs();
@@ -463,12 +512,12 @@ $("chatform").addEventListener("submit", async (e) => {
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({message: text, speaker: $("speaker").value})});
     pending.textContent = res.reply;
-    refresh(); loadMemories(); loadDocs(); loadProperties();  // the agent may have written rules, memories, annotations, comps, or values
+    refresh(); loadMemories(); loadDocs(); loadProperties(); loadActions();  // the agent may have written rules, memories, annotations, comps, values, or proposals
   } catch (err) { pending.textContent = "Error: " + err.message; }
 });
 
 // Auto-login check: overview 401s if not authenticated.
-api("/api/overview").then(() => { show(true); refresh(); loadThread(); loadMemories(); loadDocs(); loadProperties(); }).catch(() => show(false));
+api("/api/overview").then(() => { show(true); refresh(); loadThread(); loadMemories(); loadDocs(); loadProperties(); loadActions(); }).catch(() => show(false));
 </script>
 </body>
 </html>

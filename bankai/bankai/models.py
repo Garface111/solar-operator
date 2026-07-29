@@ -187,6 +187,28 @@ class Valuation(Base):
     property_: Mapped[Property] = relationship(back_populates="valuations")
 
 
+class AgentAction(Base):
+    """Side-effectful actions the copilot proposes (cancel a subscription by
+    emailing support, etc.). NOTHING here executes without a human clicking
+    Approve & run in the portal; every outcome is recorded, so this table is the
+    audit trail of the copilot's reach into the world."""
+
+    __tablename__ = "agent_actions"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _uid("act"))
+    kind: Mapped[str] = mapped_column(String(30))  # email_support (more kinds later)
+    title: Mapped[str] = mapped_column(String(200))
+    rationale: Mapped[str] = mapped_column(Text, default="")  # why the copilot proposes it
+    to_email: Mapped[str] = mapped_column(String(200), default="")
+    subject: Mapped[str] = mapped_column(String(300), default="")
+    body: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(20), default="proposed", index=True)
+    # proposed | executed | declined | failed
+    result: Mapped[str] = mapped_column(Text, default="")
+    proposed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    executed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class MemoryNote(Base):
     """Persistent agent memory: small titled notes the copilot writes for itself,
     always injected into its system prompt."""

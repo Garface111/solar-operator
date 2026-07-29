@@ -12,6 +12,8 @@ from datetime import date, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..connectors import email_harvest
+from ..intelligence.forecast import cash_flow_forecast, spending_anomalies
 from ..intelligence.insights import (
     month_bounds,
     net_worth,
@@ -20,7 +22,16 @@ from ..intelligence.insights import (
     upcoming_bills,
 )
 from ..intelligence.recurring import detect_recurring
-from ..models import Account, Document, MemoryNote, Property, Rule, Transaction, Valuation
+from ..models import (
+    Account,
+    AgentAction,
+    Document,
+    MemoryNote,
+    Property,
+    Rule,
+    Transaction,
+    Valuation,
+)
 from .. import realestate, vault
 from ..rules.engine import RULE_KINDS
 
@@ -158,6 +169,102 @@ TOOLS: list[dict] = [
             "required": ["document_id", "summary"],
             "additionalProperties": False,
         },
+    },
+    {
+        "name": "cash_flow_forecast",
+        "description": (
+            "Project the household's liquid balance forward by replaying every "
+            "detected recurring paycheck and bill on its own schedule. Shows each "
+            "upcoming event, the running balance, and the lowest point. Call this for "
+            "'can we afford', 'will we be tight', or any forward-looking cash question. "
+            "One-off spending is not included — say so when you cite it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"days": {"type": "integer", "description": "Horizon, default 60, max 180"}},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "spending_anomalies",
+        "description": (
+            "Compare this month's spending per category against its trailing 3-month "
+            "average and list large first-time merchants. Call this for 'anything "
+            "unusual', monthly reviews, or when spend looks off."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "search_email",
+        "description": (
+            "Search the household inbox (metadata only: sender, subject, date, "
+            "attachment names). Gmail query syntax, e.g. "
+            "'from:lawyer has:attachment trust'. Use this to LOCATE documents — "
+            "deeds, trust papers, statements — before asking the humans for them."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "description": "default 20"},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "harvest_email_documents",
+        "description": (
+            "Sweep the inbox and file matching attachments (PDF/Word) straight into "
+            "the document vault with provenance. Without a query it runs the standing "
+            "financial/legal-document sweep (trust, deed, insurance, tax, statements). "
+            "Duplicates are skipped automatically. After a harvest, read and annotate "
+            "what arrived."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "Optional Gmail query override"}},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "subscription_audit",
+        "description": (
+            "Every detected recurring outflow with its annualized cost, flagging "
+            "likely subscriptions (streaming, memberships, software). Use it for cost "
+            "reviews — and periodically pick ONE and check in with the household: "
+            "'still using this?'. If they say no, draft the cancellation with "
+            "propose_action."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "propose_action",
+        "description": (
+            "Propose a real-world action for household approval — today's kind: "
+            "email_support (a cancellation/inquiry email to a company, sent from the "
+            "household's own address). Propose only AFTER the household agreed in "
+            "conversation; it still executes ONLY when a human clicks Approve & run "
+            "in the dashboard. Write the email ready-to-send: firm, brief, includes "
+            "account identifiers you know, requests written confirmation."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "e.g. 'Cancel PlayStation Plus'"},
+                "rationale": {"type": "string", "description": "Why — cite the conversation/evidence"},
+                "to_email": {"type": "string"},
+                "subject": {"type": "string"},
+                "body": {"type": "string"},
+            },
+            "required": ["title", "rationale", "to_email", "subject", "body"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "list_actions",
+        "description": "The action audit trail: everything you have proposed, with status (proposed/executed/declined/failed) and results. Check before proposing duplicates.",
+        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
         "name": "get_property_valuation",
@@ -330,6 +437,70 @@ def _dispatch(session: Session, name: str, args: dict):
             return {"error": "rule not found"}
         rule.enabled = False
         return {"disabled": True, "rule_id": rule.id, "name": rule.name}
+    if name == "cash_flow_forecast":
+        days = min(int(args.get("days") or 60), 180)
+        return cash_flow_forecast(session, days=days)
+    if name == "spending_anomalies":
+        return spending_anomalies(session)
+    if name == "search_email":
+        return email_harvest.search_email(
+            args["query"], limit=min(int(args.get("limit") or 20), 50)
+        )
+    if name == "harvest_email_documents":
+        return email_harvest.harvest(session, args.get("query"))
+    if name == "subscription_audit":
+        multiplier = {"weekly": 52, "biweekly": 26, "monthly": 12, "quarterly": 4, "yearly": 1}
+        subs_hint = (
+            "playstation|netflix|spotify|hulu|disney|hbo|max |youtube|apple|prime|"
+            "peacock|paramount|audible|patreon|gym|fitness|club|membership|storage|"
+            "icloud|dropbox|adobe|github|domain|vpn|news|times|substack"
+        )
+        import re as _re
+        hint = _re.compile(subs_hint, _re.I)
+        rows = []
+        for s in detect_recurring(session):
+            if not s.is_bill:
+                continue
+            annual = round(abs(s.avg_amount) * multiplier.get(s.cadence, 12), 2)
+            rows.append({
+                "merchant": s.merchant,
+                "cadence": s.cadence,
+                "per_charge": round(abs(s.avg_amount), 2),
+                "annualized": annual,
+                "last_seen": s.last_date.isoformat(),
+                "likely_subscription": bool(hint.search(s.merchant)) or abs(s.avg_amount) <= 50,
+            })
+        rows.sort(key=lambda r: -r["annualized"])
+        return {
+            "recurring_outflows": rows,
+            "total_annualized": round(sum(r["annualized"] for r in rows), 2),
+            "note": "Bank data cannot show USAGE — ask the household before judging a subscription idle.",
+        }
+    if name == "propose_action":
+        action = AgentAction(
+            kind="email_support",
+            title=args["title"][:200],
+            rationale=args["rationale"],
+            to_email=args["to_email"][:200],
+            subject=args["subject"][:300],
+            body=args["body"],
+        )
+        session.add(action)
+        session.flush()
+        return {
+            "proposed": True, "action_id": action.id, "title": action.title,
+            "next_step": "a human must click Approve & run in the dashboard's Copilot actions panel",
+        }
+    if name == "list_actions":
+        actions = session.execute(
+            select(AgentAction).order_by(AgentAction.proposed_at.desc()).limit(30)
+        ).scalars().all()
+        return [
+            {"action_id": a.id, "kind": a.kind, "title": a.title, "status": a.status,
+             "to_email": a.to_email, "proposed_at": a.proposed_at.isoformat(),
+             "result": a.result[:300]}
+            for a in actions
+        ]
     if name == "get_property_valuation":
         props = session.execute(select(Property)).scalars().all()
         out = []
