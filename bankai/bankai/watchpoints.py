@@ -200,8 +200,9 @@ def validate_condition(kind: str, params: dict | None) -> dict:
     return validator(params or {})
 
 
-def describe_condition(watchpoint: Watchpoint) -> str:
-    """Human phrasing of what this watchpoint is waiting for."""
+def describe_condition(watchpoint: Watchpoint, session: Session | None = None) -> str:
+    """Human phrasing of what this watchpoint is waiting for. Pass a session to
+    name the account instead of showing its raw id."""
     params = watchpoint.params or {}
     kind = watchpoint.kind
     if kind == "on_date":
@@ -211,10 +212,12 @@ def describe_condition(watchpoint: Watchpoint) -> str:
     if kind == "net_worth_above":
         return f"net worth rises above {_money(float(params.get('threshold', 0)))}"
     if kind == "account_balance_below":
-        return (
-            f"account {params.get('account_id')} falls below "
-            f"{_money(float(params.get('threshold', 0)))}"
-        )
+        label = str(params.get("account_id") or "")
+        if session is not None:
+            account = session.get(Account, label)
+            if account:
+                label = account.name
+        return f"{label} falls below {_money(float(params.get('threshold', 0)))}"
     if kind == "liquid_below":
         return f"liquid cash falls below {_money(float(params.get('threshold', 0)))}"
     return f"{kind} {params}"

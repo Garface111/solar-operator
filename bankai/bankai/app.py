@@ -544,7 +544,7 @@ def list_watchpoints(status: str = "", _: str = Depends(require_auth)):
                     "note": w.note,
                     "kind": w.kind,
                     "status": w.status,
-                    "waits_for": watchpoints_lib.describe_condition(w),
+                    "waits_for": watchpoints_lib.describe_condition(w, session),
                     "created_by": w.created_by,
                     "created_at": w.created_at.isoformat(),
                     "fired_at": w.fired_at.isoformat() if w.fired_at else None,

@@ -10,6 +10,7 @@ from bankai.watchpoints import (
     build_wake_prompt,
     cancel_watchpoint,
     create_watchpoint,
+    describe_condition,
     evaluate_watchpoints,
     list_watchpoints,
     validate_condition,
@@ -281,3 +282,19 @@ def test_wake_prompt_handles_a_missing_note(session):
     fired = evaluate_watchpoints(session, NOW)
     assert fired == [watchpoint]
     assert "(no note recorded)" in build_wake_prompt(watchpoint)
+
+
+def test_account_watchpoint_names_the_account_not_its_id(session):
+    account = upsert_account(
+        session, source="simplefin", name="Adv Plus Banking- 2724", kind="checking",
+        balance=20000.0,
+    )
+    watchpoint = _wp(
+        session, title="Cash floor", kind="account_balance_below",
+        params={"account_id": account.id, "threshold": 10000},
+    )
+    with_session = describe_condition(watchpoint, session)
+    assert "Adv Plus Banking- 2724 falls below $10,000.00" == with_session
+    assert account.id not in with_session
+    # sessionless callers (the wake prompt) still work, just less pretty
+    assert account.id in describe_condition(watchpoint)

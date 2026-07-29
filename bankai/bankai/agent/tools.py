@@ -702,7 +702,7 @@ def _dispatch(session: Session, name: str, args: dict):
             "title": watchpoint.title,
             "kind": watchpoint.kind,
             "params": watchpoint.params,
-            "waits_for": watchpoints.describe_condition(watchpoint),
+            "waits_for": watchpoints.describe_condition(watchpoint, session),
         }
     if name == "list_watchpoints":
         rows = watchpoints.list_watchpoints(session, status=args.get("status"))
@@ -714,7 +714,7 @@ def _dispatch(session: Session, name: str, args: dict):
                 "kind": w.kind,
                 "params": w.params,
                 "status": w.status,
-                "waits_for": watchpoints.describe_condition(w),
+                "waits_for": watchpoints.describe_condition(w, session),
                 "created_by": w.created_by,
                 "created_at": w.created_at.isoformat(),
                 "fired_at": w.fired_at.isoformat() if w.fired_at else None,
