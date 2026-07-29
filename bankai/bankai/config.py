@@ -47,8 +47,11 @@ SMTP_USER = _env("SMTP_USER")
 SMTP_PASSWORD = _env("SMTP_PASSWORD")
 
 # --- SMS group thread (Twilio) ---
-TWILIO_ACCOUNT_SID = _env("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = _env("TWILIO_AUTH_TOKEN")
+TWILIO_ACCOUNT_SID = _env("TWILIO_ACCOUNT_SID")  # AC... (Console home)
+TWILIO_AUTH_TOKEN = _env("TWILIO_AUTH_TOKEN")  # required: signs inbound webhooks
+# Optional standard API key (SK... + secret) — preferred auth for sending
+TWILIO_API_KEY_SID = _env("TWILIO_API_KEY_SID")
+TWILIO_API_KEY_SECRET = _env("TWILIO_API_KEY_SECRET")
 TWILIO_FROM_NUMBER = _env("TWILIO_FROM_NUMBER")
 # "Ford:+18025551234,Sam:+18025555678" — names label speakers in the thread
 HOUSEHOLD_PHONES = _env("HOUSEHOLD_PHONES")

@@ -19,6 +19,23 @@ def twilio_config(monkeypatch):
     )
 
 
+def test_auth_prefers_api_key(monkeypatch):
+    assert sms._auth() == ("ACtest", "secret-token")
+    monkeypatch.setattr(config, "TWILIO_API_KEY_SID", "SKtest")
+    monkeypatch.setattr(config, "TWILIO_API_KEY_SECRET", "sk-secret")
+    assert sms._auth() == ("SKtest", "sk-secret")
+    assert sms.configured()
+
+
+def test_configured_with_api_key_but_no_auth_token(monkeypatch):
+    monkeypatch.setattr(config, "TWILIO_AUTH_TOKEN", "")
+    assert not sms.configured()
+    monkeypatch.setattr(config, "TWILIO_API_KEY_SID", "SKtest")
+    monkeypatch.setattr(config, "TWILIO_API_KEY_SECRET", "sk-secret")
+    assert sms.configured()  # sending works; inbound webhook still needs the auth token
+    assert not sms.validate_signature("https://x/api/sms/webhook", {}, "sig")
+
+
 def test_normalize_phone_variants():
     assert sms.normalize_phone("+1 (802) 555-1234") == "+18025551234"
     assert sms.normalize_phone("802-555-1234") == "+18025551234"

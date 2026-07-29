@@ -44,10 +44,22 @@ def household_phones() -> dict[str, str]:
     return out
 
 
+def _auth() -> tuple[str, str]:
+    """Basic-auth pair for the REST API: API key (SK sid + secret) when provided,
+    else Account SID + Auth Token. The URL path always uses the Account SID."""
+    if config.TWILIO_API_KEY_SID and config.TWILIO_API_KEY_SECRET:
+        return (config.TWILIO_API_KEY_SID, config.TWILIO_API_KEY_SECRET)
+    return (config.TWILIO_ACCOUNT_SID, config.TWILIO_AUTH_TOKEN)
+
+
 def configured() -> bool:
+    has_send_auth = bool(
+        (config.TWILIO_API_KEY_SID and config.TWILIO_API_KEY_SECRET)
+        or config.TWILIO_AUTH_TOKEN
+    )
     return bool(
         config.TWILIO_ACCOUNT_SID
-        and config.TWILIO_AUTH_TOKEN
+        and has_send_auth
         and config.TWILIO_FROM_NUMBER
         and household_phones()
     )
@@ -65,7 +77,7 @@ def send_sms(to: str, body: str) -> bool:
     try:
         resp = httpx.post(
             f"https://api.twilio.com/2010-04-01/Accounts/{config.TWILIO_ACCOUNT_SID}/Messages.json",
-            auth=(config.TWILIO_ACCOUNT_SID, config.TWILIO_AUTH_TOKEN),
+            auth=_auth(),
             data={"From": config.TWILIO_FROM_NUMBER, "To": to, "Body": body[:1500]},
             timeout=30,
         )
