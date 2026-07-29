@@ -1,11 +1,15 @@
-"""The shared household SMS thread: persistent in the DB (survives restarts), one
-conversation for both spouses + the copilot. Inbound flow:
+"""The shared household thread: ONE persistent conversation in the DB, spanning the
+dashboard chat and SMS. Every message (web or text) lands in the same history with a
+speaker label, so the copilot never loses context no matter where you talk to it.
 
+SMS inbound flow:
   spouse texts the copilot number
     -> stored as a ChatMessage (speaker = their name)
     -> relayed to the other spouse ("Ford: what's our net worth?")
     -> agent runs over the shared history (speaker-prefixed)
     -> reply stored + broadcast to BOTH spouses
+
+Web flow: same storage and history, no SMS broadcast (the dashboard shows it).
 """
 from __future__ import annotations
 
@@ -34,10 +38,10 @@ START_KEYWORDS = {"START", "UNSTOP", "YES", "JOIN"}
 
 
 def build_history(session: Session, limit: int = HISTORY_LIMIT) -> list[dict]:
+    """Unified history across all channels, oldest-first, speaker-prefixed."""
     rows = (
         session.execute(
             select(ChatMessage)
-            .where(ChatMessage.channel == "sms")
             .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
             .limit(limit)
         )
@@ -106,4 +110,19 @@ def handle_inbound(session: Session, sender: str, text: str) -> str:
     session.add(ChatMessage(channel="sms", role="assistant", speaker="copilot", content=reply))
     session.flush()
     sms.broadcast(reply)
+    return reply
+
+
+def handle_web(session: Session, speaker: str, text: str) -> str:
+    """Dashboard message into the same shared thread (no SMS broadcast)."""
+    text = text.strip()
+    if not text:
+        return ""
+    speaker = (speaker or "Dashboard").strip()[:60]
+    session.add(ChatMessage(channel="web", role="user", speaker=speaker, content=text))
+    session.flush()
+    history = build_history(session)
+    reply = agent_chat.run_turn(session, history, channel="web")
+    session.add(ChatMessage(channel="web", role="assistant", speaker="copilot", content=reply))
+    session.flush()
     return reply

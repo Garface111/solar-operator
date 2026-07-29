@@ -93,6 +93,21 @@ def test_build_history_prefixes_speakers_and_starts_with_user(session):
     assert history[1]["role"] == "assistant"
 
 
+def test_unified_thread_across_web_and_sms(session, monkeypatch):
+    monkeypatch.setattr(sms, "send_sms", lambda to, body: True)
+    monkeypatch.setattr(
+        thread.agent_chat, "run_turn", lambda s, m, channel="web": "ok"
+    )
+    thread.handle_web(session, "Ford", "note from the dashboard")
+    thread.handle_inbound(session, "Sam", "and a text follow-up")
+    history = thread.build_history(session)
+    contents = [m["content"] for m in history if m["role"] == "user"]
+    assert "[Ford] note from the dashboard" in contents
+    assert "[Sam] and a text follow-up" in contents
+    # both replies persisted too
+    assert sum(1 for m in history if m["role"] == "assistant") == 2
+
+
 def test_empty_inbound_ignored(session, monkeypatch):
     monkeypatch.setattr(sms, "send_sms", lambda to, body: True)
     assert thread.handle_inbound(session, "Ford", "   ") == ""

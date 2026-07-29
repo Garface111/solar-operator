@@ -14,14 +14,14 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from . import config
-from .agent import chat as agent_chat
 from .connectors import simplefin
 from .connectors.csv_import import import_csv
+from .connectors.ofx_import import import_ofx
 from .db import init_db, session_scope
 from .messaging import sms
 from .messaging import thread as sms_thread
 from .intelligence.insights import net_worth, net_worth_history, spending_summary, upcoming_bills
-from .models import Rule, RuleFiring, SyncLog, Transaction
+from .models import ChatMessage, MemoryNote, Rule, RuleFiring, SyncLog, Transaction
 from .rules.engine import RULE_KINDS
 from .scheduler import run_rules_once, start_background_tasks
 
@@ -29,9 +29,6 @@ logging.basicConfig(level=logging.INFO)
 
 STATIC_DIR = Path(__file__).parent / "static"
 COOKIE_NAME = "bankai_session"
-
-# In-memory chat histories keyed by session token (resets on restart — fine here).
-_chat_histories: dict[str, list] = {}
 
 
 def _session_token() -> str:
@@ -67,6 +64,7 @@ class LoginBody(BaseModel):
 
 class ChatBody(BaseModel):
     message: str
+    speaker: str = "Dashboard"
 
 
 class RuleBody(BaseModel):
@@ -135,6 +133,7 @@ def overview(_: str = Depends(require_auth)):
                 else None
             ),
             "simplefin_configured": bool(config.SIMPLEFIN_ACCESS_URL),
+            "members": list(sms.household_phones().keys()) or ["Ford", "Spouse"],
         }
 
 
@@ -169,12 +168,19 @@ async def import_csv_endpoint(
     _: str = Depends(require_auth),
 ):
     text = (await file.read()).decode("utf-8-sig", errors="replace")
+    filename = (file.filename or "").lower()
+    is_ofx = filename.endswith((".ofx", ".qfx")) or "<OFX" in text[:2000].upper()
     try:
         with session_scope() as session:
-            result = import_csv(
-                session, text=text, account_name=account_name, kind=kind, owner=owner
-            )
-            return {"added": result.added, "skipped": result.skipped}
+            if is_ofx:
+                result = import_ofx(
+                    session, text=text, account_name=account_name, kind=kind, owner=owner
+                )
+            else:
+                result = import_csv(
+                    session, text=text, account_name=account_name, kind=kind, owner=owner
+                )
+            return {"added": result.added, "skipped": result.skipped, "format": "ofx" if is_ofx else "csv"}
     except ValueError as exc:
         raise HTTPException(400, str(exc))
 
@@ -243,16 +249,65 @@ def delete_rule(rule_id: str, _: str = Depends(require_auth)):
 
 
 @app.post("/api/chat")
-def chat_endpoint(body: ChatBody, token: str = Depends(require_auth)):
-    history = _chat_histories.get(token, [])
+def chat_endpoint(body: ChatBody, _: str = Depends(require_auth)):
     try:
         with session_scope() as session:
-            reply, new_history = agent_chat.chat(session, history, body.message)
+            reply = sms_thread.handle_web(session, body.speaker, body.message)
     except Exception as exc:
         logging.getLogger("bankai.chat").exception("chat failed")
         raise HTTPException(502, f"Chat failed: {exc}")
-    _chat_histories[token] = new_history
     return {"reply": reply}
+
+
+@app.get("/api/chat/history")
+def chat_history(limit: int = 60, _: str = Depends(require_auth)):
+    with session_scope() as session:
+        rows = (
+            session.execute(
+                select(ChatMessage)
+                .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
+                .limit(min(limit, 200))
+            )
+            .scalars()
+            .all()
+        )
+        return [
+            {
+                "role": m.role,
+                "speaker": m.speaker,
+                "content": m.content,
+                "channel": m.channel,
+                "at": m.created_at.isoformat(),
+            }
+            for m in reversed(rows)
+        ]
+
+
+@app.get("/api/memories")
+def list_memories(_: str = Depends(require_auth)):
+    with session_scope() as session:
+        notes = session.execute(
+            select(MemoryNote).order_by(MemoryNote.updated_at.desc())
+        ).scalars().all()
+        return [
+            {
+                "id": n.id,
+                "title": n.title,
+                "content": n.content,
+                "updated_at": n.updated_at.isoformat(),
+            }
+            for n in notes
+        ]
+
+
+@app.delete("/api/memories/{note_id}")
+def delete_memory(note_id: str, _: str = Depends(require_auth)):
+    with session_scope() as session:
+        note = session.get(MemoryNote, note_id)
+        if not note:
+            raise HTTPException(404, "memory not found")
+        session.delete(note)
+        return {"ok": True}
 
 
 _EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>'
@@ -281,9 +336,3 @@ async def sms_webhook(request: Request):
     # Unknown numbers are ignored silently. Replies go out via the REST API,
     # so the TwiML response is always empty.
     return Response(content=_EMPTY_TWIML, media_type="application/xml")
-
-
-@app.post("/api/chat/reset")
-def chat_reset(token: str = Depends(require_auth)):
-    _chat_histories.pop(token, None)
-    return {"ok": True}

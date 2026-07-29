@@ -37,19 +37,52 @@ python run.py                 # http://localhost:8300
 Log in with the shared household password (`APP_PASSWORD`). Both of you use the same
 instance — accounts carry an `owner` label (ford / spouse / joint).
 
-## Getting your banking data in
+## Running it on your computer (the portal)
 
-**Option A — SimpleFIN Bridge (recommended, automatic):**
-1. Sign up at beta-bridge.simplefin.org and connect your banks there.
+```bash
+git clone <this repo> && cd bankai
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env    # edit: APP_PASSWORD + one LLM backend at minimum
+python run.py
+```
+
+Open **http://localhost:8300** — that's the portal: accounts, net worth, transactions,
+statement import, rules, memory, and the copilot chat. The database is a local
+`bankai.db` file next to the code; back it up like you would any private file.
+
+## Linking your institutions
+
+**Live-updating (SimpleFIN Bridge, ~$1.50/mo — recommended):**
+Bank of America, Fidelity, and American Express can all be linked for automatic
+syncing (every 6h + "Sync now" button):
+1. Sign up at beta-bridge.simplefin.org and connect BofA / Fidelity / Amex there
+   (SimpleFIN aggregates via MX; your credentials stay with them, this app only ever
+   holds a read-only access URL).
 2. Create an app connection → copy the **setup token**.
 3. `python -m bankai.connectors.simplefin claim <SETUP_TOKEN>` — prints the access URL.
-4. Put it in `.env` as `SIMPLEFIN_ACCESS_URL`. The scheduler then syncs every 6 hours
-   (configurable), or hit "Sync now" in the dashboard.
+4. Put it in `.env` as `SIMPLEFIN_ACCESS_URL`.
 
-**Option B — CSV import (works today, zero signup):** download CSV statements from your
-bank's website and drop them into the dashboard's import form (or POST
-`/api/import/csv`). Column names are auto-detected (date / description / amount, or
-debit+credit pairs). Re-importing the same file is safe — dedupe is built in.
+**Apple Card (manual — Apple allows nothing else):** Apple Card has no aggregator or
+web access; the only export is from the iPhone: Wallet → Apple Card → Card Balance →
+Export → OFX (or CSV), monthly. Drop the file in the dashboard's import form. The OFX
+export includes your balance, so Apple Card still participates in net worth.
+
+**Statement files (any bank, zero signup):** the import form takes **CSV, OFX, and
+QFX**. BofA/Fidelity/Amex all offer QFX/OFX downloads ("Quicken format") — prefer
+those over CSV: they carry stable transaction IDs (perfect dedupe) and the account
+balance. Column names in CSVs are auto-detected. Re-importing any file is always safe.
+
+## Memory & the persistent thread
+
+- **One conversation, forever.** The chat thread is stored in the database and shared
+  across the dashboard and SMS — the copilot never loses context, and either spouse
+  can pick up mid-conversation from either surface. Pick your name in the chat box so
+  messages are attributed.
+- **Real memory.** The copilot has `save_memory` / `delete_memory` tools and its notes
+  are always in its context. Say "remember that the Amex is only for travel" and it
+  persists across restarts, models, and channels. Notes are visible (and deletable) in
+  the dashboard's "Copilot memory" panel.
 
 ## 3-way text conversation (SMS)
 

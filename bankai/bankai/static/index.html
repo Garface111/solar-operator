@@ -84,9 +84,11 @@
       <table id="txns"></table>
     </section>
     <section>
-      <h2>Import CSV statement</h2>
+      <h2>Import statement (CSV / OFX / QFX)</h2>
+      <p class="muted">QFX/OFX exports (BofA, Fidelity, Amex, Apple Card via Wallet →
+      Export) also carry the account balance; CSV imports transactions only.</p>
       <form class="inline" id="csvform">
-        <input type="file" id="csvfile" accept=".csv" required>
+        <input type="file" id="csvfile" accept=".csv,.ofx,.qfx" required>
         <input type="text" id="csvaccount" placeholder="Account name" required>
         <select id="csvkind">
           <option value="checking">checking</option><option value="savings">savings</option>
@@ -110,12 +112,18 @@
   </div>
   <div>
     <section>
-      <h2>Copilot <button class="ghost" style="float:right" onclick="resetChat()">reset</button></h2>
+      <h2>Copilot <span class="muted">— one persistent thread, shared with SMS</span></h2>
       <div id="chatlog"></div>
       <form id="chatform">
+        <select id="speaker" title="Who's typing"></select>
         <input id="chatinput" placeholder="Ask about your money…" autocomplete="off">
         <button type="submit">Send</button>
       </form>
+    </section>
+    <section>
+      <h2>Copilot memory</h2>
+      <p class="muted">Notes the copilot keeps for itself (say "remember that…" in chat).</p>
+      <table id="memories"></table>
     </section>
   </div>
 </main>
@@ -205,32 +213,57 @@ $("csvform").addEventListener("submit", async (e) => {
   } catch (err) { $("csvstatus").textContent = err.message; }
 });
 
-function addMsg(text, cls) {
+function addMsg(text, cls, speaker) {
   const div = document.createElement("div");
-  div.className = "msg " + cls; div.textContent = text;
+  div.className = "msg " + cls;
+  div.textContent = (speaker && cls === "user") ? `${speaker}: ${text}` : text;
   $("chatlog").appendChild(div); $("chatlog").scrollTop = 1e9;
   return div;
 }
+
+async function loadThread() {
+  const o = await api("/api/overview");
+  const sel = $("speaker");
+  if (!sel.options.length) {
+    o.members.forEach(m => { const opt = document.createElement("option"); opt.value = opt.textContent = m; sel.appendChild(opt); });
+    const saved = localStorage.getItem("bankai_speaker");
+    if (saved && o.members.includes(saved)) sel.value = saved;
+    sel.addEventListener("change", () => localStorage.setItem("bankai_speaker", sel.value));
+  }
+  const history = await api("/api/chat/history?limit=60");
+  $("chatlog").innerHTML = "";
+  history.forEach(m => addMsg(m.content, m.role === "user" ? "user" : "bot",
+    m.role === "user" ? m.speaker : null));
+}
+
+async function loadMemories() {
+  const notes = await api("/api/memories");
+  rows("memories", notes.map(n =>
+    `<tr><td><b>${n.title}</b><br><span class=muted>${n.content.slice(0, 200)}</span></td>` +
+    `<td><button class=ghost onclick="delMemory('${n.id}')">forget</button></td></tr>`).join("") ||
+    "<tr><td class=muted>No memories yet.</td></tr>");
+}
+
+async function delMemory(id) { await api("/api/memories/" + id, {method: "DELETE"}); loadMemories(); }
 
 $("chatform").addEventListener("submit", async (e) => {
   e.preventDefault();
   const text = $("chatinput").value.trim();
   if (!text) return;
   $("chatinput").value = "";
-  addMsg(text, "user");
+  addMsg(text, "user", $("speaker").value);
   const pending = addMsg("…", "bot");
   try {
     const res = await api("/api/chat", {method: "POST",
-      headers: {"Content-Type": "application/json"}, body: JSON.stringify({message: text})});
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({message: text, speaker: $("speaker").value})});
     pending.textContent = res.reply;
-    refresh();  // the agent may have created rules
+    refresh(); loadMemories();  // the agent may have created rules or memories
   } catch (err) { pending.textContent = "Error: " + err.message; }
 });
 
-async function resetChat() { await api("/api/chat/reset", {method: "POST"}); $("chatlog").innerHTML = ""; }
-
 // Auto-login check: overview 401s if not authenticated.
-api("/api/overview").then(() => { show(true); refresh(); }).catch(() => show(false));
+api("/api/overview").then(() => { show(true); refresh(); loadThread(); loadMemories(); }).catch(() => show(false));
 </script>
 </body>
 </html>

@@ -102,6 +102,20 @@ class RuleFiring(Base):
     rule: Mapped[Rule] = relationship(back_populates="firings")
 
 
+class MemoryNote(Base):
+    """Persistent agent memory: small titled notes the copilot writes for itself,
+    always injected into its system prompt."""
+
+    __tablename__ = "memory_notes"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _uid("mem"))
+    title: Mapped[str] = mapped_column(String(120), unique=True, index=True)
+    content: Mapped[str] = mapped_column(Text, default="")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+    )
+
+
 class ChatMessage(Base):
     """Persistent shared conversation (the SMS group thread lives here)."""
 

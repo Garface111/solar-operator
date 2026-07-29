@@ -12,9 +12,11 @@ from __future__ import annotations
 
 from datetime import date
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import config
+from ..models import MemoryNote
 
 MAX_HISTORY_MESSAGES = 40
 
@@ -33,7 +35,15 @@ it. Keep answers short and concrete: lead with the answer, then only the detail 
 Amounts in dollars. Today's date is {today}.
 
 When creating a rule, restate exactly what you set up (kind, schedule/threshold, message) so
-they can correct you."""
+they can correct you.
+
+You have a persistent memory: your notes (if any) appear below and survive every restart and
+conversation. Proactively save_memory durable facts — account nicknames, preferences, goals,
+standing decisions, corrections — and update or delete notes that go stale. The conversation
+thread itself is also persistent and shared across the dashboard and SMS, so treat it as one
+continuous conversation with the household."""
+
+MEMORY_BUDGET_CHARS = 8000
 
 SMS_ADDENDUM = """
 
@@ -41,8 +51,24 @@ You are replying over SMS. Keep replies under 450 characters, plain text only �
 no bullet lists, no headers. One or two sentences unless they ask for detail."""
 
 
-def build_system(channel: str) -> str:
+def build_system(session: Session, channel: str) -> str:
     system = SYSTEM_PROMPT.format(today=date.today().isoformat())
+    notes = (
+        session.execute(select(MemoryNote).order_by(MemoryNote.updated_at.desc()))
+        .scalars()
+        .all()
+    )
+    if notes:
+        rendered: list[str] = []
+        total = 0
+        for note in notes:
+            chunk = f"### {note.title}\n{note.content}"
+            total += len(chunk)
+            if total > MEMORY_BUDGET_CHARS:
+                rendered.append("(older notes omitted — use list-style titles to keep notes small)")
+                break
+            rendered.append(chunk)
+        system += "\n\n## Your persistent memory notes\n" + "\n\n".join(rendered)
     if channel == "sms":
         system += SMS_ADDENDUM
     return system
@@ -58,11 +84,6 @@ def run_turn(session: Session, messages: list[dict], channel: str = "web") -> st
         from .backends import claude_cli as impl
     else:
         from .backends import anthropic_backend as impl
-    return impl.run(session, build_system(channel), list(messages))
+    return impl.run(session, build_system(session, channel), list(messages))
 
 
-def chat(session: Session, history: list[dict], user_message: str) -> tuple[str, list[dict]]:
-    """Dashboard chat wrapper: text-only history in, (reply, new_history) out."""
-    messages = history[-MAX_HISTORY_MESSAGES:] + [{"role": "user", "content": user_message}]
-    reply = run_turn(session, messages, channel="web")
-    return reply, messages + [{"role": "assistant", "content": reply}]

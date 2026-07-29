@@ -20,7 +20,7 @@ from ..intelligence.insights import (
     upcoming_bills,
 )
 from ..intelligence.recurring import detect_recurring
-from ..models import Account, Rule, Transaction
+from ..models import Account, MemoryNote, Rule, Transaction
 from ..rules.engine import RULE_KINDS
 
 TOOLS: list[dict] = [
@@ -106,6 +106,35 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "save_memory",
+        "description": (
+            "Save or update a persistent memory note for yourself (upsert by title). "
+            "Your notes are always shown in your context, across every conversation and "
+            "restart. Use this proactively whenever you learn a durable fact: account "
+            "nicknames, preferences, financial goals, standing decisions, corrections. "
+            "Keep notes short and current — update rather than duplicate."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Short stable title, e.g. 'Account nicknames'"},
+                "content": {"type": "string"},
+            },
+            "required": ["title", "content"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "delete_memory",
+        "description": "Delete one of your memory notes by title when it is stale or wrong.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"title": {"type": "string"}},
+            "required": ["title"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "delete_rule",
         "description": "Disable a rule by id (from list_rules). Use when the user asks to stop a reminder/alert.",
         "input_schema": {
@@ -170,6 +199,25 @@ def _dispatch(session: Session, name: str, args: dict):
         session.add(rule)
         session.flush()
         return {"created": True, "rule_id": rule.id, "name": rule.name, "kind": rule.kind}
+    if name == "save_memory":
+        note = session.execute(
+            select(MemoryNote).where(MemoryNote.title == args["title"])
+        ).scalar_one_or_none()
+        if note:
+            note.content = args["content"]
+        else:
+            note = MemoryNote(title=args["title"], content=args["content"])
+            session.add(note)
+        session.flush()
+        return {"saved": True, "title": note.title}
+    if name == "delete_memory":
+        note = session.execute(
+            select(MemoryNote).where(MemoryNote.title == args["title"])
+        ).scalar_one_or_none()
+        if not note:
+            return {"error": "no memory note with that title"}
+        session.delete(note)
+        return {"deleted": True, "title": args["title"]}
     if name == "delete_rule":
         rule = session.get(Rule, args["rule_id"])
         if not rule:

@@ -16,9 +16,8 @@ def test_dispatch_uses_configured_backend(session, monkeypatch):
     monkeypatch.setattr(
         grok_backend, "run", lambda s, system, messages: calls.append(messages) or "hi from grok"
     )
-    reply, history = agent_chat.chat(session, [], "hello")
+    reply = agent_chat.run_turn(session, [{"role": "user", "content": "hello"}])
     assert reply == "hi from grok"
-    assert history[-1] == {"role": "assistant", "content": "hi from grok"}
     assert calls[0][-1] == {"role": "user", "content": "hello"}
 
 
