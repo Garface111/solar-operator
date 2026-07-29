@@ -50,6 +50,19 @@ OWNER_AGENT_MAILBOX = (
 )
 OWNER_AGENT_FROM = f"Energy Agent <{OWNER_AGENT_MAILBOX}>"
 
+# Our own outbound identities — never converse with ourselves. Restored
+# 2026-07-29: "Remove the Energy Agent Sovereign entirely" (463e2ee2) deleted
+# this set along with the sovereign@ addresses it used to contain, but missed
+# the one remaining reader of it below (`ingest_owner_email`) — every inbound
+# owner reply since then raised NameError on that line, caught by a blanket
+# except at both call sites, so every "reply and I'll act" promise this
+# module makes (check-ins, gap alerts, escalations, reminders) was silently
+# unfulfillable. Only the two mailboxes still real after Sovereign's removal.
+_SELF_ADDRESSES = {
+    OWNER_AGENT_MAILBOX,
+    "repairs@agent.arrayoperator.com",
+}
+
 
 _MAX_OWNER_EMAIL_TURNS_PER_DAY = int(os.getenv("EA_OWNER_EMAIL_TURNS_PER_DAY", "20") or 20)
 _CHECKIN_MIN_GAP_DAYS = 5.5  # idempotence across restarts / double-fires
