@@ -20,20 +20,24 @@ from api.models import Array, Client, DailyGeneration, InverterAlertState, Tenan
 from api.scheduler import _COOP_REALERT_DAYS, _COOP_STALE_DAYS, coop_session_death_warnings
 
 
-def _mk_tenant() -> str:
+def _mk_tenant(*, capture_mode: str | None = "device") -> str:
+    """Defaults to device mode: the one mode 'the extension will capture a
+    fresh session' is actually true for. See test_capture_mode_gate below for
+    the cloud/unset case, which must NOT get that instruction."""
     tid = "ten_" + secrets.token_hex(6)
     with SessionLocal() as db:
         db.add(Tenant(
             id=tid, name="Coop Realert Test", contact_email=f"{tid}@t.t",
             tenant_key="k_" + secrets.token_hex(8), plan="standard", active=True,
+            capture_mode=capture_mode,
         ))
         db.commit()
     return tid
 
 
-def _mk_dead_coop_tenant() -> tuple[str, int]:
+def _mk_dead_coop_tenant(*, capture_mode: str | None = "device") -> tuple[str, int]:
     """A tenant whose VEC session died long enough ago to trigger the alert."""
-    tid = _mk_tenant()
+    tid = _mk_tenant(capture_mode=capture_mode)
     with SessionLocal() as db:
         c = Client(tenant_id=tid, name="Dead Coop Client", active=True)
         db.add(c); db.flush()
@@ -100,3 +104,27 @@ def test_dead_session_re_alerts_after_the_realert_window_passes(monkeypatch):
     out = coop_session_death_warnings()
     assert [w for w in out["warned"] if w["tenant"] == tid] != []
     assert [s for s in sent if tid in s[1]] != []
+
+
+def test_cloud_tenant_gets_the_internal_alert_but_not_the_extension_email(monkeypatch):
+    """Same bug as the GMP reauth flow, same fix: 'the extension will capture
+    a fresh session' is not how Cloud Capture recovers a co-op login, so a
+    cloud-mode tenant must not receive it. Ops still hears about the dead
+    session either way — only the wrong customer instruction is withheld.
+
+    (The email send is wrapped in a bare `except Exception` in scheduler.py,
+    which would swallow an assertion raised from inside the mock — so this
+    records calls instead of raising, and asserts on the recorded list.)"""
+    notified = []
+    emailed = []
+    monkeypatch.setattr("api.notify.send_internal_alert",
+                        lambda subject, body: notified.append(subject))
+    monkeypatch.setattr("api.notify.send_coop_reauth_needed_email",
+                        lambda **kw: emailed.append(kw) or True)
+    tid, _arr = _mk_dead_coop_tenant(capture_mode="cloud")
+
+    out = coop_session_death_warnings()
+
+    assert [w for w in out["warned"] if w["tenant"] == tid] != []
+    assert emailed == []  # the wrong instruction was withheld
+    assert any(tid in s for s in notified)  # internal alert still fired

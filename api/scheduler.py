@@ -987,16 +987,36 @@ def refresh_expiring_gmp_tokens() -> dict:
                 _last_alert = tenant.gmp_reauth_alert_at if tenant else None
                 _cooldown_ok = (_last_alert is None) or (datetime.utcnow() - _last_alert >= timedelta(days=7))
                 if crossed_threshold and is_authoritative and tenant and _cooldown_ok:
-                    try:
-                        send_gmp_reauth_needed_email(
-                            to=tenant.contact_email,
-                            name=tenant.operator_name or tenant.company_name or tenant.name,
-                            product=tenant.product,
-                        )
-                    except Exception as notify_exc:
-                        logger.error(
-                            "Failed to send reauth email to %s: %s",
-                            tenant.contact_email, notify_exc,
+                    # The customer copy says "log in once — the extension will
+                    # capture a fresh session." That is only true in device
+                    # (extension) mode. Cloud Capture logs in server-side from a
+                    # stored password, so telling a cloud tenant to visit
+                    # greenmountainpower.com themselves is not just unhelpful —
+                    # visiting the site does not feed the stored credential the
+                    # harvester actually uses. As of 2026-07-29 zero tenants use
+                    # device mode (Ford: "I am not in extension mode and
+                    # basically nobody is"), so every one of these emails was
+                    # going out with an instruction that could not work for its
+                    # recipient. The internal alert still fires unconditionally
+                    # below, so ops is never silently unaware of a dead session
+                    # — only the misleading customer email is withheld.
+                    if (getattr(tenant, "capture_mode", None) or "") == "device":
+                        try:
+                            send_gmp_reauth_needed_email(
+                                to=tenant.contact_email,
+                                name=tenant.operator_name or tenant.company_name or tenant.name,
+                                product=tenant.product,
+                            )
+                        except Exception as notify_exc:
+                            logger.error(
+                                "Failed to send reauth email to %s: %s",
+                                tenant.contact_email, notify_exc,
+                            )
+                    else:
+                        logger.info(
+                            "GMP reauth: withholding extension-instruction email for "
+                            "tenant=%s (capture_mode=%s) — internal alert only",
+                            sess.tenant_id, getattr(tenant, "capture_mode", None),
                         )
                     send_internal_alert(
                         f"GMP refresh: {_GMP_REAUTH_NOTIFY_AFTER} consecutive failures for tenant {sess.tenant_id}",
@@ -1107,14 +1127,27 @@ def gmp_final_expiry_warnings(days_ahead: int = _GMP_FINAL_WARN_DAYS,
                 db.add(state)
             state.last_alerted_at = datetime.utcnow()
             db.commit()
-            try:
-                send_gmp_reauth_needed_email(
-                    to=tenant.contact_email,
-                    name=tenant.operator_name or tenant.company_name or tenant.name,
-                    product=tenant.product,
+            # Same device-mode gate as refresh_expiring_gmp_tokens above: this
+            # copy also promises an extension keep-alive, which only exists in
+            # device mode. A cloud tenant's token dies for the same reason a
+            # device tenant's does (no keep-alive ran), but the fix is updating
+            # the stored password in Cloud Capture, not visiting the utility
+            # site — so the same instruction is wrong here too.
+            if (getattr(tenant, "capture_mode", None) or "") == "device":
+                try:
+                    send_gmp_reauth_needed_email(
+                        to=tenant.contact_email,
+                        name=tenant.operator_name or tenant.company_name or tenant.name,
+                        product=tenant.product,
+                    )
+                except Exception:
+                    logger.exception("final-warning email failed for %s", tid)
+            else:
+                logger.info(
+                    "GMP final-warning: withholding extension-instruction email for "
+                    "tenant=%s (capture_mode=%s) — internal alert only",
+                    tid, getattr(tenant, "capture_mode", None),
                 )
-            except Exception:
-                logger.exception("final-warning email failed for %s", tid)
             try:
                 send_internal_alert(
                     f"GMP token FINAL WARNING: {tid} dies in {days_left:.1f}d, no keep-alive has run",
@@ -1241,15 +1274,25 @@ def coop_session_death_warnings(days_stale: int = _COOP_STALE_DAYS,
                 db.add(state)
             state.last_alerted_at = now_
             db.commit()
-            try:
-                send_coop_reauth_needed_email(
-                    to=tenant.contact_email,
-                    name=tenant.operator_name or tenant.company_name or tenant.name,
-                    utility_name=util_name, portal_url=portal,
-                    product=tenant.product,
+            # Same device-mode gate as the GMP reauth email above: the copy
+            # promises "the extension will capture a fresh session," which is
+            # not how Cloud Capture recovers a co-op login. See that comment.
+            if (getattr(tenant, "capture_mode", None) or "") == "device":
+                try:
+                    send_coop_reauth_needed_email(
+                        to=tenant.contact_email,
+                        name=tenant.operator_name or tenant.company_name or tenant.name,
+                        utility_name=util_name, portal_url=portal,
+                        product=tenant.product,
+                    )
+                except Exception:
+                    logger.exception("co-op reauth email failed for %s/%s", tid, prov)
+            else:
+                logger.info(
+                    "coop reauth: withholding extension-instruction email for "
+                    "tenant=%s provider=%s (capture_mode=%s) — internal alert only",
+                    tid, prov, getattr(tenant, "capture_mode", None),
                 )
-            except Exception:
-                logger.exception("co-op reauth email failed for %s/%s", tid, prov)
             try:
                 send_internal_alert(
                     f"Co-op session DEAD: {tid} {prov} — no generation for {days_dark}d",

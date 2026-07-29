@@ -14,7 +14,12 @@ from api.gmp_refresh import GmpRefreshError, refresh_gmp_token
 
 # ─── helpers ────────────────────────────────────────────────────────────────
 
-def _make_tenant(db, suffix: str | None = None) -> Tenant:
+def _make_tenant(db, suffix: str | None = None, *, capture_mode: str | None = "device") -> Tenant:
+    """Defaults to device (extension) mode: that is the one mode the reauth
+    email's "the extension will capture a fresh session" instruction is true
+    for, and these tests are about the threshold/dedup mechanics, not about
+    which tenants should receive the email at all — that gate has its own
+    tests below."""
     sfx = suffix or secrets.token_hex(4)
     t = Tenant(
         id=f"ten_gmpr_{sfx}",
@@ -25,6 +30,7 @@ def _make_tenant(db, suffix: str | None = None) -> Tenant:
         active=True,
         created_at=now(),
         onboarding_stage="done",
+        capture_mode=capture_mode,
     )
     db.add(t)
     return t
@@ -174,7 +180,12 @@ def test_scheduler_notifies_after_3_failures():
         result = refresh_expiring_gmp_tokens()
 
     assert sess_id in result["failed"]
-    mock_notify.assert_called_once_with(to=tenant_email, name="Refresh Test Solar")
+    # Pre-existing gap fixed in passing: the scheduler has passed product= for a
+    # while (branding is per-tenant), but this assertion never picked it up and
+    # was failing before the capture_mode work in this file too.
+    mock_notify.assert_called_once_with(
+        to=tenant_email, name="Refresh Test Solar", product="nepool"
+    )
     mock_alert.assert_called_once()
 
     with SessionLocal() as db:
@@ -327,3 +338,122 @@ def test_scheduler_dedup_emails_per_tenant_across_dup_sessions():
         f"expected 1 tenant-level email, got {len(my_emails)} "
         "(dup sessions multiplied the reauth nudge)"
     )
+
+
+# ─── capture-mode gate: the extension-instruction email must only reach ────
+# ─── tenants who actually use the extension ─────────────────────────────────
+
+def test_cloud_tenant_does_not_get_the_extension_email():
+    """A cloud-capture tenant's session dies the same way a device tenant's
+    does, but 'log in once — the extension will capture a fresh session' is
+    not how Cloud Capture recovers (it logs in server-side from a stored
+    password). Sending it anyway tells the customer to do something that
+    cannot fix their account. The internal alert must still fire, so ops is
+    never silently unaware of a dead session."""
+    from api.scheduler import refresh_expiring_gmp_tokens
+
+    with SessionLocal() as db:
+        t = _make_tenant(db, suffix="cloud3", capture_mode="cloud")
+        db.flush()
+        sess = _make_session(
+            db, t.id, expires_at=datetime.utcnow() + timedelta(days=1), failures=2,
+        )
+        db.commit()
+        sess_id = sess.id
+
+    resp = MagicMock()
+    resp.status_code = 401
+    resp.text = "Unauthorized"
+    with patch("api.gmp_refresh.httpx.post", return_value=resp), \
+         patch("api.scheduler.send_gmp_reauth_needed_email") as mock_notify, \
+         patch("api.scheduler.send_internal_alert") as mock_alert:
+        result = refresh_expiring_gmp_tokens()
+
+    assert sess_id in result["failed"]
+    mock_notify.assert_not_called()
+    mock_alert.assert_called_once()  # ops still hears about it
+
+
+def test_unset_capture_mode_also_withholds_the_email():
+    """Tenants predating the capture_mode field (or never fully onboarded)
+    read as capture_mode=None — treated the same as cloud, not as device.
+    A missing field must never default to the customer-facing send."""
+    from api.scheduler import refresh_expiring_gmp_tokens
+
+    with SessionLocal() as db:
+        t = _make_tenant(db, suffix="unset3", capture_mode=None)
+        db.flush()
+        sess = _make_session(
+            db, t.id, expires_at=datetime.utcnow() + timedelta(days=1), failures=2,
+        )
+        db.commit()
+        sess_id = sess.id
+
+    resp = MagicMock()
+    resp.status_code = 401
+    resp.text = "Unauthorized"
+    with patch("api.gmp_refresh.httpx.post", return_value=resp), \
+         patch("api.scheduler.send_gmp_reauth_needed_email") as mock_notify, \
+         patch("api.scheduler.send_internal_alert") as mock_alert:
+        result = refresh_expiring_gmp_tokens()
+
+    assert sess_id in result["failed"]
+    mock_notify.assert_not_called()
+    mock_alert.assert_called_once()
+
+
+def test_device_tenant_still_gets_the_email():
+    """The gate must not become a blanket suppression — the one mode the
+    instruction is true for must be unaffected."""
+    from api.scheduler import refresh_expiring_gmp_tokens
+
+    with SessionLocal() as db:
+        t = _make_tenant(db, suffix="device3", capture_mode="device")
+        db.flush()
+        sess = _make_session(
+            db, t.id, expires_at=datetime.utcnow() + timedelta(days=1), failures=2,
+        )
+        db.commit()
+        sess_id = sess.id
+        tenant_email = t.contact_email
+
+    resp = MagicMock()
+    resp.status_code = 401
+    resp.text = "Unauthorized"
+    with patch("api.gmp_refresh.httpx.post", return_value=resp), \
+         patch("api.scheduler.send_gmp_reauth_needed_email") as mock_notify, \
+         patch("api.scheduler.send_internal_alert"):
+        result = refresh_expiring_gmp_tokens()
+
+    assert sess_id in result["failed"]
+    my_emails = [c for c in mock_notify.call_args_list
+                 if c.kwargs.get("to") == tenant_email]
+    assert len(my_emails) == 1
+
+
+def test_final_warning_also_respects_the_capture_mode_gate():
+    """gmp_final_expiry_warnings is the second, UNCONDITIONAL send site (fires
+    on bare expiry, independent of the failure counter) — it carries the same
+    wrong instruction and needs the same gate.
+
+    It re-imports from .notify LOCALLY inside its own body, so the patch
+    target is api.notify (matching test_coop_session_realert.py's pattern),
+    not api.scheduler — patching the latter here would silently patch nothing
+    and let the real functions run."""
+    from api.scheduler import gmp_final_expiry_warnings, _GMP_FINAL_WARN_DAYS
+
+    with SessionLocal() as db:
+        t = _make_tenant(db, suffix="finalcloud", capture_mode="cloud")
+        db.flush()
+        _make_session(
+            db, t.id,
+            expires_at=datetime.utcnow() + timedelta(days=_GMP_FINAL_WARN_DAYS - 1),
+        )
+        db.commit()
+
+    with patch("api.notify.send_gmp_reauth_needed_email") as mock_notify, \
+         patch("api.notify.send_internal_alert") as mock_alert:
+        gmp_final_expiry_warnings()
+
+    mock_notify.assert_not_called()
+    mock_alert.assert_called_once()
