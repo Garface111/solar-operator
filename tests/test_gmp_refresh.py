@@ -551,3 +551,42 @@ def test_final_warning_also_sends_the_connect_email_when_no_credential_exists():
 
     mock_wrong.assert_not_called()
     mock_connect.assert_called_once()
+
+
+# ─── dual-trigger de-dup: don't send the same reauth twice in one tick ──────
+
+def test_no_duplicate_email_when_threshold_crossing_and_final_warning_coincide():
+    """refresh_expiring_gmp_tokens crosses its own failure threshold AND
+    unconditionally calls gmp_final_expiry_warnings on the SAME tick. A session
+    that is both crossing the threshold and inside the final-warn window used
+    to get two separate reauth emails back to back — one from each function's
+    own, uncoordinated dedup mechanism (Tenant.gmp_reauth_alert_at vs.
+    InverterAlertState). Both the outer call site (scheduler.py's module-level
+    import) and the inner one (gmp_final_expiry_warnings' own local `from
+    .notify import`) must be patched since they resolve independently."""
+    from api.scheduler import refresh_expiring_gmp_tokens, _GMP_FINAL_WARN_DAYS
+
+    with SessionLocal() as db:
+        t = _make_tenant(db, suffix="dualtrigger")
+        db.flush()
+        _make_session(
+            db, t.id,
+            expires_at=datetime.utcnow() + timedelta(days=_GMP_FINAL_WARN_DAYS - 1),
+            failures=2,  # this run pushes it to 3: crosses the threshold
+        )
+        db.commit()
+        tenant_email = t.contact_email
+
+    resp = MagicMock()
+    resp.status_code = 401
+    resp.text = "Unauthorized"
+    with patch("api.gmp_refresh.httpx.post", return_value=resp), \
+         patch("api.scheduler.send_gmp_reauth_needed_email") as outer_mock, \
+         patch("api.notify.send_gmp_reauth_needed_email") as inner_mock, \
+         patch("api.scheduler.send_internal_alert"), \
+         patch("api.notify.send_internal_alert"):
+        refresh_expiring_gmp_tokens()
+
+    outer_calls = [c for c in outer_mock.call_args_list if c.kwargs.get("to") == tenant_email]
+    inner_calls = [c for c in inner_mock.call_args_list if c.kwargs.get("to") == tenant_email]
+    assert len(outer_calls) + len(inner_calls) == 1

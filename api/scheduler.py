@@ -913,6 +913,14 @@ def refresh_expiring_gmp_tokens() -> dict:
     failed: list[int] = []
     skipped: int = 0
     cutoff = datetime.utcnow() + timedelta(days=7)
+    # Tenants that just got a customer-facing reauth/connect email THIS tick from
+    # the failure-threshold branch below — passed to gmp_final_expiry_warnings so
+    # it doesn't also fire its own "expires in Nd" email for the same tenant in
+    # the same run. The two dedup mechanisms (Tenant.gmp_reauth_alert_at vs.
+    # InverterAlertState) don't know about each other, and a session that's both
+    # crossing its failure threshold and inside the final-warn window right now
+    # would otherwise get two separate "reconnect GMP" emails back to back.
+    just_alerted_tenants: set[str] = set()
 
     with SessionLocal() as db:
         sessions = db.execute(
@@ -1009,6 +1017,7 @@ def refresh_expiring_gmp_tokens() -> dict:
                                 name=tenant.operator_name or tenant.company_name or tenant.name,
                                 product=tenant.product,
                             )
+                            just_alerted_tenants.add(sess.tenant_id)
                         except Exception as notify_exc:
                             logger.error(
                                 "Failed to send reauth email to %s: %s",
@@ -1026,6 +1035,7 @@ def refresh_expiring_gmp_tokens() -> dict:
                                 utility_name="Green Mountain Power",
                                 product=tenant.product,
                             )
+                            just_alerted_tenants.add(sess.tenant_id)
                         except Exception as notify_exc:
                             logger.error(
                                 "Failed to send connect-cloud-capture email to %s: %s",
@@ -1058,7 +1068,7 @@ def refresh_expiring_gmp_tokens() -> dict:
     # The unconditional FINAL-WARNING backstop (see gmp_final_expiry_warnings):
     # rides the same hourly tick, catches sessions the refresh loop can't see.
     try:
-        gmp_final_expiry_warnings()
+        gmp_final_expiry_warnings(skip_tenants=just_alerted_tenants)
     except Exception:
         logger.exception("gmp_final_expiry_warnings failed")
     # Co-op (SmartHub) sessions have NO expiry field at all — their death alert
@@ -1081,7 +1091,8 @@ _GMP_FINAL_WARN_REALERT_DAYS = 3
 
 
 def gmp_final_expiry_warnings(days_ahead: int = _GMP_FINAL_WARN_DAYS,
-                              dry_run: bool = False) -> dict:
+                              dry_run: bool = False,
+                              skip_tenants: set[str] | None = None) -> dict:
     """The EXPLICIT token-death alert: 'your GMP token expires in N days and no
     keep-alive has run.' Unlike the refresh loop above, this pass is UNCONDITIONAL —
     it looks at expires_at alone, so it also covers sessions with no refresh_token
@@ -1112,6 +1123,12 @@ def gmp_final_expiry_warnings(days_ahead: int = _GMP_FINAL_WARN_DAYS,
             newest.setdefault(tid, (sid, exp))
 
         for tid, (sid, exp) in newest.items():
+            if skip_tenants and tid in skip_tenants:
+                # Already got a reauth/connect email this exact tick from the
+                # failure-threshold branch above — don't send a second one for
+                # the same underlying outage. Dedup state here is left
+                # untouched, so next tick evaluates this tenant fresh.
+                continue
             key = f"gmp_token_final:{tid}"
             state = db.execute(select(InverterAlertState).where(
                 InverterAlertState.tenant_id == tid,
