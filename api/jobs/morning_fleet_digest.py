@@ -284,6 +284,38 @@ def _fleet_reference_day(cols: list[dict]) -> tuple[str | None, str | None, bool
     return iso, label, is_stale
 
 
+def _col_data_source(col: dict) -> str | None:
+    """Cheap, DB-free provenance guess from a column's own daily rows — the
+    same derivation _array_visibility attaches to col['visibility'], but
+    usable before full enrichment (it only reads col['daily'], already present
+    straight off build_fleet_tree). utility_meter = a utility login, extension_pull
+    = the browser capture, a vendor slug = a cloud API — the fix differs per case."""
+    sources = [str(p.get("source")) for p in (col.get("daily") or [])
+               if p.get("source") and str(p.get("source")) != "bill_prorate"]
+    return max(set(sources), key=sources.count) if sources else None
+
+
+def _stale_fix_hint(cols: list[dict]) -> str:
+    """What to actually tell the owner to fix stale arrays — read from WHICH
+    arrays are behind, not a blanket "run the capture extension" that's simply
+    wrong for a fleet with no browser-capture vendor in it at all (a pure
+    SolarEdge/Enphase cloud-API fleet has no extension in its data path)."""
+    yiso = _yesterday_iso()
+    stale_sources = {
+        _col_data_source(c) for c in cols
+        if (_recent_day(c) or "") < yiso
+    }
+    needs_extension = "extension_pull" in stale_sources
+    needs_login = "utility_meter" in stale_sources
+    if needs_extension and needs_login:
+        return "open Array Operator, check your utility login, or run the capture extension"
+    if needs_extension:
+        return "open Array Operator or run the capture extension"
+    if needs_login:
+        return "open Array Operator and check your utility/Cloud Capture connection"
+    return "open Array Operator and check the connection status for those arrays"
+
+
 # A unit below this fraction of its array cohort's output-per-kW on the comparison
 # day is a laggard. Conservative (0.6 → clearly below), so a whole-array weather dip
 # (every unit low together) never trips it — only a unit that fell behind its own
@@ -703,9 +735,7 @@ def _array_visibility(db, col: dict) -> dict:
     # Provenance: how this array's numbers actually reach us. utility_meter =
     # a utility login (dies when the login dies); extension_pull = the browser
     # capture; a vendor slug = a cloud API. The owner's fix differs for each.
-    sources = [str(p.get("source")) for p in (col.get("daily") or [])
-               if p.get("source") and str(p.get("source")) != "bill_prorate"]
-    vis["data_source"] = max(set(sources), key=sources.count) if sources else None
+    vis["data_source"] = _col_data_source(col)
 
     # Whether this array has a utility login behind it at all. An array with NO
     # utility account cannot be a victim of a dead utility session — which is
@@ -973,7 +1003,7 @@ def build_digest_html(tenant, tree: dict, personal_note: str | None = None) -> s
     stale_html = (
         f'<div style="color:{FAINT};font-size:12px;margin-top:3px;line-height:1.4;">'
         f'Some arrays haven&rsquo;t reported a full day recently (see their dates below) — '
-        f'open Array Operator or run the capture extension to refresh their readings.</div>'
+        f'{_html.escape(_stale_fix_hint(cols))} to refresh their readings.</div>'
         if stale else ""
     )
 
@@ -1480,7 +1510,7 @@ def send_digest_for_tenant(db, tenant: Tenant) -> bool:
             log.info("morning_digest: tenant %s still stale — digest held silently", tenant.id)
             return False
         _, last_label, _ = _fleet_reference_day(cols)
-        sent = _send_hold_notice(tenant, to, last_label)
+        sent = _send_hold_notice(tenant, to, last_label, cols=cols)
         if sent:
             tenant.digest_hold_notified_at = datetime.utcnow()
             db.commit()
@@ -1526,19 +1556,19 @@ def send_digest_for_tenant(db, tenant: Tenant) -> bool:
     )
 
 
-def _send_hold_notice(tenant: Tenant, to: str, last_label: str | None) -> bool:
+def _send_hold_notice(tenant: Tenant, to: str, last_label: str | None,
+                       cols: list[dict] | None = None) -> bool:
     """The one email a stale episode gets: plain, honest, actionable. No fleet
     numbers (we don't have fresh ones) — just what's wrong and how to fix it."""
     since = f" The last complete day we received was {last_label}." if last_label else ""
     subject = "Fleet digest held — we're not receiving fresh data"
+    fix_hint = _stale_fix_hint(cols or [])
     text = (
         "Your morning fleet digest is on hold because we haven't received fresh "
         f"data from any of your arrays.{since}\n\n"
         "Rather than send you a report built on old numbers, we'll hold the "
         "digest until data is flowing again — it resumes automatically.\n\n"
-        "Usual fix: open Chrome (with the EnergyAgent extension) on the machine "
-        "that captures your portals, or check your inverter API connections in "
-        "Array Operator.\n"
+        f"Usual fix: {fix_hint}.\n"
     )
     html = (
         '<div style="font:15px/1.6 -apple-system,Segoe UI,Roboto,sans-serif;color:#0f172a">'
@@ -1546,9 +1576,7 @@ def _send_hold_notice(tenant: Tenant, to: str, last_label: str | None) -> bool:
         f"haven&rsquo;t received fresh data from any of your arrays.{_html.escape(since)}</p>"
         "<p>Rather than send a report built on old numbers, we&rsquo;ll hold the "
         "digest until data is flowing again &mdash; it resumes automatically.</p>"
-        "<p><strong>Usual fix:</strong> open Chrome (with the EnergyAgent "
-        "extension) on the machine that captures your portals, or check your "
-        "inverter API connections in Array Operator.</p></div>"
+        f"<p><strong>Usual fix:</strong> {_html.escape(fix_hint)}.</p></div>"
     )
     try:
         return notify._send_via_resend(

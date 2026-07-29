@@ -680,3 +680,53 @@ def test_all_clear_is_withheld_when_a_feed_is_invisible():
     text = digest.build_digest_text(_tenant(), tree)
     assert "All systems healthy" not in text
     assert "Never Connected" in text
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HONESTY: don't tell a cloud-API-only fleet to "run the capture extension"
+#
+# The stale-data banner and the digest-hold notice both hardcoded "run the
+# capture extension" / "open Chrome (with the EnergyAgent extension)" as THE
+# fix, regardless of which vendor path was actually behind. A pure SolarEdge/
+# Enphase fleet has no browser capture anywhere in its data path — that
+# instruction is not just unhelpful, it names a mechanism the fleet doesn't use.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _col_with_source(name, days_ago: list[int], source: str, kwh: float = 100.0) -> dict:
+    d = [_iso_days_ago(i) for i in sorted(days_ago, reverse=True)]
+    return {
+        "array_id": name, "array_name": name, "inverter_count": 1,
+        "alert": {"level": "ok", "count": 0},
+        "inverters": [{"inverter_id": name + "-1", "name": name + "-1", "status": "ok"}],
+        "daily": [{"date": day, "kwh": kwh, "source": source} for day in d],
+        "is_daylight": True,
+    }
+
+
+def test_stale_hint_omits_extension_for_a_pure_cloud_api_fleet():
+    fresh = _col_with_source("Fresh", [3, 2, 1], "solaredge")
+    stale = _col_with_source("Behind", [9, 8, 7], "solaredge")
+    hint = digest._stale_fix_hint([fresh, stale])
+    assert "extension" not in hint.lower()
+    assert "Array Operator" in hint
+
+
+def test_stale_hint_mentions_extension_only_when_an_extension_array_is_stale():
+    fresh = _col_with_source("Fresh", [3, 2, 1], "solaredge")
+    stale = _col_with_source("Behind", [9, 8, 7], "extension_pull")
+    hint = digest._stale_fix_hint([fresh, stale])
+    assert "extension" in hint.lower()
+
+
+def test_stale_hint_mentions_utility_login_for_a_stale_utility_meter_array():
+    stale = _col_with_source("Behind", [9, 8, 7], "utility_meter")
+    hint = digest._stale_fix_hint([stale])
+    assert "extension" not in hint.lower()
+    assert "utility" in hint.lower() or "login" in hint.lower()
+
+
+def test_stale_banner_html_reflects_cloud_only_fleet():
+    fresh = _col_with_source("Fresh", [3, 2, 1], "solaredge")
+    stale = _col_with_source("Behind", [9, 8, 7], "solaredge")
+    html = digest.build_digest_html(_tenant(), {"columns": [fresh, stale]})
+    assert "capture extension" not in html
