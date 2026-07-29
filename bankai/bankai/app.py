@@ -13,7 +13,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from . import config, vault
+from . import config, realestate, vault
 from .connectors import simplefin
 from .connectors.csv_import import import_csv
 from .connectors.ofx_import import import_ofx
@@ -26,8 +26,10 @@ from .models import (
     Account,
     BalanceSnapshot,
     ChatMessage,
+    Comp,
     Document,
     MemoryNote,
+    Property,
     Rule,
     RuleFiring,
     SyncLog,
@@ -90,6 +92,30 @@ class ManualAccountBody(BaseModel):
     kind: str
     balance: float
     owner: str = "joint"
+
+
+class PropertyBody(BaseModel):
+    account_id: str
+    street: str
+    city: str
+    state: str
+    zip_code: str = ""
+    sqft: int | None = None
+    beds: float | None = None
+    baths: float | None = None
+    year_built: int | None = None
+    auto_update: bool = True
+
+
+class CompBody(BaseModel):
+    address: str
+    price: float
+    status: str = "sold"
+    sale_date: str = ""
+    sqft: int | None = None
+    beds: float | None = None
+    baths: float | None = None
+    distance_miles: float | None = None
 
 
 @app.post("/api/login")
@@ -347,6 +373,114 @@ def delete_manual_account(account_id: str, _: str = Depends(require_auth)):
         ).scalars():
             session.delete(snap)
         session.delete(account)
+        return {"ok": True}
+
+
+def _property_payload(p: Property) -> dict:
+    latest = max(p.valuations, key=lambda v: v.created_at, default=None)
+    comps = sorted(
+        p.comps, key=lambda c: (c.sale_date or date.min), reverse=True
+    )
+    return {
+        "id": p.id,
+        "account_id": p.account_id,
+        "account_name": p.account.name,
+        "street": p.street, "city": p.city, "state": p.state, "zip_code": p.zip_code,
+        "sqft": p.sqft, "beds": p.beds, "baths": p.baths, "year_built": p.year_built,
+        "auto_update": p.auto_update,
+        "current_value": p.account.balance,
+        "estimate": realestate.estimate_from_comps(p),
+        "latest_valuation": (
+            {"value": latest.value, "method": latest.method, "applied": latest.applied,
+             "at": latest.created_at.isoformat()}
+            if latest else None
+        ),
+        "comps": [
+            {"id": c.id, "address": c.address, "price": c.price, "status": c.status,
+             "sale_date": c.sale_date.isoformat() if c.sale_date else None,
+             "sqft": c.sqft, "distance_miles": c.distance_miles, "source": c.source}
+            for c in comps
+        ],
+    }
+
+
+@app.get("/api/properties")
+def list_properties(_: str = Depends(require_auth)):
+    with session_scope() as session:
+        props = session.execute(select(Property)).scalars().all()
+        return {
+            "rentcast_configured": bool(config.RENTCAST_API_KEY),
+            "properties": [_property_payload(p) for p in props],
+        }
+
+
+@app.post("/api/properties")
+def upsert_property(body: PropertyBody, _: str = Depends(require_auth)):
+    """Attach comps tracking to a manual property account (upserts by account)."""
+    with session_scope() as session:
+        account = session.get(Account, body.account_id)
+        if not account:
+            raise HTTPException(404, "account not found")
+        if account.source != "manual" or account.kind != "property":
+            raise HTTPException(400, "tracking attaches to a manual property account")
+        prop = session.execute(
+            select(Property).where(Property.account_id == account.id)
+        ).scalar_one_or_none()
+        if prop is None:
+            prop = Property(account_id=account.id, street="", city="", state="")
+            session.add(prop)
+        prop.street = body.street.strip()
+        prop.city = body.city.strip()
+        prop.state = body.state.strip()
+        prop.zip_code = body.zip_code.strip()
+        prop.sqft = body.sqft
+        prop.beds = body.beds
+        prop.baths = body.baths
+        prop.year_built = body.year_built
+        prop.auto_update = body.auto_update
+        session.flush()
+        return _property_payload(prop)
+
+
+@app.post("/api/properties/{prop_id}/refresh")
+def refresh_property_endpoint(prop_id: str, _: str = Depends(require_auth)):
+    with session_scope() as session:
+        prop = session.get(Property, prop_id)
+        if not prop:
+            raise HTTPException(404, "property not found")
+        result = realestate.refresh_property(session, prop)
+        result["property"] = _property_payload(prop)
+        return result
+
+
+@app.post("/api/properties/{prop_id}/comps")
+def add_comp(prop_id: str, body: CompBody, _: str = Depends(require_auth)):
+    with session_scope() as session:
+        prop = session.get(Property, prop_id)
+        if not prop:
+            raise HTTPException(404, "property not found")
+        sale_date = None
+        if body.sale_date:
+            try:
+                sale_date = date.fromisoformat(body.sale_date)
+            except ValueError:
+                raise HTTPException(400, "sale_date must be an ISO date")
+        comp, created = realestate.upsert_comp(
+            session, prop, source="manual", address=body.address, price=body.price,
+            status=body.status, sale_date=sale_date, sqft=body.sqft, beds=body.beds,
+            baths=body.baths, distance_miles=body.distance_miles,
+        )
+        return {"id": comp.id, "created": created,
+                "estimate": realestate.estimate_from_comps(prop)}
+
+
+@app.delete("/api/comps/{comp_id}")
+def delete_comp(comp_id: str, _: str = Depends(require_auth)):
+    with session_scope() as session:
+        comp = session.get(Comp, comp_id)
+        if not comp:
+            raise HTTPException(404, "comp not found")
+        session.delete(comp)
         return {"ok": True}
 
 

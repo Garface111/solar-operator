@@ -84,6 +84,10 @@
         <span id="manstatus" class="muted"></span>
       </form>
     </section>
+    <section id="realestate" class="hidden">
+      <h2>Real estate <span class="muted">— comps drive the value</span></h2>
+      <div id="properties"></div>
+    </section>
     <section>
       <h2>This month</h2>
       <div id="month" class="muted">—</div>
@@ -177,7 +181,7 @@ async function doLogin() {
   try {
     await api("/api/login", {method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({password: $("pw").value})});
-    show(true); refresh(); loadThread(); loadMemories(); loadDocs();
+    show(true); refresh(); loadThread(); loadMemories(); loadDocs(); loadProperties();
   } catch (e) { $("loginerr").textContent = "Wrong password."; }
 }
 $("pw").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
@@ -309,6 +313,122 @@ async function loadDocs() {
     "<tr><td class=muted>Vault is empty — start with the deed, mortgage note, and insurance policies.</td></tr>");
 }
 
+let RENTCAST_ON = false;
+
+async function loadProperties() {
+  const [d, o] = await Promise.all([api("/api/properties"), api("/api/overview")]);
+  RENTCAST_ON = d.rentcast_configured;
+  const tracked = new Set(d.properties.map(p => p.account_id));
+  const untracked = o.net_worth.accounts.filter(a =>
+    a.source === "manual" && a.kind === "property" && !tracked.has(a.account_id));
+  const sec = $("realestate");
+  sec.classList.toggle("hidden", !d.properties.length && !untracked.length);
+  let html = d.properties.map(p => {
+    const specs = [p.sqft && `${p.sqft} sqft`, p.beds && `${p.beds} bd`,
+                   p.baths && `${p.baths} ba`, p.year_built && `built ${p.year_built}`]
+                  .filter(Boolean).join(" · ");
+    const est = p.estimate;
+    const lv = p.latest_valuation;
+    const basis = est
+      ? `comps estimate ${fmt(est.value)} — ${est.basis}`
+      : "no usable comps yet — add recent nearby sales below";
+    const applied = lv
+      ? `last valuation ${fmt(lv.value)} (${lv.method}${lv.applied ? ", applied" : ", not applied"}) ${lv.at.slice(0, 10)}`
+      : "no valuations recorded yet";
+    return `<div class="prop" data-id="${p.id}" style="margin-bottom:14px">
+      <b>${p.street}, ${p.city}, ${p.state} ${p.zip_code}</b>
+      <span class="muted">${specs ? " — " + specs : ""}</span>
+      <div class="big">${p.current_value == null ? "—" : fmt(p.current_value)}</div>
+      <div class="muted">${basis}<br>${applied}</div>
+      <table>` +
+      (p.comps.length ? "<tr><th>Comp</th><th>Status</th><th>Sold</th><th class=num>Price</th><th class=num>$/sqft</th><th class=num>mi</th><th></th></tr>" : "") +
+      p.comps.map(c =>
+        `<tr><td>${c.address}<span class=muted> · ${c.source}</span></td><td class=muted>${c.status}</td>` +
+        `<td class=muted>${c.sale_date || "—"}</td><td class=num>${fmt(c.price)}</td>` +
+        `<td class=num>${c.sqft ? "$" + Math.round(c.price / c.sqft) : "—"}</td>` +
+        `<td class=num>${c.distance_miles == null ? "—" : c.distance_miles.toFixed(1)}</td>` +
+        `<td><button class=ghost onclick="delComp('${c.id}')">✕</button></td></tr>`).join("") +
+      `</table>
+      <form class="inline" style="margin-top:8px" onsubmit="return addComp(event,'${p.id}')">
+        <input type="text" name="address" placeholder="Comp address" required style="width:190px">
+        <input type="number" name="price" placeholder="Sale price" required style="width:110px">
+        <input type="date" name="sale_date" title="Sale date">
+        <input type="number" name="sqft" placeholder="sqft" style="width:80px">
+        <input type="number" name="distance_miles" placeholder="mi" step="0.1" style="width:70px">
+        <button type="submit">Add comp</button>
+        <button type="button" class="ghost" ${RENTCAST_ON ? "" : "disabled title='Set RENTCAST_API_KEY in .env to pull comps automatically'"}
+          onclick="refreshProp('${p.id}')">Refresh from market</button>
+        <label class="muted"><input type="checkbox" ${p.auto_update ? "checked" : ""}
+          onchange="toggleAuto('${p.id}', this.checked)"> auto-apply to net worth</label>
+        <span class="muted propstatus"></span>
+      </form>
+    </div>`;
+  }).join("");
+  if (untracked.length) {
+    html += `<form class="inline" id="trackform" style="margin-top:6px">
+      <select id="trackaccount">` +
+      untracked.map(a => `<option value="${a.account_id}">${a.name}</option>`).join("") +
+      `</select>
+      <input type="text" id="trstreet" placeholder="Street address" required>
+      <input type="text" id="trcity" placeholder="City" required style="width:110px">
+      <input type="text" id="trstate" placeholder="ST" required style="width:50px">
+      <input type="text" id="trzip" placeholder="ZIP" style="width:80px">
+      <input type="number" id="trsqft" placeholder="sqft" style="width:80px">
+      <button type="submit">Track comps</button>
+    </form>
+    <p class="muted">Attach neighborhood-comps tracking to this property.</p>`;
+  }
+  $("properties").innerHTML = html;
+  const tf = $("trackform");
+  if (tf) tf.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    await api("/api/properties", {method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({account_id: $("trackaccount").value, street: $("trstreet").value,
+        city: $("trcity").value, state: $("trstate").value, zip_code: $("trzip").value,
+        sqft: $("trsqft").value ? parseInt($("trsqft").value) : null})});
+    loadProperties();
+  });
+}
+
+async function addComp(e, propId) {
+  e.preventDefault();
+  const f = e.target;
+  const body = {address: f.address.value, price: parseFloat(f.price.value),
+    sale_date: f.sale_date.value || "", status: "sold",
+    sqft: f.sqft.value ? parseInt(f.sqft.value) : null,
+    distance_miles: f.distance_miles.value ? parseFloat(f.distance_miles.value) : null};
+  await api(`/api/properties/${propId}/comps`, {method: "POST",
+    headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  loadProperties();
+  return false;
+}
+
+async function delComp(id) { await api("/api/comps/" + id, {method: "DELETE"}); loadProperties(); }
+
+async function refreshProp(id) {
+  const status = document.querySelector(`.prop[data-id="${id}"] .propstatus`);
+  if (status) status.textContent = "checking the market…";
+  try {
+    const r = await api(`/api/properties/${id}/refresh`, {method: "POST"});
+    if (status) status.textContent = r.fetch_error ? "fetch failed: " + r.fetch_error :
+      `${r.comps_added} new comp(s)` + (r.applied ? `, value updated to ${fmt(r.value)}` : "");
+  } catch (err) { if (status) status.textContent = err.message; }
+  refresh(); loadProperties();
+}
+
+async function toggleAuto(id, on) {
+  const d = await api("/api/properties");
+  const p = d.properties.find(x => x.id === id);
+  if (!p) return;
+  await api("/api/properties", {method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({account_id: p.account_id, street: p.street, city: p.city,
+      state: p.state, zip_code: p.zip_code, sqft: p.sqft, beds: p.beds, baths: p.baths,
+      year_built: p.year_built, auto_update: on})});
+  loadProperties();
+}
+
 async function delDoc(id) {
   if (!confirm("Remove this document from the vault? The original file is deleted too.")) return;
   await api("/api/documents/" + id, {method: "DELETE"}); loadDocs();
@@ -343,12 +463,12 @@ $("chatform").addEventListener("submit", async (e) => {
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({message: text, speaker: $("speaker").value})});
     pending.textContent = res.reply;
-    refresh(); loadMemories(); loadDocs();  // the agent may have created rules, memories, or annotations
+    refresh(); loadMemories(); loadDocs(); loadProperties();  // the agent may have written rules, memories, annotations, comps, or values
   } catch (err) { pending.textContent = "Error: " + err.message; }
 });
 
 // Auto-login check: overview 401s if not authenticated.
-api("/api/overview").then(() => { show(true); refresh(); loadThread(); loadMemories(); loadDocs(); }).catch(() => show(false));
+api("/api/overview").then(() => { show(true); refresh(); loadThread(); loadMemories(); loadDocs(); loadProperties(); }).catch(() => show(false));
 </script>
 </body>
 </html>

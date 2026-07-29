@@ -38,6 +38,10 @@ CLAUDE_CLI_MODEL = _env("CLAUDE_CLI_MODEL")  # empty = the CLI's default model
 
 SIMPLEFIN_ACCESS_URL = _env("SIMPLEFIN_ACCESS_URL")
 
+# --- Real estate: comps + AVM via RentCast (free tier: 50 requests/month) ---
+RENTCAST_API_KEY = _env("RENTCAST_API_KEY")
+REALESTATE_REFRESH_DAYS = int(_env("REALESTATE_REFRESH_DAYS", "7") or 7)
+
 NOTIFY_EMAILS = [e.strip() for e in _env("NOTIFY_EMAILS").split(",") if e.strip()]
 NOTIFY_FROM = _env("NOTIFY_FROM", "bankai@localhost")
 RESEND_API_KEY = _env("RESEND_API_KEY")

@@ -20,8 +20,8 @@ from ..intelligence.insights import (
     upcoming_bills,
 )
 from ..intelligence.recurring import detect_recurring
-from ..models import Account, Document, MemoryNote, Rule, Transaction
-from .. import vault
+from ..models import Account, Document, MemoryNote, Property, Rule, Transaction, Valuation
+from .. import realestate, vault
 from ..rules.engine import RULE_KINDS
 
 READ_PAGE_CHARS = 30_000
@@ -160,6 +160,58 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "get_property_valuation",
+        "description": (
+            "List tracked real-estate properties with their current value (the account "
+            "balance in net worth), latest valuation record, comps on file, and a fresh "
+            "comps-based estimate. Call this for any question about home value, equity, "
+            "or the local market picture."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "add_property_comp",
+        "description": (
+            "Record a comparable sale/listing near a tracked property — use when the "
+            "household mentions one ('the place two doors down sold for 1.5M') or you "
+            "learn of one. Comps feed the value estimate, so only record ones you have "
+            "a concrete source for, and say where it came from in your reply."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "property_id": {"type": "string"},
+                "address": {"type": "string"},
+                "price": {"type": "number"},
+                "status": {"type": "string", "enum": ["sold", "active", "pending"]},
+                "sale_date": {"type": "string", "description": "ISO date, if known"},
+                "sqft": {"type": "integer"},
+                "distance_miles": {"type": "number"},
+            },
+            "required": ["property_id", "address", "price"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "set_property_value",
+        "description": (
+            "Adjust a tracked property's value — this changes the account balance and "
+            "therefore net worth, and is recorded with your reasoning. Only do this on "
+            "comps/market evidence or an owner's instruction, never a hunch; always "
+            "restate the old value, new value, and basis in your reply."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "property_id": {"type": "string"},
+                "value": {"type": "number"},
+                "reasoning": {"type": "string", "description": "Evidence for this value"},
+            },
+            "required": ["property_id", "value", "reasoning"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "save_memory",
         "description": (
             "Save or update a persistent memory note for yourself (upsert by title). "
@@ -278,6 +330,70 @@ def _dispatch(session: Session, name: str, args: dict):
             return {"error": "rule not found"}
         rule.enabled = False
         return {"disabled": True, "rule_id": rule.id, "name": rule.name}
+    if name == "get_property_valuation":
+        props = session.execute(select(Property)).scalars().all()
+        out = []
+        for p in props:
+            latest = max(p.valuations, key=lambda v: v.created_at, default=None)
+            comps = sorted(
+                realestate.usable_comps(p),
+                key=lambda c: (c.sale_date or date.min),
+                reverse=True,
+            )
+            out.append({
+                "property_id": p.id,
+                "address": f"{p.street}, {p.city}, {p.state} {p.zip_code}".strip(),
+                "specs": {"sqft": p.sqft, "beds": p.beds, "baths": p.baths,
+                          "year_built": p.year_built},
+                "current_value": p.account.balance,
+                "auto_update": p.auto_update,
+                "fresh_comps_estimate": realestate.estimate_from_comps(p),
+                "latest_valuation": (
+                    {"value": latest.value, "method": latest.method,
+                     "applied": latest.applied, "at": latest.created_at.isoformat(),
+                     "detail": latest.detail}
+                    if latest else None
+                ),
+                "comps": [
+                    {"address": c.address, "price": c.price, "status": c.status,
+                     "sale_date": c.sale_date.isoformat() if c.sale_date else None,
+                     "sqft": c.sqft, "distance_miles": c.distance_miles,
+                     "source": c.source}
+                    for c in comps[:15]
+                ],
+            })
+        return out
+    if name == "add_property_comp":
+        prop = session.get(Property, args["property_id"])
+        if not prop:
+            return {"error": "property not found — call get_property_valuation for ids"}
+        sale_date = date.fromisoformat(args["sale_date"]) if args.get("sale_date") else None
+        comp, created = realestate.upsert_comp(
+            session, prop, source="agent", address=args["address"],
+            price=float(args["price"]), status=args.get("status") or "sold",
+            sale_date=sale_date, sqft=args.get("sqft"),
+            distance_miles=args.get("distance_miles"),
+        )
+        return {
+            "recorded": True, "created": created, "comp_id": comp.id,
+            "fresh_estimate": realestate.estimate_from_comps(prop),
+        }
+    if name == "set_property_value":
+        prop = session.get(Property, args["property_id"])
+        if not prop:
+            return {"error": "property not found — call get_property_valuation for ids"}
+        if prop.account.kind != "property":
+            return {"error": "linked account is not a property account"}
+        old = prop.account.balance
+        valuation = Valuation(
+            property_id=prop.id, value=float(args["value"]), method="agent",
+            detail=args["reasoning"],
+        )
+        session.add(valuation)
+        session.flush()
+        realestate.apply_value(session, prop, valuation)
+        return {"updated": True, "old_value": old, "new_value": prop.account.balance,
+                "reasoning_recorded": True}
     if name == "list_documents":
         docs = session.execute(select(Document).order_by(Document.added_at)).scalars().all()
         return [

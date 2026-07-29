@@ -83,6 +83,35 @@ original saved to `documents/` → dashboard renders it, all confirmed end-to-en
 - Tests: `tests/test_vault.py` (extraction incl. generated docx + pypdf blank-page,
   add/dedupe/delete/search, all four tool dispatches incl. paging) + persona test.
 
+## Real-estate comps tracker — DONE (2026-07-29, live on Ford's real home)
+
+Ford: track neighborhood comps so the AI can actively adjust home value. Built and
+live (84/84 tests):
+- `models.py`: `Property` (1:1 with a manual property Account — the account balance
+  IS the value), `Comp` (source: rentcast|manual|agent), `Valuation` (every value
+  with method avm|comps_median|manual|agent + evidence, `applied` flag).
+- `realestate.py`: recency×distance-weighted $/sqft median estimate (falls back to
+  raw prices without sqft; comps >18mo excluded), RentCast AVM fetch
+  (`RENTCAST_API_KEY`, free tier 50/mo — NOT yet configured, Ford must sign up),
+  `refresh_property` (fetch → upsert comps → estimate → Valuation → auto-apply w/
+  snapshot when `auto_update`).
+- Agent tools: `get_property_valuation`, `add_property_comp`,
+  `set_property_value` (the agent's ONLY balance write; property accounts only,
+  reasoning recorded as a Valuation). Persona has a Real estate paragraph.
+- API: GET/POST `/api/properties`, POST `/api/properties/{id}/refresh`,
+  POST `/api/properties/{id}/comps`, DELETE `/api/comps/{id}`. UI: Real estate
+  section under Net worth (comps table, add-comp form, market-refresh button that
+  disables without the key, auto-apply toggle, attach-tracking form).
+- Scheduler: `_realestate_loop` refreshes all properties every
+  `REALESTATE_REFRESH_DAYS` (default 7) — only when the RentCast key is set.
+- LIVE STATE: Ford's home (36001 Cabrillo Dr, Fremont CA 94536, 3bd/2ba 1,148sqft,
+  bought Feb 13 2026 for $1.46M) is tracked with 7 REAL sold comps hand-gathered
+  from its Redfin page; value auto-applied at $1,398,000 ($1,218/sqft weighted
+  median). Known divergence, recorded in the Household picture note: Redfin AVM
+  said $1,649,510 on 2026-07-29; we deliberately use sold comps, not AVMs.
+  NEXT: Ford signs up at rentcast.io (free) → `RENTCAST_API_KEY` in .env → weekly
+  autonomous refresh replaces hand-gathered comps.
+
 ## Where things live
 
 - Working tree: `/home/user/solar-operator/bankai/` on branch

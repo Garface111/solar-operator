@@ -121,6 +121,72 @@ class Document(Base):
     added_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class Property(Base):
+    """A tracked real-estate asset. Links the manual property Account (whose
+    balance IS the current value) to an address, its specs, and its comps."""
+
+    __tablename__ = "properties"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _uid("prop"))
+    account_id: Mapped[str] = mapped_column(ForeignKey("accounts.id"), unique=True, index=True)
+    street: Mapped[str] = mapped_column(String(200))
+    city: Mapped[str] = mapped_column(String(80))
+    state: Mapped[str] = mapped_column(String(20))
+    zip_code: Mapped[str] = mapped_column(String(20), default="")
+    sqft: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    beds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    baths: Mapped[float | None] = mapped_column(Float, nullable=True)
+    year_built: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # When True, a refresh applies its estimate to the account balance (with a
+    # snapshot); when False, estimates are recorded but the value is hand-set.
+    auto_update: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    account: Mapped[Account] = relationship()
+    comps: Mapped[list["Comp"]] = relationship(back_populates="property_", cascade="all, delete-orphan")
+    valuations: Mapped[list["Valuation"]] = relationship(back_populates="property_", cascade="all, delete-orphan")
+
+
+class Comp(Base):
+    """A comparable sale/listing near a tracked property. Sources: rentcast (API),
+    manual (dashboard), agent (the copilot heard about a sale)."""
+
+    __tablename__ = "comps"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _uid("comp"))
+    property_id: Mapped[str] = mapped_column(ForeignKey("properties.id"), index=True)
+    source: Mapped[str] = mapped_column(String(20), default="manual")  # rentcast | manual | agent
+    external_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    address: Mapped[str] = mapped_column(String(240))
+    status: Mapped[str] = mapped_column(String(20), default="sold")  # sold | active | pending
+    price: Mapped[float] = mapped_column(Float)
+    sale_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    sqft: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    beds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    baths: Mapped[float | None] = mapped_column(Float, nullable=True)
+    distance_miles: Mapped[float | None] = mapped_column(Float, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    property_: Mapped[Property] = relationship(back_populates="comps")
+
+
+class Valuation(Base):
+    """Every value the tracker computed or was told, with method + evidence.
+    applied=True means it became the account balance (and snapshotted)."""
+
+    __tablename__ = "valuations"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _uid("val"))
+    property_id: Mapped[str] = mapped_column(ForeignKey("properties.id"), index=True)
+    value: Mapped[float] = mapped_column(Float)
+    method: Mapped[str] = mapped_column(String(20))  # avm | comps_median | manual | agent
+    detail: Mapped[str] = mapped_column(Text, default="")  # evidence: comp count, $/sqft, reasoning
+    applied: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    property_: Mapped[Property] = relationship(back_populates="valuations")
+
+
 class MemoryNote(Base):
     """Persistent agent memory: small titled notes the copilot writes for itself,
     always injected into its system prompt."""
