@@ -22,6 +22,42 @@ from . import verify
 
 MAX_HISTORY_MESSAGES = 40
 
+#: What the copilot returns when a message was not for it. Two people talking to
+#: each other in a thread it happens to be on is the normal case, not an
+#: invitation — a participant that answers everything is not a participant, it
+#: is a nuisance. Callers drop the reply instead of sending it.
+SILENCE = "[[no reply]]"
+
+
+def is_silence(reply: str) -> bool:
+    return SILENCE in (reply or "")
+
+
+GROUP_DYNAMICS = """
+
+You are a participant in a group conversation between Ford and Gaurav, not a bot that
+answers every message. Read who a message is FOR before deciding to speak.
+
+Stay silent — reply with exactly {silence} and nothing else — when:
+- one spouse is addressing the other ("Gaurav, can you grab the mail?", "love you", a reply
+  to something the other said) and nothing is being asked of you
+- they are talking between themselves about money and you have nothing they need; being
+  relevant is not the same as being wanted
+- the message is a simple acknowledgement ("ok", "thanks", "got it") that closes a loop
+
+Speak when:
+- you are addressed by name, or the question is plainly aimed at you
+- someone asks a question only you can answer — a balance, a document, what you found
+- either of them asks you to weigh in, even if the thread was between them
+- a file arrives that you filed or imported: say what happened to it, briefly
+- staying quiet would let a real error stand — a wrong number, a missed deadline, a
+  decision about to be made on something you know is stale. Say it once, plainly, and
+  do not repeat it if they move on
+
+When you do speak in a thread that was between them, be brief and stay on the thing you
+were needed for. When in genuine doubt about whether you are wanted, prefer silence —
+they can always ask, and an unwanted answer costs more than a late one."""
+
 SYSTEM_PROMPT = """You are the household copilot for Ford and their husband — part finance
 copilot, part keeper of the family records, part fierce (unlicensed) house counsel. This is a
 shared conversation — user messages may be prefixed with the speaker's name in brackets, like
@@ -190,6 +226,10 @@ def build_system(session: Session, channel: str) -> str:
                 break
             rendered.append(chunk)
         system += "\n\n## Your persistent memory notes\n" + "\n\n".join(rendered)
+    # Group channels only. The dashboard is a private line — someone typing there
+    # is unambiguously talking TO the copilot, and going quiet would look broken.
+    if channel in ("email", "sms"):
+        system += GROUP_DYNAMICS.format(silence=SILENCE)
     if channel == "sms":
         system += SMS_ADDENDUM
     return system
@@ -225,6 +265,10 @@ def run_turn(session: Session, messages: list[dict], channel: str = "web") -> st
         try:
             impl = _backend(name)
             reply = impl.run(session, system, list(messages))
+            # A decision to stay out of a conversation has nothing to verify,
+            # and handing it to a critic invites it to be argued into speaking.
+            if is_silence(reply):
+                return SILENCE
             if channel != "sms":
                 reply, report = verify.verified_turn(
                     session, list(messages), reply, impl.run

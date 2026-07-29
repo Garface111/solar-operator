@@ -241,6 +241,14 @@ def process_message(session: Session, parsed: dict) -> str | None:
     history = shared_thread.build_history(session)
     reply = agent_chat.run_turn(session, history, channel="email")
 
+    # Not everything in a shared thread is addressed to it. The message is
+    # already stored above, so the copilot has still HEARD it and carries the
+    # context — it simply does not speak. Nothing is sent and nothing is
+    # recorded as having been said, because it wasn't.
+    if agent_chat.is_silence(reply):
+        log.info("staying out of a message between the spouses: %.60s", body)
+        return agent_chat.SILENCE
+
     session.add(
         ChatMessage(channel="email", role="assistant", speaker="copilot", content=reply)
     )
@@ -282,7 +290,7 @@ def poll_resend(session: Session) -> dict:
         adopted = resend_inbound.adopt_backlog(session)
         return {"status": "initialized", "adopted": adopted}
 
-    answered, ignored, filed, imported = 0, 0, 0, 0
+    answered, ignored, filed, imported, silent = 0, 0, 0, 0, 0
     for summary in resend_inbound.new_messages(session):
         resend_id = summary["id"]
         # Claim first: the reply must go out exactly once even if two workers
@@ -342,9 +350,18 @@ def poll_resend(session: Session) -> dict:
             log.exception("failed handling email %s", resend_id)
             resend_inbound.release(session, resend_id)  # retried on the next poll
             continue
-        resend_inbound.settle(session, resend_id, "answered" if reply else "ignored")
-        answered += int(bool(reply))
-    return {"status": "ok", "answered": answered, "ignored": ignored,
+        # Three distinct outcomes, kept distinct in the audit trail: a stranger
+        # ignored, a household message heard but not answered, and a real reply.
+        if reply is None:
+            resend_inbound.settle(session, resend_id, "ignored")
+            ignored += 1
+        elif agent_chat.is_silence(reply):
+            resend_inbound.settle(session, resend_id, "silent")
+            silent += 1
+        else:
+            resend_inbound.settle(session, resend_id, "answered")
+            answered += 1
+    return {"status": "ok", "answered": answered, "silent": silent, "ignored": ignored,
             "documents_filed": filed, "statements_imported": imported}
 
 
