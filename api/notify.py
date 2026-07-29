@@ -375,28 +375,26 @@ def send_welcome_email(to: str, name: str, tenant_key: str, plan: str) -> bool:
 
     body_html = (
         f"<p>Your NEPOOL Operator account is live on the <strong>{_html.escape(plan_label)}</strong> plan. "
-        f"You're a few minutes from automatic quarterly reporting.</p>"
-        f"<p><strong>Setup, in three steps:</strong></p>"
-        f'<ol style="padding-left:20px;margin:14px 0;">'
-        f'<li style="margin:10px 0;"><strong>Install the Chrome extension</strong> — '
-        f'<a href="{install_url}" style="color:#047857;">Add NEPOOL Operator Sync to Chrome</a></li>'
-        f'<li style="margin:10px 0;"><strong>The extension auto-pairs with your account</strong> — '
-        f'open your <a href="{_dash}" style="color:#047857;">NEPOOL Operator dashboard</a> '
-        f"once after installing and the extension links itself automatically. No codes to copy.</li>"
-        f'<li style="margin:10px 0;"><strong>Sign into your utility portal once</strong> — visit '
-        f'<a href="https://greenmountainpower.com" style="color:#047857;">greenmountainpower.com</a> '
-        f"(or Vermont Electric Co-op), log in with the extension active. We capture the rest.</li>"
-        f"</ol>"
+        f"You're two minutes from automatic quarterly reporting.</p>"
+        f"<p><strong>Setup, one step:</strong></p>"
+        f'<p style="margin:14px 0;">Open your <a href="{_dash}" style="color:#047857;">NEPOOL Operator dashboard</a>, '
+        f"go to <strong>Account → Cloud Capture</strong>, and save your utility login — Green Mountain Power "
+        f"or Vermont Electric Co-op, just a username and password, once. We sign in and pull your bills "
+        f"automatically from there. No browser extension, nothing to install.</p>"
         f'<p style="margin-top:24px;background:#ecfdf5;border-radius:4px;padding:16px 20px;font-size:14px;color:#3a5a42;">'
         f"<strong>What happens next:</strong><br>"
-        f"Once you finish setup, the extension will pull your utility bills automatically "
+        f"Once you save your login, we pull your utility bills automatically "
         f"every 6 hours in the background. Your first quarterly NEPOOL-GIS report goes "
         f"out on <strong>{next_q}</strong> — you don't need to do anything between now and then. "
         f"If you ever want to trigger a report early, there's a \"Send a report now\" button in your dashboard."
         f"</p>"
         f'<p style="margin-top:24px;background:#faedd8;border-radius:4px;padding:14px 18px;font-size:13px;color:#6b4423;border:1px solid #e6d4bd;">'
-        f"<strong>Setting up on a new device later?</strong> If auto-pairing doesn't trigger, "
-        f"open the extension, click \"Enter code manually,\" and paste your activation code: "
+        f"<strong>Prefer to keep your utility password off our servers?</strong> Install the "
+        f'<a href="{install_url}" style="color:#6b4423;">NEPOOL Operator Sync</a> Chrome extension instead — '
+        f"open your dashboard once after installing and it auto-pairs (no codes to copy), then log into "
+        f"your utility portal with the extension active; your password stays in your browser, never ours. "
+        f"Setting up a second device later? Open the extension, click \"Enter code manually,\" and paste "
+        f"your activation code: "
         f'<span style="font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:700;">{tenant_key}</span>'
         f"</p>"
         f'<p style="margin-top:24px;color:#3a5a42;font-size:14px;">'
@@ -406,34 +404,38 @@ def send_welcome_email(to: str, name: str, tenant_key: str, plan: str) -> bool:
     )
     body_text = (
         f"Your account is live on the {plan_label} plan.\n\n"
-        f"Setup (3 steps):\n\n"
-        f"  1. Install the Chrome extension: {install_url}\n"
-        f"  2. Open your NEPOOL Operator dashboard ({_dash}) — the\n"
-        f"     extension auto-pairs with your account. No codes to copy.\n"
-        f"  3. Sign into your utility portal once (greenmountainpower.com or Vermont\n"
-        f"     Electric Co-op). The extension captures the rest.\n\n"
+        f"Setup (one step):\n\n"
+        f"  Open your NEPOOL Operator dashboard ({_dash}), go to Account -> Cloud\n"
+        f"  Capture, and save your utility login (Green Mountain Power or Vermont\n"
+        f"  Electric Co-op) — a username and password, once. We sign in and pull\n"
+        f"  your bills automatically from there. No browser extension needed.\n\n"
         f"What happens next:\n"
-        f"  Once set up, the extension pulls your utility bills every 6 hours in the\n"
+        f"  Once you save your login, we pull your utility bills every 6 hours in the\n"
         f"  background. Your first quarterly report goes out on {next_q}. You\n"
         f"  don't need to do anything between now and then.\n\n"
-        f"Setting up on a new device later? If auto-pairing doesn't trigger, open the\n"
-        f"extension, click \"Enter code manually,\" and paste your activation code:\n"
+        f"Prefer to keep your utility password off our servers? Install the NEPOOL\n"
+        f"Operator Sync Chrome extension instead: {install_url}\n"
+        f"Open your dashboard once after installing and it auto-pairs (no codes to\n"
+        f"copy), then log into your utility portal with the extension active — your\n"
+        f"password stays in your browser, never ours.\n\n"
+        f"Setting up a second device later? Open the extension, click \"Enter code\n"
+        f"manually,\" and paste your activation code:\n"
         f"  {tenant_key}\n\n"
         f"Questions? Just reply.\n\n"
         f"— The NEPOOL Operator team"
     )
     html = render_email_skin(
-        preheader="Your account is ready — 3 steps to go live.",
+        preheader="Your account is ready — one step to go live.",
         headline="NEPOOL Operator",
         intro_line=f"Welcome aboard, {first}.",
         body_html=body_html,
-        cta={"label": "Install the Chrome extension", "url": install_url},
+        cta={"label": "Open your dashboard", "url": _dash},
     )
     text = render_email_skin_text(
         headline="NEPOOL Operator",
         intro_line=f"Welcome aboard, {name.split()[0] if name else 'there'}.",
         body_text=body_text,
-        cta={"label": "Install the Chrome extension", "url": install_url},
+        cta={"label": "Open your dashboard", "url": _dash},
     )
     return _send_via_resend(
         to=to,
@@ -466,8 +468,9 @@ def send_sample_workbook_email(to: str, name: str,
         f"exactly what we'll send your clients each quarter — a pixel-perfect NEPOOL-GIS "
         f"generation workbook, one sheet per array, covering the last six complete "
         f"quarters with monthly MWh and REC counts.</p>"
-        f"<p>This particular file uses made-up \"Demo Array\" data, but once your Green "
-        f"Mountain Power bills sync through the Chrome extension, your real arrays will "
+        f"<p>This particular file uses made-up \"Demo Array\" data, but once you save your Green "
+        f"Mountain Power login under <strong>Account → Cloud Capture</strong> in your dashboard "
+        f"(a two-minute, one-time setup — no browser extension needed), your real arrays will "
         f"appear automatically and go out on the schedule you choose. You can manage "
         f"everything — clients, schedule, and recipients — from your "
         f'<a href="{dashboard_url}" style="color:#047857;">dashboard</a>.</p>'
@@ -480,9 +483,10 @@ def send_sample_workbook_email(to: str, name: str,
         f"send your clients each quarter — a pixel-perfect NEPOOL-GIS generation workbook,\n"
         f"one sheet per array, covering the last six complete quarters with monthly MWh\n"
         f"and REC counts.\n\n"
-        f"This file uses made-up \"Demo Array\" data, but once your Green Mountain Power\n"
-        f"bills sync through the Chrome extension, your real arrays appear automatically\n"
-        f"and go out on the schedule you choose.\n\n"
+        f"This file uses made-up \"Demo Array\" data, but once you save your Green Mountain\n"
+        f"Power login under Account -> Cloud Capture in your dashboard (a two-minute,\n"
+        f"one-time setup — no browser extension needed), your real arrays appear\n"
+        f"automatically and go out on the schedule you choose.\n\n"
         f"Manage everything at {dashboard_url}\n\n"
         f"Questions? Just reply.\n\n"
         f"— The NEPOOL Operator team"
@@ -953,9 +957,10 @@ def send_add_first_array_email(to: str, name: str,
         f"<p>Hi {first},</p>"
         f"<p>You signed up for {_brand} but haven't added any arrays yet. "
         f"We've extended your trial by 3 more days so you have time to finish setup.</p>"
-        f'<p>Head to your <a href="{dashboard_url}" style="color:{_link};">dashboard</a>, '
-        f"install the Chrome extension, and log into your utility portal to pull your "
-        f"arrays automatically.</p>"
+        f'<p>Head to your <a href="{dashboard_url}" style="color:{_link};">dashboard</a>, open '
+        f"<strong>Account → Cloud Capture</strong>, and save your utility login — we'll pull your "
+        f"arrays automatically from there. No browser extension needed (prefer to keep your "
+        f"password off our servers? the free Chrome extension still works too).</p>"
         f"{_billing_html}"
         f"<p>Questions? Just reply — we read every email.</p>"
         f"<p style=\"margin-top:24px;\">— {_brand}</p>"
