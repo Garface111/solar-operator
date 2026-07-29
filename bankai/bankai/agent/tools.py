@@ -510,6 +510,29 @@ TOOLS: list[dict] = [
         "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
+        "name": "email_household",
+        "description": (
+            "Start an email thread with BOTH spouses — use it when something is "
+            "worth their attention away from the dashboard, or when you need "
+            "something only they can provide (a document, a decision, a "
+            "confirmation). Both are always addressed, so it is one conversation "
+            "rather than a message to whoever you happened to write to; their "
+            "replies come back to you and continue this same thread. Write it as "
+            "a person would: say what you know, what you need, and why it matters "
+            "to them — not a form letter. This reaches only the household; "
+            "anything addressed to an outside company goes through propose_action."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "subject": {"type": "string"},
+                "body": {"type": "string", "description": "Plain text. No markdown — this is email."},
+            },
+            "required": ["subject", "body"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "publish_actuals_to_sheet",
         "description": (
             "Write the household's real current figures — cash, investments, cards, "
@@ -899,6 +922,12 @@ def _dispatch(session: Session, name: str, args: dict):
         if not sheets.configured():
             return {"error": "SHEETS_ID is not set in .env — no planning sheet linked"}
         return sheets.reconcile(session)
+    if name == "email_household":
+        from ..messaging import email_thread
+
+        if not email_thread.configured():
+            return {"error": "the email channel is not configured"}
+        return email_thread.start_thread(session, args["subject"], args["body"])
     if name == "publish_actuals_to_sheet":
         if not sheets.can_write():
             return {

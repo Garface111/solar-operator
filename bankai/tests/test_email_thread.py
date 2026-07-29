@@ -184,3 +184,34 @@ def test_resend_key_alone_cannot_receive(monkeypatch):
     monkeypatch.setattr(config, "RESEND_API_KEY", "re_test")
     assert email_harvest.can_send() is True
     assert email_thread.configured() is False
+
+
+# --- the copilot opening a thread of its own ---
+
+def test_start_thread_addresses_both_spouses(session, monkeypatch):
+    sent = {}
+    monkeypatch.setattr(
+        email_thread.email_harvest, "send_message",
+        lambda **kw: sent.update(kw) or "sent via Resend",
+    )
+    out = email_thread.start_thread(session, "Apple Card export", "Body text here.")
+    assert out["sent"] is True
+    assert sent["to"] == sorted([FORD, SPOUSE])  # never one spouse alone
+    assert sent["subject"] == "Apple Card export"
+    assert sent["text"] == "Body text here."
+
+
+def test_start_thread_records_it_in_the_shared_conversation(session, monkeypatch):
+    """What the copilot says by email must be part of the same thread it reads
+    back, or a reply arrives with no memory of what prompted it."""
+    monkeypatch.setattr(email_thread.email_harvest, "send_message", lambda **kw: "ok")
+    email_thread.start_thread(session, "Apple Card export", "Please export it.")
+    row = session.query(ChatMessage).one()
+    assert row.role == "assistant" and row.channel == "email"
+    assert "Apple Card export" in row.content and "Please export it." in row.content
+
+
+def test_start_thread_refuses_with_nobody_to_write_to(session, monkeypatch):
+    monkeypatch.setattr(config, "HOUSEHOLD_EMAILS", "")
+    with pytest.raises(RuntimeError, match="nobody to write to"):
+        email_thread.start_thread(session, "s", "b")

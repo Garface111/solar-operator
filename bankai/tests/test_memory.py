@@ -42,3 +42,13 @@ def test_memory_injected_into_system_prompt(session):
     system = build_system(session, "web")
     assert "## Your persistent memory notes" in system
     assert "house down payment" in system
+
+
+def test_persona_forbids_stale_figures_and_invented_actions(session):
+    """Two live failures, both in one sent email: net worth quoted $10,012 low
+    from pre-sync numbers, and 'I've reclassified it as income going forward'
+    for a capability that does not exist."""
+    system = build_system(session, "web")
+    assert "re-pull every figure" in system
+    assert "Never describe an action you did not take" in system
+    assert "propose_code_change" in system

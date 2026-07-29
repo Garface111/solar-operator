@@ -148,6 +148,34 @@ def household_recipients() -> list[str]:
     return sorted(set(household_emails().values()))
 
 
+def start_thread(session: Session, subject: str, body: str) -> dict:
+    """Open a new email thread addressed to the whole household.
+
+    Only ever to the household itself — this is the copilot talking to the people
+    it works for, the same audience as the SMS broadcast and the rules engine.
+    Anything aimed at an outside party goes through propose_action and the
+    dashboard's approval gate instead.
+
+    The message is recorded in the shared thread first, so what the copilot said
+    by email is part of the same conversation as the dashboard and SMS, and a
+    reply lands with its own words already in context.
+    """
+    recipients = household_recipients()
+    if not recipients:
+        raise RuntimeError("HOUSEHOLD_EMAILS is not configured — nobody to write to")
+
+    session.add(
+        ChatMessage(
+            channel="email", role="assistant", speaker="copilot",
+            content=f"[email to the household — {subject}]\n\n{body}",
+        )
+    )
+    session.commit()
+
+    receipt = email_harvest.send_message(to=recipients, subject=subject, text=body)
+    return {"sent": True, "to": recipients, "subject": subject, "receipt": receipt}
+
+
 def process_message(session: Session, parsed: dict) -> str | None:
     """Store one inbound household email, run a turn, and reply to everyone.
     Returns the reply text, or None when the sender is not household."""
