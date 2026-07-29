@@ -102,6 +102,19 @@ class RuleFiring(Base):
     rule: Mapped[Rule] = relationship(back_populates="firings")
 
 
+class ChatMessage(Base):
+    """Persistent shared conversation (the SMS group thread lives here)."""
+
+    __tablename__ = "chat_messages"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _uid("msg"))
+    channel: Mapped[str] = mapped_column(String(10), default="sms", index=True)  # sms | web
+    role: Mapped[str] = mapped_column(String(10))  # user | assistant
+    speaker: Mapped[str] = mapped_column(String(60), default="")  # household member name | copilot
+    content: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
 class SyncLog(Base):
     __tablename__ = "sync_logs"
 

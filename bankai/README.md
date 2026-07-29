@@ -51,6 +51,27 @@ bank's website and drop them into the dashboard's import form (or POST
 `/api/import/csv`). Column names are auto-detected (date / description / amount, or
 debit+credit pairs). Re-importing the same file is safe — dedupe is built in.
 
+## 3-way text conversation (SMS)
+
+Both of you can text the copilot from your phones, in one shared conversation:
+
+1. Buy a Twilio number, set `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` /
+   `TWILIO_FROM_NUMBER` in `.env`.
+2. List both phones in `HOUSEHOLD_PHONES` (`Ford:+1802...,Sam:+1802...`) — the names
+   label who said what in the thread. **Only these numbers are ever answered.**
+3. Point the Twilio number's incoming-message webhook at
+   `https://<your-deploy>/api/sms/webhook` (requests are signature-validated; set
+   `SMS_PUBLIC_URL` to that exact URL if you're behind a proxy).
+
+How the "group chat" works: carrier group-MMS can't include a Twilio number, so the
+thread is **mirrored** — when one of you texts the copilot, your message is relayed to
+the other ("Ford: what's our net worth?") and the copilot's reply goes to both. Same
+conversation, two mirrored views. The thread is stored in the DB, so context survives
+restarts, and the copilot sees who's speaking.
+
+With Twilio configured, rule notifications (below) are texted to both of you as well
+as emailed (`NOTIFY_SMS=false` to turn off texts).
+
 ## Reminders & auto-messages
 
 Email delivery uses, in order of preference: `RESEND_API_KEY`, else `SMTP_*` settings,

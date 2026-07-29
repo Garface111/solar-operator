@@ -9,7 +9,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 from sqlalchemy import select
 
@@ -18,6 +18,8 @@ from .agent import chat as agent_chat
 from .connectors import simplefin
 from .connectors.csv_import import import_csv
 from .db import init_db, session_scope
+from .messaging import sms
+from .messaging import thread as sms_thread
 from .intelligence.insights import net_worth, net_worth_history, spending_summary, upcoming_bills
 from .models import Rule, RuleFiring, SyncLog, Transaction
 from .rules.engine import RULE_KINDS
@@ -235,6 +237,34 @@ def chat_endpoint(body: ChatBody, token: str = Depends(require_auth)):
         raise HTTPException(502, f"Chat failed: {exc}")
     _chat_histories[token] = new_history
     return {"reply": reply}
+
+
+_EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>'
+
+
+def _webhook_url(request: Request) -> str:
+    if config.SMS_PUBLIC_URL:
+        return config.SMS_PUBLIC_URL
+    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("host", request.url.netloc)
+    return f"{scheme}://{host}{request.url.path}"
+
+
+@app.post("/api/sms/webhook")
+async def sms_webhook(request: Request):
+    """Twilio inbound SMS. Signature-validated; only household numbers get replies."""
+    form = await request.form()
+    params = {k: str(v) for k, v in form.items()}
+    signature = request.headers.get("X-Twilio-Signature", "")
+    if not sms.validate_signature(_webhook_url(request), params, signature):
+        raise HTTPException(403, "invalid Twilio signature")
+    sender = sms.identify_sender(params.get("From", ""))
+    if sender:
+        with session_scope() as session:
+            sms_thread.handle_inbound(session, sender, params.get("Body", ""))
+    # Unknown numbers are ignored silently. Replies go out via the REST API,
+    # so the TwiML response is always empty.
+    return Response(content=_EMPTY_TWIML, media_type="application/xml")
 
 
 @app.post("/api/chat/reset")

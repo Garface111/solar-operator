@@ -59,11 +59,17 @@ def send_email(subject: str, body: str) -> bool:
 
 
 def deliver_firings(session: Session, firings: list[RuleFiring]) -> int:
+    from ..messaging import sms
+
     delivered = 0
+    sms_on = config.NOTIFY_SMS and sms.configured()
     for firing in firings:
         if firing.delivered:
             continue
-        if send_email(firing.subject, firing.body):
+        ok = send_email(firing.subject, firing.body)
+        if sms_on:
+            ok = sms.broadcast(f"{firing.subject}\n{firing.body}"[:1200]) > 0 or ok
+        if ok:
             firing.delivered = True
             delivered += 1
     return delivered

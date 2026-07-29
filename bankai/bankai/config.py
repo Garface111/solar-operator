@@ -38,6 +38,17 @@ SMTP_PORT = int(_env("SMTP_PORT", "587") or 587)
 SMTP_USER = _env("SMTP_USER")
 SMTP_PASSWORD = _env("SMTP_PASSWORD")
 
+# --- SMS group thread (Twilio) ---
+TWILIO_ACCOUNT_SID = _env("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = _env("TWILIO_AUTH_TOKEN")
+TWILIO_FROM_NUMBER = _env("TWILIO_FROM_NUMBER")
+# "Ford:+18025551234,Sam:+18025555678" — names label speakers in the thread
+HOUSEHOLD_PHONES = _env("HOUSEHOLD_PHONES")
+# Exact public URL Twilio posts to, for signature validation behind proxies.
+# If unset, it is reconstructed from the request (X-Forwarded-Proto aware).
+SMS_PUBLIC_URL = _env("SMS_PUBLIC_URL")
+NOTIFY_SMS = _env("NOTIFY_SMS", "true").lower() != "false"
+
 SYNC_INTERVAL_MINUTES = int(_env("SYNC_INTERVAL_MINUTES", "360") or 360)
 RULES_INTERVAL_MINUTES = int(_env("RULES_INTERVAL_MINUTES", "15") or 15)
 PORT = int(_env("PORT", "8300") or 8300)
