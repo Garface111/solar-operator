@@ -1946,10 +1946,35 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
     else:
         amount_rows_html = _row("Solar credit value due", amount_str, strong=True)
         amount_rows_text = f"Solar credit value due: {amount_str}\n"
+    # Invoice hierarchy (Bruce 2026-07-29): Array generation (Group Excess
+    # Shared, from the master bill) → the offtaker's share → their production →
+    # solar credit rate → value due. Each row renders ONLY when the draft
+    # genuinely carries the figure — never derived, never fabricated.
+    _anat_inv = inv.get("bill_anatomy") or {}
+    pool_kwh = _anat_inv.get("group_excess_shared_kwh")
+    if pool_kwh is None:
+        pool_kwh = inv.get("array_group_excess_kwh")
+    share_frac = inv.get("array_share_pct")
+    rate_eff = inv.get("effective_rate_per_kwh") or inv.get("rate_per_kwh")
+    pool_rows_html = ""
+    pool_rows_text = ""
+    if isinstance(pool_kwh, (int, float)) and pool_kwh > 0:
+        pool_rows_html += _row("Array generation (Group Excess Shared)", f"{pool_kwh:,.0f} kWh")
+        pool_rows_text += f"Array generation (Group Excess Shared): {pool_kwh:,.0f} kWh\n"
+        if isinstance(share_frac, (int, float)) and 0 < share_frac <= 1:
+            pool_rows_html += _row("Your share", f"{share_frac * 100:.2f}%")
+            pool_rows_text += f"Your share: {share_frac * 100:.2f}%\n"
+    rate_rows_html = ""
+    rate_rows_text = ""
+    if isinstance(rate_eff, (int, float)) and rate_eff > 0:
+        rate_rows_html = _row("Solar credit rate", f"${rate_eff:,.5f}/kWh")
+        rate_rows_text = f"Solar credit rate: ${rate_eff:,.5f}/kWh\n"
     figures_table = (
         f'<table width="100%" style="font-size:14px;border-collapse:collapse;margin-top:8px;">'
         f'{_row("Billing period", period or "—")}'
+        f'{pool_rows_html}'
         f'{_row("Your production", f"{kwh:,.0f} kWh")}'
+        f'{rate_rows_html}'
         f'{amount_rows_html}'
         f"</table>"
     )
@@ -1997,7 +2022,7 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
             f"{note_text}"
             f"Solar credit invoice for {cust}\n\n"
             f"Billing period: {period or '—'}\n"
-            f"Your production: {kwh:,.0f} kWh\n"
+            f"{pool_rows_text}Your production: {kwh:,.0f} kWh\n{rate_rows_text}"
             f"{amount_rows_text}{pay_cta_text}\n"
             f"The full invoice{' and performance summary are' if sub.include_summary else ' is'} attached.\n\n"
             f"Questions? Just reply to this email."
@@ -2009,7 +2034,7 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
         body_text = (
             f"{html_to_text(letter_html)}\n\n"
             f"Billing period: {period or '—'}\n"
-            f"Your production: {kwh:,.0f} kWh\n"
+            f"{pool_rows_text}Your production: {kwh:,.0f} kWh\n{rate_rows_text}"
             f"{amount_rows_text}{pay_cta_text}\n"
             f"Questions? Just reply to this email."
         )
