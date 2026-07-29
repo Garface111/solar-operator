@@ -48,6 +48,14 @@ VERIFY_REPLIES = (_env("VERIFY_REPLIES", "true") or "true").lower() not in (
 )
 
 SIMPLEFIN_ACCESS_URL = _env("SIMPLEFIN_ACCESS_URL")
+# Each spouse can hold their own SimpleFIN bridge, so neither has to hand their
+# bank credentials to the other's account. Comma-separated; the single-URL form
+# above still works and is treated as a list of one.
+SIMPLEFIN_ACCESS_URLS = [
+    u.strip() for u in (
+        _env("SIMPLEFIN_ACCESS_URLS") or SIMPLEFIN_ACCESS_URL
+    ).split(",") if u.strip()
+]
 
 # --- Real estate: comps + AVM via RentCast (free tier: 50 requests/month) ---
 RENTCAST_API_KEY = _env("RENTCAST_API_KEY")

@@ -245,7 +245,7 @@ def overview(_: str = Depends(require_auth)):
                 if last_sync
                 else None
             ),
-            "simplefin_configured": bool(config.SIMPLEFIN_ACCESS_URL),
+            "simplefin_configured": bool(config.SIMPLEFIN_ACCESS_URLS),
             "members": list(sms.household_phones().keys()) or ["Ford", "Spouse"],
         }
 

@@ -70,12 +70,34 @@ def fetch(access_url: str, lookback_days: int = 90) -> dict:
 
 
 def sync(lookback_days: int = 90) -> dict:
-    """Pull accounts + transactions from SimpleFIN into the local model."""
-    if not config.SIMPLEFIN_ACCESS_URL:
-        return {"status": "skipped", "detail": "SIMPLEFIN_ACCESS_URL not configured"}
+    """Pull every configured SimpleFIN bridge into the local model.
+
+    Each household member can hold their own bridge, so one spouse's failure
+    (an expired connection, a bank outage) must not stop the other's from
+    syncing — each is pulled independently and reported on its own.
+    """
+    urls = config.SIMPLEFIN_ACCESS_URLS
+    if not urls:
+        return {"status": "skipped", "detail": "no SimpleFIN access URL configured"}
+    if len(urls) == 1:
+        return _sync_one(urls[0], lookback_days)
+
+    results = [_sync_one(url, lookback_days) for url in urls]
+    failed = [r for r in results if r.get("status") != "ok"]
+    return {
+        "status": "ok" if not failed else ("partial" if len(failed) < len(results) else "error"),
+        "bridges": len(results),
+        "accounts": sum(r.get("accounts", 0) for r in results),
+        "added": sum(r.get("added", 0) for r in results),
+        "skipped": sum(r.get("skipped", 0) for r in results),
+        "failures": [r.get("detail") for r in failed],
+    }
+
+
+def _sync_one(access_url: str, lookback_days: int = 90) -> dict:
     added = skipped = accounts_seen = 0
     try:
-        data = fetch(config.SIMPLEFIN_ACCESS_URL, lookback_days)
+        data = fetch(access_url, lookback_days)
         with session_scope() as session:
             for acct in data.get("accounts", []):
                 accounts_seen += 1

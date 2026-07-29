@@ -97,7 +97,7 @@ def run_watchpoints_once() -> dict:
 
 async def _sync_loop() -> None:
     while True:
-        if config.SIMPLEFIN_ACCESS_URL:
+        if config.SIMPLEFIN_ACCESS_URLS:
             result = await asyncio.to_thread(simplefin.sync)
             log.info("simplefin sync: %s", result)
         await asyncio.sleep(config.SYNC_INTERVAL_MINUTES * 60)

@@ -247,3 +247,50 @@ def test_mcp_server_initialize_list_call(session):
 
     unknown = mcp_server.handle_request({"jsonrpc": "2.0", "id": 4, "method": "nope"})
     assert unknown["error"]["code"] == -32601
+
+
+# --- each spouse can hold their own bank connection ---
+
+def test_multiple_simplefin_bridges_are_all_pulled(monkeypatch):
+    from bankai.connectors import simplefin
+
+    monkeypatch.setattr(config, "SIMPLEFIN_ACCESS_URLS", ["https://a/x", "https://b/y"])
+    seen = []
+    monkeypatch.setattr(
+        simplefin, "_sync_one",
+        lambda url, days=90: seen.append(url) or
+        {"status": "ok", "accounts": 3, "added": 5, "skipped": 1},
+    )
+    out = simplefin.sync()
+    assert seen == ["https://a/x", "https://b/y"]
+    assert out["bridges"] == 2 and out["accounts"] == 6 and out["added"] == 10
+
+
+def test_one_broken_bridge_does_not_stop_the_other(monkeypatch):
+    """A spouse's expired connection must not silently halt the household's sync."""
+    from bankai.connectors import simplefin
+
+    monkeypatch.setattr(config, "SIMPLEFIN_ACCESS_URLS", ["https://good/x", "https://dead/y"])
+    monkeypatch.setattr(
+        simplefin, "_sync_one",
+        lambda url, days=90: (
+            {"status": "ok", "accounts": 2, "added": 4, "skipped": 0}
+            if "good" in url
+            else {"status": "error", "detail": "connection expired"}
+        ),
+    )
+    out = simplefin.sync()
+    assert out["status"] == "partial"
+    assert out["accounts"] == 2 and out["added"] == 4
+    assert out["failures"] == ["connection expired"]
+
+
+def test_a_single_url_still_works_unchanged(monkeypatch):
+    from bankai.connectors import simplefin
+
+    monkeypatch.setattr(config, "SIMPLEFIN_ACCESS_URLS", ["https://only/one"])
+    monkeypatch.setattr(
+        simplefin, "_sync_one", lambda url, days=90: {"status": "ok", "accounts": 8}
+    )
+    out = simplefin.sync()
+    assert out == {"status": "ok", "accounts": 8}  # not wrapped in the multi shape
