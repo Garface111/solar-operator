@@ -76,6 +76,9 @@ EMAIL_INBOUND_ADDRESS = _env("EMAIL_INBOUND_ADDRESS")
 # (path to its JSON key) and the sheet shared with that account's address.
 SHEETS_ID = _env("SHEETS_ID")
 SHEETS_GID = _env("SHEETS_GID")  # empty = the workbook's default tab
+# Name of the planning tab to READ. Preferred over relying on tab order: adding
+# a tab changes which sheet the default export returns.
+SHEETS_TAB = _env("SHEETS_TAB")
 SHEETS_SERVICE_ACCOUNT_JSON = _env("SHEETS_SERVICE_ACCOUNT_JSON")
 # Preferred write path: an Apps Script web app bound to the sheet. Needs no
 # service-account key, so it works under Google's default org policy that blocks

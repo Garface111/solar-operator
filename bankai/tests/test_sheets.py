@@ -16,9 +16,19 @@ not a date,,,,1,,,,1,,1,,,,,,,,1
 
 @pytest.fixture(autouse=True)
 def sheet_configured(monkeypatch):
+    """Pin EVERY sheets setting.
+
+    config reads the operator's real .env at import, so a test that only sets
+    some values silently inherits live credentials — once a real webhook URL
+    existed, tests asserting "writing is off" started passing against production
+    configuration. Isolation has to be total.
+    """
     monkeypatch.setattr(config, "SHEETS_ID", "test-sheet")
     monkeypatch.setattr(config, "SHEETS_GID", "")
+    monkeypatch.setattr(config, "SHEETS_TAB", "")
     monkeypatch.setattr(config, "SHEETS_SERVICE_ACCOUNT_JSON", "")
+    monkeypatch.setattr(config, "SHEETS_WEBHOOK_URL", "")
+    monkeypatch.setattr(config, "SHEETS_WEBHOOK_SECRET", "")
 
 
 def test_parses_us_dates_and_money():
@@ -226,3 +236,47 @@ def test_a_login_page_response_explains_the_deployment_setting(monkeypatch):
     monkeypatch.setattr(sheets.httpx, "post", lambda *a, **k: FakeResponse())
     with pytest.raises(RuntimeError, match="Anyone"):
         sheets._write_via_apps_script("BankAI Actuals", [["x"]])
+
+
+# --- addressing the right tab ---
+
+def test_reader_uses_the_named_tab_not_whichever_is_first(monkeypatch):
+    """Writing the actuals tab reordered the workbook and pointed the reader at
+    the copilot's own output. Naming the tab removes that coupling entirely."""
+    monkeypatch.setattr(config, "SHEETS_TAB", "Daily Plan")
+    seen = {}
+
+    class FakeResponse:
+        text = CSV
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(
+        sheets.httpx, "get",
+        lambda url, **kw: seen.update({"url": url}) or FakeResponse(),
+    )
+    sheets.fetch_csv()
+    assert "gviz" in seen["url"]
+    assert "sheet=Daily%20Plan" in seen["url"]
+
+
+def test_reader_falls_back_to_the_default_export_when_no_tab_named(monkeypatch):
+    monkeypatch.setattr(config, "SHEETS_TAB", "")
+    monkeypatch.setattr(config, "SHEETS_GID", "")
+    seen = {}
+
+    class FakeResponse:
+        text = CSV
+        status_code = 200
+        url = "https://docs.google.com/x"
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(
+        sheets.httpx, "get",
+        lambda url, **kw: seen.update({"url": url}) or FakeResponse(),
+    )
+    sheets.fetch_csv()
+    assert "gviz" not in seen["url"] and "export?format=csv" in seen["url"]

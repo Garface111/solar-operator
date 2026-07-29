@@ -44,7 +44,14 @@ function doPost(e) {
     const book = SpreadsheetApp.getActiveSpreadsheet();
     let tab = book.getSheetByName(tabName);
     if (!tab) {
-      tab = book.insertSheet(tabName);
+      // Insert at the END. insertSheet() otherwise drops the new tab in front,
+      // which silently changes which sheet a credential-free CSV export returns
+      // — that broke reading the planning ledger the first time this ran.
+      tab = book.insertSheet(tabName, book.getSheets().length);
+    } else if (book.getSheets()[0].getName() === tabName && book.getSheets().length > 1) {
+      // Self-heal a tab that is already sitting in front.
+      book.setActiveSheet(tab);
+      book.moveActiveSheet(book.getSheets().length);
     }
 
     // Clear only the block we manage, so a shorter update never leaves
@@ -67,7 +74,13 @@ function doPost(e) {
   }
 }
 
-/** Visiting the URL in a browser should not look broken. */
+/** Visiting the URL in a browser should not look broken — and it names the
+ *  tabs, which is the one thing the copilot cannot discover without a key. */
 function doGet() {
-  return ContentService.createTextOutput('BankAI sheet bridge is live. POST to write.');
+  const names = SpreadsheetApp.getActiveSpreadsheet().getSheets().map(function (s) {
+    return s.getName();
+  });
+  return ContentService.createTextOutput(
+    'BankAI sheet bridge is live. POST to write.\ntabs: ' + names.join(' | ')
+  );
 }

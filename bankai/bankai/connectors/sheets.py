@@ -92,9 +92,27 @@ def _parse_date(raw: str) -> date | None:
         return None
 
 
+GVIZ = "https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&sheet={tab}"
+
+
 def fetch_csv(gid: str | None = None) -> str:
+    """The planning ledger, addressed as explicitly as the config allows.
+
+    The default export returns whichever tab is FIRST, which is not a stable
+    address — adding the actuals tab reordered the workbook and silently pointed
+    the reader at the copilot's own output instead of the household's ledger.
+    Naming the tab (SHEETS_TAB) or pinning its gid removes that coupling; the
+    default is kept for the common single-tab case.
+    """
     if not config.SHEETS_ID:
         raise RuntimeError("SHEETS_ID is not set in .env")
+    if not gid and config.SHEETS_TAB:
+        from urllib.parse import quote
+
+        url = GVIZ.format(sheet_id=config.SHEETS_ID, tab=quote(config.SHEETS_TAB))
+        resp = httpx.get(url, timeout=60, follow_redirects=True)
+        resp.raise_for_status()
+        return resp.text
     url = CSV_EXPORT.format(sheet_id=config.SHEETS_ID)
     tab = gid or config.SHEETS_GID
     if tab:
