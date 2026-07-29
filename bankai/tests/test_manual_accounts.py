@@ -52,7 +52,7 @@ def test_manual_upsert_updates_and_snapshots(session):
 
 
 def test_manual_kinds_are_the_ui_contract():
-    assert MANUAL_KINDS == ["property", "vehicle", "other", "mortgage", "loan"]
+    assert MANUAL_KINDS == ["property", "vehicle", "other", "mortgage", "loan", "credit"]
 
 
 # --- the copilot correcting its own stale data ---

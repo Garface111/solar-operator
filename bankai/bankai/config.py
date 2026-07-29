@@ -29,10 +29,14 @@ DATABASE_URL = _env("DATABASE_URL") or f"sqlite:///{BASE_DIR / 'bankai.db'}"
 ANTHROPIC_MODEL = _env("ANTHROPIC_MODEL", "claude-opus-5")
 
 # --- LLM backend: anthropic (API key) | claude-cli (Claude subscription via
-# headless `claude -p`) | grok (xAI API credits) ---
+# headless `claude -p`) | grok (xAI / Grok Build prepaid credits via OIDC or key) ---
+# Comma-separated fallback chain is supported, e.g. "claude-cli,grok".
 LLM_BACKEND = _env("LLM_BACKEND", "anthropic")
-XAI_API_KEY = _env("XAI_API_KEY")
+XAI_API_KEY = _env("XAI_API_KEY")  # classic console key; optional if Grok Build OIDC is live
 GROK_MODEL = _env("GROK_MODEL", "grok-4")
+# Prefer Grok Build OIDC (prepaid team) over a possibly-capped console API key.
+# bankai.xai_auth reads ~/.grok/auth.json and falls back to Hermes ~/.hermes/auth.json.
+XAI_PREFER_GROK_BUILD_OIDC = _env("XAI_PREFER_GROK_BUILD_OIDC", "1")
 CLAUDE_CLI_BIN = _env("CLAUDE_CLI_BIN", "claude")
 CLAUDE_CLI_MODEL = _env("CLAUDE_CLI_MODEL")  # empty = the CLI's default model
 

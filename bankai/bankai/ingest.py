@@ -24,7 +24,10 @@ _NOISE = re.compile(r"[#*]|\b\w*\d{3,}\w*\b")
 # vehicles, private loans — anything no bank feed reports. They sum into net worth
 # exactly like synced accounts, so home equity = property value + (negative) mortgage.
 MANUAL_ASSET_KINDS = ["property", "vehicle", "other"]
-MANUAL_LIABILITY_KINDS = ["mortgage", "loan"]
+#: credit belongs here because some cards have no feed at all — the Apple Card
+#: is readable only from a statement — and a card left out of the list does not
+#: read as "unknown", it reads as a card with nothing owed.
+MANUAL_LIABILITY_KINDS = ["mortgage", "loan", "credit"]
 MANUAL_KINDS = MANUAL_ASSET_KINDS + MANUAL_LIABILITY_KINDS
 
 

@@ -53,14 +53,14 @@ def test_backend_chain_reports_every_failure(session, monkeypatch):
         raise RuntimeError("not logged in — run /login")
 
     def grok_down(s, system, messages):
-        raise RuntimeError("XAI_API_KEY is not set")
+        raise RuntimeError("no xAI credentials: set XAI_API_KEY")
 
     monkeypatch.setattr(claude_cli, "run", cli_down)
     monkeypatch.setattr(grok_backend, "run", grok_down)
     with pytest.raises(RuntimeError) as exc:
         agent_chat.run_turn(session, [{"role": "user", "content": "hi"}])
     msg = str(exc.value)
-    assert "claude-cli:" in msg and "grok:" in msg and "XAI_API_KEY" in msg
+    assert "claude-cli:" in msg and "grok:" in msg and "no xAI credentials" in msg
 
 
 def test_run_turn_passes_reply_through_when_verifier_disabled(session, monkeypatch):
@@ -152,6 +152,7 @@ def test_grok_tools_are_openai_shaped():
 def test_grok_tool_loop(session, monkeypatch):
     upsert_account(session, source="csv", name="Checking", balance=250.0)
     monkeypatch.setattr(config, "XAI_API_KEY", "xai-test")
+    monkeypatch.setattr(grok_backend, "get_xai_bearer", lambda force_refresh=False: "xai-test")
     responses = [
         {
             "choices": [{
@@ -170,7 +171,8 @@ def test_grok_tool_loop(session, monkeypatch):
     ]
     payloads = []
     monkeypatch.setattr(
-        grok_backend, "_post", lambda payload: payloads.append(payload) or responses.pop(0)
+        grok_backend, "_post",
+        lambda payload, bearer=None: payloads.append(payload) or responses.pop(0),
     )
     reply = grok_backend.run(session, "system", [{"role": "user", "content": "balance?"}])
     assert reply == "You have $250 in Checking."
@@ -180,9 +182,12 @@ def test_grok_tool_loop(session, monkeypatch):
     assert "250" in tool_msgs[0]["content"]
 
 
-def test_grok_requires_key(session, monkeypatch):
-    monkeypatch.setattr(config, "XAI_API_KEY", "")
-    with pytest.raises(RuntimeError, match="XAI_API_KEY"):
+def test_grok_requires_credentials(session, monkeypatch):
+    def no_creds(force_refresh=False):
+        raise RuntimeError("no xAI credentials: set XAI_API_KEY")
+
+    monkeypatch.setattr(grok_backend, "get_xai_bearer", no_creds)
+    with pytest.raises(RuntimeError, match="no xAI credentials"):
         grok_backend.run(session, "s", [{"role": "user", "content": "x"}])
 
 
@@ -294,3 +299,36 @@ def test_a_single_url_still_works_unchanged(monkeypatch):
     )
     out = simplefin.sync()
     assert out == {"status": "ok", "accounts": 8}  # not wrapped in the multi shape
+
+
+def test_an_empty_cli_result_does_not_read_as_total_failure(session, monkeypatch):
+    """Observed live: the copilot read two statement PDFs, annotated both, and
+    created an account — then hit the turn cap before writing its answer. The
+    household saw "(no response)" and would reasonably assume nothing happened."""
+    class FakeProc:
+        returncode = 0
+        stdout = json.dumps({"type": "result", "result": "   "})
+        stderr = ""
+
+    monkeypatch.setattr(claude_cli.subprocess, "run", lambda cmd, **kw: FakeProc())
+    reply = claude_cli.run(session, "s", [{"role": "user", "content": "x"}])
+    assert "ran out of steps" in reply
+    assert "saved" in reply
+    assert "no response" not in reply.lower()
+
+
+def test_the_turn_budget_allows_real_document_work(session, monkeypatch):
+    captured = {}
+
+    class FakeProc:
+        returncode = 0
+        stdout = json.dumps({"type": "result", "result": "done"})
+        stderr = ""
+
+    monkeypatch.setattr(
+        claude_cli.subprocess, "run",
+        lambda cmd, **kw: captured.update({"cmd": cmd}) or FakeProc(),
+    )
+    claude_cli.run(session, "s", [{"role": "user", "content": "x"}])
+    cmd = captured["cmd"]
+    assert int(cmd[cmd.index("--max-turns") + 1]) >= 30

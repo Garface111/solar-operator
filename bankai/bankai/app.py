@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 
 from . import (
+    accounts_terms,
     config,
     events,
     goals as goals_lib,
@@ -160,7 +161,15 @@ def index():
 
 @app.get("/api/health")
 def health():
-    return {"ok": True}
+    from . import config
+    from .xai_auth import xai_auth_status
+
+    return {
+        "ok": True,
+        "llm_backend": config.LLM_BACKEND,
+        "grok_model": config.GROK_MODEL,
+        "xai": xai_auth_status(),
+    }
 
 
 EVENT_POLL_SECONDS = 1.5
@@ -233,6 +242,9 @@ def overview(_: str = Depends(require_auth)):
         ).scalar_one_or_none()
         return {
             "net_worth": net_worth(session),
+            # What is owed and when, for accounts whose statements carry terms —
+            # a balance alone cannot answer "can we cover the cards this month".
+            "account_terms": accounts_terms.terms_by_account(session),
             "history": net_worth_history(session, months=6),
             "this_month": spending_summary(session, today.replace(day=1), today + timedelta(days=1)),
             "upcoming_bills": upcoming_bills(session, days=21),

@@ -23,7 +23,7 @@ from ..intelligence.insights import (
     upcoming_bills,
 )
 from ..intelligence.recurring import detect_recurring
-from ..ingest import _snapshot_balance, normalize_manual_balance
+from ..ingest import MANUAL_KINDS, _snapshot_balance, normalize_manual_balance, upsert_account
 from ..models import (
     Account,
     AgentAction,
@@ -34,7 +34,7 @@ from ..models import (
     Transaction,
     Valuation,
 )
-from .. import goals as goals_lib, realestate, skills_lib, vault, watchpoints
+from .. import accounts_terms, goals as goals_lib, realestate, skills_lib, vault, watchpoints
 from ..rules.engine import RULE_KINDS
 from ..watchpoints import WATCHPOINT_KINDS
 
@@ -547,6 +547,39 @@ TOOLS: list[dict] = [
         "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
+        "name": "track_account",
+        "description": (
+            "Add or update an account no bank feed can reach — the Apple Card is "
+            "the case this exists for — so it appears in the account list and "
+            "counts in net worth like everything else. Give what the statement "
+            "says: the FULL amount owed (for Apple Card that is 'Total Balance', "
+            "which includes remaining Monthly Installments, not the smaller "
+            "'Monthly Balance'), the minimum payment, the due date, and the "
+            "statement date it came from. Enter what is owed as a positive number "
+            "on a credit account; it is stored as a negative. Calling it again "
+            "with the same name updates that account rather than creating a "
+            "second one. Use it the moment a statement gives you better numbers — "
+            "leaving a card out entirely is worse than showing a dated figure, "
+            "because a missing card reads as a card with nothing owed."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "e.g. 'Apple Card'"},
+                "kind": {"type": "string", "enum": MANUAL_KINDS},
+                "balance": {"type": "number", "description": "Amount owed, for a liability"},
+                "owner": {"type": "string", "description": "ford | gaurav | joint"},
+                "minimum_payment": {"type": "number"},
+                "payment_due_date": {"type": "string", "description": "ISO date from the statement"},
+                "apr": {"type": "number"},
+                "as_of": {"type": "string", "description": "ISO statement date these figures are from"},
+                "source": {"type": "string", "description": "Which document/statement this came from"},
+            },
+            "required": ["name", "kind", "balance", "source"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "update_account_balance",
         "description": (
             "Correct the balance of a MANUALLY tracked account — the mortgage, a "
@@ -940,6 +973,49 @@ def _dispatch(session: Session, name: str, args: dict):
                 )
             }
         return sheets.write_actuals(session)
+    if name == "track_account":
+        kind = (args.get("kind") or "other").strip().lower()
+        if kind not in MANUAL_KINDS:
+            return {"error": f"kind must be one of {MANUAL_KINDS}"}
+        label = args["name"].strip()
+        if not label:
+            return {"error": "name is required"}
+        existing = session.execute(
+            select(Account).where(Account.source == "manual", Account.name == label)
+        ).scalar_one_or_none()
+        if existing is not None and existing.source != "manual":
+            return {"error": f"'{label}' is a synced account and cannot be set by hand"}
+
+        old = existing.balance if existing else None
+        account = upsert_account(
+            session, source="manual", name=label, kind=kind,
+            balance=normalize_manual_balance(kind, float(args["balance"])),
+        )
+        if args.get("owner"):
+            account.owner = args["owner"].strip().lower()
+        session.flush()
+
+        def _date(key):
+            raw = (args.get(key) or "").strip()
+            return date.fromisoformat(raw) if raw else None
+
+        accounts_terms.set_terms(
+            session, account.id,
+            statement_balance=abs(float(args["balance"])),
+            minimum_payment=args.get("minimum_payment"),
+            payment_due_date=_date("payment_due_date"),
+            apr=args.get("apr"),
+            as_of=_date("as_of"),
+            source=args["source"],
+        )
+        return {
+            "tracked": True,
+            "created": old is None,
+            "account": account.name,
+            "old_balance": old,
+            "balance": account.balance,
+            "net_worth": net_worth(session)["total"],
+        }
     if name == "update_account_balance":
         account = session.get(Account, args["account_id"])
         if not account:

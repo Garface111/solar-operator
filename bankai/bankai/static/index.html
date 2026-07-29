@@ -30,6 +30,25 @@
   td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
   .pos { color:var(--good); } .neg { color:var(--bad); }
   .big { font-size:28px; font-weight:650; margin:2px 0 8px; }
+  /* --- Net worth composition ------------------------------------------- */
+  #networth { font-size:40px; letter-spacing:-.02em; }
+  .nwgroup { border-top:1px solid var(--line); padding:9px 0 4px; }
+  .nwhead { display:flex; justify-content:space-between; align-items:baseline;
+            font-size:11.5px; text-transform:uppercase; letter-spacing:.07em;
+            color:var(--dim); margin-bottom:5px; }
+  .nwsub { font-variant-numeric:tabular-nums; font-size:13px; color:var(--text); }
+  .nwrow { display:flex; justify-content:space-between; align-items:flex-start;
+           gap:12px; padding:4px 0; }
+  .nwname { font-size:13.5px; display:flex; flex-wrap:wrap; align-items:center; gap:7px; }
+  .nwowner { font-size:10.5px; text-transform:uppercase; letter-spacing:.05em;
+             color:var(--dim); border:1px solid var(--line); border-radius:20px;
+             padding:0 6px; }
+  .nwowner.manual { color:#c9a227; border-color:#5c4a12; }
+  .nwamt { font-variant-numeric:tabular-nums; font-size:14px; white-space:nowrap; }
+  .nwamt button { padding:0 5px; font-size:11px; margin-left:4px; }
+  .terms { flex-basis:100%; font-size:11.5px; color:var(--dim); }
+  .terms.imminent { color:var(--bad); }
+  .terms.stale { color:#c9a227; }
   .muted { color:var(--dim); font-size:12.5px; }
   button { background:var(--accent); color:#fff; border:0; border-radius:7px;
            padding:8px 14px; font-size:14px; cursor:pointer; }
@@ -155,7 +174,8 @@
     <section>
       <h2>Net worth</h2>
       <div class="big" id="networth">—</div>
-      <table id="accounts"></table>
+      <div id="accounts"></div>
+      <p id="nwgaps" style="margin:8px 0 0"></p>
       <p class="muted" style="margin-bottom:6px">Track what the banks can't see — home, mortgage,
       vehicles, loans. Liabilities are entered as the amount owed. Re-saving the same name
       updates its balance.</p>
@@ -163,7 +183,7 @@
         <input type="text" id="manname" placeholder="e.g. Home — 36001 Cabrillo Dr" required>
         <select id="mankind">
           <option value="property">property</option><option value="mortgage">mortgage</option>
-          <option value="vehicle">vehicle</option><option value="loan">loan</option>
+          <option value="vehicle">vehicle</option><option value="credit">credit card</option><option value="loan">loan</option>
           <option value="other">other</option>
         </select>
         <input type="number" id="manbalance" placeholder="Value / amount owed" step="0.01" required>
@@ -310,11 +330,7 @@ function rows(el, html) { $(el).innerHTML = html; }
 async function refresh() {
   const o = await api("/api/overview");
   $("networth").textContent = fmt(o.net_worth.total);
-  rows("accounts", "<tr><th>Account</th><th>Kind</th><th>Owner</th><th class=num>Balance</th><th></th></tr>" +
-    o.net_worth.accounts.map(a =>
-      `<tr><td>${a.name}</td><td>${a.kind}</td><td>${a.owner}</td>` +
-      `<td class="num ${a.balance < 0 ? "neg" : ""}">${fmt(a.balance)}</td>` +
-      `<td>${a.source === "manual" ? `<button class=ghost onclick="delAccount('${a.account_id}')">✕</button>` : ""}</td></tr>`).join(""));
+  renderNetWorth(o);
   const m = o.this_month;
   $("month").textContent = `Income ${fmt(m.income)}  ·  Spend ${fmt(Math.abs(m.spend))}  ·  Net ${fmt(m.net)}`;
   rows("categories", m.by_category.filter(c => c.total < 0).slice(0, 8).map(c =>
@@ -360,6 +376,67 @@ async function refresh() {
       `<tr><td>${x.title}</td><td class=muted>${x.waits_for}</td>` +
       `<td class=muted>${x.status}</td></tr>`).join("") ||
     "<tr><td class=muted>Nothing being watched yet.</td></tr>");
+}
+
+// --- Net worth: the number, and everything that composes it ---------------
+// Grouped, because a flat list of twelve accounts makes you do the arithmetic
+// in your head. Cards carry what is owed and when it is due, since a balance
+// alone cannot answer "can we cover the cards this month" — and an account
+// with no due date says so, because a missing date reads as nothing owed.
+const GROUPS = [
+  {key: "cash", label: "Cash", kinds: ["checking", "savings"]},
+  {key: "invest", label: "Investments", kinds: ["investment"]},
+  {key: "property", label: "Property", kinds: ["property", "vehicle"]},
+  {key: "cards", label: "Credit cards", kinds: ["credit"]},
+  {key: "debt", label: "Loans & mortgage", kinds: ["mortgage", "loan"]},
+  {key: "other", label: "Other", kinds: ["other"]},
+];
+
+function dueLabel(t) {
+  if (!t || !t.payment_due_date) return "";
+  const d = t.days_until_due;
+  const when = t.stale ? `due ${t.payment_due_date} (statement is old)`
+    : d === 0 ? "due today" : d === 1 ? "due tomorrow" : `due in ${d} days`;
+  const min = t.minimum_payment != null ? ` · min ${fmt(t.minimum_payment)}` : "";
+  return `<div class="terms ${t.stale ? "stale" : (d <= 5 ? "imminent" : "")}">${when}${min}</div>`;
+}
+
+function renderNetWorth(o) {
+  const terms = o.account_terms || {};
+  const accounts = o.net_worth.accounts.filter(a => a.balance != null);
+  let html = "";
+
+  for (const g of GROUPS) {
+    const mine = accounts.filter(a => g.kinds.includes(a.kind));
+    if (!mine.length) continue;
+    const subtotal = mine.reduce((s, a) => s + a.balance, 0);
+    html += `<div class="nwgroup"><div class="nwhead">` +
+      `<span>${g.label}</span>` +
+      `<span class="nwsub ${subtotal < 0 ? "neg" : ""}">${fmt(subtotal)}</span></div>`;
+    for (const a of mine.sort((x, y) => Math.abs(y.balance) - Math.abs(x.balance))) {
+      const t = terms[a.account_id];
+      html += `<div class="nwrow">` +
+        `<div class="nwname">${a.name}` +
+          `<span class="nwowner">${a.owner}</span>` +
+          (a.source === "manual" ? `<span class="nwowner manual">manual</span>` : "") +
+          dueLabel(t) +
+        `</div>` +
+        `<div class="nwamt ${a.balance < 0 ? "neg" : ""}">${fmt(a.balance)}` +
+          (a.source === "manual"
+            ? ` <button class=ghost title="Stop tracking" onclick="delAccount('${a.account_id}')">✕</button>`
+            : "") +
+        `</div></div>`;
+    }
+    html += `</div>`;
+  }
+  $("accounts").innerHTML = html;
+
+  // Anything with no feed and no statement terms is a hole in the picture.
+  const unsynced = accounts.filter(a =>
+    a.source === "manual" && a.kind === "credit" && !terms[a.account_id]);
+  $("nwgaps").innerHTML = unsynced.length
+    ? `<span class="muted">No statement terms yet for ${unsynced.map(a => a.name).join(", ")} — ask the copilot to read the latest statement.</span>`
+    : "";
 }
 
 // The money already spoken for, surfaced above everything else — with the
