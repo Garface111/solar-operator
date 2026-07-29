@@ -18,10 +18,21 @@ from .connectors import simplefin
 from .connectors.csv_import import import_csv
 from .connectors.ofx_import import import_ofx
 from .db import init_db, session_scope
+from .ingest import MANUAL_KINDS, normalize_manual_balance, upsert_account
 from .messaging import sms
 from .messaging import thread as sms_thread
 from .intelligence.insights import net_worth, net_worth_history, spending_summary, upcoming_bills
-from .models import ChatMessage, Document, MemoryNote, Rule, RuleFiring, SyncLog, Transaction
+from .models import (
+    Account,
+    BalanceSnapshot,
+    ChatMessage,
+    Document,
+    MemoryNote,
+    Rule,
+    RuleFiring,
+    SyncLog,
+    Transaction,
+)
 from .rules.engine import RULE_KINDS
 from .scheduler import run_rules_once, start_background_tasks
 
@@ -72,6 +83,13 @@ class RuleBody(BaseModel):
     kind: str
     params: dict = {}
     message: str = ""
+
+
+class ManualAccountBody(BaseModel):
+    name: str
+    kind: str
+    balance: float
+    owner: str = "joint"
 
 
 @app.post("/api/login")
@@ -281,6 +299,55 @@ def chat_history(limit: int = 60, _: str = Depends(require_auth)):
             }
             for m in reversed(rows)
         ]
+
+
+@app.post("/api/accounts")
+def upsert_manual_account(body: ManualAccountBody, _: str = Depends(require_auth)):
+    """Track a manual asset or liability (home, mortgage, vehicle, loan). Upserts
+    by name, so posting again with the same name updates the balance — and each
+    update snapshots, so net-worth history reflects it."""
+    kind = body.kind.strip().lower()
+    if kind not in MANUAL_KINDS:
+        raise HTTPException(400, f"kind must be one of {MANUAL_KINDS}")
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(400, "name is required")
+    with session_scope() as session:
+        account = upsert_account(
+            session,
+            source="manual",
+            name=name,
+            kind=kind,
+            balance=normalize_manual_balance(kind, body.balance),
+        )
+        account.owner = body.owner
+        return {
+            "id": account.id,
+            "name": account.name,
+            "kind": account.kind,
+            "balance": account.balance,
+        }
+
+
+@app.delete("/api/accounts/{account_id}")
+def delete_manual_account(account_id: str, _: str = Depends(require_auth)):
+    with session_scope() as session:
+        account = session.get(Account, account_id)
+        if not account:
+            raise HTTPException(404, "account not found")
+        if account.source != "manual":
+            raise HTTPException(400, "only manually tracked accounts can be removed here")
+        has_txns = session.execute(
+            select(Transaction.id).where(Transaction.account_id == account.id).limit(1)
+        ).scalar_one_or_none()
+        if has_txns:
+            raise HTTPException(400, "account has transactions; cannot remove")
+        for snap in session.execute(
+            select(BalanceSnapshot).where(BalanceSnapshot.account_id == account.id)
+        ).scalars():
+            session.delete(snap)
+        session.delete(account)
+        return {"ok": True}
 
 
 MAX_DOCUMENT_BYTES = 15 * 1024 * 1024

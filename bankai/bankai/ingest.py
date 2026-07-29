@@ -20,6 +20,23 @@ _WS = re.compile(r"\s+")
 # strip #/* separators and any token containing a 3+ digit run (card/ref numbers)
 _NOISE = re.compile(r"[#*]|\b\w*\d{3,}\w*\b")
 
+# Manually tracked assets/liabilities (source="manual"): the home, its mortgage,
+# vehicles, private loans — anything no bank feed reports. They sum into net worth
+# exactly like synced accounts, so home equity = property value + (negative) mortgage.
+MANUAL_ASSET_KINDS = ["property", "vehicle", "other"]
+MANUAL_LIABILITY_KINDS = ["mortgage", "loan"]
+MANUAL_KINDS = MANUAL_ASSET_KINDS + MANUAL_LIABILITY_KINDS
+
+
+def normalize_manual_balance(kind: str, balance: float) -> float:
+    """Users enter liabilities as the amount owed; net worth needs them negative.
+    Assets are forced positive, liabilities negative; 'other' keeps its sign."""
+    if kind in MANUAL_LIABILITY_KINDS:
+        return -abs(balance)
+    if kind == "other":
+        return balance
+    return abs(balance)
+
 
 def normalize_desc(desc: str) -> str:
     """Stable, human-ish merchant key: uppercase, strip reference numbers."""

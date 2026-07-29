@@ -69,6 +69,20 @@
       <h2>Net worth</h2>
       <div class="big" id="networth">—</div>
       <table id="accounts"></table>
+      <p class="muted" style="margin-bottom:6px">Track what the banks can't see — home, mortgage,
+      vehicles, loans. Liabilities are entered as the amount owed. Re-saving the same name
+      updates its balance.</p>
+      <form class="inline" id="manform">
+        <input type="text" id="manname" placeholder="e.g. Home — 36001 Cabrillo Dr" required>
+        <select id="mankind">
+          <option value="property">property</option><option value="mortgage">mortgage</option>
+          <option value="vehicle">vehicle</option><option value="loan">loan</option>
+          <option value="other">other</option>
+        </select>
+        <input type="number" id="manbalance" placeholder="Value / amount owed" step="0.01" required>
+        <button type="submit">Save</button>
+        <span id="manstatus" class="muted"></span>
+      </form>
     </section>
     <section>
       <h2>This month</h2>
@@ -173,10 +187,11 @@ function rows(el, html) { $(el).innerHTML = html; }
 async function refresh() {
   const o = await api("/api/overview");
   $("networth").textContent = fmt(o.net_worth.total);
-  rows("accounts", "<tr><th>Account</th><th>Kind</th><th>Owner</th><th class=num>Balance</th></tr>" +
+  rows("accounts", "<tr><th>Account</th><th>Kind</th><th>Owner</th><th class=num>Balance</th><th></th></tr>" +
     o.net_worth.accounts.map(a =>
       `<tr><td>${a.name}</td><td>${a.kind}</td><td>${a.owner}</td>` +
-      `<td class="num ${a.balance < 0 ? "neg" : ""}">${fmt(a.balance)}</td></tr>`).join(""));
+      `<td class="num ${a.balance < 0 ? "neg" : ""}">${fmt(a.balance)}</td>` +
+      `<td>${a.source === "manual" ? `<button class=ghost onclick="delAccount('${a.account_id}')">✕</button>` : ""}</td></tr>`).join(""));
   const m = o.this_month;
   $("month").textContent = `Income ${fmt(m.income)}  ·  Spend ${fmt(Math.abs(m.spend))}  ·  Net ${fmt(m.net)}`;
   rows("categories", m.by_category.filter(c => c.total < 0).slice(0, 8).map(c =>
@@ -211,6 +226,25 @@ async function syncNow() {
 }
 
 async function delRule(id) { await api("/api/rules/" + id, {method: "DELETE"}); refresh(); }
+
+async function delAccount(id) {
+  if (!confirm("Stop tracking this manual asset/liability? Its balance history goes too.")) return;
+  await api("/api/accounts/" + id, {method: "DELETE"}); refresh();
+}
+
+$("manform").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  $("manstatus").textContent = "saving…";
+  try {
+    const res = await api("/api/accounts", {method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({name: $("manname").value, kind: $("mankind").value,
+                            balance: parseFloat($("manbalance").value)})});
+    $("manstatus").textContent = `saved ${res.name} at ${fmt(res.balance)}`;
+    $("manname").value = ""; $("manbalance").value = "";
+    refresh();
+  } catch (err) { $("manstatus").textContent = err.message; }
+});
 
 $("csvform").addEventListener("submit", async (e) => {
   e.preventDefault();

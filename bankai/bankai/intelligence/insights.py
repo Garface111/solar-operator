@@ -64,6 +64,7 @@ def net_worth(session: Session) -> dict:
                 "account_id": account.id,
                 "name": account.name,
                 "kind": account.kind,
+                "source": account.source,
                 "owner": account.owner,
                 "balance": round(bal, 2),
                 "as_of": account.balance_date.isoformat() if account.balance_date else None,
