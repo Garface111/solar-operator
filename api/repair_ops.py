@@ -2434,19 +2434,31 @@ def find_ticket_for_inbound(
     from_email: str | None = None,
     subject: str | None = None,
     body: str | None = None,
+    tenant_id: str | None = None,
 ) -> RepairTicket | None:
-    """Resolve a ticket from explicit id, subject/body markers, or contact email."""
+    """Resolve a ticket from explicit id, subject/body markers, or contact email.
+
+    Ticket ids are globally unique, so the [AO-TICKET-N] token resolves to exactly
+    one customer's ticket — that path cannot cross customers.
+
+    The sender-email fallback is the one that can. One O&M company often services
+    arrays for several operators, so the same technician address exists as a
+    ServiceContact under more than one tenant. Choosing "the most recent active
+    ticket" across all of them would file one customer's reply against another
+    customer's job and answer in that customer's context. When the address is
+    ambiguous across tenants we return nothing instead of guessing: an unmatched
+    email is a visible gap, a misrouted one is a silent leak.
+    """
     tid = ticket_id or extract_ticket_id_from_text(subject, body)
     if tid:
         t = db.get(RepairTicket, tid)
-        if t and t.status in ACTIVE_TICKET_STATUSES + ("resolved",):
-            return t
+        if t and tenant_id and t.tenant_id != tenant_id:
+            return None
         if t:
             return t
 
     email = (from_email or "").strip().lower()
     if email:
-        # Active tickets whose contact email matches the sender (tenant-scoped via contact)
         contacts = db.execute(
             select(ServiceContact).where(
                 ServiceContact.deleted_at.is_(None),
@@ -2454,7 +2466,19 @@ def find_ticket_for_inbound(
                 ServiceContact.email.isnot(None),
             )
         ).scalars().all()
-        cids = [c.id for c in contacts if (c.email or "").strip().lower() == email]
+        matching = [c for c in contacts if (c.email or "").strip().lower() == email]
+        if tenant_id:
+            matching = [c for c in matching if c.tenant_id == tenant_id]
+        owners = {c.tenant_id for c in matching}
+        if len(owners) > 1:
+            log.warning(
+                "inbound email %s matches service contacts in %d tenants — refusing "
+                "to guess a ticket; the reply needs its [AO-TICKET-N] reference",
+                email,
+                len(owners),
+            )
+            return None
+        cids = [c.id for c in matching]
         if cids:
             t = db.execute(
                 select(RepairTicket)
@@ -2510,6 +2534,7 @@ def ingest_inbound_email(
 
     ticket = find_ticket_for_inbound(
         db, ticket_id=ticket_id, from_email=from_email, subject=subject, body=body,
+        tenant_id=tenant_id,
     )
     if ticket is None:
         return {"ok": False, "matched": False, "reason": "no_ticket", "subject": (subject or "")[:120]}
