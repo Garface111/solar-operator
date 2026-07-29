@@ -2449,24 +2449,30 @@ def test_alert_settings(authorization: str | None = Header(default=None)) -> dic
     tenant = _tenant_from_bearer(authorization)
     from .account import require_not_demo
     require_not_demo(tenant)
+    if not ratelimit.allow("test_alert_tenant", tenant.id, max_hits=5, window_s=300):
+        raise HTTPException(429, "Too many test alerts — give it a few minutes and try again.")
+    if not ratelimit.allow("test_alert_global", "all", max_hits=60, window_s=300):
+        raise HTTPException(429, "The alert service is busy right now — please try again in a few minutes.")
     raw = getattr(tenant, "inverter_alert_email", None) or tenant.contact_email
     to = [e.strip() for e in str(raw or "").replace(";", ",").split(",") if e.strip()]
     if not to:
         raise HTTPException(400, "Add a recipient email first, then send a test.")
-    from . import notify
-    subject = "✅ Test alert — your Array Operator monitoring is set up"
+    from . import notify, branding
+    product = tenant.product or "array_operator"
+    brand = branding.brand_name(product)
+    subject = f"✅ Test alert — your {brand} monitoring is set up"
     html = (
-        "<p>This is a <strong>test alert</strong> from Array Operator.</p>"
+        f"<p>This is a <strong>test alert</strong> from {brand}.</p>"
         "<p>Your inverter monitoring is working. When a real inverter goes dark or "
         "drops below its neighbors — and stays there past your grace window — "
-        "we’ll email you here with the site, the inverter, and what to do.</p>"
-        "<p>No action needed — you can change who gets alerts and how sensitive "
-        "they are from the alerts widget in Array Operator.</p>"
+        f"we’ll email you here with the site, the inverter, and what to do.</p>"
+        f"<p>No action needed — you can change who gets alerts and how sensitive "
+        f"they are from the alerts widget in {brand}.</p>"
     )
-    text = ("Test alert from Array Operator. Your inverter monitoring is working — "
+    text = (f"Test alert from {brand}. Your inverter monitoring is working — "
             "we’ll email you here when a real inverter needs attention. No action needed.")
     ok = notify._send_via_resend(to=to, subject=subject, html=html, text=text,
-                                 product="array_operator")
+                                 product=product)
     if not ok:
         raise HTTPException(502, "Couldn't send the test email right now — try again shortly.")
     return {"ok": True, "sent_to": to}

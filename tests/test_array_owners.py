@@ -1394,3 +1394,66 @@ def test_fleet_trends_excludes_deleted_and_excluded_arrays(client):
     assert [a["name"] for a in b["by_array"]] == ["Keep"]
 
 
+# ── alert-settings/test: correct branding + rate limit ───────────────────────
+# Hardcoded product="array_operator" meant a NEPOOL Operator tenant got an
+# Array-Operator-branded test email (wrong name in the subject/body, wrong
+# From domain via notify's product-aware sender) — the same "instructions that
+# don't match the recipient's actual account" bug class as the GMP/VT-coop
+# fixes above. It also had zero rate limiting, unlike every other
+# email/send-triggering endpoint in this file.
+
+def _make_tenant_product(product: str) -> tuple[str, str]:
+    tid = "ten_" + secrets.token_hex(6)
+    key = "sol_test_" + secrets.token_hex(8)
+    with SessionLocal() as db:
+        db.add(Tenant(
+            id=tid, name="Branding Test", contact_email=f"{key}@t.test",
+            tenant_key=key, plan="standard", active=True, product=product,
+        ))
+        db.commit()
+    return tid, key
+
+
+def test_test_alert_uses_the_tenant_own_brand(client, monkeypatch):
+    tid, key = _make_tenant_product("nepool")
+    import api.array_owners as ao
+    captured = {}
+
+    def fake_send(**kw):
+        captured.update(kw)
+        return True
+
+    monkeypatch.setattr("api.notify._send_via_resend", fake_send)
+    resp = client.post("/v1/array-owners/alert-settings/test", headers=_auth(key))
+    assert resp.status_code == 200, resp.text
+    assert captured.get("product") == "nepool"
+    from api import branding
+    brand = branding.brand_name("nepool")
+    assert brand in captured.get("subject", "")
+    assert "Array Operator" not in captured.get("subject", "")
+
+
+def test_test_alert_defaults_to_array_operator_when_product_unset(client, monkeypatch):
+    tid, key = _make_tenant()  # product="array_operator" per the shared helper
+    import api.array_owners as ao
+    captured = {}
+    monkeypatch.setattr("api.notify._send_via_resend",
+                        lambda **kw: captured.update(kw) or True)
+    resp = client.post("/v1/array-owners/alert-settings/test", headers=_auth(key))
+    assert resp.status_code == 200, resp.text
+    assert captured.get("product") == "array_operator"
+
+
+def test_test_alert_is_rate_limited_per_tenant(client, monkeypatch):
+    tid, key = _make_tenant()
+    import api.array_owners as ao
+    monkeypatch.setattr("api.notify._send_via_resend", lambda **kw: True)
+    monkeypatch.setattr(ao.ratelimit, "_HITS", {})
+    statuses = [
+        client.post("/v1/array-owners/alert-settings/test", headers=_auth(key)).status_code
+        for _ in range(6)
+    ]
+    assert statuses.count(200) == 5
+    assert statuses[-1] == 429
+
+
