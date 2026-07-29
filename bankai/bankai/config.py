@@ -36,6 +36,17 @@ GROK_MODEL = _env("GROK_MODEL", "grok-4")
 CLAUDE_CLI_BIN = _env("CLAUDE_CLI_BIN", "claude")
 CLAUDE_CLI_MODEL = _env("CLAUDE_CLI_MODEL")  # empty = the CLI's default model
 
+# --- Reply verification: a second model pass critiques consequential replies
+# (dollar figures, percentages, recommendations, deadlines) before they are
+# sent, and revises them once if it finds a material problem. Costs one or two
+# extra model calls on consequential turns only; set false to disable. ---
+VERIFY_REPLIES = (_env("VERIFY_REPLIES", "true") or "true").lower() not in (
+    "false",
+    "0",
+    "no",
+    "off",
+)
+
 SIMPLEFIN_ACCESS_URL = _env("SIMPLEFIN_ACCESS_URL")
 
 # --- Real estate: comps + AVM via RentCast (free tier: 50 requests/month) ---

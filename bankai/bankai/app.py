@@ -13,7 +13,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from . import config, realestate, vault
+from . import config, goals as goals_lib, realestate, vault, watchpoints as watchpoints_lib
 from .connectors import email_harvest, simplefin
 from .connectors.csv_import import import_csv
 from .connectors.ofx_import import import_ofx
@@ -106,6 +106,16 @@ class PropertyBody(BaseModel):
     baths: float | None = None
     year_built: int | None = None
     auto_update: bool = True
+
+
+class GoalBody(BaseModel):
+    name: str
+    target_amount: float
+    category: str = "savings"
+    target_date: str = ""
+    linked_account_id: str | None = None
+    starting_amount: float | None = None
+    note: str = ""
 
 
 class CompBody(BaseModel):
@@ -483,6 +493,65 @@ def delete_comp(comp_id: str, _: str = Depends(require_auth)):
             raise HTTPException(404, "comp not found")
         session.delete(comp)
         return {"ok": True}
+
+
+@app.get("/api/goals")
+def list_goals(status: str = "active", _: str = Depends(require_auth)):
+    """Household goals with computed progress. status=all for every goal."""
+    with session_scope() as session:
+        try:
+            return {
+                "goals": goals_lib.list_goals_with_progress(
+                    session, status=None if status == "all" else status
+                )
+            }
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
+
+@app.post("/api/goals")
+def create_goal(body: GoalBody, _: str = Depends(require_auth)):
+    with session_scope() as session:
+        try:
+            goal = goals_lib.create_goal(
+                session,
+                name=body.name,
+                target_amount=body.target_amount,
+                category=body.category,
+                target_date=date.fromisoformat(body.target_date) if body.target_date else None,
+                linked_account_id=body.linked_account_id,
+                starting_amount=body.starting_amount,
+                note=body.note,
+            )
+            return goals_lib.goal_progress(session, goal)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
+
+@app.get("/api/watchpoints")
+def list_watchpoints(status: str = "", _: str = Depends(require_auth)):
+    """Flags the copilot planted for its future self. status=armed|fired|cancelled."""
+    with session_scope() as session:
+        try:
+            rows = watchpoints_lib.list_watchpoints(session, status=status or None)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        return {
+            "watchpoints": [
+                {
+                    "id": w.id,
+                    "title": w.title,
+                    "note": w.note,
+                    "kind": w.kind,
+                    "status": w.status,
+                    "waits_for": watchpoints_lib.describe_condition(w),
+                    "created_by": w.created_by,
+                    "created_at": w.created_at.isoformat(),
+                    "fired_at": w.fired_at.isoformat() if w.fired_at else None,
+                }
+                for w in rows
+            ]
+        }
 
 
 MAX_DOCUMENT_BYTES = 15 * 1024 * 1024

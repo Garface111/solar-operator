@@ -98,6 +98,14 @@
       <table id="bills"></table>
     </section>
     <section>
+      <h2>Goals <span class="muted">— progress read from the ledger</span></h2>
+      <table id="goals"></table>
+    </section>
+    <section>
+      <h2>Watchpoints <span class="muted">— flags the copilot planted for itself</span></h2>
+      <table id="watchpoints"></table>
+    </section>
+    <section>
       <h2>Recent transactions</h2>
       <table id="txns"></table>
     </section>
@@ -228,6 +236,25 @@ async function refresh() {
   rows("firings", r.recent_firings.map(f =>
     `<tr><td class=muted>${f.fired_at.slice(0, 16).replace("T", " ")}</td><td>${f.subject}</td>` +
     `<td class=muted>${f.delivered ? "emailed" : "logged"}</td></tr>`).join(""));
+  const g = await api("/api/goals?status=all");
+  rows("goals", "<tr><th>Goal</th><th>Progress</th><th class=num>Target</th></tr>" +
+    g.goals.map(x => {
+      // on_track === null means "not yet determinable" — never render that as failure.
+      const track = x.on_track === true ? `<span class=pos>on track</span>`
+        : x.on_track === false ? `<span class=neg>off track</span>`
+        : `<span class=muted>pace not yet determinable</span>`;
+      const pct = x.percent_complete == null ? "—" : x.percent_complete.toFixed(1) + "%";
+      return `<tr><td>${x.name}<br><span class=muted>${x.status}${x.target_date ? " · by " + x.target_date : ""}</span></td>` +
+        `<td>${pct} · ${track}</td>` +
+        `<td class=num>${fmt(x.target_amount)}</td></tr>`;
+    }).join("") ||
+    "<tr><td class=muted>No goals yet — tell the copilot one and it will record it.</td></tr>");
+  const w = await api("/api/watchpoints");
+  rows("watchpoints", "<tr><th>Flag</th><th>Waiting for</th><th>Status</th></tr>" +
+    w.watchpoints.map(x =>
+      `<tr><td>${x.title}</td><td class=muted>${x.waits_for}</td>` +
+      `<td class=muted>${x.status}</td></tr>`).join("") ||
+    "<tr><td class=muted>Nothing being watched yet.</td></tr>");
 }
 
 async function syncNow() {

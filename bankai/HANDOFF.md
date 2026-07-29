@@ -206,3 +206,79 @@ your PlayStation subscription?') and try to cancel it." Built (100/100 tests):
    container and may be gone — if so, re-stage from `bankai/` (fresh `git init`,
    copy tree excluding .git/db/env/venv/__pycache__/documents).
 3. Then the deploy story (Railway config) if the user wants the SMS webhook public.
+
+---
+
+## 2026-07-29 — "ultimate tier" integrated (4 builder modules wired in)
+
+Four self-contained modules were built in parallel and wired into the live app this
+session. Each shipped with an `INTEGRATION-*.md` manual; all four were applied in full
+and the manuals deleted. **Nothing was left inert — every module is reachable from the
+agent, the scheduler, or the dashboard.**
+
+What landed:
+
+- **`intelligence/horizon.py`** — multi-year wealth projection. Tools `project_wealth`
+  and `affordability_check`. Seeded with a fixed `HORIZON_SEED = 20260101` in
+  `agent/tools.py` so identical questions return identical bands (unseeded it draws from
+  `SystemRandom` and the household reads the wobble as the copilot contradicting itself).
+- **`watchpoints.py`** — flags the copilot plants for its future self (table
+  `watchpoints`). Tools `set_watchpoint` / `list_watchpoints` / `cancel_watchpoint`;
+  evaluated every rules tick by `scheduler.run_watchpoints_once()`, which wakes the
+  copilot in the shared thread via `chat_thread.handle_web` — the same mechanism as the
+  monthly review.
+- **`skills_lib.py` + `skills_library/*.md`** — 5 markdown operating manuals
+  (negotiation, tax_levers, insurance_claims, consumer_protection,
+  subscriptions_darkpatterns). Tools `list_skills` / `read_skill`.
+- **`goals.py`** — `Goal` model (table `goals`) + derived progress. Tools `create_goal` /
+  `list_goals` / `update_goal_status`.
+- **`agent/verify.py`** — was inert (nothing imported it). Now hooked into
+  `chat.run_turn`.
+
+Hooks, file by file:
+
+- `db.py::init_db` — imports `goals` AND `watchpoints` before `create_all`. **Load
+  bearing**: both declare models outside `models.py`, so without these imports the tables
+  are silently never created and every call fails at runtime, not at import.
+- `agent/tools.py` — 10 new tool schemas + dispatch branches. **24 → 34 tools.**
+  `agent/mcp_server.py` needed no edit: it renders `TOOLS` directly, so the claude-cli
+  backend sees all 34 for free.
+- `agent/chat.py` — verifier hook inside the fallback loop, using the impl that actually
+  answered (`impl = _backend(name)`, not a re-resolve — a degraded chain must not be
+  critiqued by the dead brain). Skipped when `channel == "sms"`: a revision is generated
+  under `REVISION_SYSTEM`, which does not carry `SMS_ADDENDUM`, so a revised SMS reply
+  would come back long or in markdown. Four new SYSTEM_PROMPT paragraphs (long view,
+  watchpoints, skills+goals); all existing persona text and guardrails untouched.
+- `scheduler.py` — `run_watchpoints_once()` called from `_rules_loop()` in its own
+  try/except. Statuses commit BEFORE any agent turn starts (an uncommitted `fired` row
+  held across `handle_web` deadlocks SQLite against the claude-cli MCP process).
+  `MAX_WAKES_PER_TICK = 3`; overflow is re-armed **inside the same transaction**, so a
+  capped-out wake is deferred to the next tick rather than left `fired` with nothing in
+  the thread. A wake whose turn raises is re-armed too.
+- `app.py` — `GET /api/goals`, `POST /api/goals`, `GET /api/watchpoints` (auth-required).
+- `static/index.html` — read-only "Goals" and "Watchpoints" sections in the left column,
+  refreshed in the existing `refresh()` flow. `on_track: null` renders as "pace not yet
+  determinable", never as a red X — that honesty is the point of the feature.
+- `config.py` + `.env.example` — `VERIFY_REPLIES` (default true) moved out of
+  `verify.py`; the local `_env`/`_env_flag` shims and the `os` import are gone.
+
+Tests: **223 → 227 passing**, no network, no LLM. The 4 additions are in
+`tests/test_backends.py` and cover the `run_turn` verifier hook: disabled passes through,
+the fallback chain critiques with the winning backend, SMS skips verification, and a
+critic that raises degrades to the original reply.
+
+Watch for:
+
+- **Existing backend tests are accidentally safe.** Their canned replies ("hi from grok",
+  "Net worth is $10.") happen not to trip `is_consequential`, so the verifier stays out of
+  them. A future test whose fake reply quotes >$100, a percentage, a date, or a word like
+  "recommend"/"cancel" WILL get a second critic call against the same monkeypatched
+  backend. Set `verify.VERIFY_REPLIES = False` in such tests.
+- **Cost.** A financial copilot's replies are consequential *often*. Budget for most
+  substantive turns costing 2–3× the model calls. On `claude-cli` that is latency and
+  rate limits, not dollars — one or two extra `claude -p` subprocesses per verified turn.
+- **The horizon model holds existing debt flat in nominal dollars** (no payoff
+  schedules), so a household with a large mortgage projects worse than reality. It is in
+  `assumptions`, and the prompt tells the copilot to say it out loud — but eyeball this
+  before showing projections to anyone debt-heavy.
+- **Unseeded projections would wobble.** Do not remove `HORIZON_SEED`.

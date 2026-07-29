@@ -17,10 +17,25 @@ from .messaging import thread as chat_thread
 from .models import MemoryNote, Property
 from .rules.engine import evaluate_rules
 from .rules.notify import deliver_firings
+from .watchpoints import (
+    STATUS_ARMED,
+    STATUS_FIRED,
+    Watchpoint,
+    build_wake_prompt,
+    evaluate_watchpoints,
+)
 
 log = logging.getLogger("bankai.scheduler")
 
 REVIEW_MARKER_TITLE = "Last monthly review"
+
+WATCHPOINT_SPEAKER = "watchpoint (scheduled)"
+
+#: Each wake is a full agent turn, so a tick that trips many flags would stall the
+#: loop (and, on claude-cli, burn several subprocesses back to back). Overflow is
+#: re-armed inside the same transaction rather than left `fired` — a capped-out
+#: wake must be deferred, never silently dropped.
+MAX_WAKES_PER_TICK = 3
 
 MONTHLY_REVIEW_PROMPT = (
     "(scheduled monthly review — a new month just started. Look back and ahead: "
@@ -39,6 +54,47 @@ def run_rules_once() -> dict:
     return {"fired": len(firings), "delivered": delivered}
 
 
+def _rearm(watchpoint_id: str) -> None:
+    """Put a fired watchpoint back on the armed list so the next tick retries it."""
+    with session_scope() as session:
+        row = session.get(Watchpoint, watchpoint_id)
+        if row is not None and row.status == STATUS_FIRED:
+            row.status = STATUS_ARMED
+            row.fired_at = None
+
+
+def run_watchpoints_once() -> dict:
+    """Fire due watchpoints and wake the copilot in the shared thread for each."""
+    # Pass 1: flip statuses and capture the prompts. session_scope commits on exit,
+    # so the armed->fired transition is durable BEFORE any agent turn starts — that
+    # is what guarantees one wake per flag, and it also releases the SQLite write
+    # lock (the agent turn writes to the same DB from the claude-cli MCP process;
+    # holding an uncommitted `fired` row across handle_web would deadlock).
+    deferred = 0
+    with session_scope() as session:
+        fired = evaluate_watchpoints(session)
+        # Cap before the commit: the overflow goes back to `armed` in this same
+        # transaction, so it simply fires again next tick instead of being lost.
+        for overflow in fired[MAX_WAKES_PER_TICK:]:
+            overflow.status = STATUS_ARMED
+            overflow.fired_at = None
+            deferred += 1
+        pending = [(w.id, build_wake_prompt(w)) for w in fired[:MAX_WAKES_PER_TICK]]
+
+    woken = 0
+    for watchpoint_id, prompt in pending:
+        try:
+            with session_scope() as session:
+                chat_thread.handle_web(session, WATCHPOINT_SPEAKER, prompt)
+            woken += 1
+        except Exception:
+            # The turn failed (backend down). Re-arm so the next tick retries,
+            # mirroring the monthly review's "marker only after success" rule.
+            log.exception("watchpoint %s wake failed; re-arming", watchpoint_id)
+            _rearm(watchpoint_id)
+    return {"fired": len(pending), "woken": woken, "deferred": deferred}
+
+
 async def _sync_loop() -> None:
     while True:
         if config.SIMPLEFIN_ACCESS_URL:
@@ -55,6 +111,13 @@ async def _rules_loop() -> None:
                 log.info("rules: %s", result)
         except Exception:
             log.exception("rules loop error")
+        # Its own try: a watchpoint failure must never take rule delivery down.
+        try:
+            wp_result = await asyncio.to_thread(run_watchpoints_once)
+            if wp_result["fired"] or wp_result["deferred"]:
+                log.info("watchpoints: %s", wp_result)
+        except Exception:
+            log.exception("watchpoints loop error")
         await asyncio.sleep(config.RULES_INTERVAL_MINUTES * 60)
 
 

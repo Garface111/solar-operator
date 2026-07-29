@@ -120,6 +120,43 @@ Rule kinds (create in dashboard, via API, or by asking the chat agent):
 | `bill_reminder` | alert N days before an auto-detected recurring bill | `days_before` |
 | `weekly_digest` | weekly cashflow + upcoming-bills summary email | `weekday` |
 
+## The ultimate tier
+
+Four capabilities that take the copilot past answering questions:
+
+- **The long view.** `project_wealth` puts net worth years or decades out in today's
+  dollars — a median path plus p10/p50/p90 Monte Carlo bands, built from your *observed*
+  median monthly savings, not a number you typed in. `affordability_check` weighs one
+  financed purchase: payment math, what the down payment does to your cash cushion, and
+  both futures compared on identical simulated markets. The seed is pinned, so asking the
+  same question twice gives the same bands; every result carries its assumptions,
+  caveats, and a confidence flag, and the copilot is told never to quote the median alone.
+- **Watchpoints — flags for its future self.** A rule sends a notification; a watchpoint
+  *wakes the copilot up*. It writes down what it wants to reconsider and why, arms a
+  condition (a date, a net-worth or cash threshold, an account balance), and when the
+  condition trips it is woken **in this same thread** as a real agent turn — so it
+  reassesses with fresh balances and documents instead of replaying a canned alert. Each
+  flag fires at most once. The dashboard lists what it's watching and why.
+- **A skills library.** Five operating manuals it wrote for itself — bill negotiation, US
+  household tax levers, insurance claims and appeals, consumer-protection law (FCRA,
+  FDCPA, EFTA, FCBA), and subscription cancellation and dark patterns. Before it drafts a
+  cancellation, an appeal, or a dispute letter, it reads the relevant manual and follows
+  its scripts, thresholds, and deadlines instead of improvising. (The tax pack is
+  deliberately near-numberless: limits change annually, so it verifies before it cites.)
+- **Goals it actually stewards.** Say a goal out loud and it records one, linked to the
+  account whose balance *is* the measurement — so progress is read from the ledger, never
+  from memory. Every goal reports percent complete, the monthly pace needed to hit the
+  date, the pace actually observed, and a `basis` string saying exactly how that was
+  computed. When it can't tell honestly whether you're on track, it says so rather than
+  guessing.
+
+Underneath all of it: **reply verification**. Before a consequential reply leaves the
+copilot — anything with a dollar figure over $100, a percentage, a recommendation, or a
+deadline — a second model pass attacks it for invented numbers, bad arithmetic,
+overconfidence, and missing caveats, and rewrites it once if it finds something material.
+Costs 2–3× the model calls on those turns; `VERIFY_REPLIES=false` turns it off. SMS
+replies skip it (a revision wouldn't respect the 450-character limit).
+
 ## Choosing what powers the chat (`LLM_BACKEND`)
 
 | backend | pays with | setup |

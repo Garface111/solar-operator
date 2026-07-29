@@ -5,9 +5,12 @@ import pytest
 from bankai import config
 from bankai.agent import chat as agent_chat
 from bankai.agent import mcp_server
+from bankai.agent import verify
 from bankai.agent.backends import claude_cli, grok_backend
 from bankai.agent.tools import TOOLS
 from bankai.ingest import upsert_account
+
+CONSEQUENTIAL = "You should move $5,000 into savings."
 
 
 def test_dispatch_uses_configured_backend(session, monkeypatch):
@@ -58,6 +61,72 @@ def test_backend_chain_reports_every_failure(session, monkeypatch):
         agent_chat.run_turn(session, [{"role": "user", "content": "hi"}])
     msg = str(exc.value)
     assert "claude-cli:" in msg and "grok:" in msg and "XAI_API_KEY" in msg
+
+
+def test_run_turn_passes_reply_through_when_verifier_disabled(session, monkeypatch):
+    monkeypatch.setattr(config, "LLM_BACKEND", "grok")
+    monkeypatch.setattr(verify, "VERIFY_REPLIES", False)
+    calls = []
+    monkeypatch.setattr(
+        grok_backend, "run", lambda s, system, messages: calls.append(system) or CONSEQUENTIAL
+    )
+    assert agent_chat.run_turn(session, [{"role": "user", "content": "hi"}]) == CONSEQUENTIAL
+    assert len(calls) == 1  # no critic pass
+
+
+def test_run_turn_verifies_with_the_backend_that_answered(session, monkeypatch):
+    """On a fallback chain the critic must be the winning backend, not a re-resolve."""
+    monkeypatch.setattr(config, "LLM_BACKEND", "claude-cli,grok")
+    monkeypatch.setattr(verify, "VERIFY_REPLIES", True)
+
+    def cli_down(s, system, messages):
+        raise RuntimeError("not logged in")
+
+    systems = []
+
+    def grok(s, system, messages):
+        systems.append(system)
+        if len(systems) == 1:
+            return CONSEQUENTIAL
+        if len(systems) == 2:
+            return '{"verdict": "revise", "problems": ["the $5,000 is unsupported"], "severity": "high"}'
+        return "Corrected reply."
+
+    monkeypatch.setattr(claude_cli, "run", cli_down)
+    monkeypatch.setattr(grok_backend, "run", grok)
+    assert agent_chat.run_turn(session, [{"role": "user", "content": "hi"}]) == "Corrected reply."
+    # The dead backend was never asked to critique; grok answered all three calls.
+    assert len(systems) == 3
+    assert systems[1] == verify.CRITIC_SYSTEM and systems[2] == verify.REVISION_SYSTEM
+
+
+def test_run_turn_skips_verification_on_sms(session, monkeypatch):
+    """A revision is generated without SMS_ADDENDUM, so SMS replies are never revised."""
+    monkeypatch.setattr(config, "LLM_BACKEND", "grok")
+    monkeypatch.setattr(verify, "VERIFY_REPLIES", True)
+    calls = []
+    monkeypatch.setattr(
+        grok_backend, "run", lambda s, system, messages: calls.append(system) or CONSEQUENTIAL
+    )
+    reply = agent_chat.run_turn(session, [{"role": "user", "content": "hi"}], channel="sms")
+    assert reply == CONSEQUENTIAL
+    assert len(calls) == 1
+
+
+def test_run_turn_keeps_original_reply_when_critic_fails(session, monkeypatch):
+    monkeypatch.setattr(config, "LLM_BACKEND", "grok")
+    monkeypatch.setattr(verify, "VERIFY_REPLIES", True)
+    state = {"n": 0}
+
+    def grok(s, system, messages):
+        state["n"] += 1
+        if state["n"] == 1:
+            return CONSEQUENTIAL
+        raise RuntimeError("critic backend exploded")
+
+    monkeypatch.setattr(grok_backend, "run", grok)
+    # The critic failing must degrade to the original reply, not to the next backend.
+    assert agent_chat.run_turn(session, [{"role": "user", "content": "hi"}]) == CONSEQUENTIAL
 
 
 def test_claude_cli_not_logged_in_is_actionable(session, monkeypatch):

@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from ..connectors import email_harvest
 from ..intelligence.forecast import cash_flow_forecast, spending_anomalies
+from ..intelligence.horizon import affordability, project_wealth
 from ..intelligence.insights import (
     month_bounds,
     net_worth,
@@ -32,10 +33,15 @@ from ..models import (
     Transaction,
     Valuation,
 )
-from .. import realestate, vault
+from .. import goals as goals_lib, realestate, skills_lib, vault, watchpoints
 from ..rules.engine import RULE_KINDS
+from ..watchpoints import WATCHPOINT_KINDS
 
 READ_PAGE_CHARS = 30_000
+
+# Fixed so the copilot's projections don't wobble between identical questions.
+# The seed is echoed in every result, so any run is reproducible.
+HORIZON_SEED = 20260101
 
 TOOLS: list[dict] = [
     {
@@ -193,6 +199,222 @@ TOOLS: list[dict] = [
             "unusual', monthly reviews, or when spend looks off."
         ),
         "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "project_wealth",
+        "description": (
+            "Project the household's net worth years or decades out, in today's "
+            "dollars: a deterministic median path plus p10/p50/p90 Monte Carlo bands. "
+            "Built from their OBSERVED median monthly savings and current account "
+            "split — call this for retirement, 'are we on track', 'what if we saved "
+            "another $500/month' (monthly_savings_delta), or any multi-year wealth "
+            "question. cash_flow_forecast is the tool for weeks and months; this one "
+            "is for years. Always report the p10/p90 range, not just the median, and "
+            "repeat the confidence/data_thin flags the result carries."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "years": {"type": "integer", "description": "Horizon, default 10, max 40"},
+                "monthly_savings_delta": {
+                    "type": "number",
+                    "description": "Change to the observed monthly savings rate; positive = saving more. Default 0.",
+                },
+                "annual_return": {
+                    "type": "number",
+                    "description": "Expected real-ish annual investment return as a decimal, default 0.06",
+                },
+                "return_volatility": {
+                    "type": "number",
+                    "description": "Annual return standard deviation, default 0.12",
+                },
+                "inflation": {"type": "number", "description": "Annual inflation, default 0.03"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "affordability_check",
+        "description": (
+            "Test a specific large purchase (usually a house): monthly principal and "
+            "interest, total interest over the term, what the down payment does to "
+            "liquid savings and months of reserve, and projected p10/p50/p90 net worth "
+            "WITH versus WITHOUT the purchase on identical simulated markets. Returns a "
+            "plain-language 'verdict' with explicit confidence framing. Call this "
+            "whenever a purchase with a loan is being weighed. Pass extra_monthly_costs "
+            "for property tax, insurance, HOA, and maintenance — they are NOT in the "
+            "mortgage payment, and omitting them makes the answer too optimistic. State "
+            "the verdict AND the assumptions you fed it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "purchase_price": {"type": "number"},
+                "down_payment": {"type": "number"},
+                "annual_rate": {
+                    "type": "number",
+                    "description": "Mortgage rate as a decimal, e.g. 0.0675 for 6.75%",
+                },
+                "term_years": {"type": "integer", "description": "Loan term, e.g. 30"},
+                "extra_monthly_costs": {
+                    "type": "number",
+                    "description": "Property tax + insurance + HOA + maintenance per month. Default 0.",
+                },
+                "years": {"type": "integer", "description": "Comparison horizon, default 10, max 40"},
+            },
+            "required": ["purchase_price", "down_payment", "annual_rate", "term_years"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "set_watchpoint",
+        "description": (
+            "Plant a flag for your future self: something to RECONSIDER later, not a "
+            "notification. Give the note you'd want to read months from now — what you "
+            "decided, why, and what would change the answer. When it fires you are woken "
+            "in this thread with that note and the live numbers, and you reassess. Kinds: "
+            "on_date (params: date 'YYYY-MM-DD' — renewals, promo-rate expirations, "
+            "'revisit in 6 months' promises), net_worth_below / net_worth_above (params: "
+            "threshold), account_balance_below (params: account_id, threshold), "
+            "liquid_below (params: threshold — checking + savings combined). Use this "
+            "whenever you defer a decision or say you'll come back to something; say in "
+            "your reply what you planted and what will wake you."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Short, e.g. 'Reconsider the HELOC'"},
+                "note": {
+                    "type": "string",
+                    "description": "What future-you should reconsider and why — the reasoning, not just the fact",
+                },
+                "kind": {"type": "string", "enum": WATCHPOINT_KINDS},
+                "params": {"type": "object", "description": "Condition params for the kind"},
+            },
+            "required": ["title", "note", "kind", "params"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "list_watchpoints",
+        "description": (
+            "Every flag you have planted, with status (armed/fired/cancelled), the note "
+            "you wrote, and what each is waiting for. Check before planting a duplicate, "
+            "and when the household asks what you are keeping an eye on."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "enum": ["armed", "fired", "cancelled"]},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "cancel_watchpoint",
+        "description": (
+            "Disarm a watchpoint by id (from list_watchpoints) when the question it was "
+            "watching is settled or the household says to drop it. A watchpoint that "
+            "already fired cannot be cancelled."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"watchpoint_id": {"type": "string"}},
+            "required": ["watchpoint_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "list_skills",
+        "description": (
+            "List your skills library — durable operating manuals you wrote for "
+            "yourself on bill negotiation, US tax levers, insurance claims and "
+            "appeals, consumer-protection law (FCRA/FDCPA/EFTA/FCBA), and "
+            "subscription cancellation. Returns each skill's name and a WHEN TO "
+            "USE line. Check this BEFORE advising on a negotiation, a dispute, a "
+            "denied claim, or a tax question — then read the relevant one."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "read_skill",
+        "description": (
+            "Read one skill from your library in full — scripts, thresholds, "
+            "statutes, deadlines, and letter structures. Read the skill before "
+            "you draft a cancellation email, an appeal, a dispute letter, or a "
+            "negotiation plan, and follow its procedure rather than improvising."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"name": {"type": "string", "description": "Skill name from list_skills"}},
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "create_goal",
+        "description": (
+            "Record a household goal — an emergency fund, a down payment, a debt "
+            "payoff, a purchase. Link the account whose balance measures it "
+            "(linked_account_id from get_accounts) so progress is read from the "
+            "ledger, never from memory. starting_amount defaults to that "
+            "account's balance today, so progress counts from now. Create a goal "
+            "whenever the household states one out loud; restate the target, "
+            "date, and linked account in your reply."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "e.g. 'Six-month emergency fund'"},
+                "target_amount": {"type": "number", "description": "Amount to save, or debt to pay off"},
+                "category": {"type": "string", "enum": ["savings", "debt_payoff", "purchase", "other"]},
+                "target_date": {"type": "string", "description": "ISO date, must be in the future"},
+                "linked_account_id": {"type": "string", "description": "Account whose balance measures this goal"},
+                "starting_amount": {"type": "number", "description": "Override the baseline; defaults to today's balance"},
+                "note": {"type": "string"},
+            },
+            "required": ["name", "target_amount"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "list_goals",
+        "description": (
+            "Every household goal with computed progress: current amount, percent "
+            "complete, required monthly pace to hit the target date, observed "
+            "pace from balance history, and on_track. on_track is null when it "
+            "cannot be determined honestly — say so rather than guessing. Each "
+            "goal carries a 'basis' string explaining exactly how it was "
+            "computed; cite it when you report progress. Call this in monthly "
+            "reviews and whenever money decisions touch a stated goal."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["active", "achieved", "abandoned", "all"],
+                    "description": "default active",
+                }
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "update_goal_status",
+        "description": (
+            "Mark a goal achieved or abandoned (or reactivate it). Mark achieved "
+            "when list_goals shows the target reached — and tell the household."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "goal_id": {"type": "string"},
+                "status": {"type": "string", "enum": ["active", "achieved", "abandoned"]},
+            },
+            "required": ["goal_id", "status"],
+            "additionalProperties": False,
+        },
     },
     {
         "name": "search_email",
@@ -442,6 +664,95 @@ def _dispatch(session: Session, name: str, args: dict):
         return cash_flow_forecast(session, days=days)
     if name == "spending_anomalies":
         return spending_anomalies(session)
+    if name == "project_wealth":
+        return project_wealth(
+            session,
+            min(int(args.get("years") or 10), 40),
+            monthly_savings_delta=float(args.get("monthly_savings_delta") or 0.0),
+            annual_return=float(args.get("annual_return") or 0.06),
+            return_volatility=float(args.get("return_volatility") or 0.12),
+            inflation=float(args.get("inflation") or 0.03),
+            seed=HORIZON_SEED,
+            simulations=500,
+        )
+    if name == "affordability_check":
+        return affordability(
+            session,
+            purchase_price=float(args["purchase_price"]),
+            down_payment=float(args["down_payment"]),
+            annual_rate=float(args["annual_rate"]),
+            term_years=int(args["term_years"]),
+            extra_monthly_costs=float(args.get("extra_monthly_costs") or 0.0),
+            years=min(int(args.get("years") or 10), 40),
+            seed=HORIZON_SEED,
+            simulations=500,
+        )
+    if name == "set_watchpoint":
+        watchpoint = watchpoints.create_watchpoint(
+            session,
+            title=args["title"],
+            kind=args["kind"],
+            note=args.get("note") or "",
+            params=args.get("params") or {},
+            created_by="agent",
+        )
+        return {
+            "created": True,
+            "watchpoint_id": watchpoint.id,
+            "title": watchpoint.title,
+            "kind": watchpoint.kind,
+            "params": watchpoint.params,
+            "waits_for": watchpoints.describe_condition(watchpoint),
+        }
+    if name == "list_watchpoints":
+        rows = watchpoints.list_watchpoints(session, status=args.get("status"))
+        return [
+            {
+                "watchpoint_id": w.id,
+                "title": w.title,
+                "note": w.note,
+                "kind": w.kind,
+                "params": w.params,
+                "status": w.status,
+                "waits_for": watchpoints.describe_condition(w),
+                "created_by": w.created_by,
+                "created_at": w.created_at.isoformat(),
+                "fired_at": w.fired_at.isoformat() if w.fired_at else None,
+            }
+            for w in rows
+        ]
+    if name == "cancel_watchpoint":
+        watchpoint = watchpoints.cancel_watchpoint(session, args["watchpoint_id"])
+        return {"cancelled": True, "watchpoint_id": watchpoint.id, "title": watchpoint.title}
+    if name == "list_skills":
+        return {
+            "skills": skills_lib.list_skills(),
+            "note": "read_skill(name) for the full manual before acting on it",
+        }
+    if name == "read_skill":
+        return {"name": args["name"], "text": skills_lib.read_skill(args["name"])}
+    if name == "create_goal":
+        goal = goals_lib.create_goal(
+            session,
+            name=args["name"],
+            target_amount=float(args["target_amount"]),
+            category=args.get("category") or "savings",
+            target_date=(
+                date.fromisoformat(args["target_date"]) if args.get("target_date") else None
+            ),
+            linked_account_id=args.get("linked_account_id"),
+            starting_amount=args.get("starting_amount"),
+            note=args.get("note") or "",
+        )
+        return {"created": True, **goals_lib.goal_progress(session, goal)}
+    if name == "list_goals":
+        status = args.get("status") or "active"
+        return goals_lib.list_goals_with_progress(
+            session, status=None if status == "all" else status
+        )
+    if name == "update_goal_status":
+        goal = goals_lib.update_goal_status(session, args["goal_id"], args["status"])
+        return {"updated": True, "goal_id": goal.id, "name": goal.name, "status": goal.status}
     if name == "search_email":
         return email_harvest.search_email(
             args["query"], limit=min(int(args.get("limit") or 20), 50)
