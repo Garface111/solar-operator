@@ -10,7 +10,7 @@ def twilio_config(monkeypatch):
     monkeypatch.setattr(config, "TWILIO_ACCOUNT_SID", "ACtest")
     monkeypatch.setattr(config, "TWILIO_AUTH_TOKEN", "secret-token")
     monkeypatch.setattr(config, "TWILIO_FROM_NUMBER", "+18025550000")
-    monkeypatch.setattr(config, "HOUSEHOLD_PHONES", "Ford:+18025551234,Sam:+18025555678")
+    monkeypatch.setattr(config, "HOUSEHOLD_PHONES", "Ford:+18025551234,Partner:+18025555678")
 
 
 @pytest.fixture()
@@ -48,6 +48,6 @@ def test_first_contact_sends_welcome_then_answers(session, sent):
 
 
 def test_start_keyword_gets_welcome_not_agent(session, sent):
-    reply = thread.handle_inbound(session, "Sam", "START")
+    reply = thread.handle_inbound(session, "Partner", "START")
     assert reply == thread.WELCOME_TEXT
     assert session.query(ChatMessage).count() == 0  # keyword not stored as conversation

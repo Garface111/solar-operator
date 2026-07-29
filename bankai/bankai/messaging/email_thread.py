@@ -49,7 +49,7 @@ _QUOTE_MARKERS = [
 
 
 def household_emails() -> dict[str, str]:
-    """Parse HOUSEHOLD_EMAILS ('Ford:ford@x.com,Sam:sam@x.com') -> {name: address}."""
+    """Parse HOUSEHOLD_EMAILS ('Ford:ford@x.com,Partner:partner@example.com') -> {name: address}."""
     out: dict[str, str] = {}
     for part in config.HOUSEHOLD_EMAILS.split(","):
         if ":" in part:

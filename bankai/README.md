@@ -90,7 +90,7 @@ Both of you can text the copilot from your phones, in one shared conversation:
 
 1. Buy a Twilio number, set `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` /
    `TWILIO_FROM_NUMBER` in `.env`.
-2. List both phones in `HOUSEHOLD_PHONES` (`Ford:+1802...,Sam:+1802...`) — the names
+2. List both phones in `HOUSEHOLD_PHONES` (`Ford:+1802...,Partner:+1802...`) — the names
    label who said what in the thread. **Only these numbers are ever answered.**
 3. Point the Twilio number's incoming-message webhook at
    `https://<your-deploy>/api/sms/webhook` (requests are signature-validated; set

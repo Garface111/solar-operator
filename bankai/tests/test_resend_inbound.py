@@ -18,7 +18,7 @@ def wired(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "RESEND_API_KEY", "re_test")
     monkeypatch.setattr(config, "EMAIL_FROM", OURS)
     monkeypatch.setattr(config, "EMAIL_INBOUND_ADDRESS", "")
-    monkeypatch.setattr(config, "HOUSEHOLD_EMAILS", f"Ford:{FORD},Sam:{SPOUSE}")
+    monkeypatch.setattr(config, "HOUSEHOLD_EMAILS", f"Ford:{FORD},Partner:{SPOUSE}")
     monkeypatch.setattr(config, "GMAIL_ADDRESS", "")
     monkeypatch.setattr(config, "GMAIL_APP_PASSWORD", "")
 

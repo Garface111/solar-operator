@@ -34,7 +34,7 @@ def normalize_phone(raw: str) -> str:
 
 
 def household_phones() -> dict[str, str]:
-    """Parse HOUSEHOLD_PHONES ('Ford:+18025551234,Sam:+18025555678') -> {name: E.164}."""
+    """Parse HOUSEHOLD_PHONES ('Ford:+18025551234,Partner:+15555550002') -> {name: E.164}."""
     out: dict[str, str] = {}
     for part in config.HOUSEHOLD_PHONES.split(","):
         if ":" in part:

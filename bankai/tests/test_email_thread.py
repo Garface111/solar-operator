@@ -9,12 +9,12 @@ from bankai.messaging import email_thread
 from bankai.models import ChatMessage
 
 FORD = "ford.genereaux@gmail.com"
-SPOUSE = "sam@example.com"
+SPOUSE = "partner@example.com"
 
 
 @pytest.fixture(autouse=True)
 def household(monkeypatch):
-    monkeypatch.setattr(config, "HOUSEHOLD_EMAILS", f"Ford:{FORD},Sam:{SPOUSE}")
+    monkeypatch.setattr(config, "HOUSEHOLD_EMAILS", f"Ford:{FORD},Partner:{SPOUSE}")
     monkeypatch.setattr(config, "GMAIL_ADDRESS", "copilot@example.com")
     monkeypatch.setattr(config, "GMAIL_APP_PASSWORD", "app-password")
     monkeypatch.setattr(config, "RESEND_API_KEY", "")
@@ -35,7 +35,7 @@ def raw_email(sender, subject="Question", body="How are we doing?", message_id="
 
 def test_identifies_household_senders():
     assert email_thread.identify_sender(f"Ford G <{FORD}>") == "Ford"
-    assert email_thread.identify_sender(SPOUSE.upper()) == "Sam"
+    assert email_thread.identify_sender(SPOUSE.upper()) == "Partner"
 
 
 def test_unknown_senders_are_not_identified():
@@ -155,11 +155,11 @@ def test_spouse_email_joins_the_same_thread(session, monkeypatch):
         email_thread.agent_chat, "run_turn",
         lambda s, history, channel="email": seen.setdefault("history", history) and "" or "ok",
     )
-    parsed = email_thread._parse(raw_email(f"Sam <{SPOUSE}>", body="and now?"))
+    parsed = email_thread._parse(raw_email(f"Partner <{SPOUSE}>", body="and now?"))
     email_thread.process_message(session, parsed)
     contents = [m["content"] for m in seen["history"]]
     assert any("earlier" in c for c in contents)
-    assert any("[Sam] and now?" == c for c in contents)
+    assert any("[Partner] and now?" == c for c in contents)
 
 
 def test_empty_body_after_stripping_is_not_answered(session, monkeypatch):

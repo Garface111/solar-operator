@@ -58,7 +58,7 @@ GMAIL_ADDRESS = _env("GMAIL_ADDRESS")
 GMAIL_APP_PASSWORD = _env("GMAIL_APP_PASSWORD")
 IMAP_HOST = _env("IMAP_HOST", "imap.gmail.com")
 EMAIL_HARVEST_DAYS = int(_env("EMAIL_HARVEST_DAYS", "7") or 7)
-# Three-way email thread: "Ford:ford@x.com,Sam:sam@x.com". ONLY these addresses
+# Three-way email thread: "Ford:ford@x.com,Partner:partner@example.com". ONLY these addresses
 # are answered — the copilot can read the household's whole financial picture.
 HOUSEHOLD_EMAILS = _env("HOUSEHOLD_EMAILS")
 EMAIL_POLL_SECONDS = int(_env("EMAIL_POLL_SECONDS", "60") or 60)
@@ -86,7 +86,7 @@ TWILIO_AUTH_TOKEN = _env("TWILIO_AUTH_TOKEN")  # required: signs inbound webhook
 TWILIO_API_KEY_SID = _env("TWILIO_API_KEY_SID")
 TWILIO_API_KEY_SECRET = _env("TWILIO_API_KEY_SECRET")
 TWILIO_FROM_NUMBER = _env("TWILIO_FROM_NUMBER")
-# "Ford:+18025551234,Sam:+18025555678" — names label speakers in the thread
+# "Ford:+18025551234,Partner:+15555550002" — names label speakers in the thread
 HOUSEHOLD_PHONES = _env("HOUSEHOLD_PHONES")
 # Exact public URL Twilio posts to, for signature validation behind proxies.
 # If unset, it is reconstructed from the request (X-Forwarded-Proto aware).

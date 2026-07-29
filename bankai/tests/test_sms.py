@@ -15,7 +15,7 @@ def twilio_config(monkeypatch):
     monkeypatch.setattr(config, "TWILIO_AUTH_TOKEN", "secret-token")
     monkeypatch.setattr(config, "TWILIO_FROM_NUMBER", "+18025550000")
     monkeypatch.setattr(
-        config, "HOUSEHOLD_PHONES", "Ford:+1 (802) 555-1234, Sam:802-555-5678"
+        config, "HOUSEHOLD_PHONES", "Ford:+1 (802) 555-1234, Partner:802-555-5678"
     )
 
 
@@ -44,8 +44,8 @@ def test_normalize_phone_variants():
 
 def test_household_parsing_and_sender_identification():
     phones = sms.household_phones()
-    assert phones == {"Ford": "+18025551234", "Sam": "+18025555678"}
-    assert sms.identify_sender("+18025555678") == "Sam"
+    assert phones == {"Ford": "+18025551234", "Partner": "+18025555678"}
+    assert sms.identify_sender("+18025555678") == "Partner"
     assert sms.identify_sender("(802) 555-1234") == "Ford"
     assert sms.identify_sender("+19995550000") is None
     assert sms.configured()
@@ -73,7 +73,7 @@ def test_handle_inbound_relays_and_broadcasts(session, monkeypatch):
 
     reply = thread.handle_inbound(session, "Ford", "what's our net worth?")
     assert reply == "Your net worth is $10."
-    # Relay of Ford's message goes only to Sam; reply goes to both.
+    # Relay of Ford's message goes only to Partner; reply goes to both.
     relay = [x for x in sent if x[1].startswith("Ford:")]
     assert relay == [("+18025555678", "Ford: what's our net worth?")]
     replies = [x for x in sent if x[1] == reply]
@@ -85,11 +85,11 @@ def test_handle_inbound_relays_and_broadcasts(session, monkeypatch):
 
 def test_build_history_prefixes_speakers_and_starts_with_user(session):
     session.add(ChatMessage(channel="sms", role="assistant", speaker="copilot", content="hi"))
-    session.add(ChatMessage(channel="sms", role="user", speaker="Sam", content="how much in savings?"))
+    session.add(ChatMessage(channel="sms", role="user", speaker="Partner", content="how much in savings?"))
     session.add(ChatMessage(channel="sms", role="assistant", speaker="copilot", content="$5,000."))
     session.flush()
     history = thread.build_history(session)
-    assert history[0] == {"role": "user", "content": "[Sam] how much in savings?"}
+    assert history[0] == {"role": "user", "content": "[Partner] how much in savings?"}
     assert history[1]["role"] == "assistant"
 
 
@@ -99,11 +99,11 @@ def test_unified_thread_across_web_and_sms(session, monkeypatch):
         thread.agent_chat, "run_turn", lambda s, m, channel="web": "ok"
     )
     thread.handle_web(session, "Ford", "note from the dashboard")
-    thread.handle_inbound(session, "Sam", "and a text follow-up")
+    thread.handle_inbound(session, "Partner", "and a text follow-up")
     history = thread.build_history(session)
     contents = [m["content"] for m in history if m["role"] == "user"]
     assert "[Ford] note from the dashboard" in contents
-    assert "[Sam] and a text follow-up" in contents
+    assert "[Partner] and a text follow-up" in contents
     # both replies persisted too
     assert sum(1 for m in history if m["role"] == "assistant") == 2
 
