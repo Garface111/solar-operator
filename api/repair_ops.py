@@ -2482,6 +2482,13 @@ def ingest_inbound_email(
     inbound_message_id: str | None = None,
 ) -> dict:
     """Parse a tech reply email into a RepairCheckIn. Used by Resend inbound webhook + poller."""
+    # Defence in depth: the webhook can be reached without going through the
+    # poller's filter, and the receiving inbox is shared with other systems.
+    # When we know who it was addressed to and it is not one of our mailboxes,
+    # it is not a tech reply — do not read it, match it, or answer it.
+    if to_emails and not _is_our_mailbox(to_emails):
+        return {"ok": False, "matched": False, "reason": "not_our_mailbox"}
+
     # Dedupe by Resend id (webhook + poller may both see the same message)
     if resend_email_id:
         marker = f"resend:{resend_email_id}"
@@ -2632,10 +2639,28 @@ def ingest_inbound_email(
     }
 
 
+#: Mailboxes this system owns. The Resend receiving inbox is shared across every
+#: agent on agent.arrayoperator.com — including mailboxes belonging to entirely
+#: separate systems (e.g. a household finance copilot). Mail addressed anywhere
+#: else is NOT ours: ingesting it filed private conversations as repair-ticket
+#: replies and answered them as the Energy Agent. Match on the local part so a
+#: display-name wrapper ("Energy Agent <repairs@...>") still resolves.
+OWNED_MAILBOX_PREFIXES = ("repairs@", "agent@", "sovereign@")
+
+
+def _is_our_mailbox(to_emails: list | None) -> bool:
+    for addr in to_emails or []:
+        low = str(addr or "").strip().lower()
+        if any(prefix in low for prefix in OWNED_MAILBOX_PREFIXES):
+            return True
+    return False
+
+
 def sync_inbound_from_resend(db, *, limit: int = 25, tenant_id: str | None = None) -> dict:
     """Pull recent Resend receiving inbox and ingest any unreplied tech mail.
 
     Safety net when webhooks are delayed/missed. Safe to call repeatedly (deduped).
+    Only mail addressed to a mailbox this system owns is touched.
     """
     import os
     import urllib.request
@@ -2708,6 +2733,12 @@ def sync_inbound_from_resend(db, *, limit: int = 25, tenant_id: str | None = Non
                 pass
 
         to_list = to_emails if isinstance(to_emails, list) else [to_emails]
+
+        # Not addressed to us: another system shares this receiving inbox and its
+        # mail is none of our business. Skip before reading or replying.
+        if not _is_our_mailbox(to_list):
+            results.append({"email_id": eid, "skipped": "not_our_mailbox"})
+            continue
 
         # Owner ⇄ agent mailbox mail belongs to the Energy Agent email channel,
         # not the repair-ticket matcher (crew mail arrives at repairs@). Escalation
