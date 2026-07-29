@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 
 from .. import config
 from ..agent import chat as agent_chat
-from ..connectors import email_harvest, resend_inbound
+from ..connectors import attachments, email_harvest, resend_inbound
 from ..models import ChatMessage
 from . import thread as shared_thread
 
@@ -176,6 +176,45 @@ def start_thread(session: Session, subject: str, body: str) -> dict:
     return {"sent": True, "to": recipients, "subject": subject, "receipt": receipt}
 
 
+def _describe_attachments(results: list[dict]) -> str:
+    """Tell the turn what actually became of each file, in its own words.
+
+    Stating the outcome plainly is what stops the copilot from thanking someone
+    for data it failed to read, or claiming an import that never happened.
+    """
+    lines = ["[Files arrived with this email:]"]
+    for r in results:
+        name = r.get("filename", "a file")
+        if r.get("imported"):
+            line = (
+                f"- {name}: IMPORTED into '{r['account']}' — {r['added']} new "
+                f"transactions, {r['duplicates_skipped']} already known."
+            )
+            if r.get("balance_unknown"):
+                line += f" BUT: {r['note']}"
+            else:
+                line += " The balances now reflect it; confirm what you can see."
+            lines.append(line)
+        elif r.get("needs_account"):
+            lines.append(
+                f"- {name}: saved to the vault, but it looks like a statement and "
+                f"nothing says which account it belongs to. ASK which account, "
+                f"then import it. Do not guess."
+            )
+        elif r.get("import_error"):
+            lines.append(
+                f"- {name}: saved to the vault, but its transactions could NOT be "
+                f"read ({r['import_error']}). Say so plainly and ask for another "
+                f"export rather than implying the data is in."
+            )
+        else:
+            lines.append(
+                f"- {name}: filed in the vault (document_id {r.get('document_id')}). "
+                f"Read it and annotate_document with what it says."
+            )
+    return "\n".join(lines)
+
+
 def process_message(session: Session, parsed: dict) -> str | None:
     """Store one inbound household email, run a turn, and reply to everyone.
     Returns the reply text, or None when the sender is not household."""
@@ -184,8 +223,13 @@ def process_message(session: Session, parsed: dict) -> str | None:
         log.info("ignoring email from unknown sender: %s", parsed["from"][:80])
         return None
     body = strip_quoted(parsed["body"])
-    if not body:
+    files = parsed.get("attachments") or []
+    # Someone forwarding a statement often writes nothing at all. Silence plus an
+    # attachment is still a message, and answering nothing would look broken.
+    if not body and not files:
         return None
+    if files:
+        body = (body + "\n\n" + _describe_attachments(files)).strip()
 
     session.add(
         ChatMessage(channel="email", role="user", speaker=sender, content=body)
@@ -233,13 +277,12 @@ def poll_resend(session: Session) -> dict:
     Attachments ride along into the vault — emailing the copilot a document is
     the least-friction way to hand it something.
     """
-    from .. import vault
 
     if not resend_inbound.seen_ids(session):
         adopted = resend_inbound.adopt_backlog(session)
         return {"status": "initialized", "adopted": adopted}
 
-    answered, ignored, filed = 0, 0, 0
+    answered, ignored, filed, imported = 0, 0, 0, 0
     for summary in resend_inbound.new_messages(session):
         resend_id = summary["id"]
         # Claim first: the reply must go out exactly once even if two workers
@@ -259,27 +302,28 @@ def poll_resend(session: Session) -> dict:
             ignored += 1
             continue
 
+        attachment_results = []
         for attachment in message.get("attachments") or []:
             data = resend_inbound.attachment_bytes(attachment)
             filename = attachment.get("filename") or attachment.get("name") or ""
             if not data or not filename:
                 continue
             try:
-                doc, created = vault.add_document(
-                    session, filename=filename, data=data,
+                outcome = attachments.handle(
+                    session,
+                    filename=filename,
+                    data=data,
+                    sender=sender,
+                    subject=message.get("subject", ""),
                     category=email_harvest.guess_category(
                         f"{filename} {message.get('subject', '')}"
                     ),
                 )
-                if created:
-                    doc.summary = (
-                        f"Emailed in by {sender} on "
-                        f"{message.get('created_at', '')}: "
-                        f"\"{message.get('subject', '')}\". Not yet reviewed in detail."
-                    )
-                    filed += 1
+                attachment_results.append(outcome)
+                filed += int(bool(outcome.get("filed")))
+                imported += int(bool(outcome.get("imported")))
             except Exception:
-                log.exception("could not file attachment %s", filename)
+                log.exception("could not handle attachment %s", filename)
 
         parsed = {
             "from": message.get("from", ""),
@@ -287,6 +331,10 @@ def poll_resend(session: Session) -> dict:
             "message_id": message.get("message_id", ""),
             "references": message.get("references", "") or "",
             "body": resend_inbound.body_text(message),
+            # The turn is told what actually happened to the files, so it can
+            # confirm an import, ask which account an ambiguous export belongs
+            # to, or admit a file could not be read — rather than assuming.
+            "attachments": attachment_results,
         }
         try:
             reply = process_message(session, parsed)
@@ -296,7 +344,8 @@ def poll_resend(session: Session) -> dict:
             continue
         resend_inbound.settle(session, resend_id, "answered" if reply else "ignored")
         answered += int(bool(reply))
-    return {"status": "ok", "answered": answered, "ignored": ignored, "documents_filed": filed}
+    return {"status": "ok", "answered": answered, "ignored": ignored,
+            "documents_filed": filed, "statements_imported": imported}
 
 
 def poll_once(session: Session) -> dict:
