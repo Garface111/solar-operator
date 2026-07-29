@@ -23,6 +23,28 @@ export interface CanvasActions {
     loginId?: string | null,
   ) => void;
   moveArrayToClient: (srcClientId: string, arrayId: string, dstClientId: string, subMeterCount: number) => void;
+  /** Move a whole MONITORING login (SolarEdge/Fronius/Locus/AlsoEnergy…) and
+   *  every array under it to another client.
+   *
+   *  Separate from moveLoginToClient because the two are different objects:
+   *  a utility login is a set of UtilityAccounts (moved with reassignAccount),
+   *  while a vendor login owns Arrays directly and has no UtilityAccount at all
+   *  — which is exactly why these rows used to be render-only. */
+  moveVendorLoginToClient: (
+    srcClientId: string,
+    vendor: string,
+    login: string,
+    dstClientId: string,
+  ) => void;
+  /** Move ONE array out of a monitoring login to another client. The array
+   *  travels alone; the login row stays put with its remaining arrays. */
+  moveVendorArrayToClient: (
+    srcClientId: string,
+    vendor: string,
+    login: string,
+    arrayId: number,
+    dstClientId: string,
+  ) => void;
   /** Look up an origin client by id — used to label moved logins
    *  ("from Marie's GMP login"). Returns null when the origin is unknown or
    *  the lookup hasn't loaded yet. */

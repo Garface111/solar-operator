@@ -1959,6 +1959,187 @@ export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen
   // ── Array-level drag ──────────────────────────────────────────────────────
 
   // Executes the actual array move without any confirmation step.
+  // ── monitoring (vendor) logins ───────────────────────────────────────────
+  // SolarEdge / Fronius / Locus / AlsoEnergy own their Arrays DIRECTLY and have
+  // no UtilityAccount, so neither moveLoginToClient (which reassigns accounts)
+  // nor executeArrayMove (which finds an array by walking client.accounts) can
+  // see them. That is why these rows were render-only. They get their own pair
+  // of movers, working on client.vendorLogins and reassignArray.
+  const moveVendorLoginToClient = useCallback(
+    (srcClientId: string, vendor: string, login: string, dstClientId: string) => {
+      if (srcClientId === dstClientId) return;
+      const current = nodesRef.current;
+      const src = current.find((n) => n.id === srcClientId && n.type === 'client');
+      const dst = current.find((n) => n.id === dstClientId && n.type === 'client');
+      if (!src || !dst) return;
+
+      const srcData = src.data as ClientNodeData;
+      const dstData = dst.data as ClientNodeData;
+      const group = (srcData.client.vendorLogins ?? []).find(
+        (v) => v.vendor === vendor && v.login === login,
+      );
+      if (!group || group.arrays.length === 0) return;
+
+      const snapshot = current;
+      const applyMove = () =>
+        setNodes((ns) =>
+          ns.map((n) => {
+            if (n.id === srcClientId) {
+              return {
+                ...n,
+                data: {
+                  ...srcData,
+                  client: {
+                    ...srcData.client,
+                    vendorLogins: (srcData.client.vendorLogins ?? []).filter(
+                      (v) => !(v.vendor === vendor && v.login === login),
+                    ),
+                  },
+                },
+              };
+            }
+            if (n.id === dstClientId) {
+              const existing = dstData.client.vendorLogins ?? [];
+              // The destination may already hold the SAME credential (one login
+              // legitimately spans clients) — merge into it rather than render
+              // two identical login rows on one card.
+              const same = existing.find((v) => v.vendor === vendor && v.login === login);
+              const merged = same
+                ? existing.map((v) =>
+                    v === same ? { ...v, arrays: [...v.arrays, ...group.arrays] } : v,
+                  )
+                : [...existing, group];
+              return {
+                ...n,
+                data: { ...dstData, client: { ...dstData.client, vendorLogins: merged } },
+              };
+            }
+            return n;
+          }),
+        );
+
+      applyMove();
+      const n = group.arrays.length;
+      toast.show(
+        `${vendor} login (${n} ${n === 1 ? 'array' : 'arrays'}) → ${dstData.client.name}.`,
+        'success',
+      );
+
+      const dstNumId = parseInt(dstClientId.replace('client_', ''), 10);
+      const srcNumId = parseInt(srcClientId.replace('client_', ''), 10);
+      if (isNaN(dstNumId)) return;
+      Promise.all(group.arrays.map((a) => reassignArray(a.id, dstNumId)))
+        .then(() => { void loadCanvas(); })
+        .catch(() => {
+          setNodes(snapshot);
+          toast.show('Move failed — reverted.', 'error');
+        });
+
+      if (!isNaN(srcNumId)) {
+        pushUndo({
+          label: `Move ${vendor} login to ${dstData.client.name}`,
+          timestamp: Date.now(),
+          undo: () => {
+            setNodes(snapshot);
+            Promise.all(group.arrays.map((a) => reassignArray(a.id, srcNumId)))
+              .then(() => { void loadCanvas(); })
+              .catch(() => toast.show('Undo move login failed.', 'error'));
+          },
+          redo: () => {
+            applyMove();
+            Promise.all(group.arrays.map((a) => reassignArray(a.id, dstNumId)))
+              .then(() => { void loadCanvas(); })
+              .catch(() => toast.show('Redo move login failed.', 'error'));
+          },
+        });
+      }
+    },
+    [setNodes, toast, loadCanvas, pushUndo],
+  );
+
+  const moveVendorArrayToClient = useCallback(
+    (srcClientId: string, vendor: string, login: string, arrayId: number, dstClientId: string) => {
+      if (srcClientId === dstClientId) return;
+      const current = nodesRef.current;
+      const src = current.find((n) => n.id === srcClientId && n.type === 'client');
+      const dst = current.find((n) => n.id === dstClientId && n.type === 'client');
+      if (!src || !dst) return;
+
+      const srcData = src.data as ClientNodeData;
+      const dstData = dst.data as ClientNodeData;
+      const group = (srcData.client.vendorLogins ?? []).find(
+        (v) => v.vendor === vendor && v.login === login,
+      );
+      const arr = group?.arrays.find((a) => a.id === arrayId);
+      if (!group || !arr) return;
+
+      const snapshot = current;
+      const applyMove = () =>
+        setNodes((ns) =>
+          ns.map((n) => {
+            if (n.id === srcClientId) {
+              const rest = group.arrays.filter((a) => a.id !== arrayId);
+              const groups = (srcData.client.vendorLogins ?? [])
+                // Drop the login row once its last array leaves — an empty
+                // credential row is noise, and the login itself still lives on
+                // the client that now holds the arrays.
+                .map((v) => (v === group ? { ...v, arrays: rest } : v))
+                .filter((v) => v.arrays.length > 0);
+              return {
+                ...n,
+                data: { ...srcData, client: { ...srcData.client, vendorLogins: groups } },
+              };
+            }
+            if (n.id === dstClientId) {
+              const existing = dstData.client.vendorLogins ?? [];
+              const same = existing.find((v) => v.vendor === vendor && v.login === login);
+              const merged = same
+                ? existing.map((v) => (v === same ? { ...v, arrays: [...v.arrays, arr] } : v))
+                : [...existing, { vendor, login, arrays: [arr] }];
+              return {
+                ...n,
+                data: { ...dstData, client: { ...dstData.client, vendorLogins: merged } },
+              };
+            }
+            return n;
+          }),
+        );
+
+      applyMove();
+      toast.show(`Array "${arr.name}" → ${dstData.client.name}.`, 'success');
+
+      const dstNumId = parseInt(dstClientId.replace('client_', ''), 10);
+      const srcNumId = parseInt(srcClientId.replace('client_', ''), 10);
+      if (isNaN(dstNumId)) return;
+      reassignArray(arrayId, dstNumId)
+        .then(() => { void loadCanvas(); })
+        .catch(() => {
+          setNodes(snapshot);
+          toast.show('Move failed — reverted.', 'error');
+        });
+
+      if (!isNaN(srcNumId)) {
+        pushUndo({
+          label: `Move ${arr.name} to ${dstData.client.name}`,
+          timestamp: Date.now(),
+          undo: () => {
+            setNodes(snapshot);
+            reassignArray(arrayId, srcNumId)
+              .then(() => { void loadCanvas(); })
+              .catch(() => toast.show('Undo move array failed.', 'error'));
+          },
+          redo: () => {
+            applyMove();
+            reassignArray(arrayId, dstNumId)
+              .then(() => { void loadCanvas(); })
+              .catch(() => toast.show('Redo move array failed.', 'error'));
+          },
+        });
+      }
+    },
+    [setNodes, toast, loadCanvas, pushUndo],
+  );
+
   // Called directly for single-account arrays, or after the sub-meter
   // confirmation dialog is confirmed.
   const executeArrayMove = useCallback(
@@ -2295,6 +2476,8 @@ export default function SandboxCanvas({ isFullscreen = false, onToggleFullscreen
     detachLogin,
     moveLoginToClient,
     moveArrayToClient,
+    moveVendorLoginToClient,
+    moveVendorArrayToClient,
     getOriginClient: (cid: number) => originLookup[cid] ?? null,
     updateClient: updateClientField,
     togglePin,

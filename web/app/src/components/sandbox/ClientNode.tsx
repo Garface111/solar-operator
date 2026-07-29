@@ -124,7 +124,13 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
 
   const onDragOver = (e: React.DragEvent) => {
     const isAccount = e.dataTransfer.types.includes('application/x-so-account');
-    const isLogin = e.dataTransfer.types.includes('application/x-so-login');
+    // A monitoring login/array is a login-shaped drop for hover purposes — it
+    // gets the same "login" ring + 400ms auto-expand as a utility login, so a
+    // vendor drag doesn't feel like a lesser citizen.
+    const isLogin =
+      e.dataTransfer.types.includes('application/x-so-login') ||
+      e.dataTransfer.types.includes('application/x-so-vendor-login') ||
+      e.dataTransfer.types.includes('application/x-so-vendor-array');
     if (!isAccount && !isLogin) return;
     e.preventDefault();
     e.stopPropagation();
@@ -146,7 +152,9 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
   const onDrop = (e: React.DragEvent) => {
     const accountRaw = e.dataTransfer.getData('application/x-so-account');
     const loginRaw = e.dataTransfer.getData('application/x-so-login');
-    if (!accountRaw && !loginRaw) return;
+    const vendorLoginRaw = e.dataTransfer.getData('application/x-so-vendor-login');
+    const vendorArrayRaw = e.dataTransfer.getData('application/x-so-vendor-array');
+    if (!accountRaw && !loginRaw && !vendorLoginRaw && !vendorArrayRaw) return;
     e.preventDefault();
     e.stopPropagation();
     setDropHoverType(null);
@@ -165,6 +173,18 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
         };
         if (srcClientId === id) return;
         actions.moveLoginToClient(srcClientId, utility, id, originClientId, loginId);
+      } else if (vendorLoginRaw) {
+        const { srcClientId, vendor, login } = JSON.parse(vendorLoginRaw) as {
+          srcClientId: string; vendor: string; login: string;
+        };
+        if (srcClientId === id) return;
+        actions.moveVendorLoginToClient(srcClientId, vendor, login, id);
+      } else if (vendorArrayRaw) {
+        const { srcClientId, vendor, login, arrayId } = JSON.parse(vendorArrayRaw) as {
+          srcClientId: string; vendor: string; login: string; arrayId: number;
+        };
+        if (srcClientId === id) return;
+        actions.moveVendorArrayToClient(srcClientId, vendor, login, arrayId, id);
       }
     } catch {
       /* malformed payload — ignore */
@@ -411,11 +431,100 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
               2026-07-24, Johnson Hardware). Render-only: monitor arrays
               re-home via the clients table, not canvas drag. */}
           {(client.vendorLogins ?? []).map((vl) => (
-            <div
-              key={`${vl.vendor}:${vl.login}`}
-              className="mb-1.5 rounded-lg border border-violet-200 bg-violet-50 px-2.5 py-2"
-            >
+            <VendorLoginRow key={`${vl.vendor}:${vl.login}`} clientId={id} vl={vl} />
+          ))}
+        </div>
+      )}
+
+      {/* Footer removed (MWh/qtr indicator was visual noise — Jun 6) */}
+    </div>
+  );
+}
+
+/** A monitoring login (SolarEdge/Fronius/Locus/AlsoEnergy…) and its arrays.
+ *
+ *  Draggable, same as a utility LOGIN row: the six-dot handle moves the whole
+ *  login (every array under it) to another client, and each array carries its
+ *  own smaller handle to travel alone. Before this these rows were render-only
+ *  and vendor arrays could be re-homed ONLY from the clients table — so half
+ *  the fleet was uncustomisable on the surface built for customising it
+ *  (Ford, 2026-07-29).
+ *
+ *  Deliberately mirrors LoginGroup's idiom rather than inventing a second one:
+ *  the handle is the ONLY draggable surface, the row body is the drag image,
+ *  and pointer events are stopped so ReactFlow doesn't pan the canvas instead.
+ */
+function VendorLoginRow({
+  clientId,
+  vl,
+}: {
+  clientId: string;
+  vl: { vendor: string; login: string; arrays: { id: number; name: string; fuel_type: string; mwh_per_qtr: number | null }[] };
+}) {
+  // No useCanvasActions here on purpose: this row only PUBLISHES a drag
+  // payload. The receiving client card owns the drop and calls the move — the
+  // same split the utility LOGIN row uses.
+  const rowRef = useRef<HTMLDivElement | null>(null);
+  const [dragging, setDragging] = useState(false);
+  const [draggingArrayId, setDraggingArrayId] = useState<number | null>(null);
+
+  const onLoginDragStart = (e: React.DragEvent) => {
+    e.stopPropagation();
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData(
+      'application/x-so-vendor-login',
+      JSON.stringify({ srcClientId: clientId, vendor: vl.vendor, login: vl.login }),
+    );
+    e.dataTransfer.setData('text/plain', `${vl.vendor} login`);
+    if (rowRef.current) {
+      const rect = rowRef.current.getBoundingClientRect();
+      e.dataTransfer.setDragImage(rowRef.current, e.clientX - rect.left, e.clientY - rect.top);
+    }
+    setDragging(true);
+  };
+
+  const onArrayDragStart = (e: React.DragEvent, arrayId: number, name: string) => {
+    e.stopPropagation();
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData(
+      'application/x-so-vendor-array',
+      JSON.stringify({ srcClientId: clientId, vendor: vl.vendor, login: vl.login, arrayId }),
+    );
+    e.dataTransfer.setData('text/plain', name);
+    setDraggingArrayId(arrayId);
+  };
+
+  return (
+    <div
+      ref={rowRef}
+      className={[
+        'nodrag mb-1.5 rounded-lg border border-violet-200 bg-violet-50 px-2.5 py-2 transition-opacity',
+        dragging ? 'opacity-40' : '',
+      ].join(' ')}
+      onMouseDown={(e) => { e.stopPropagation(); }}
+    >
               <div className="flex items-center gap-1.5">
+                {/* Six-dot handle — identical idiom to the utility LOGIN row */}
+                <span
+                  className="nodrag nopan shrink-0 cursor-grab active:cursor-grabbing rounded p-0.5 text-violet-700 opacity-40 transition-opacity hover:opacity-80"
+                  draggable
+                  onDragStart={onLoginDragStart}
+                  onDragEnd={() => setDragging(false)}
+                  onMouseDown={(e) => { e.stopPropagation(); }}
+                  onPointerDown={(e) => { e.stopPropagation(); }}
+                  onPointerDownCapture={(e) => { e.stopPropagation(); }}
+                  title={`Drag to move this ${vl.vendor} login to another client`}
+                  aria-label="Drag handle"
+                >
+                  <svg width="10" height="14" viewBox="0 0 10 14" fill="currentColor" aria-hidden>
+                    <circle cx="2" cy="2" r="1.2"/>
+                    <circle cx="8" cy="2" r="1.2"/>
+                    <circle cx="2" cy="7" r="1.2"/>
+                    <circle cx="8" cy="7" r="1.2"/>
+                    <circle cx="2" cy="12" r="1.2"/>
+                    <circle cx="8" cy="12" r="1.2"/>
+                  </svg>
+                </span>
                 <span className="h-2 w-2 rounded-full bg-violet-400" />
                 <span className="text-[10px] font-semibold uppercase tracking-wider text-violet-700">
                   Login {vl.vendor}
@@ -431,9 +540,33 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
                 {vl.arrays.map((arr) => (
                   <div
                     key={arr.id}
-                    className="flex items-center justify-between gap-2 rounded-md bg-white/80 px-2 py-1.5"
+                    className={[
+                      'flex items-center justify-between gap-2 rounded-md bg-white/80 px-2 py-1.5 transition-opacity',
+                      draggingArrayId === arr.id ? 'opacity-40' : '',
+                    ].join(' ')}
                   >
                     <span className="flex min-w-0 items-center gap-1.5">
+                      {/* Per-array handle — move ONE array without its login */}
+                      <span
+                        className="nodrag nopan shrink-0 cursor-grab active:cursor-grabbing rounded text-violet-500 opacity-40 transition-opacity hover:opacity-90"
+                        draggable
+                        onDragStart={(e) => onArrayDragStart(e, arr.id, arr.name)}
+                        onDragEnd={() => setDraggingArrayId(null)}
+                        onMouseDown={(e) => { e.stopPropagation(); }}
+                        onPointerDown={(e) => { e.stopPropagation(); }}
+                        onPointerDownCapture={(e) => { e.stopPropagation(); }}
+                        title="Drag to move this array to another client"
+                        aria-label="Drag handle"
+                      >
+                        <svg width="8" height="11" viewBox="0 0 10 14" fill="currentColor" aria-hidden>
+                          <circle cx="2" cy="2" r="1.2"/>
+                          <circle cx="8" cy="2" r="1.2"/>
+                          <circle cx="2" cy="7" r="1.2"/>
+                          <circle cx="8" cy="7" r="1.2"/>
+                          <circle cx="2" cy="12" r="1.2"/>
+                          <circle cx="8" cy="12" r="1.2"/>
+                        </svg>
+                      </span>
                       <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-violet-300" />
                       <span className="truncate text-xs text-zinc-800">{arr.name}</span>
                     </span>
@@ -445,12 +578,6 @@ export function ClientNodeComponent({ id, data: rawData, selected }: NodeProps) 
                   </div>
                 ))}
               </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Footer removed (MWh/qtr indicator was visual noise — Jun 6) */}
     </div>
   );
 }
