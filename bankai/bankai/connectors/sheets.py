@@ -353,8 +353,15 @@ def write_actuals(session) -> dict:
     }
 
 
+#: The sheet carries a running balance PER SPOUSE, so reconciliation has to be
+#: per spouse too — a matching total can hide two errors that cancel out, and a
+#: mismatched total says nothing about whose side drifted.
+OWNER_COLUMNS = {"ford": "ford_balance", "gaurav": "gaurav_balance"}
+
+
 def reconcile(session, limit_days: int = 14) -> dict:
-    """Compare what the sheet claims against what the accounts actually hold."""
+    """Compare what the sheet claims against what the accounts actually hold,
+    per person as well as in total."""
     from ..intelligence.insights import net_worth
 
     plan = read_plan(limit_days=limit_days)
@@ -362,21 +369,52 @@ def reconcile(session, limit_days: int = 14) -> dict:
     latest = recent[-1] if recent else None
 
     live = net_worth(session)
-    liquid = sum(
-        a["balance"] for a in live["accounts"]
+    cash = [
+        a for a in live["accounts"]
         if a["kind"] in ("checking", "savings") and a["balance"] is not None
-    )
+    ]
+    liquid = sum(a["balance"] for a in cash)
     out = {
+        "sheet_date": latest["date"] if latest else None,
         "sheet_latest_row": latest,
         "live_liquid_total": round(liquid, 2),
         "live_net_worth": live["total"],
     }
-    if latest and latest.get("total_cash") is not None:
+    if not latest:
+        return out
+
+    per_person = {}
+    for owner, column in OWNER_COLUMNS.items():
+        owned = [a for a in cash if (a.get("owner") or "").lower() == owner]
+        claimed = latest.get(column)
+        if not owned and claimed is None:
+            continue
+        actual = round(sum(a["balance"] for a in owned), 2)
+        entry = {
+            "live": actual,
+            "sheet": claimed,
+            "accounts": [a["name"] for a in owned],
+        }
+        if claimed is not None:
+            entry["difference"] = round(actual - claimed, 2)
+        per_person[owner] = entry
+    if per_person:
+        out["per_person"] = per_person
+
+    untagged = [a["name"] for a in cash if (a.get("owner") or "joint").lower() == "joint"]
+    if untagged:
+        out["untagged_cash_accounts"] = untagged
+        out["untagged_note"] = (
+            "these cash accounts are not attributed to either spouse, so they are "
+            "missing from the per-person comparison — ask whose they are"
+        )
+
+    if latest.get("total_cash") is not None:
         difference = round(liquid - latest["total_cash"], 2)
         out["difference_vs_sheet_cash"] = difference
         out["interpretation"] = (
             "sheet and accounts agree within $50" if abs(difference) < 50
-            else "sheet and accounts disagree — say by how much and on which date, "
-                 "and ask which is right before changing anything"
+            else "sheet and accounts disagree — name the gap, say WHOSE side it is "
+                 "on using per_person, and ask which is right before changing anything"
         )
     return out

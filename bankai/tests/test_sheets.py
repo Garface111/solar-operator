@@ -280,3 +280,42 @@ def test_reader_falls_back_to_the_default_export_when_no_tab_named(monkeypatch):
     )
     sheets.fetch_csv()
     assert "gviz" not in seen["url"] and "export?format=csv" in seen["url"]
+
+
+# --- per-person reconciliation ---
+
+def test_reconcile_isolates_whose_side_drifted(session, monkeypatch):
+    """A single total hides which spouse's column is stale — and can even net two
+    errors to zero. The sheet tracks them separately, so reconciliation must."""
+    monkeypatch.setattr(sheets, "fetch_csv", lambda gid=None: CSV)
+    ford = upsert_account(session, source="simplefin", name="Ford Checking",
+                          kind="checking", balance=20_109.18)
+    gaurav = upsert_account(session, source="simplefin", name="Gaurav Checking",
+                            kind="checking", balance=8_157.85)
+    ford.owner, gaurav.owner = "ford", "gaurav"
+    session.flush()
+
+    out = sheets.reconcile(session)
+    assert out["per_person"]["ford"]["sheet"] == 9037.0
+    assert out["per_person"]["ford"]["difference"] == pytest.approx(11_072.18, abs=0.01)
+    assert out["per_person"]["gaurav"]["difference"] == pytest.approx(108.85, abs=0.01)
+    # the total alone would not tell you it is almost entirely one side
+    assert out["difference_vs_sheet_cash"] == pytest.approx(11_181.03, abs=0.01)
+    assert "WHOSE" in out["interpretation"]
+
+
+def test_untagged_cash_is_flagged_not_silently_dropped(session, monkeypatch):
+    """An unattributed account would vanish from the per-person view and make a
+    spouse look short — say so instead."""
+    monkeypatch.setattr(sheets, "fetch_csv", lambda gid=None: CSV)
+    ford = upsert_account(session, source="simplefin", name="Ford Checking",
+                          kind="checking", balance=9_037.0)
+    ford.owner = "ford"
+    upsert_account(session, source="simplefin", name="Mystery Account",
+                   kind="checking", balance=500.0)  # stays 'joint'
+    session.flush()
+
+    out = sheets.reconcile(session)
+    assert out["untagged_cash_accounts"] == ["Mystery Account"]
+    assert "whose" in out["untagged_note"]
+    assert out["per_person"]["ford"]["difference"] == 0.0
