@@ -40,8 +40,12 @@
   #login input { width:100%; margin-bottom:10px; }
   /* --- Copilot conversation ------------------------------------------------ */
   #chatpanel { display:flex; flex-direction:column; }
+  /* No smooth scrolling here: the thread is rebuilt whenever the live stream
+     reports a new message, and an in-flight smooth scroll reports a stale
+     scrollTop mid-animation — which read as "the user scrolled up" and left the
+     view stranded at the top. The Latest button animates itself instead. */
   #chatlog { height:min(58vh, 620px); overflow-y:auto; display:flex; flex-direction:column;
-             gap:12px; padding:6px 4px; scroll-behavior:smooth; }
+             gap:12px; padding:6px 4px; overflow-anchor:none; }
   body.chatfocus #chatlog { height:calc(100vh - 260px); }
   .turn { display:flex; flex-direction:column; gap:3px; max-width:94%; }
   .turn.user { align-self:flex-end; align-items:flex-end; }
@@ -104,6 +108,21 @@
   input:focus-visible, select:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
   form.inline { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
   .hidden { display:none; }
+  /* --- What's coming: the money already spoken for, before anything else --- */
+  #whatscoming { max-width:1400px; margin:18px auto 0; padding:0 22px; }
+  .wc-head { display:flex; align-items:baseline; gap:12px; margin-bottom:8px; }
+  .wc-head span:first-child { font-size:13px; text-transform:uppercase;
+                              letter-spacing:.08em; color:var(--dim); }
+  #wc-list { display:flex; gap:10px; overflow-x:auto; padding-bottom:4px; }
+  .wc { flex:0 0 auto; min-width:150px; background:var(--panel); border:1px solid var(--line);
+        border-left:3px solid var(--line); border-radius:10px; padding:10px 13px; }
+  .wc .when { font-size:11.5px; color:var(--dim); text-transform:uppercase;
+              letter-spacing:.05em; }
+  .wc .who { font-size:13.5px; margin:3px 0 2px; }
+  .wc .amt { font-size:17px; font-weight:650; font-variant-numeric:tabular-nums; }
+  .wc.soon { border-left-color:var(--accent); }
+  .wc.imminent { border-left-color:var(--bad); }
+  .wc.imminent .when { color:var(--bad); }
 </style>
 </head>
 <body>
@@ -124,6 +143,13 @@
     <span id="livestate" class="muted" title="Live updates — panels refresh themselves">connecting…</span>
   </div>
 </header>
+<div id="whatscoming" class="hidden">
+  <div class="wc-head">
+    <span>What's coming</span>
+    <span id="wc-runway" class="muted"></span>
+  </div>
+  <div id="wc-list"></div>
+</div>
 <main>
   <div>
     <section>
@@ -220,7 +246,7 @@
         <button class="iconbtn" id="focusbtn" title="Expand the conversation (Esc to exit)">⤢</button>
       </h2>
       <div id="chatlog"></div>
-      <button class="ghost" id="jumplatest" onclick="scrollChat(true)">↓ Latest</button>
+      <button class="ghost" id="jumplatest" onclick="jumpLatest()">↓ Latest</button>
       <form id="composer">
         <textarea id="chatinput" rows="1" placeholder="Ask anything, paste a screenshot, or drop a document…"></textarea>
         <div id="attachlist"></div>
@@ -293,6 +319,7 @@ async function refresh() {
   $("month").textContent = `Income ${fmt(m.income)}  ·  Spend ${fmt(Math.abs(m.spend))}  ·  Net ${fmt(m.net)}`;
   rows("categories", m.by_category.filter(c => c.total < 0).slice(0, 8).map(c =>
     `<tr><td>${c.category}</td><td class="num neg">${fmt(Math.abs(c.total))}</td></tr>`).join(""));
+  renderWhatsComing(o);
   rows("bills", "<tr><th>Expected</th><th>Merchant</th><th class=num>~Amount</th></tr>" +
     o.upcoming_bills.map(b =>
       `<tr><td>${b.expected_date}</td><td>${b.merchant}</td>` +
@@ -333,6 +360,40 @@ async function refresh() {
       `<tr><td>${x.title}</td><td class=muted>${x.waits_for}</td>` +
       `<td class=muted>${x.status}</td></tr>`).join("") ||
     "<tr><td class=muted>Nothing being watched yet.</td></tr>");
+}
+
+// The money already spoken for, surfaced above everything else — with the
+// spendable cash it has to come out of, because a bill only matters relative
+// to what is there to pay it.
+function renderWhatsComing(o) {
+  const bills = (o.upcoming_bills || []).slice(0, 8);
+  const band = $("whatscoming");
+  band.classList.toggle("hidden", !bills.length);
+  if (!bills.length) return;
+
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const days = (iso) => Math.round((new Date(iso + "T00:00:00") - today) / 86400000);
+
+  const liquid = o.net_worth.accounts
+    .filter(a => ["checking", "savings"].includes(a.kind))
+    .reduce((sum, a) => sum + (a.balance || 0), 0);
+  const due14 = bills.filter(b => days(b.expected_date) <= 14)
+    .reduce((sum, b) => sum + Math.abs(b.avg_amount), 0);
+
+  $("wc-runway").textContent =
+    `${fmt(due14)} due in the next 14 days · ${fmt(liquid)} in cash` +
+    (due14 > liquid ? " — more due than you hold" : "");
+  $("wc-runway").style.color = due14 > liquid ? "var(--bad)" : "var(--dim)";
+
+  $("wc-list").innerHTML = bills.map(b => {
+    const d = days(b.expected_date);
+    const when = d <= 0 ? "today" : d === 1 ? "tomorrow" : `in ${d} days`;
+    const urgency = d <= 3 ? "imminent" : d <= 10 ? "soon" : "";
+    return `<div class="wc ${urgency}">` +
+      `<div class="when">${when}</div>` +
+      `<div class="who">${b.merchant.slice(0, 26)}</div>` +
+      `<div class="amt">${fmt(Math.abs(b.avg_amount))}</div></div>`;
+  }).join("");
 }
 
 async function syncNow() {
@@ -419,20 +480,42 @@ function renderMarkdown(src) {
 }
 
 // --- Messages ---------------------------------------------------------------
+// Whether the reader is following the conversation. This is EXPLICIT state,
+// updated only when a human scrolls — deriving it during a rebuild is what
+// broke: clearing the log resets scrollTop to 0, so every re-render looked
+// like the reader had deliberately scrolled to the top, and the view stuck there.
+let STICK_TO_BOTTOM = true;
+let REBUILDING = false;
+
 function nearBottom() {
   const el = $("chatlog");
   return el.scrollHeight - el.scrollTop - el.clientHeight < 80;
 }
 
+function pinToBottom() {
+  const el = $("chatlog");
+  el.scrollTop = el.scrollHeight;
+  $("jumplatest").style.display = "none";
+}
+
 function scrollChat(force) {
-  if (force || nearBottom()) {
-    $("chatlog").scrollTop = $("chatlog").scrollHeight;
-    $("jumplatest").style.display = "none";
+  if (force) {
+    STICK_TO_BOTTOM = true;
+    pinToBottom();
+  } else if (STICK_TO_BOTTOM) {
+    pinToBottom();
   }
 }
 
+/** Deliberately instant. A smooth scrollTo over a long thread did not reliably
+ *  reach the end here, and a control called "Latest" that stops short is worse
+ *  than one that simply works. */
+function jumpLatest() {
+  STICK_TO_BOTTOM = true;
+  pinToBottom();
+}
+
 function addMsg(text, cls, speaker, channel) {
-  const stick = nearBottom();
   const turn = document.createElement("div");
   turn.className = "turn " + cls;
 
@@ -468,7 +551,12 @@ function addMsg(text, cls, speaker, channel) {
   turn.appendChild(tools);
 
   $("chatlog").appendChild(turn);
-  if (stick) scrollChat(true); else $("jumplatest").style.display = "block";
+  // During a rebuild the caller scrolls once at the end; scrolling per message
+  // fights itself and is what made the thread jump.
+  if (!REBUILDING) {
+    if (STICK_TO_BOTTOM) pinToBottom();
+    else $("jumplatest").style.display = "block";
+  }
   // The bubble is what callers mutate while a turn is running.
   div.setMarkdown = (t) => { div.innerHTML = renderMarkdown(t); copy.onclick = () =>
     navigator.clipboard.writeText(t); };
@@ -498,7 +586,7 @@ async function loadThread() {
     sel.addEventListener("change", () => localStorage.setItem("bankai_speaker", sel.value));
   }
   const history = await api("/api/chat/history?limit=60");
-  const stick = nearBottom();
+  REBUILDING = true;
   $("chatlog").innerHTML = "";
   history.forEach(m => addMsg(
     m.content,
@@ -509,7 +597,11 @@ async function loadThread() {
   // A turn commits the question BEFORE the model runs, so a live reload can land
   // mid-turn — re-hang the thinking bubble so it doesn't vanish while we wait.
   if (TURN_IN_FLIGHT) PENDING_BUBBLE = addThinking();
-  if (stick) scrollChat(true);
+  REBUILDING = false;
+  // Default is to follow the conversation. Only a reader who scrolled away
+  // keeps their place, and they get the Latest button instead.
+  if (STICK_TO_BOTTOM) pinToBottom();
+  else $("jumplatest").style.display = "block";
 }
 
 async function loadMemories() {
@@ -809,8 +901,11 @@ $("focusbtn").onclick = () => document.body.classList.toggle("chatfocus");
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") document.body.classList.remove("chatfocus");
 });
+// The ONLY place following-state changes: a human moving the scrollbar.
 $("chatlog").addEventListener("scroll", () => {
-  if (nearBottom()) $("jumplatest").style.display = "none";
+  if (REBUILDING) return;  // programmatic reflow is not the reader's intent
+  STICK_TO_BOTTOM = nearBottom();
+  $("jumplatest").style.display = STICK_TO_BOTTOM ? "none" : "block";
 });
 
 $("composer").addEventListener("submit", async (e) => {
@@ -834,6 +929,7 @@ $("composer").addEventListener("submit", async (e) => {
   }
 
   $("chatinput").value = ""; autogrow();
+  STICK_TO_BOTTOM = true;  // sending is an intent to watch for the answer
   const shown = typed || `📎 ${filed.map(a => a.name).join(", ")}`;
   addMsg(shown, "user", $("speaker").value, "web");
   ATTACHED = []; renderAttachments();
