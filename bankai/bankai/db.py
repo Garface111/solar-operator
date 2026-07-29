@@ -9,8 +9,22 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from . import config
 
-_connect_args = {"check_same_thread": False} if config.DATABASE_URL.startswith("sqlite") else {}
+_is_sqlite = config.DATABASE_URL.startswith("sqlite")
+_connect_args = {"check_same_thread": False} if _is_sqlite else {}
 engine = create_engine(config.DATABASE_URL, connect_args=_connect_args, future=True)
+
+if _is_sqlite:
+    from sqlalchemy import event
+
+    @event.listens_for(engine, "connect")
+    def _sqlite_pragmas(dbapi_conn, _record):
+        # WAL lets the claude-cli MCP server (a separate process) read and write
+        # while the web app holds its own transactions; busy_timeout waits out
+        # brief lock contention instead of failing immediately.
+        cursor = dbapi_conn.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=5000")
+        cursor.close()
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False, future=True)
 
 

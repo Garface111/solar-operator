@@ -27,8 +27,10 @@ def _mcp_config() -> str:
                 "bankai": {
                     "command": sys.executable,
                     "args": ["-m", "bankai.agent.mcp_server"],
-                    "cwd": str(config.BASE_DIR),
-                    "env": {"DATABASE_URL": config.DATABASE_URL},
+                    "env": {
+                        "DATABASE_URL": config.DATABASE_URL,
+                        "PYTHONPATH": str(config.BASE_DIR),
+                    },
                 }
             }
         }

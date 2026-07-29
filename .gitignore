@@ -24,3 +24,5 @@ api/auto_adapters.db
 # BankAI local data (never commit — contains banking data)
 bankai/bankai.db
 bankai/*.db
+bankai/*.db-wal
+bankai/*.db-shm

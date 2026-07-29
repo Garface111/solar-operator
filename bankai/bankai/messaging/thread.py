@@ -99,7 +99,10 @@ def handle_inbound(session: Session, sender: str, text: str) -> str:
         return WELCOME_TEXT
 
     session.add(ChatMessage(channel="sms", role="user", speaker=sender, content=text))
-    session.flush()
+    # Commit before the agent turn: keeps the message durable even if the turn
+    # fails, and releases the write lock so claude-cli's MCP server process can
+    # write (memory notes, rules) to the same database mid-turn.
+    session.commit()
 
     # Mirror the sender's message to the other spouse so both see the whole thread.
     sms.broadcast(f"{sender}: {text}", exclude=sender)
@@ -120,7 +123,7 @@ def handle_web(session: Session, speaker: str, text: str) -> str:
         return ""
     speaker = (speaker or "Dashboard").strip()[:60]
     session.add(ChatMessage(channel="web", role="user", speaker=speaker, content=text))
-    session.flush()
+    session.commit()  # release the write lock before the agent turn (see handle_inbound)
     history = build_history(session)
     reply = agent_chat.run_turn(session, history, channel="web")
     session.add(ChatMessage(channel="web", role="assistant", speaker="copilot", content=reply))
