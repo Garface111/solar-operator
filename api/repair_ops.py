@@ -25,7 +25,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from . import notify
 from .db import SessionLocal
@@ -3174,6 +3174,13 @@ def escalate_stale_repairs(db, tenant: Tenant) -> int:
             RepairTicket.fail_type.in_(AUTO_OPEN_FAILS),
             RepairTicket.owner_escalated_at.is_(None),
             RepairTicket.opened_at <= cutoff,
+            # Don't tell the owner "still down, push harder?" when a tech has
+            # already committed to a real future date — that's the same
+            # false-alarm shape as the GMP/coop reauth bug (asserting a stale
+            # state instead of the ticket's actual one). Once that date passes
+            # without resolution it's a genuine stall again, so this only skips
+            # while the appointment is still upcoming.
+            or_(RepairTicket.scheduled_for.is_(None), RepairTicket.scheduled_for <= now()),
         ).order_by(RepairTicket.opened_at.asc()).limit(10)
     ).scalars().all()
 
