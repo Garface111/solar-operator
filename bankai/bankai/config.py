@@ -58,6 +58,10 @@ GMAIL_ADDRESS = _env("GMAIL_ADDRESS")
 GMAIL_APP_PASSWORD = _env("GMAIL_APP_PASSWORD")
 IMAP_HOST = _env("IMAP_HOST", "imap.gmail.com")
 EMAIL_HARVEST_DAYS = int(_env("EMAIL_HARVEST_DAYS", "7") or 7)
+# Three-way email thread: "Ford:ford@x.com,Sam:sam@x.com". ONLY these addresses
+# are answered — the copilot can read the household's whole financial picture.
+HOUSEHOLD_EMAILS = _env("HOUSEHOLD_EMAILS")
+EMAIL_POLL_SECONDS = int(_env("EMAIL_POLL_SECONDS", "60") or 60)
 
 NOTIFY_EMAILS = [e.strip() for e in _env("NOTIFY_EMAILS").split(",") if e.strip()]
 NOTIFY_FROM = _env("NOTIFY_FROM", "bankai@localhost")

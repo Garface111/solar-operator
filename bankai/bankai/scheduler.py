@@ -141,6 +141,28 @@ async def _realestate_loop() -> None:
         await asyncio.sleep(config.REALESTATE_REFRESH_DAYS * 24 * 3600)
 
 
+def run_email_poll_once() -> dict:
+    from .messaging import email_thread
+
+    with session_scope() as session:
+        return email_thread.poll_once(session)
+
+
+async def _email_chat_loop() -> None:
+    """Inbound household email -> the shared thread -> a reply to both spouses."""
+    from .messaging import email_thread
+
+    while True:
+        if email_thread.configured():
+            try:
+                result = await asyncio.to_thread(run_email_poll_once)
+                if result.get("answered"):
+                    log.info("email chat: %s", result)
+            except Exception:
+                log.exception("email chat loop error")
+        await asyncio.sleep(config.EMAIL_POLL_SECONDS)
+
+
 def run_email_harvest_once() -> dict:
     with session_scope() as session:
         return email_harvest.harvest(session)
@@ -216,5 +238,6 @@ def start_background_tasks() -> list[asyncio.Task]:
         asyncio.create_task(_rules_loop(), name="bankai-rules"),
         asyncio.create_task(_realestate_loop(), name="bankai-realestate"),
         asyncio.create_task(_email_loop(), name="bankai-email"),
+        asyncio.create_task(_email_chat_loop(), name="bankai-email-chat"),
         asyncio.create_task(_monthly_review_loop(), name="bankai-monthly-review"),
     ]

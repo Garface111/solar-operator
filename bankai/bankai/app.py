@@ -1,19 +1,28 @@
 """FastAPI app: shared-password auth, dashboard, JSON API, chat endpoint."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
+import json
 import logging
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 
-from . import config, goals as goals_lib, realestate, vault, watchpoints as watchpoints_lib
+from . import (
+    config,
+    events,
+    goals as goals_lib,
+    realestate,
+    vault,
+    watchpoints as watchpoints_lib,
+)
 from .connectors import email_harvest, simplefin
 from .connectors.csv_import import import_csv
 from .connectors.ofx_import import import_ofx
@@ -148,6 +157,51 @@ def index():
 @app.get("/api/health")
 def health():
     return {"ok": True}
+
+
+EVENT_POLL_SECONDS = 1.5
+EVENT_HEARTBEAT_SECONDS = 20
+
+
+@app.get("/api/events")
+async def event_stream(request: Request, _: str = Depends(require_auth)):
+    """Server-Sent Events: names the topics whose data moved, so an open
+    dashboard reloads only the affected panels — no manual refresh, and it
+    reflects writes from every process (agent tools, scheduler, email, the
+    other spouse's browser), not just this one."""
+
+    def _read() -> dict:
+        with session_scope() as session:
+            return events.fingerprints(session)
+
+    async def stream():
+        previous: dict = {}
+        since_beat = 0.0
+        # An immediate hello lets the browser show "live" without waiting a tick.
+        yield f"data: {json.dumps({'topics': [], 'hello': True})}\n\n"
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                current = await asyncio.to_thread(_read)
+                changed = events.changed_topics(previous, current)
+                previous = current
+                if changed:
+                    since_beat = 0.0
+                    yield f"data: {json.dumps({'topics': changed})}\n\n"
+            except Exception as exc:  # a bad poll must not kill the stream
+                logging.getLogger("bankai.events").warning("event poll failed: %s", exc)
+            since_beat += EVENT_POLL_SECONDS
+            if since_beat >= EVENT_HEARTBEAT_SECONDS:
+                since_beat = 0.0
+                yield ": ping\n\n"  # keeps proxies from closing an idle stream
+            await asyncio.sleep(EVENT_POLL_SECONDS)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # Public compliance pages (referenced by Twilio A2P / toll-free verification).

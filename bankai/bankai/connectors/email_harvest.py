@@ -52,6 +52,34 @@ def configured() -> bool:
     return bool(config.GMAIL_ADDRESS and config.GMAIL_APP_PASSWORD)
 
 
+def send_email_message(message: EmailMessage) -> str:
+    """Send a fully-formed message (used by the email thread, which needs its own
+    threading headers). Plain SMTP over the same app password."""
+    if not configured():
+        raise RuntimeError(
+            "email is not connected — set GMAIL_ADDRESS and GMAIL_APP_PASSWORD in .env"
+        )
+    smtp_host = config.IMAP_HOST.replace("imap.", "smtp.", 1)
+    with smtplib.SMTP(smtp_host, 587, timeout=30) as smtp:
+        smtp.starttls()
+        smtp.login(config.GMAIL_ADDRESS, config.GMAIL_APP_PASSWORD)
+        smtp.send_message(message)
+    return f"sent to {message['To']} from {config.GMAIL_ADDRESS}"
+
+
+def connect_writable() -> imaplib.IMAP4_SSL:
+    """INBOX opened read-write, so handled mail can be flagged \\Seen. The
+    harvest sweep uses the read-only connection instead."""
+    if not configured():
+        raise RuntimeError(
+            "email is not connected — set GMAIL_ADDRESS and GMAIL_APP_PASSWORD in .env"
+        )
+    conn = imaplib.IMAP4_SSL(config.IMAP_HOST)
+    conn.login(config.GMAIL_ADDRESS, config.GMAIL_APP_PASSWORD)
+    conn.select("INBOX", readonly=False)
+    return conn
+
+
 def send_email(to: str, subject: str, body: str) -> str:
     """Send plain-text mail AS the household address (approved actions only —
     the approval gate lives in the portal, not here). Returns a receipt line."""

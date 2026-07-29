@@ -61,6 +61,7 @@
   <div>
     <button class="ghost" onclick="syncNow()" id="syncbtn">Sync now</button>
     <span id="syncstate" class="muted"></span>
+    <span id="livestate" class="muted" title="Live updates — panels refresh themselves">connecting…</span>
   </div>
 </header>
 <main>
@@ -178,6 +179,10 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
+// A chat turn commits the question before the model runs, so live reloads can
+// arrive mid-turn; these keep the thinking bubble alive across them.
+let TURN_IN_FLIGHT = false;
+let PENDING_BUBBLE = null;
 const fmt = (n) => (n < 0 ? "-" : "") + "$" + Math.abs(n).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
 
 async function api(path, opts = {}) {
@@ -196,7 +201,7 @@ async function doLogin() {
   try {
     await api("/api/login", {method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({password: $("pw").value})});
-    show(true); refresh(); loadThread(); loadMemories(); loadDocs(); loadProperties(); loadActions();
+    bootDashboard();
   } catch (e) { $("loginerr").textContent = "Wrong password."; }
 }
 $("pw").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
@@ -317,9 +322,14 @@ async function loadThread() {
     sel.addEventListener("change", () => localStorage.setItem("bankai_speaker", sel.value));
   }
   const history = await api("/api/chat/history?limit=60");
+  const atBottom = $("chatlog").scrollHeight - $("chatlog").scrollTop - $("chatlog").clientHeight < 60;
   $("chatlog").innerHTML = "";
   history.forEach(m => addMsg(m.content, m.role === "user" ? "user" : "bot",
     m.role === "user" ? m.speaker : null));
+  // A turn commits the question BEFORE the model runs, so a live reload can land
+  // mid-turn — re-hang the thinking bubble so it doesn't vanish while we wait.
+  if (TURN_IN_FLIGHT) PENDING_BUBBLE = addMsg("…", "bot");
+  if (!atBottom) $("chatlog").scrollTop = $("chatlog").scrollHeight;
 }
 
 async function loadMemories() {
@@ -533,18 +543,68 @@ $("chatform").addEventListener("submit", async (e) => {
   if (!text) return;
   $("chatinput").value = "";
   addMsg(text, "user", $("speaker").value);
-  const pending = addMsg("…", "bot");
+  TURN_IN_FLIGHT = true;
+  PENDING_BUBBLE = addMsg("…", "bot");
   try {
     const res = await api("/api/chat", {method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({message: text, speaker: $("speaker").value})});
-    pending.textContent = res.reply;
-    refresh(); loadMemories(); loadDocs(); loadProperties(); loadActions();  // the agent may have written rules, memories, annotations, comps, values, or proposals
-  } catch (err) { pending.textContent = "Error: " + err.message; }
+    TURN_IN_FLIGHT = false;
+    if (PENDING_BUBBLE) PENDING_BUBBLE.textContent = res.reply;
+    // Panels refresh themselves off the live stream — the copilot may have
+    // written rules, memories, annotations, comps, goals, or proposals mid-turn.
+  } catch (err) {
+    TURN_IN_FLIGHT = false;
+    if (PENDING_BUBBLE) PENDING_BUBBLE.textContent = "Error: " + err.message;
+  }
 });
 
+// --- Live updates -----------------------------------------------------------
+// The server streams the names of topics whose data moved (Server-Sent Events).
+// Writes come from several places — this browser, the other spouse's browser,
+// the copilot's own tools mid-turn, email, SMS, and the background loops — so
+// the page reacts to all of them without anyone pressing refresh.
+const TOPIC_LOADERS = {
+  accounts: refresh, transactions: refresh, sync: refresh,
+  goals: refresh, watchpoints: refresh, rules: refresh,
+  chat: loadThread, documents: loadDocs, properties: loadProperties,
+  actions: loadActions, memories: loadMemories,
+};
+
+let EVENTS;
+
+function setLive(on, detail) {
+  const el = $("livestate");
+  if (!el) return;
+  el.textContent = on ? "live" : (detail || "reconnecting…");
+  el.style.color = on ? "var(--good)" : "var(--dim)";
+}
+
+function startLiveUpdates() {
+  if (EVENTS) return;
+  EVENTS = new EventSource("/api/events");
+  EVENTS.onopen = () => setLive(true);
+  EVENTS.onerror = () => setLive(false);  // EventSource retries on its own
+  EVENTS.onmessage = (e) => {
+    let payload;
+    try { payload = JSON.parse(e.data); } catch { return; }
+    setLive(true);
+    const topics = payload.topics || [];
+    // Collapse to unique loaders: several topics share refresh().
+    const pending = new Set();
+    topics.forEach(t => { if (TOPIC_LOADERS[t]) pending.add(TOPIC_LOADERS[t]); });
+    pending.forEach(fn => { try { fn(); } catch (err) { console.warn(err); } });
+  };
+}
+
+function bootDashboard() {
+  show(true);
+  refresh(); loadThread(); loadMemories(); loadDocs(); loadProperties(); loadActions();
+  startLiveUpdates();
+}
+
 // Auto-login check: overview 401s if not authenticated.
-api("/api/overview").then(() => { show(true); refresh(); loadThread(); loadMemories(); loadDocs(); loadProperties(); loadActions(); }).catch(() => show(false));
+api("/api/overview").then(bootDashboard).catch(() => show(false));
 </script>
 </body>
 </html>
