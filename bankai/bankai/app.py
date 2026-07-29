@@ -49,6 +49,10 @@ from .rules.engine import RULE_KINDS
 from .scheduler import run_rules_once, start_background_tasks
 
 logging.basicConfig(level=logging.INFO)
+# httpx logs every request URL at INFO — and the SimpleFIN access URL carries the
+# household's bank credential in its path, so that would write a working secret
+# into the log file on every sync. Warnings and errors still come through.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 STATIC_DIR = Path(__file__).parent / "static"
 COOKIE_NAME = "bankai_session"
@@ -651,6 +655,11 @@ def execute_agent_action(action_id: str, _: str = Depends(require_auth)):
         try:
             if action.kind == "email_support":
                 receipt = email_harvest.send_email(action.to_email, action.subject, action.body)
+            elif action.kind == "code_change":
+                # Deliberately not executable: approving a self-modification marks
+                # it accepted for a developer to implement and review. Nothing in
+                # this process rewrites the code running the household's finances.
+                receipt = "accepted for implementation — no code was changed automatically"
             else:
                 raise RuntimeError(f"no executor for kind {action.kind!r}")
             action.status = "executed"

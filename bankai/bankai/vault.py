@@ -31,8 +31,20 @@ _DOCX_TEXT = re.compile(r"<w:t[^>]*>(.*?)</w:t>", re.S)
 _DOCX_PARA = re.compile(r"</w:p>")
 
 
+#: Images hold no text layer. Decoding their bytes as UTF-8 produces pages of
+#: replacement characters that look like content and poison search, so they are
+#: stored with empty text — the copilot reads the file itself instead.
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".bmp")
+
+
+def is_image(filename: str) -> bool:
+    return filename.lower().endswith(IMAGE_EXTENSIONS)
+
+
 def extract_text(filename: str, data: bytes) -> str:
     lower = filename.lower()
+    if is_image(lower):
+        return ""
     try:
         if lower.endswith(".pdf"):
             return _extract_pdf(data)
@@ -41,6 +53,13 @@ def extract_text(filename: str, data: bytes) -> str:
     except Exception:
         return ""
     return data.decode("utf-8", errors="replace")
+
+
+def stored_path(doc: Document):
+    """Where the original file lives on disk, or None if it is missing."""
+    for path in DOCUMENTS_DIR.glob(f"{doc.id}__*"):
+        return path
+    return None
 
 
 def _extract_pdf(data: bytes) -> str:

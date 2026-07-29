@@ -235,3 +235,46 @@ def test_send_without_any_transport_is_an_actionable_error(monkeypatch):
     assert email_harvest.can_send() is False
     with pytest.raises(RuntimeError, match="RESEND_API_KEY"):
         email_harvest.send_message(to=["a@x.com"], subject="s", text="t")
+
+
+# --- self-improvement proposals ---
+
+def test_propose_code_change_is_a_proposal_not_an_edit(session):
+    out = json.loads(execute_tool(session, "propose_code_change", {
+        "title": "Detect irregular income",
+        "file_path": "bankai/intelligence/recurring.py",
+        "problem": "Paychecks that vary by a few days are not detected, so the "
+                   "cash-flow forecast shows income of zero and cries wolf.",
+        "change": "Widen the biweekly tolerance and allow one missed interval.",
+        "test_plan": "A series with 12/16/14/15-day gaps must be detected as biweekly.",
+    }))
+    assert out["proposed"] and "NOT be applied automatically" in out["note"]
+    action = session.get(AgentAction, out["action_id"])
+    assert action.kind == "code_change" and action.status == "proposed"
+    assert "recurring.py" in action.subject
+    assert "cries wolf" in action.body and "12/16/14/15-day" in action.body
+
+
+def test_the_agent_has_no_tool_that_writes_source(session):
+    """The copilot may PROPOSE changes to itself and nothing more.
+
+    This is the guard on the whole idea: if a future tool ever gains the ability
+    to write, patch, or execute source, it has to come past this test and a human
+    has to decide that is acceptable for a system holding the family's money.
+    """
+    from bankai.agent.tools import TOOLS
+
+    names = {t["name"] for t in TOOLS}
+    forbidden = {"write_file", "edit_file", "apply_patch", "run_shell", "exec_code",
+                 "restart_server", "install_package"}
+    assert names & forbidden == set()
+    assert "propose_code_change" in names
+
+    # and the proposal really is inert: no path, no executable payload
+    out = json.loads(execute_tool(session, "propose_code_change", {
+        "title": "x", "problem": "y", "change": "z",
+    }))
+    action = session.get(AgentAction, out["action_id"])
+    assert action.kind == "code_change"
+    assert action.status == "proposed"
+    assert action.to_email == ""  # nothing to send, nothing to run

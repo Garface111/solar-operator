@@ -484,6 +484,31 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "propose_code_change",
+        "description": (
+            "Propose a change to your OWN source code — a new tool, a better "
+            "calculation, a fix for something you noticed while working. You cannot "
+            "edit yourself directly and should not want to: a bad edit to a system "
+            "holding this household's finances is worse than a missing feature. "
+            "Write the proposal so a developer can act on it without rediscovering "
+            "anything: which file, what is wrong or missing today, the concrete "
+            "change, and how it should be tested. It appears in the dashboard for "
+            "review. Use this when you hit your own limits."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "e.g. 'Add a per-category budget tool'"},
+                "file_path": {"type": "string", "description": "Repo-relative path, e.g. bankai/intelligence/forecast.py"},
+                "problem": {"type": "string", "description": "What is wrong or missing today, concretely"},
+                "change": {"type": "string", "description": "The proposed change, specific enough to implement"},
+                "test_plan": {"type": "string", "description": "How to prove it works and what it must not break"},
+            },
+            "required": ["title", "problem", "change"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "list_actions",
         "description": "The action audit trail: everything you have proposed, with status (proposed/executed/declined/failed) and results. Check before proposing duplicates.",
         "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
@@ -802,6 +827,30 @@ def _dispatch(session: Session, name: str, args: dict):
             "proposed": True, "action_id": action.id, "title": action.title,
             "next_step": "a human must click Approve & run in the dashboard's Copilot actions panel",
         }
+    if name == "propose_code_change":
+        body = "\n\n".join([
+            f"FILE: {args.get('file_path') or '(not specified)'}",
+            f"PROBLEM:\n{args['problem']}",
+            f"CHANGE:\n{args['change']}",
+            f"TEST PLAN:\n{args.get('test_plan') or '(none given)'}",
+        ])
+        action = AgentAction(
+            kind="code_change",
+            title=args["title"][:200],
+            rationale=args["problem"],
+            subject=args.get("file_path", "")[:300],
+            body=body,
+        )
+        session.add(action)
+        session.flush()
+        return {
+            "proposed": True,
+            "action_id": action.id,
+            "note": (
+                "Filed for human review in the dashboard. It will NOT be applied "
+                "automatically — say plainly that you have proposed it, not done it."
+            ),
+        }
     if name == "list_actions":
         actions = session.execute(
             select(AgentAction).order_by(AgentAction.proposed_at.desc()).limit(30)
@@ -895,6 +944,22 @@ def _dispatch(session: Session, name: str, args: dict):
         doc = session.get(Document, args["document_id"])
         if not doc:
             return {"error": "document not found — call list_documents for valid ids"}
+        if vault.is_image(doc.filename):
+            path = vault.stored_path(doc)
+            return {
+                "document_id": doc.id,
+                "title": doc.title,
+                "category": doc.category,
+                "kind": "image",
+                "image_path": str(path) if path else None,
+                "note": (
+                    "This is an image (a screenshot or photo), so it has no text to "
+                    "return. Open it with your own Read tool at image_path to look at "
+                    "it, then annotate_document with what it shows."
+                    if path else
+                    "This image's original file is missing from disk."
+                ),
+            }
         text = doc.content_text
         start = max(0, int(args.get("start_char") or 0))
         chunk = text[start:start + READ_PAGE_CHARS]

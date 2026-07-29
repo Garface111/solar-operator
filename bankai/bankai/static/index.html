@@ -13,11 +13,15 @@
   header { display:flex; justify-content:space-between; align-items:center;
            padding:14px 22px; border-bottom:1px solid var(--line); }
   header h1 { font-size:17px; margin:0; letter-spacing:.02em; }
-  main { display:grid; grid-template-columns: 1fr 420px; gap:18px; padding:18px 22px;
-         max-width:1250px; margin:0 auto; }
-  @media (max-width: 980px) { main { grid-template-columns:1fr; } }
+  main { display:grid; grid-template-columns: 1fr 500px; gap:18px; padding:18px 22px;
+         max-width:1400px; margin:0 auto; }
+  @media (max-width: 1080px) { main { grid-template-columns:1fr; } }
+  /* Focus mode: the conversation takes the room, the ledger steps aside. */
+  body.chatfocus main > div:first-child { display:none; }
+  body.chatfocus main { grid-template-columns:minmax(0,900px); justify-content:center; }
+  body.chatfocus main > div:last-child > section:not(:first-child) { display:none; }
   section { background:var(--panel); border:1px solid var(--line); border-radius:10px;
-            padding:16px 18px; margin-bottom:18px; }
+            padding:16px 18px; margin-bottom:18px; position:relative; }
   h2 { font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim);
        margin:0 0 10px; }
   table { width:100%; border-collapse:collapse; font-size:13.5px; }
@@ -34,14 +38,70 @@
                   border-radius:7px; padding:8px 10px; font-size:14px; }
   #login { max-width:340px; margin:18vh auto; text-align:center; }
   #login input { width:100%; margin-bottom:10px; }
-  #chatlog { height:420px; overflow-y:auto; display:flex; flex-direction:column; gap:10px;
-             padding:4px 2px; }
-  .msg { padding:9px 12px; border-radius:10px; max-width:92%; white-space:pre-wrap;
-         font-size:14px; }
-  .msg.user { background:#28303a; align-self:flex-end; }
-  .msg.bot  { background:#20344a; align-self:flex-start; }
-  #chatform { display:flex; gap:8px; margin-top:10px; }
-  #chatform input { flex:1; }
+  /* --- Copilot conversation ------------------------------------------------ */
+  #chatpanel { display:flex; flex-direction:column; }
+  #chatlog { height:min(58vh, 620px); overflow-y:auto; display:flex; flex-direction:column;
+             gap:12px; padding:6px 4px; scroll-behavior:smooth; }
+  body.chatfocus #chatlog { height:calc(100vh - 260px); }
+  .turn { display:flex; flex-direction:column; gap:3px; max-width:94%; }
+  .turn.user { align-self:flex-end; align-items:flex-end; }
+  .turn.bot  { align-self:flex-start; align-items:flex-start; }
+  .turn .who { font-size:11px; color:var(--dim); letter-spacing:.04em;
+               display:flex; gap:6px; align-items:center; padding:0 4px; }
+  .chan { border:1px solid var(--line); border-radius:20px; padding:0 6px; font-size:10px;
+          text-transform:uppercase; letter-spacing:.06em; }
+  .chan.email { color:#9db4ff; border-color:#3b4a7a; }
+  .chan.sms { color:#8fd9b6; border-color:#2f5c48; }
+  .msg { padding:10px 13px; border-radius:12px; font-size:14.5px; line-height:1.55;
+         overflow-wrap:anywhere; }
+  .msg.user { background:#28303a; border-top-right-radius:4px; }
+  .msg.bot  { background:#1c2c3f; border-top-left-radius:4px; }
+  /* markdown inside a reply — the copilot writes bold, lists and code */
+  .msg p { margin:0 0 .6em; } .msg p:last-child { margin-bottom:0; }
+  .msg ul, .msg ol { margin:.3em 0 .6em; padding-left:1.25em; }
+  .msg li { margin:.15em 0; }
+  .msg code { background:#0d1319; border:1px solid var(--line); border-radius:4px;
+              padding:1px 5px; font-size:12.5px; font-family:ui-monospace,Menlo,Consolas,monospace; }
+  .msg strong { color:#fff; font-weight:650; }
+  .msg h3 { font-size:14px; margin:.5em 0 .3em; color:var(--text); text-transform:none;
+            letter-spacing:0; }
+  .msg a { color:var(--accent); }
+  .msgtools { display:flex; gap:8px; opacity:0; transition:opacity .15s; padding:0 4px; }
+  .turn:hover .msgtools { opacity:1; }
+  .msgtools button { background:none; border:0; color:var(--dim); font-size:11px;
+                     padding:0; cursor:pointer; }
+  .msgtools button:hover { color:var(--text); }
+  .thinking { display:inline-flex; gap:5px; align-items:center; color:var(--dim); }
+  .thinking i { width:5px; height:5px; border-radius:50%; background:var(--dim);
+                animation:blink 1.2s infinite; }
+  .thinking i:nth-child(2) { animation-delay:.2s; } .thinking i:nth-child(3) { animation-delay:.4s; }
+  @keyframes blink { 0%,80%,100% { opacity:.25; } 40% { opacity:1; } }
+  @media (prefers-reduced-motion: reduce) {
+    .thinking i { animation:none; opacity:.6; } #chatlog { scroll-behavior:auto; }
+  }
+  #jumplatest { position:absolute; right:16px; bottom:96px; display:none; z-index:5;
+                font-size:12px; padding:5px 11px; border-radius:20px; }
+  #composer { border:1px solid var(--line); border-radius:12px; padding:8px 10px;
+              margin-top:10px; background:var(--bg); display:flex; flex-direction:column;
+              gap:8px; transition:border-color .15s, background .15s; }
+  #composer.dragging { border-color:var(--accent); background:#16222e; }
+  #chatinput { width:100%; background:none; border:0; color:var(--text); font:inherit;
+               resize:none; padding:2px; max-height:180px; min-height:22px; outline:none; }
+  .composerbar { display:flex; gap:8px; align-items:center; }
+  .composerbar .spacer { flex:1; }
+  .iconbtn { background:none; border:1px solid var(--line); color:var(--dim); border-radius:8px;
+             padding:5px 10px; font-size:13px; cursor:pointer; }
+  .iconbtn:hover { color:var(--text); border-color:var(--dim); }
+  .hint { font-size:11.5px; color:var(--dim); }
+  #attachlist { display:flex; flex-wrap:wrap; gap:6px; }
+  .chip { display:flex; align-items:center; gap:6px; background:#232b35; border:1px solid var(--line);
+          border-radius:20px; padding:3px 10px; font-size:12px; }
+  .chip button { background:none; border:0; color:var(--dim); cursor:pointer; padding:0;
+                 font-size:13px; line-height:1; }
+  .chip.done { border-color:#2f5c48; color:var(--good); }
+  .chip.failed { border-color:#5c3030; color:var(--bad); }
+  button:focus-visible, .iconbtn:focus-visible, #chatinput:focus-visible,
+  input:focus-visible, select:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
   form.inline { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
   .hidden { display:none; }
 </style>
@@ -154,12 +214,25 @@
   </div>
   <div>
     <section>
-      <h2>Copilot <span class="muted">— one persistent thread, shared with SMS</span></h2>
+      <h2 style="display:flex;align-items:center;gap:8px">
+        Copilot <span class="muted">— one thread, shared with email &amp; SMS</span>
+        <span class="spacer" style="flex:1"></span>
+        <button class="iconbtn" id="focusbtn" title="Expand the conversation (Esc to exit)">⤢</button>
+      </h2>
       <div id="chatlog"></div>
-      <form id="chatform">
-        <select id="speaker" title="Who's typing"></select>
-        <input id="chatinput" placeholder="Ask about your money…" autocomplete="off">
-        <button type="submit">Send</button>
+      <button class="ghost" id="jumplatest" onclick="scrollChat(true)">↓ Latest</button>
+      <form id="composer">
+        <textarea id="chatinput" rows="1" placeholder="Ask anything, paste a screenshot, or drop a document…"></textarea>
+        <div id="attachlist"></div>
+        <div class="composerbar">
+          <select id="speaker" title="Who's typing"></select>
+          <button type="button" class="iconbtn" id="attachbtn" title="Attach a document to the vault">📎 Attach</button>
+          <input type="file" id="chatfile" multiple class="hidden"
+                 accept=".pdf,.docx,.txt,.md,.rtf,.csv,.png,.jpg,.jpeg,.gif,.webp,.heic">
+          <span class="spacer"></span>
+          <span class="hint" id="composerhint">Enter to send · Shift+Enter for a new line</span>
+          <button type="submit">Send</button>
+        </div>
       </form>
     </section>
     <section>
@@ -304,12 +377,115 @@ $("csvform").addEventListener("submit", async (e) => {
   } catch (err) { $("csvstatus").textContent = err.message; }
 });
 
-function addMsg(text, cls, speaker) {
+// --- Markdown ---------------------------------------------------------------
+// The copilot writes bold, lists and code; rendering it raw showed literal
+// asterisks. Everything is escaped BEFORE any markup is added — replies can
+// carry text that arrived by email, so it is never trusted as HTML.
+function escapeHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function renderMarkdown(src) {
+  const inline = (s) => escapeHtml(s)
+    .replace(/`([^`]+)`/g, (_, c) => `<code>${c}</code>`)
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+             '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+  const out = [];
+  let list = null;
+  const closeList = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  for (const raw of src.split("\n")) {
+    const line = raw.trimEnd();
+    const bullet = line.match(/^\s*[-*+]\s+(.*)$/);
+    const numbered = line.match(/^\s*\d+[.)]\s+(.*)$/);
+    const heading = line.match(/^#{1,6}\s+(.*)$/);
+    if (bullet) {
+      if (list !== "ul") { closeList(); out.push("<ul>"); list = "ul"; }
+      out.push(`<li>${inline(bullet[1])}</li>`);
+    } else if (numbered) {
+      if (list !== "ol") { closeList(); out.push("<ol>"); list = "ol"; }
+      out.push(`<li>${inline(numbered[1])}</li>`);
+    } else if (heading) {
+      closeList(); out.push(`<h3>${inline(heading[1])}</h3>`);
+    } else if (!line.trim()) {
+      closeList();
+    } else {
+      closeList(); out.push(`<p>${inline(line)}</p>`);
+    }
+  }
+  closeList();
+  return out.join("");
+}
+
+// --- Messages ---------------------------------------------------------------
+function nearBottom() {
+  const el = $("chatlog");
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+}
+
+function scrollChat(force) {
+  if (force || nearBottom()) {
+    $("chatlog").scrollTop = $("chatlog").scrollHeight;
+    $("jumplatest").style.display = "none";
+  }
+}
+
+function addMsg(text, cls, speaker, channel) {
+  const stick = nearBottom();
+  const turn = document.createElement("div");
+  turn.className = "turn " + cls;
+
+  if (speaker || channel) {
+    const who = document.createElement("div");
+    who.className = "who";
+    who.textContent = speaker || "";
+    // A thread spanning three channels should say where each message came from.
+    if (channel && channel !== "web") {
+      const tag = document.createElement("span");
+      tag.className = "chan " + channel;
+      tag.textContent = channel;
+      who.appendChild(tag);
+    }
+    turn.appendChild(who);
+  }
+
   const div = document.createElement("div");
   div.className = "msg " + cls;
-  div.textContent = (speaker && cls === "user") ? `${speaker}: ${text}` : text;
-  $("chatlog").appendChild(div); $("chatlog").scrollTop = 1e9;
+  if (cls === "bot") div.innerHTML = renderMarkdown(text);
+  else div.textContent = text;
+  turn.appendChild(div);
+
+  const tools = document.createElement("div");
+  tools.className = "msgtools";
+  const copy = document.createElement("button");
+  copy.textContent = "copy";
+  copy.onclick = () => {
+    navigator.clipboard.writeText(text);
+    copy.textContent = "copied"; setTimeout(() => (copy.textContent = "copy"), 1200);
+  };
+  tools.appendChild(copy);
+  turn.appendChild(tools);
+
+  $("chatlog").appendChild(turn);
+  if (stick) scrollChat(true); else $("jumplatest").style.display = "block";
+  // The bubble is what callers mutate while a turn is running.
+  div.setMarkdown = (t) => { div.innerHTML = renderMarkdown(t); copy.onclick = () =>
+    navigator.clipboard.writeText(t); };
   return div;
+}
+
+function addThinking() {
+  const bubble = addMsg("…", "bot", "copilot");
+  const started = Date.now();
+  bubble.innerHTML = '<span class="thinking"><i></i><i></i><i></i> <span class="el"></span></span>';
+  const el = bubble.querySelector(".el");
+  const tick = setInterval(() => {
+    const s = Math.round((Date.now() - started) / 1000);
+    el.textContent = s > 3 ? `thinking… ${s}s` : "thinking…";
+  }, 1000);
+  bubble.stopTimer = () => clearInterval(tick);
+  return bubble;
 }
 
 async function loadThread() {
@@ -322,14 +498,18 @@ async function loadThread() {
     sel.addEventListener("change", () => localStorage.setItem("bankai_speaker", sel.value));
   }
   const history = await api("/api/chat/history?limit=60");
-  const atBottom = $("chatlog").scrollHeight - $("chatlog").scrollTop - $("chatlog").clientHeight < 60;
+  const stick = nearBottom();
   $("chatlog").innerHTML = "";
-  history.forEach(m => addMsg(m.content, m.role === "user" ? "user" : "bot",
-    m.role === "user" ? m.speaker : null));
+  history.forEach(m => addMsg(
+    m.content,
+    m.role === "user" ? "user" : "bot",
+    m.role === "user" ? m.speaker : "copilot",
+    m.channel,
+  ));
   // A turn commits the question BEFORE the model runs, so a live reload can land
   // mid-turn — re-hang the thinking bubble so it doesn't vanish while we wait.
-  if (TURN_IN_FLIGHT) PENDING_BUBBLE = addMsg("…", "bot");
-  if (!atBottom) $("chatlog").scrollTop = $("chatlog").scrollHeight;
+  if (TURN_IN_FLIGHT) PENDING_BUBBLE = addThinking();
+  if (stick) scrollChat(true);
 }
 
 async function loadMemories() {
@@ -495,13 +675,21 @@ $("emailsweep").addEventListener("click", async () => {
 async function loadActions() {
   const actions = await api("/api/actions");
   rows("actions", actions.map(a => {
+    const isCode = a.kind === "code_change";
+    const verb = isCode ? "Accept" : "Approve &amp; run";
     const buttons = a.status === "proposed"
-      ? `<button onclick="runAction('${a.id}')">Approve &amp; run</button> ` +
+      ? `<button onclick="runAction('${a.id}')">${verb}</button> ` +
         `<button class=ghost onclick="declineAction('${a.id}')">Decline</button>`
       : `<span class=muted>${a.status}${a.result ? " — " + a.result.slice(0, 80) : ""}</span>`;
-    return `<tr><td><b>${a.title}</b><br>` +
-      `<span class=muted>${a.kind === "email_support" ? "email to " + a.to_email + ": “" + a.subject + "”" : a.kind}</span><br>` +
-      `<span class=muted>${a.rationale.slice(0, 140)}</span></td>` +
+    const detail = isCode
+      ? `self-improvement${a.subject ? " · " + a.subject : ""}`
+      : "email to " + a.to_email + ": “" + a.subject + "”";
+    const body = isCode
+      ? `<details><summary class=muted style="cursor:pointer">proposal</summary>` +
+        `<pre style="white-space:pre-wrap;font-size:12px;color:var(--dim)">${escapeHtml(a.body)}</pre></details>`
+      : `<span class=muted>${escapeHtml(a.rationale.slice(0, 140))}</span>`;
+    return `<tr><td><b>${escapeHtml(a.title)}</b><br>` +
+      `<span class=muted>${escapeHtml(detail)}</span><br>${body}</td>` +
       `<td>${buttons}</td></tr>`;
   }).join("") || "<tr><td class=muted>No proposals yet — the copilot will bring ideas here for your approval.</td></tr>");
 }
@@ -537,25 +725,133 @@ $("docform").addEventListener("submit", async (e) => {
   } catch (err) { $("docstatus").textContent = err.message; }
 });
 
-$("chatform").addEventListener("submit", async (e) => {
+// --- Attachments -------------------------------------------------------------
+// Anything dropped, pasted or picked goes STRAIGHT into the vault, then the
+// copilot is told what arrived so it reads and annotates it in the same turn.
+let ATTACHED = [];  // {name, id, status}
+
+function renderAttachments() {
+  $("attachlist").innerHTML = "";
+  ATTACHED.forEach((a, i) => {
+    const chip = document.createElement("span");
+    chip.className = "chip " + (a.status || "");
+    chip.textContent = a.status === "done" ? `✓ ${a.name}`
+                     : a.status === "failed" ? `✕ ${a.name}` : `… ${a.name}`;
+    if (a.status !== "pending") {
+      const x = document.createElement("button");
+      x.textContent = "×"; x.title = "Remove from this message";
+      x.onclick = () => { ATTACHED.splice(i, 1); renderAttachments(); };
+      chip.appendChild(x);
+    }
+    $("attachlist").appendChild(chip);
+  });
+}
+
+async function uploadToVault(file) {
+  const entry = {name: file.name || "pasted-image.png", status: "pending"};
+  ATTACHED.push(entry); renderAttachments();
+  try {
+    const fd = new FormData();
+    fd.append("file", file, entry.name);
+    fd.append("title", "");
+    fd.append("category", "other");
+    const res = await api("/api/documents", {method: "POST", body: fd});
+    entry.status = "done"; entry.id = res.id; entry.created = res.created;
+    entry.name = res.title || entry.name;
+  } catch (err) {
+    entry.status = "failed"; entry.error = err.message;
+  }
+  renderAttachments();
+  loadDocs();
+  return entry;
+}
+
+function takeFiles(files) {
+  [...files].forEach(f => { if (f) uploadToVault(f); });
+}
+
+$("attachbtn").onclick = () => $("chatfile").click();
+$("chatfile").addEventListener("change", (e) => { takeFiles(e.target.files); e.target.value = ""; });
+
+// Paste a screenshot straight into the conversation.
+$("chatinput").addEventListener("paste", (e) => {
+  const files = [...(e.clipboardData?.items || [])]
+    .filter(i => i.kind === "file").map(i => i.getAsFile()).filter(Boolean);
+  if (files.length) { e.preventDefault(); takeFiles(files); }
+});
+
+// Drag a document anywhere onto the composer.
+["dragenter", "dragover"].forEach(ev => $("composer").addEventListener(ev, (e) => {
+  e.preventDefault(); $("composer").classList.add("dragging");
+}));
+["dragleave", "drop"].forEach(ev => $("composer").addEventListener(ev, (e) => {
+  e.preventDefault(); $("composer").classList.remove("dragging");
+}));
+$("composer").addEventListener("drop", (e) => {
+  if (e.dataTransfer?.files?.length) takeFiles(e.dataTransfer.files);
+});
+
+// --- Composer ---------------------------------------------------------------
+function autogrow() {
+  const el = $("chatinput");
+  el.style.height = "auto";
+  el.style.height = Math.min(el.scrollHeight, 180) + "px";
+}
+$("chatinput").addEventListener("input", autogrow);
+$("chatinput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    $("composer").requestSubmit();
+  }
+});
+
+$("focusbtn").onclick = () => document.body.classList.toggle("chatfocus");
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") document.body.classList.remove("chatfocus");
+});
+$("chatlog").addEventListener("scroll", () => {
+  if (nearBottom()) $("jumplatest").style.display = "none";
+});
+
+$("composer").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const text = $("chatinput").value.trim();
-  if (!text) return;
-  $("chatinput").value = "";
-  addMsg(text, "user", $("speaker").value);
+  const typed = $("chatinput").value.trim();
+  const filed = ATTACHED.filter(a => a.status === "done");
+  if (!typed && !filed.length) return;
+  if (ATTACHED.some(a => a.status === "pending")) {
+    $("composerhint").textContent = "still filing your attachment…";
+    return;
+  }
+
+  // Name the documents so the copilot reads them rather than guessing.
+  let message = typed;
+  if (filed.length) {
+    const manifest = filed
+      .map(a => `${a.name} (document_id ${a.id}${a.created ? "" : ", already in the vault"})`)
+      .join("; ");
+    const note = `[Added to the vault: ${manifest}. Read each one and annotate it.]`;
+    message = typed ? `${typed}\n\n${note}` : note;
+  }
+
+  $("chatinput").value = ""; autogrow();
+  const shown = typed || `📎 ${filed.map(a => a.name).join(", ")}`;
+  addMsg(shown, "user", $("speaker").value, "web");
+  ATTACHED = []; renderAttachments();
+  $("composerhint").textContent = "Enter to send · Shift+Enter for a new line";
+
   TURN_IN_FLIGHT = true;
-  PENDING_BUBBLE = addMsg("…", "bot");
+  PENDING_BUBBLE = addThinking();
   try {
     const res = await api("/api/chat", {method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({message: text, speaker: $("speaker").value})});
+      body: JSON.stringify({message, speaker: $("speaker").value})});
     TURN_IN_FLIGHT = false;
-    if (PENDING_BUBBLE) PENDING_BUBBLE.textContent = res.reply;
-    // Panels refresh themselves off the live stream — the copilot may have
-    // written rules, memories, annotations, comps, goals, or proposals mid-turn.
+    if (PENDING_BUBBLE) { PENDING_BUBBLE.stopTimer?.(); PENDING_BUBBLE.setMarkdown(res.reply); }
+    scrollChat();
+    // Other panels repaint from the live stream.
   } catch (err) {
     TURN_IN_FLIGHT = false;
-    if (PENDING_BUBBLE) PENDING_BUBBLE.textContent = "Error: " + err.message;
+    if (PENDING_BUBBLE) { PENDING_BUBBLE.stopTimer?.(); PENDING_BUBBLE.textContent = "Error: " + err.message; }
   }
 });
 

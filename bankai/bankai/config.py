@@ -66,6 +66,10 @@ EMAIL_POLL_SECONDS = int(_env("EMAIL_POLL_SECONDS", "60") or 60)
 # (RESEND_API_KEY, shared with the notification path); the From domain must be
 # verified in Resend. Falls back to GMAIL_ADDRESS over SMTP.
 EMAIL_FROM = _env("EMAIL_FROM")
+# Address the copilot RECEIVES at (defaults to EMAIL_FROM). Resend's inbound list
+# also carries mail for the household's other agents, so this is the filter that
+# keeps this copilot reading only its own conversations.
+EMAIL_INBOUND_ADDRESS = _env("EMAIL_INBOUND_ADDRESS")
 
 NOTIFY_EMAILS = [e.strip() for e in _env("NOTIFY_EMAILS").split(",") if e.strip()]
 NOTIFY_FROM = _env("NOTIFY_FROM", "bankai@localhost")

@@ -32,6 +32,7 @@ def init_db() -> None:
     from . import models
     from . import goals  # noqa: F401 — registers the goals table on Base.metadata
     from . import watchpoints  # noqa: F401 — registers the watchpoints table
+    from .connectors import resend_inbound  # noqa: F401 — registers inbound_emails
 
     models.Base.metadata.create_all(engine)
 

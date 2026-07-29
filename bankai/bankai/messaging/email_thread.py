@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 
 from .. import config
 from ..agent import chat as agent_chat
-from ..connectors import email_harvest
+from ..connectors import email_harvest, resend_inbound
 from ..models import ChatMessage
 from . import thread as shared_thread
 
@@ -61,18 +61,13 @@ def household_emails() -> dict[str, str]:
 
 
 def configured() -> bool:
-    """Receiving needs IMAP credentials; sending can go out over Resend.
+    """Ready when it can receive, send, and knows who the household is.
 
-    Resend is a send-only API, so the inbound half of the conversation still
-    requires a mailbox to poll (or a public webhook, which a localhost server
-    cannot offer). Both halves plus a household roster are needed before the
-    thread is usable.
+    Receiving works two ways: Resend's pollable inbound list (preferred — no
+    mailbox credential at all) or IMAP against a real mailbox.
     """
-    return (
-        email_harvest.configured()  # IMAP: the receive side
-        and email_harvest.can_send()  # Resend or SMTP: the send side
-        and bool(household_emails())
-    )
+    can_receive = resend_inbound.configured() or email_harvest.configured()
+    return can_receive and email_harvest.can_send() and bool(household_emails())
 
 
 def identify_sender(from_header: str) -> str | None:
@@ -204,10 +199,84 @@ def _parse(raw: bytes) -> dict:
     }
 
 
+def poll_resend(session: Session) -> dict:
+    """Answer new household mail from Resend's inbound list.
+
+    Attachments ride along into the vault — emailing the copilot a document is
+    the least-friction way to hand it something.
+    """
+    from .. import vault
+
+    if not resend_inbound.seen_ids(session):
+        adopted = resend_inbound.adopt_backlog(session)
+        return {"status": "initialized", "adopted": adopted}
+
+    answered, ignored, filed = 0, 0, 0
+    for summary in resend_inbound.new_messages(session):
+        resend_id = summary["id"]
+        # Claim first: the reply must go out exactly once even if two workers
+        # are polling. A lost claim means someone else already has this one.
+        if not resend_inbound.claim(session, resend_id):
+            continue
+        try:
+            message = resend_inbound.fetch_inbound(resend_id)
+        except Exception:
+            log.exception("could not fetch inbound %s", resend_id)
+            resend_inbound.release(session, resend_id)  # retry on the next poll
+            continue
+        sender = identify_sender(message.get("from", ""))
+        if not sender:
+            log.info("ignoring email from unknown sender: %s", str(message.get("from"))[:80])
+            resend_inbound.settle(session, resend_id, "ignored")
+            ignored += 1
+            continue
+
+        for attachment in message.get("attachments") or []:
+            data = resend_inbound.attachment_bytes(attachment)
+            filename = attachment.get("filename") or attachment.get("name") or ""
+            if not data or not filename:
+                continue
+            try:
+                doc, created = vault.add_document(
+                    session, filename=filename, data=data,
+                    category=email_harvest.guess_category(
+                        f"{filename} {message.get('subject', '')}"
+                    ),
+                )
+                if created:
+                    doc.summary = (
+                        f"Emailed in by {sender} on "
+                        f"{message.get('created_at', '')}: "
+                        f"\"{message.get('subject', '')}\". Not yet reviewed in detail."
+                    )
+                    filed += 1
+            except Exception:
+                log.exception("could not file attachment %s", filename)
+
+        parsed = {
+            "from": message.get("from", ""),
+            "subject": message.get("subject", ""),
+            "message_id": message.get("message_id", ""),
+            "references": message.get("references", "") or "",
+            "body": resend_inbound.body_text(message),
+        }
+        try:
+            reply = process_message(session, parsed)
+        except Exception:
+            log.exception("failed handling email %s", resend_id)
+            resend_inbound.release(session, resend_id)  # retried on the next poll
+            continue
+        resend_inbound.settle(session, resend_id, "answered" if reply else "ignored")
+        answered += int(bool(reply))
+    return {"status": "ok", "answered": answered, "ignored": ignored, "documents_filed": filed}
+
+
 def poll_once(session: Session) -> dict:
-    """Read unseen mail, answer household senders, mark handled messages read."""
+    """Check for new household mail. Resend inbound when available, else IMAP."""
     if not configured():
         return {"status": "skipped", "detail": "email chat not configured"}
+    if resend_inbound.configured():
+        return poll_resend(session)
     conn = email_harvest.connect_writable()
     answered, ignored = 0, 0
     try:

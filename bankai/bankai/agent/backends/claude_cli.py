@@ -62,7 +62,9 @@ def run(session: Session, system: str, messages: list[dict]) -> str:
         "--mcp-config",
         _mcp_config(),
         "--allowedTools",
-        "mcp__bankai__*,WebSearch,WebFetch",
+        # Read lets it open vault images (pasted screenshots) at the path
+        # read_document hands back — an MCP tool can only return text.
+        "mcp__bankai__*,WebSearch,WebFetch,Read",
         "--max-turns",
         "15",
     ]
