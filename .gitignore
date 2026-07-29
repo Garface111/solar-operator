@@ -26,3 +26,4 @@ bankai/bankai.db
 bankai/*.db
 bankai/*.db-wal
 bankai/*.db-shm
+bankai/documents/

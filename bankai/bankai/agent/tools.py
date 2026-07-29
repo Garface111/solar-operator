@@ -20,7 +20,8 @@ from ..intelligence.insights import (
     upcoming_bills,
 )
 from ..intelligence.recurring import detect_recurring
-from ..models import Account, MemoryNote, Rule, Transaction
+from ..models import Account, Document, MemoryNote, Rule, Transaction
+from .. import vault
 from ..rules.engine import RULE_KINDS
 
 TOOLS: list[dict] = [
@@ -102,6 +103,57 @@ TOOLS: list[dict] = [
                 "message": {"type": "string", "description": "Text included in the notification email"},
             },
             "required": ["name", "kind"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "list_documents",
+        "description": (
+            "List every document in the household vault (deeds, mortgage/closing papers, "
+            "contracts, insurance policies, estate documents, tax records) with your saved "
+            "summaries. Call this whenever a question might touch recorded documents, and "
+            "when forming your picture of the household's legal situation."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "read_document",
+        "description": (
+            "Read a vault document's full extracted text. Long documents are paged: pass "
+            "start_char to continue (each call returns up to 30000 chars and the total "
+            "length). Reread source documents rather than relying on your recollection "
+            "when details matter (dates, amounts, clauses, names)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "document_id": {"type": "string"},
+                "start_char": {"type": "integer", "description": "default 0"},
+            },
+            "required": ["document_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "search_documents",
+        "description": "Case-insensitive text search across every vault document; returns matching snippets with document ids. Use to locate a clause, name, address, or amount across the whole vault.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "annotate_document",
+        "description": "Save/replace your digest of a vault document (key parties, dates, amounts, obligations, deadlines, anything protective to remember). Do this after reading any new document — annotations show up in list_documents and survive forever.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "document_id": {"type": "string"},
+                "summary": {"type": "string"},
+            },
+            "required": ["document_id", "summary"],
             "additionalProperties": False,
         },
     },

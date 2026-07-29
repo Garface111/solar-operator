@@ -12,6 +12,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
 )
@@ -100,6 +101,24 @@ class RuleFiring(Base):
     delivered: Mapped[bool] = mapped_column(Boolean, default=False)
 
     rule: Mapped[Rule] = relationship(back_populates="firings")
+
+
+class Document(Base):
+    """The household document vault: deeds, contracts, policies, estate docs.
+    Original file kept on disk; extracted text stored here so the copilot can
+    reread and search everything at any time."""
+
+    __tablename__ = "documents"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _uid("doc"))
+    title: Mapped[str] = mapped_column(String(200))
+    category: Mapped[str] = mapped_column(String(40), default="other", index=True)
+    filename: Mapped[str] = mapped_column(String(255), default="")
+    sha256: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    content_text: Mapped[str] = mapped_column(Text, default="")
+    summary: Mapped[str] = mapped_column(Text, default="")  # the copilot's own digest
+    added_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class MemoryNote(Base):
