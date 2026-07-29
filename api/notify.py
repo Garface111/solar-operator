@@ -1157,6 +1157,74 @@ def send_coop_reauth_needed_email(to: str, name: str, utility_name: str,
     )
 
 
+def send_connect_cloud_capture_email(
+    to: str, name: str, utility_name: str, product: str = "nepool"
+) -> bool:
+    """Invite an operator to connect Cloud Capture for a utility whose old
+    session-based pull has died with NO stored credential to fall back on.
+
+    Distinct from send_gmp_reauth_needed_email / send_coop_reauth_needed_email:
+    those assume a browser extension is what rescues the session, which is only
+    true in device mode. This is for the confirmed real case — a tenant marked
+    capture_mode='cloud' who never actually saved a password, so there is
+    nothing for the system to retry. The honest ask is a one-time two-minute
+    setup, not a "your session broke" alarm, so the framing here is calm and
+    invitational rather than "Action needed": nothing is on fire, an owner who
+    ignores this loses nothing they had, and the copy says so.
+
+    CTA is the OWNER'S OWN dashboard (where Cloud Capture lives), unlike the
+    two functions above whose CTA is the utility's own portal — visiting
+    greenmountainpower.com does not create a Cloud Capture credential."""
+    import html as _html
+    first = _html.escape((name or "there").split()[0])
+    util = _html.escape(utility_name or "your utility")
+    _brand = branding.brand_name(product)
+    _brand_h = _html.escape(_brand)
+    _dash = branding.dashboard_url(product)
+
+    body_html = (
+        f"<p>Hi {first},</p>"
+        f"<p>Automatic {util} bill pulls have stopped for this account, and there's no "
+        f"login saved for us to retry with — so nothing is going to fix itself here.</p>"
+        f"<p>It's a two-minute, one-time setup: open Account → Cloud Capture and save your "
+        f"{util} username and password. We'll take it from there — no browser extension, "
+        f"nothing to remember afterward.</p>"
+        f"<p>If you'd rather keep doing it by hand, that's fine too — you can always add "
+        f"bills yourself; this is just the faster way.</p>"
+        f"<p>Questions? Just reply.</p>"
+        f"<p style=\"margin-top:24px;\">— {_brand_h}</p>"
+    )
+    body_text = (
+        f"Hi {(name or 'there').split()[0]},\n\n"
+        f"Automatic {utility_name} bill pulls have stopped for this account, and there's "
+        f"no login saved for us to retry with — so nothing is going to fix itself here.\n\n"
+        f"It's a two-minute, one-time setup: open Account -> Cloud Capture and save your "
+        f"{utility_name} username and password. We'll take it from there.\n\n"
+        f"If you'd rather keep doing it by hand, that's fine too.\n\n"
+        f"Questions? Just reply.\n\n— {_brand}"
+    )
+    html = render_email_skin(
+        preheader=f"Turn on automatic {utility_name} bill pulls — two minutes, one time.",
+        headline=f"Turn on automatic {utility_name} bill pulls",
+        intro_line="A one-time setup — no browser extension needed.",
+        body_html=body_html,
+        cta={"label": f"Open {_brand}", "url": _dash},
+    )
+    text = render_email_skin_text(
+        headline=f"Turn on automatic {utility_name} bill pulls",
+        intro_line="A one-time setup — no browser extension needed.",
+        body_text=body_text,
+        cta={"label": f"Open {_brand}", "url": _dash},
+    )
+    return _send_via_resend(
+        to=to,
+        subject=f"Turn on automatic {utility_name} bill pulls",
+        html=html,
+        text=text,
+        product=product,
+    )
+
+
 # ─── warranty claims (Array Operator) ────────────────────────────────────
 
 def send_warranty_claim_email(

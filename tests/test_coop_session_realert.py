@@ -128,3 +128,25 @@ def test_cloud_tenant_gets_the_internal_alert_but_not_the_extension_email(monkey
     assert [w for w in out["warned"] if w["tenant"] == tid] != []
     assert emailed == []  # the wrong instruction was withheld
     assert any(tid in s for s in notified)  # internal alert still fired
+
+
+def test_cloud_tenant_without_a_credential_gets_the_connect_email(monkeypatch):
+    """Confirmed real state on prod for all examined cloud-mode tenants:
+    capture_mode='cloud' but no PortalCredential row at all — the honest ask
+    is connecting Cloud Capture once, not the extension copy. (utility_name
+    is whatever this fixture's 'vec' provider resolves to — not asserted
+    here since the co-op name table is unrelated to this gate.)"""
+    connect_calls = []
+    monkeypatch.setattr("api.notify.send_internal_alert", lambda subject, body: None)
+    monkeypatch.setattr("api.notify.send_coop_reauth_needed_email",
+                        lambda **kw: (_ for _ in ()).throw(
+                            AssertionError("must not send the extension-copy email")))
+    monkeypatch.setattr("api.notify.send_connect_cloud_capture_email",
+                        lambda **kw: connect_calls.append(kw) or True)
+    tid, _arr = _mk_dead_coop_tenant(capture_mode="cloud")
+
+    out = coop_session_death_warnings()
+
+    assert [w for w in out["warned"] if w["tenant"] == tid] != []
+    assert len(connect_calls) == 1
+    assert connect_calls[0]["utility_name"]  # non-empty; exact string not our concern here

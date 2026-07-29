@@ -42,6 +42,27 @@ def crypto_ready() -> bool:
     return encryption_enabled()
 
 
+def has_active_credential(db, tenant_id: str, provider: str) -> bool:
+    """Whether Cloud Capture actually has a password on file for this login —
+    the thing that would let it self-heal a dead session without a person
+    doing anything. NOT the same question as Tenant.capture_mode == 'cloud',
+    which is a preference the owner can set (or that defaults on) without ever
+    saving a credential — three real tenants were found in exactly that state:
+    marked cloud, zero PortalCredential rows for gmp. Distinguishing the two
+    is what decides whether the honest message is "update your password"
+    (a credential exists and is failing) or "connect your login" (there is
+    nothing here to fail — automatic pulls were never actually wired up)."""
+    row = db.execute(
+        select(PortalCredential.id).where(
+            PortalCredential.tenant_id == tenant_id,
+            PortalCredential.provider == provider,
+            PortalCredential.cloud_capture_enabled.is_(True),
+            PortalCredential.secret_enc.isnot(None),
+        )
+    ).first()
+    return row is not None
+
+
 def load_creds(cred: PortalCredential) -> Creds | None:
     """Decrypt a credential row into a JIT Creds bundle (transparent read via the
     EncryptedStr/EncryptedJSON column types). Returns None if the password is

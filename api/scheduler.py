@@ -35,7 +35,9 @@ from .notify import (
     send_trial_ending_no_card_reminder_email,
     send_internal_alert,
     send_gmp_reauth_needed_email,
+    send_connect_cloud_capture_email,
 )
+from .harvester import credentials
 
 
 class _ShutdownSafeExecutor(APSThreadPoolExecutor):
@@ -1012,10 +1014,32 @@ def refresh_expiring_gmp_tokens() -> dict:
                                 "Failed to send reauth email to %s: %s",
                                 tenant.contact_email, notify_exc,
                             )
+                    elif not credentials.has_active_credential(db, sess.tenant_id, "gmp"):
+                        # Confirmed the real case on prod (2026-07-29): capture_mode
+                        # is a preference, not proof a password was ever saved. With
+                        # no credential there is nothing to retry — the honest ask
+                        # is a one-time Cloud Capture setup, not a reconnect.
+                        try:
+                            send_connect_cloud_capture_email(
+                                to=tenant.contact_email,
+                                name=tenant.operator_name or tenant.company_name or tenant.name,
+                                utility_name="Green Mountain Power",
+                                product=tenant.product,
+                            )
+                        except Exception as notify_exc:
+                            logger.error(
+                                "Failed to send connect-cloud-capture email to %s: %s",
+                                tenant.contact_email, notify_exc,
+                            )
                     else:
+                        # A credential DOES exist — a live one, per the harvester's
+                        # own bookkeeping — so a failing session here is its job to
+                        # detect and (eventually) tell the customer about, not this
+                        # legacy token-refresh path's. Silent from here on purpose.
                         logger.info(
-                            "GMP reauth: withholding extension-instruction email for "
-                            "tenant=%s (capture_mode=%s) — internal alert only",
+                            "GMP reauth: withholding email for "
+                            "tenant=%s (capture_mode=%s, has Cloud Capture credential) "
+                            "— internal alert only",
                             sess.tenant_id, getattr(tenant, "capture_mode", None),
                         )
                     send_internal_alert(
@@ -1067,7 +1091,11 @@ def gmp_final_expiry_warnings(days_ahead: int = _GMP_FINAL_WARN_DAYS,
     has rescued the session for days. De-duped via InverterAlertState
     (incident_key 'gmp_token_final:<tenant>'), re-armed on rescue."""
     from .models import InverterAlertState, UtilitySession, Tenant
-    from .notify import send_gmp_reauth_needed_email, send_internal_alert
+    from .notify import (
+        send_gmp_reauth_needed_email,
+        send_connect_cloud_capture_email,
+        send_internal_alert,
+    )
 
     cutoff = datetime.utcnow() + timedelta(days=days_ahead)
     out = {"warned": [], "skipped_dedup": 0, "rescued_cleared": 0, "dry_run": dry_run}
@@ -1142,10 +1170,21 @@ def gmp_final_expiry_warnings(days_ahead: int = _GMP_FINAL_WARN_DAYS,
                     )
                 except Exception:
                     logger.exception("final-warning email failed for %s", tid)
+            elif not credentials.has_active_credential(db, tid, "gmp"):
+                try:
+                    send_connect_cloud_capture_email(
+                        to=tenant.contact_email,
+                        name=tenant.operator_name or tenant.company_name or tenant.name,
+                        utility_name="Green Mountain Power",
+                        product=tenant.product,
+                    )
+                except Exception:
+                    logger.exception("final-warning connect-email failed for %s", tid)
             else:
                 logger.info(
-                    "GMP final-warning: withholding extension-instruction email for "
-                    "tenant=%s (capture_mode=%s) — internal alert only",
+                    "GMP final-warning: withholding email for "
+                    "tenant=%s (capture_mode=%s, has Cloud Capture credential) "
+                    "— internal alert only",
                     tid, getattr(tenant, "capture_mode", None),
                 )
             try:
@@ -1185,7 +1224,11 @@ def coop_session_death_warnings(days_stale: int = _COOP_STALE_DAYS,
     <provider>'; incident clears itself when data flows again."""
     from .adapters.smarthub import PROVIDER_TO_UTILITY, is_smarthub_provider
     from .models import InverterAlertState, UtilitySession, Tenant, DailyGeneration, UtilityAccount
-    from .notify import send_coop_reauth_needed_email, send_internal_alert
+    from .notify import (
+        send_coop_reauth_needed_email,
+        send_connect_cloud_capture_email,
+        send_internal_alert,
+    )
 
     # What counts as EVIDENCE the session is alive: rows the session-riding paths
     # write — 'utility_meter' (the extension's SmartHub usage capture, the ONLY
@@ -1287,10 +1330,21 @@ def coop_session_death_warnings(days_stale: int = _COOP_STALE_DAYS,
                     )
                 except Exception:
                     logger.exception("co-op reauth email failed for %s/%s", tid, prov)
+            elif not credentials.has_active_credential(db, tid, prov):
+                try:
+                    send_connect_cloud_capture_email(
+                        to=tenant.contact_email,
+                        name=tenant.operator_name or tenant.company_name or tenant.name,
+                        utility_name=util_name,
+                        product=tenant.product,
+                    )
+                except Exception:
+                    logger.exception("co-op connect-email failed for %s/%s", tid, prov)
             else:
                 logger.info(
-                    "coop reauth: withholding extension-instruction email for "
-                    "tenant=%s provider=%s (capture_mode=%s) — internal alert only",
+                    "coop reauth: withholding email for "
+                    "tenant=%s provider=%s (capture_mode=%s, has Cloud Capture "
+                    "credential) — internal alert only",
                     tid, prov, getattr(tenant, "capture_mode", None),
                 )
             try:

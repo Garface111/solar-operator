@@ -457,3 +457,97 @@ def test_final_warning_also_respects_the_capture_mode_gate():
 
     mock_notify.assert_not_called()
     mock_alert.assert_called_once()
+
+
+# ─── the honest replacement: connect Cloud Capture, or stay silent if it's ──
+# ─── already the harvester's problem to solve ───────────────────────────────
+
+def test_cloud_tenant_without_a_credential_gets_the_connect_email():
+    """The confirmed real case (2026-07-29 prod audit): capture_mode='cloud'
+    with zero PortalCredential rows for gmp — there is nothing for the system
+    to retry, so the honest ask is a one-time Cloud Capture setup, not a
+    reconnect."""
+    from api.scheduler import refresh_expiring_gmp_tokens
+
+    with SessionLocal() as db:
+        t = _make_tenant(db, suffix="connectme", capture_mode="cloud")
+        db.flush()
+        sess = _make_session(
+            db, t.id, expires_at=datetime.utcnow() + timedelta(days=1), failures=2,
+        )
+        db.commit()
+        sess_id = sess.id
+        tenant_email = t.contact_email
+
+    resp = MagicMock()
+    resp.status_code = 401
+    resp.text = "Unauthorized"
+    with patch("api.gmp_refresh.httpx.post", return_value=resp), \
+         patch("api.scheduler.send_gmp_reauth_needed_email") as mock_wrong, \
+         patch("api.scheduler.send_connect_cloud_capture_email") as mock_connect, \
+         patch("api.scheduler.send_internal_alert"):
+        result = refresh_expiring_gmp_tokens()
+
+    assert sess_id in result["failed"]
+    mock_wrong.assert_not_called()
+    mock_connect.assert_called_once()
+    assert mock_connect.call_args.kwargs["to"] == tenant_email
+    assert mock_connect.call_args.kwargs["utility_name"] == "Green Mountain Power"
+
+
+def test_cloud_tenant_with_a_real_credential_gets_neither_email():
+    """A credential DOES exist here — the harvester's own lockout/stall
+    detection owns telling the customer, not this legacy token-refresh path.
+    (Today that customer-facing piece is a known gap in the harvester side,
+    tracked separately — but duplicating a second, differently-worded email
+    from here would be its own confusion, so this path stays silent.)"""
+    from api.models import PortalCredential
+    from api.scheduler import refresh_expiring_gmp_tokens
+
+    with SessionLocal() as db:
+        t = _make_tenant(db, suffix="hascred", capture_mode="cloud")
+        db.flush()
+        db.add(PortalCredential(
+            tenant_id=t.id, provider="gmp", username="o@ex.com", username_lc="o@ex.com",
+            secret_enc="enc-test", cloud_capture_enabled=True,
+        ))
+        sess = _make_session(
+            db, t.id, expires_at=datetime.utcnow() + timedelta(days=1), failures=2,
+        )
+        db.commit()
+        sess_id = sess.id
+
+    resp = MagicMock()
+    resp.status_code = 401
+    resp.text = "Unauthorized"
+    with patch("api.gmp_refresh.httpx.post", return_value=resp), \
+         patch("api.scheduler.send_gmp_reauth_needed_email") as mock_wrong, \
+         patch("api.scheduler.send_connect_cloud_capture_email") as mock_connect, \
+         patch("api.scheduler.send_internal_alert") as mock_alert:
+        result = refresh_expiring_gmp_tokens()
+
+    assert sess_id in result["failed"]
+    mock_wrong.assert_not_called()
+    mock_connect.assert_not_called()
+    mock_alert.assert_called_once()  # ops still hears about it
+
+
+def test_final_warning_also_sends_the_connect_email_when_no_credential_exists():
+    from api.scheduler import gmp_final_expiry_warnings, _GMP_FINAL_WARN_DAYS
+
+    with SessionLocal() as db:
+        t = _make_tenant(db, suffix="finalconnect", capture_mode="cloud")
+        db.flush()
+        _make_session(
+            db, t.id,
+            expires_at=datetime.utcnow() + timedelta(days=_GMP_FINAL_WARN_DAYS - 1),
+        )
+        db.commit()
+
+    with patch("api.notify.send_gmp_reauth_needed_email") as mock_wrong, \
+         patch("api.notify.send_connect_cloud_capture_email") as mock_connect, \
+         patch("api.notify.send_internal_alert"):
+        gmp_final_expiry_warnings()
+
+    mock_wrong.assert_not_called()
+    mock_connect.assert_called_once()
