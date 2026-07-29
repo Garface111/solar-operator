@@ -94,3 +94,65 @@ def test_reconcile_says_agree_when_they_match(session, monkeypatch):
     session.flush()
     out = sheets.reconcile(session)
     assert "agree" in out["interpretation"]
+
+
+# --- writing: only ever into our own tab ---
+
+def test_write_refuses_without_a_key(session, monkeypatch):
+    monkeypatch.setattr(config, "SHEETS_SERVICE_ACCOUNT_JSON", "")
+    with pytest.raises(RuntimeError, match="SHEETS_SERVICE_ACCOUNT_JSON"):
+        sheets.write_actuals(session)
+
+
+def test_write_targets_the_dedicated_tab_never_the_planning_columns(session, monkeypatch):
+    """Their workbook is full of formulas whose computed values are all we can
+    see. Writing into those columns would destroy the formula with no undo, so
+    every write must be confined to the copilot's own tab."""
+    monkeypatch.setattr(config, "SHEETS_SERVICE_ACCOUNT_JSON", "/fake/key.json")
+    monkeypatch.setattr(sheets, "ensure_actuals_tab", lambda: None)
+    calls = []
+
+    def fake_api(method, path, **kwargs):
+        calls.append({"method": method, "path": path, **kwargs})
+        return {}
+
+    monkeypatch.setattr(sheets, "_api", fake_api)
+    upsert_account(session, source="simplefin", name="Checking", kind="checking",
+                   balance=20_109.18)
+    upsert_account(session, source="manual", name="Mortgage", kind="mortgage",
+                   balance=-1_226_301.14)
+    session.flush()
+
+    out = sheets.write_actuals(session)
+    assert out["written"] is True
+    write = [c for c in calls if c["method"] == "PUT"][0]
+    assert write["path"].startswith(f"/values/{sheets.ACTUALS_TAB}!")
+    assert write["params"]["valueInputOption"] == "USER_ENTERED"
+
+    values = write["json"]["values"]
+    flat = [str(cell) for row in values for cell in row]
+    assert "NET WORTH" in flat
+    assert "Checking" in flat and "Mortgage" in flat
+    assert "do not edit by hand" in values[0][0]
+
+
+def test_written_totals_group_accounts_correctly(session, monkeypatch):
+    monkeypatch.setattr(config, "SHEETS_SERVICE_ACCOUNT_JSON", "/fake/key.json")
+    monkeypatch.setattr(sheets, "ensure_actuals_tab", lambda: None)
+    captured = {}
+
+    def fake_api(method, path, **kw):
+        if method == "PUT":
+            captured.update(kw)
+        return {}
+
+    monkeypatch.setattr(sheets, "_api", fake_api)
+    upsert_account(session, source="simplefin", name="Checking", kind="checking", balance=1_000.0)
+    upsert_account(session, source="simplefin", name="Savings", kind="savings", balance=500.0)
+    upsert_account(session, source="simplefin", name="Card", kind="credit", balance=-250.0)
+    session.flush()
+    sheets.write_actuals(session)
+    rows = {r[0]: r[1] for r in captured["json"]["values"] if len(r) > 1}
+    assert rows["Cash (checking + savings)"] == 1_500.0
+    assert rows["Credit cards owed"] == -250.0
+    assert rows["NET WORTH"] == 1_250.0

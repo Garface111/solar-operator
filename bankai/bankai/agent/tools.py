@@ -510,6 +510,20 @@ TOOLS: list[dict] = [
         "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
+        "name": "publish_actuals_to_sheet",
+        "description": (
+            "Write the household's real current figures — cash, investments, cards, "
+            "property, debts, net worth, and every account balance — into the "
+            "'BankAI Actuals' tab of their planning spreadsheet, so their own "
+            "formulas can reference live numbers instead of hand-typed ones. Safe "
+            "to run repeatedly; it rewrites the same block. It never writes into "
+            "their planning columns, so their formulas are never overwritten. Do "
+            "this after a sync, when they ask you to update the sheet, or when "
+            "reconciliation shows the sheet has drifted."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
         "name": "update_account_balance",
         "description": (
             "Correct the balance of a MANUALLY tracked account — the mortgage, a "
@@ -885,6 +899,16 @@ def _dispatch(session: Session, name: str, args: dict):
         if not sheets.configured():
             return {"error": "SHEETS_ID is not set in .env — no planning sheet linked"}
         return sheets.reconcile(session)
+    if name == "publish_actuals_to_sheet":
+        if not sheets.can_write():
+            return {
+                "error": (
+                    "writing to the spreadsheet is not set up yet — it needs the "
+                    "service account's JSON key in SHEETS_SERVICE_ACCOUNT_JSON, and "
+                    "the sheet shared with that account as an Editor. Reading works."
+                )
+            }
+        return sheets.write_actuals(session)
     if name == "update_account_balance":
         account = session.get(Account, args["account_id"])
         if not account:

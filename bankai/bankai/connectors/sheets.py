@@ -157,6 +157,141 @@ def read_plan(limit_days: int = 45) -> dict:
     }
 
 
+SHEETS_API = "https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}"
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+
+#: The copilot writes HERE and nowhere else. Their workbook is full of formulas
+#: (running balances, "Off by", "Excess") whose computed values are all a CSV
+#: export shows — writing a number into a formula cell would silently destroy the
+#: formula and there is no undo an agent can perform. Instead it maintains one
+#: plain data tab that their own formulas can reference, so their model stays
+#: theirs and every value the copilot produced is visible in one place.
+ACTUALS_TAB = "BankAI Actuals"
+
+
+def _credentials():
+    from google.oauth2 import service_account
+
+    path = config.SHEETS_SERVICE_ACCOUNT_JSON
+    if not path:
+        raise RuntimeError(
+            "SHEETS_SERVICE_ACCOUNT_JSON is not set — download the service "
+            "account's JSON key and point this at it"
+        )
+    return service_account.Credentials.from_service_account_file(path, scopes=SCOPES)
+
+
+def _token() -> str:
+    import google.auth.transport.requests
+
+    creds = _credentials()
+    creds.refresh(google.auth.transport.requests.Request())
+    return creds.token
+
+
+def service_account_email() -> str | None:
+    """Who the sheet must be shared with, read from the key itself."""
+    import json
+
+    path = config.SHEETS_SERVICE_ACCOUNT_JSON
+    if not path:
+        return None
+    try:
+        with open(path) as handle:
+            return json.load(handle).get("client_email")
+    except Exception:
+        return None
+
+
+def _api(method: str, path: str, **kwargs) -> dict:
+    url = SHEETS_API.format(sheet_id=config.SHEETS_ID) + path
+    headers = {"Authorization": f"Bearer {_token()}"}
+    resp = httpx.request(method, url, headers=headers, timeout=60, **kwargs)
+    if resp.status_code == 403:
+        who = service_account_email() or "the service account"
+        raise RuntimeError(
+            f"Google refused the write. Share the spreadsheet with {who} and give "
+            "it Editor access (Share → paste the address → Editor)."
+        )
+    resp.raise_for_status()
+    return resp.json() if resp.content else {}
+
+
+def tabs() -> list[str]:
+    data = _api("GET", "?fields=sheets.properties.title")
+    return [s["properties"]["title"] for s in data.get("sheets", [])]
+
+
+def ensure_actuals_tab() -> None:
+    if ACTUALS_TAB in tabs():
+        return
+    _api("POST", ":batchUpdate", json={
+        "requests": [{"addSheet": {"properties": {"title": ACTUALS_TAB}}}]
+    })
+
+
+def write_actuals(session) -> dict:
+    """Publish today's real figures into the copilot's own tab.
+
+    Deliberately a full rewrite of a small block rather than an append: re-running
+    it is idempotent, and there is never a growing pile of half-stale rows.
+    """
+    from datetime import datetime
+
+    from ..intelligence.insights import net_worth
+
+    if not can_write():
+        raise RuntimeError(
+            "writing is not configured — set SHEETS_SERVICE_ACCOUNT_JSON to the "
+            "service account's JSON key file"
+        )
+    ensure_actuals_tab()
+
+    live = net_worth(session)
+    accounts = live["accounts"]
+
+    def total(*kinds: str) -> float:
+        return round(sum(
+            a["balance"] for a in accounts
+            if a["kind"] in kinds and a["balance"] is not None
+        ), 2)
+
+    stamp = datetime.utcnow().isoformat(timespec="seconds")
+    rows: list[list] = [
+        ["Written by the household copilot — do not edit by hand", "", ""],
+        ["Last updated (UTC)", stamp, ""],
+        ["", "", ""],
+        ["Figure", "Amount", "Source"],
+        ["Cash (checking + savings)", total("checking", "savings"), "bank feed"],
+        ["Investments", total("investment"), "bank feed"],
+        ["Credit cards owed", total("credit"), "bank feed"],
+        ["Property", total("property"), "comps tracker"],
+        ["Mortgage + loans", total("mortgage", "loan"), "statement / manual"],
+        ["NET WORTH", live["total"], "sum of the above"],
+        ["", "", ""],
+        ["Account", "Balance", "Kind"],
+    ]
+    for a in sorted(accounts, key=lambda x: x["name"]):
+        rows.append([a["name"], a["balance"], a["kind"]])
+
+    _api(
+        "PUT",
+        f"/values/{ACTUALS_TAB}!A1:C{len(rows) + 5}",
+        params={"valueInputOption": "USER_ENTERED"},
+        json={"values": rows},
+    )
+    return {
+        "written": True,
+        "tab": ACTUALS_TAB,
+        "rows": len(rows),
+        "net_worth": live["total"],
+        "note": (
+            "Written to a dedicated tab, not into their planning columns — their "
+            "formulas are untouched and can reference these cells."
+        ),
+    }
+
+
 def reconcile(session, limit_days: int = 14) -> dict:
     """Compare what the sheet claims against what the accounts actually hold."""
     from ..intelligence.insights import net_worth
