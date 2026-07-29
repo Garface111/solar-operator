@@ -13,7 +13,18 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from sqlalchemy import Date, DateTime, Float, ForeignKey, String, Text, select
+import calendar
+
+from sqlalchemy import (
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    select,
+)
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from .models import Base, _uid
@@ -33,7 +44,12 @@ class AccountTerms(Base):
     #: "Monthly Balance" that omits them.
     statement_balance: Mapped[float | None] = mapped_column(Float, nullable=True)
     minimum_payment: Mapped[float | None] = mapped_column(Float, nullable=True)
+    #: A specific due date, from a specific statement. Goes out of date monthly.
     payment_due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    #: The DAY of the month a card is due. This is the durable form: a card's
+    #: cycle does not move, so recorded once it stays correct forever and the next
+    #: due date is computed rather than expiring. Prefer this over a fixed date.
+    due_day_of_month: Mapped[int | None] = mapped_column(Integer, nullable=True)
     apr: Mapped[float | None] = mapped_column(Float, nullable=True)
     #: The statement date these figures came from — without it a stale number
     #: looks current, which is the whole failure mode this exists to prevent.
@@ -44,6 +60,24 @@ class AccountTerms(Base):
     )
 
 
+def next_due(day_of_month: int, today: date | None = None) -> date:
+    """The next occurrence of a monthly due day, counting from today.
+
+    Clamped to the month's length so a card due on the 31st still resolves in
+    February rather than raising — and 'today is the due day' means today, not
+    next month.
+    """
+    today = today or date.today()
+    year, month = today.year, today.month
+    day = min(day_of_month, calendar.monthrange(year, month)[1])
+    if day < today.day:
+        month += 1
+        if month > 12:
+            month, year = 1, year + 1
+        day = min(day_of_month, calendar.monthrange(year, month)[1])
+    return date(year, month, day)
+
+
 def set_terms(
     session: Session,
     account_id: str,
@@ -51,6 +85,7 @@ def set_terms(
     statement_balance: float | None = None,
     minimum_payment: float | None = None,
     payment_due_date: date | None = None,
+    due_day_of_month: int | None = None,
     apr: float | None = None,
     as_of: date | None = None,
     source: str = "",
@@ -67,6 +102,7 @@ def set_terms(
         ("statement_balance", statement_balance),
         ("minimum_payment", minimum_payment),
         ("payment_due_date", payment_due_date),
+        ("due_day_of_month", due_day_of_month),
         ("apr", apr),
         ("as_of", as_of),
     ):
@@ -82,17 +118,22 @@ def terms_by_account(session: Session) -> dict[str, dict]:
     """Everything known about what is owed, keyed by account id, for the UI."""
     out: dict[str, dict] = {}
     for row in session.execute(select(AccountTerms)).scalars():
-        due = row.payment_due_date
+        # A recurring due day always wins: it is computed forward, so it cannot
+        # go stale the way a date copied off one statement does.
+        recurring = row.due_day_of_month is not None
+        due = next_due(row.due_day_of_month) if recurring else row.payment_due_date
         out[row.account_id] = {
             "statement_balance": row.statement_balance,
             "minimum_payment": row.minimum_payment,
             "payment_due_date": due.isoformat() if due else None,
             "days_until_due": (due - date.today()).days if due else None,
+            "due_day_of_month": row.due_day_of_month,
+            "recurring": recurring,
             "apr": row.apr,
             "as_of": row.as_of.isoformat() if row.as_of else None,
             "source": row.source,
-            # A due date in the past means the statement is stale, not that the
-            # payment is overdue — say which so nobody panics at old data.
-            "stale": bool(due and due < date.today()),
+            # Only a one-off date can be stale. A recurring day never is, which
+            # is the whole reason to prefer it.
+            "stale": bool(not recurring and due and due < date.today()),
         }
     return out

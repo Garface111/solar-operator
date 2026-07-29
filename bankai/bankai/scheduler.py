@@ -13,8 +13,9 @@ from sqlalchemy import select
 from . import config, realestate
 from .connectors import email_harvest, simplefin
 from .db import session_scope
+from .agent import chat as agent_chat
 from .messaging import thread as chat_thread
-from .models import MemoryNote, Property
+from .models import ChatMessage, MemoryNote, Property
 from .rules.engine import evaluate_rules
 from .rules.notify import deliver_firings
 from .watchpoints import (
@@ -179,6 +180,57 @@ async def _email_loop() -> None:
         await asyncio.sleep(config.EMAIL_HARVEST_DAYS * 24 * 3600)
 
 
+TENDING_SPEAKER = "self-directed work"
+
+TENDING_PROMPT = (
+    "(no one asked — this is your own initiative. Tend the household's picture: read and "
+    "annotate anything in the vault you have not, replace figures a newer statement has "
+    "superseded, add statement terms to accounts missing them, retire or move watchpoints "
+    "that no longer fit, check goals' pace, refresh comps if stale, reconcile the planning "
+    "sheet and publish actuals if it has drifted, and tidy memory notes that have gone stale "
+    "or contradict each other. Then either stay silent, or tell them the one thing that "
+    "actually warrants their attention.)"
+)
+
+
+def run_tending_once() -> dict:
+    """One self-directed maintenance pass.
+
+    The turn runs against the shared thread so its work has full context, but the
+    prompt is NOT stored: a housekeeping instruction is not something a household
+    member said, and leaving it in the history would teach the copilot that these
+    messages come from them. Only a reply worth hearing is kept.
+    """
+    with session_scope() as session:
+        history = chat_thread.build_history(session)
+    history.append({"role": "user", "content": TENDING_PROMPT})
+
+    with session_scope() as session:
+        reply = agent_chat.run_turn(session, history, channel="tending")
+
+    if agent_chat.is_silence(reply):
+        return {"status": "quiet"}
+    with session_scope() as session:
+        session.add(
+            ChatMessage(
+                channel="web", role="assistant", speaker="copilot", content=reply
+            )
+        )
+    return {"status": "spoke", "said": reply[:200]}
+
+
+async def _tending_loop() -> None:
+    # A first pass on startup would fire on every restart, so the loop waits out
+    # one interval before its first run.
+    while True:
+        await asyncio.sleep(config.TENDING_INTERVAL_HOURS * 3600)
+        try:
+            result = await asyncio.to_thread(run_tending_once)
+            log.info("tending: %s", result["status"])
+        except Exception:
+            log.exception("tending loop error")
+
+
 def monthly_review_action(session, today: date) -> str:
     """Returns 'run' | 'init' | 'skip'. First tick only sets the marker so a
     fresh deploy doesn't fire a surprise review mid-month; after that, the
@@ -240,4 +292,5 @@ def start_background_tasks() -> list[asyncio.Task]:
         asyncio.create_task(_email_loop(), name="bankai-email"),
         asyncio.create_task(_email_chat_loop(), name="bankai-email-chat"),
         asyncio.create_task(_monthly_review_loop(), name="bankai-monthly-review"),
+        asyncio.create_task(_tending_loop(), name="bankai-tending"),
     ]

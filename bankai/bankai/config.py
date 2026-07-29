@@ -122,4 +122,6 @@ NOTIFY_SMS = _env("NOTIFY_SMS", "true").lower() != "false"
 
 SYNC_INTERVAL_MINUTES = int(_env("SYNC_INTERVAL_MINUTES", "360") or 360)
 RULES_INTERVAL_MINUTES = int(_env("RULES_INTERVAL_MINUTES", "15") or 15)
+# How often the copilot works on its own initiative with nobody watching.
+TENDING_INTERVAL_HOURS = int(_env("TENDING_INTERVAL_HOURS", "6") or 6)
 PORT = int(_env("PORT", "8300") or 8300)

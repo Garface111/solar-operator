@@ -547,6 +547,41 @@ TOOLS: list[dict] = [
         "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
+        "name": "set_account_terms",
+        "description": (
+            "Record what a statement says about ANY account — including bank-synced "
+            "ones — so its due date and minimum appear next to its balance. Bank "
+            "feeds carry balances but not due dates, so without this the biggest "
+            "cards show a number with no deadline, which is the half that actually "
+            "governs whether a payment gets missed. This never changes a synced "
+            "balance; the institution still owns that. Always give as_of (the "
+            "statement date) so a figure cannot look current when it is months old."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "account_id": {"type": "string", "description": "From get_accounts"},
+                "statement_balance": {"type": "number", "description": "Amount owed per the statement"},
+                "minimum_payment": {"type": "number"},
+                "due_day_of_month": {
+                    "type": "integer",
+                    "description": (
+                        "PREFER THIS for a card: the day of the month it is always "
+                        "due (1-31). A card's cycle does not move, so recorded once "
+                        "this stays right forever and the next date is computed. A "
+                        "fixed payment_due_date goes out of date every month."
+                    ),
+                },
+                "payment_due_date": {"type": "string", "description": "ISO date, for a one-off"},
+                "apr": {"type": "number"},
+                "as_of": {"type": "string", "description": "ISO statement date"},
+                "source": {"type": "string", "description": "Which statement this came from"},
+            },
+            "required": ["account_id", "source"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "track_account",
         "description": (
             "Add or update an account no bank feed can reach — the Apple Card is "
@@ -973,6 +1008,30 @@ def _dispatch(session: Session, name: str, args: dict):
                 )
             }
         return sheets.write_actuals(session)
+    if name == "set_account_terms":
+        account = session.get(Account, args["account_id"])
+        if not account:
+            return {"error": "account not found — call get_accounts for ids"}
+
+        def _d(key):
+            raw = (args.get(key) or "").strip()
+            return date.fromisoformat(raw) if raw else None
+
+        accounts_terms.set_terms(
+            session, account.id,
+            statement_balance=args.get("statement_balance"),
+            minimum_payment=args.get("minimum_payment"),
+            payment_due_date=_d("payment_due_date"),
+            due_day_of_month=args.get("due_day_of_month"),
+            apr=args.get("apr"),
+            as_of=_d("as_of"),
+            source=args["source"],
+        )
+        return {
+            "recorded": True,
+            "account": account.name,
+            "note": "Balance untouched — terms only." if account.source != "manual" else None,
+        }
     if name == "track_account":
         kind = (args.get("kind") or "other").strip().lower()
         if kind not in MANUAL_KINDS:
