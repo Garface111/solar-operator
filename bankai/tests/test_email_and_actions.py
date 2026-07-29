@@ -98,9 +98,12 @@ def test_harvest_tool_dispatch(session, monkeypatch):
 def test_email_tools_error_clearly_when_unconfigured(session, monkeypatch):
     monkeypatch.setattr(config, "GMAIL_ADDRESS", "")
     monkeypatch.setattr(config, "GMAIL_APP_PASSWORD", "")
+    monkeypatch.setattr(config, "RESEND_API_KEY", "")
+    # reading the inbox needs IMAP credentials...
     out = json.loads(execute_tool(session, "search_email", {"query": "trust"}))
     assert "not connected" in out["error"]
-    with pytest.raises(RuntimeError, match="not connected"):
+    # ...sending names both transports, so the fix is obvious either way
+    with pytest.raises(RuntimeError, match="RESEND_API_KEY"):
         email_harvest.send_email("a@b.com", "s", "b")
 
 
@@ -156,3 +159,79 @@ def test_monthly_review_marker_logic(session):
     session.flush()
     assert monthly_review_action(session, today) == "skip"
     assert monthly_review_action(session, date(2026, 9, 2)) == "run"
+
+
+# --- send transport: Resend preferred, SMTP fallback ---
+
+def test_resend_is_preferred_and_carries_threading_headers(monkeypatch):
+    monkeypatch.setattr(config, "RESEND_API_KEY", "re_test_key")
+    monkeypatch.setattr(config, "EMAIL_FROM", "copilot@solaroperator.org")
+    monkeypatch.setattr(config, "GMAIL_ADDRESS", "fallback@gmail.com")
+    monkeypatch.setattr(config, "GMAIL_APP_PASSWORD", "app-pw")
+    monkeypatch.setattr(
+        email_harvest.smtplib, "SMTP",
+        lambda *a, **k: pytest.fail("SMTP must not be used when Resend is configured"),
+    )
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        captured.update({"url": url, "auth": headers["Authorization"], "body": json})
+        return FakeResponse()
+
+    monkeypatch.setattr(email_harvest.httpx, "post", fake_post)
+    receipt = email_harvest.send_message(
+        to=["a@x.com", "b@x.com"], subject="Re: Question", text="hello",
+        headers={"In-Reply-To": "<abc@mail>", "References": "<abc@mail>"},
+    )
+    assert "Resend" in receipt
+    assert captured["url"] == email_harvest.RESEND_URL
+    assert captured["auth"] == "Bearer re_test_key"
+    assert captured["body"]["from"] == "copilot@solaroperator.org"
+    assert captured["body"]["to"] == ["a@x.com", "b@x.com"]
+    assert captured["body"]["headers"]["In-Reply-To"] == "<abc@mail>"
+
+
+def test_falls_back_to_smtp_without_a_resend_key(monkeypatch):
+    monkeypatch.setattr(config, "RESEND_API_KEY", "")
+    monkeypatch.setattr(config, "EMAIL_FROM", "")
+    monkeypatch.setattr(config, "GMAIL_ADDRESS", "copilot@gmail.com")
+    monkeypatch.setattr(config, "GMAIL_APP_PASSWORD", "app-pw")
+    sent = {}
+
+    class FakeSMTP:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def starttls(self):
+            pass
+
+        def login(self, user, password):
+            sent["user"] = user
+
+        def send_message(self, msg):
+            sent["msg"] = msg
+
+    monkeypatch.setattr(email_harvest.smtplib, "SMTP", lambda *a, **k: FakeSMTP())
+    receipt = email_harvest.send_message(
+        to=["a@x.com"], subject="Hi", text="body",
+        headers={"In-Reply-To": "<abc@mail>"},
+    )
+    assert "SMTP" in receipt
+    assert sent["msg"]["From"] == "copilot@gmail.com"
+    assert sent["msg"]["In-Reply-To"] == "<abc@mail>"
+
+
+def test_send_without_any_transport_is_an_actionable_error(monkeypatch):
+    monkeypatch.setattr(config, "RESEND_API_KEY", "")
+    monkeypatch.setattr(config, "GMAIL_ADDRESS", "")
+    monkeypatch.setattr(config, "GMAIL_APP_PASSWORD", "")
+    assert email_harvest.can_send() is False
+    with pytest.raises(RuntimeError, match="RESEND_API_KEY"):
+        email_harvest.send_message(to=["a@x.com"], subject="s", text="t")

@@ -29,7 +29,7 @@ from sqlalchemy.orm import Session
 
 from .. import config
 from ..agent import chat as agent_chat
-from ..connectors.email_harvest import connect_writable, send_email_message
+from ..connectors import email_harvest
 from ..models import ChatMessage
 from . import thread as shared_thread
 
@@ -61,9 +61,18 @@ def household_emails() -> dict[str, str]:
 
 
 def configured() -> bool:
-    from ..connectors import email_harvest
+    """Receiving needs IMAP credentials; sending can go out over Resend.
 
-    return email_harvest.configured() and bool(household_emails())
+    Resend is a send-only API, so the inbound half of the conversation still
+    requires a mailbox to poll (or a public webhook, which a localhost server
+    cannot offer). Both halves plus a household roster are needed before the
+    thread is usable.
+    """
+    return (
+        email_harvest.configured()  # IMAP: the receive side
+        and email_harvest.can_send()  # Resend or SMTP: the send side
+        and bool(household_emails())
+    )
 
 
 def identify_sender(from_header: str) -> str | None:
@@ -112,20 +121,28 @@ def _reply_subject(subject: str) -> str:
     return subject if subject.lower().startswith("re:") else f"Re: {subject}"
 
 
-def build_reply(
+def threading_headers(message_id: str, references: str) -> dict[str, str]:
+    """Headers that keep the reply inside the same Gmail conversation, so the
+    household sees one running thread rather than a pile of separate emails."""
+    if not message_id:
+        return {}
+    return {
+        "In-Reply-To": message_id,
+        "References": f"{references} {message_id}".strip() if references else message_id,
+    }
+
+
+def send_reply(
     *, reply_text: str, subject: str, message_id: str, references: str,
     recipients: list[str],
-) -> EmailMessage:
-    """A reply addressed to the whole household, threaded under the original."""
-    msg = EmailMessage()
-    msg["From"] = config.GMAIL_ADDRESS
-    msg["To"] = ", ".join(recipients)
-    msg["Subject"] = _reply_subject(subject)
-    if message_id:
-        msg["In-Reply-To"] = message_id
-        msg["References"] = (references + " " + message_id).strip() if references else message_id
-    msg.set_content(reply_text)
-    return msg
+) -> str:
+    """One reply to the whole household, threaded under the original message."""
+    return email_harvest.send_message(
+        to=recipients,
+        subject=_reply_subject(subject),
+        text=reply_text,
+        headers=threading_headers(message_id, references),
+    )
 
 
 def household_recipients() -> list[str]:
@@ -162,15 +179,13 @@ def process_message(session: Session, parsed: dict) -> str | None:
     )
     session.flush()
 
-    recipients = household_recipients()
-    message = build_reply(
+    send_reply(
         reply_text=reply,
         subject=parsed.get("subject", ""),
         message_id=parsed.get("message_id", ""),
         references=parsed.get("references", ""),
-        recipients=recipients,
+        recipients=household_recipients(),
     )
-    send_email_message(message)
     return reply
 
 
@@ -193,7 +208,7 @@ def poll_once(session: Session) -> dict:
     """Read unseen mail, answer household senders, mark handled messages read."""
     if not configured():
         return {"status": "skipped", "detail": "email chat not configured"}
-    conn = connect_writable()
+    conn = email_harvest.connect_writable()
     answered, ignored = 0, 0
     try:
         status, data = conn.search(None, "UNSEEN")

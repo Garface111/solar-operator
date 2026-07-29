@@ -21,6 +21,7 @@ import re
 import smtplib
 from email.message import EmailMessage
 
+import httpx
 from sqlalchemy.orm import Session
 
 from .. import config, vault
@@ -33,6 +34,8 @@ DEFAULT_QUERY = (
     "insurance OR policy OR 1099 OR w-2 OR w2 OR k-1 OR \"tax return\" OR "
     "statement OR appraisal OR title)"
 )
+
+RESEND_URL = "https://api.resend.com/emails"
 
 DOC_EXTENSIONS = (".pdf", ".docx", ".txt", ".rtf", ".csv")
 MAX_ATTACHMENT_BYTES = 15 * 1024 * 1024
@@ -52,19 +55,60 @@ def configured() -> bool:
     return bool(config.GMAIL_ADDRESS and config.GMAIL_APP_PASSWORD)
 
 
-def send_email_message(message: EmailMessage) -> str:
-    """Send a fully-formed message (used by the email thread, which needs its own
-    threading headers). Plain SMTP over the same app password."""
-    if not configured():
-        raise RuntimeError(
-            "email is not connected — set GMAIL_ADDRESS and GMAIL_APP_PASSWORD in .env"
+def can_send() -> bool:
+    """Outbound works over Resend OR a Gmail app password — either is enough."""
+    return bool(config.RESEND_API_KEY or (config.GMAIL_ADDRESS and config.GMAIL_APP_PASSWORD))
+
+
+def send_from() -> str:
+    """The address household mail goes out as."""
+    return config.EMAIL_FROM or config.GMAIL_ADDRESS or config.NOTIFY_FROM
+
+
+def send_message(
+    *, to: list[str], subject: str, text: str, headers: dict[str, str] | None = None
+) -> str:
+    """Send one plain-text message, preferring Resend.
+
+    Resend is the primary transport (same service the other projects use — no app
+    password in the send path, better deliverability). `headers` carries the
+    threading headers so a reply stays inside the household's existing Gmail
+    conversation; Resend passes custom headers through. SMTP with the Gmail app
+    password is the fallback when no Resend key is configured.
+    """
+    headers = {k: v for k, v in (headers or {}).items() if v}
+    sender = send_from()
+    if config.RESEND_API_KEY:
+        payload: dict = {"from": sender, "to": to, "subject": subject, "text": text}
+        if headers:
+            payload["headers"] = headers
+        resp = httpx.post(
+            RESEND_URL,
+            headers={"Authorization": f"Bearer {config.RESEND_API_KEY}"},
+            json=payload,
+            timeout=30,
         )
+        resp.raise_for_status()
+        return f"sent via Resend to {', '.join(to)} from {sender}"
+
+    if not (config.GMAIL_ADDRESS and config.GMAIL_APP_PASSWORD):
+        raise RuntimeError(
+            "cannot send email — set RESEND_API_KEY (preferred) or "
+            "GMAIL_ADDRESS + GMAIL_APP_PASSWORD in .env"
+        )
+    message = EmailMessage()
+    message["From"] = sender
+    message["To"] = ", ".join(to)
+    message["Subject"] = subject
+    for key, value in headers.items():
+        message[key] = value
+    message.set_content(text)
     smtp_host = config.IMAP_HOST.replace("imap.", "smtp.", 1)
     with smtplib.SMTP(smtp_host, 587, timeout=30) as smtp:
         smtp.starttls()
         smtp.login(config.GMAIL_ADDRESS, config.GMAIL_APP_PASSWORD)
         smtp.send_message(message)
-    return f"sent to {message['To']} from {config.GMAIL_ADDRESS}"
+    return f"sent via SMTP to {', '.join(to)} from {sender}"
 
 
 def connect_writable() -> imaplib.IMAP4_SSL:
@@ -81,23 +125,9 @@ def connect_writable() -> imaplib.IMAP4_SSL:
 
 
 def send_email(to: str, subject: str, body: str) -> str:
-    """Send plain-text mail AS the household address (approved actions only —
-    the approval gate lives in the portal, not here). Returns a receipt line."""
-    if not configured():
-        raise RuntimeError(
-            "email is not connected — set GMAIL_ADDRESS and GMAIL_APP_PASSWORD in .env"
-        )
-    msg = EmailMessage()
-    msg["From"] = config.GMAIL_ADDRESS
-    msg["To"] = to
-    msg["Subject"] = subject
-    msg.set_content(body)
-    smtp_host = config.IMAP_HOST.replace("imap.", "smtp.", 1)
-    with smtplib.SMTP(smtp_host, 587, timeout=30) as smtp:
-        smtp.starttls()
-        smtp.login(config.GMAIL_ADDRESS, config.GMAIL_APP_PASSWORD)
-        smtp.send_message(msg)
-    return f"sent to {to} from {config.GMAIL_ADDRESS}"
+    """Send plain-text mail as the household (approved actions only — the
+    approval gate lives in the portal, not here). Returns a receipt line."""
+    return send_message(to=[to], subject=subject, text=body)
 
 
 def guess_category(text: str) -> str:

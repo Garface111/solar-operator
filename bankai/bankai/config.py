@@ -62,6 +62,10 @@ EMAIL_HARVEST_DAYS = int(_env("EMAIL_HARVEST_DAYS", "7") or 7)
 # are answered — the copilot can read the household's whole financial picture.
 HOUSEHOLD_EMAILS = _env("HOUSEHOLD_EMAILS")
 EMAIL_POLL_SECONDS = int(_env("EMAIL_POLL_SECONDS", "60") or 60)
+# Outbound household mail goes out as this address. Sending prefers Resend
+# (RESEND_API_KEY, shared with the notification path); the From domain must be
+# verified in Resend. Falls back to GMAIL_ADDRESS over SMTP.
+EMAIL_FROM = _env("EMAIL_FROM")
 
 NOTIFY_EMAILS = [e.strip() for e in _env("NOTIFY_EMAILS").split(",") if e.strip()]
 NOTIFY_FROM = _env("NOTIFY_FROM", "bankai@localhost")

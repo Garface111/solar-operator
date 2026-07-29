@@ -4,6 +4,7 @@ import email.message
 import pytest
 
 from bankai import config
+from bankai.connectors import email_harvest
 from bankai.messaging import email_thread
 from bankai.models import ChatMessage
 
@@ -16,6 +17,8 @@ def household(monkeypatch):
     monkeypatch.setattr(config, "HOUSEHOLD_EMAILS", f"Ford:{FORD},Sam:{SPOUSE}")
     monkeypatch.setattr(config, "GMAIL_ADDRESS", "copilot@example.com")
     monkeypatch.setattr(config, "GMAIL_APP_PASSWORD", "app-password")
+    monkeypatch.setattr(config, "RESEND_API_KEY", "")
+    monkeypatch.setattr(config, "EMAIL_FROM", "")
 
 
 def raw_email(sender, subject="Question", body="How are we doing?", message_id="<abc@mail>"):
@@ -44,7 +47,7 @@ def test_stranger_email_is_ignored_entirely(session, monkeypatch):
     """The inbox is a public address and the copilot can read everything about
     this household — an unknown sender must get no reply and leave no trace."""
     sent = []
-    monkeypatch.setattr(email_thread, "send_email_message", lambda m: sent.append(m))
+    monkeypatch.setattr(email_thread.email_harvest, "send_message", lambda **kw: sent.append(kw) or "ok")
     monkeypatch.setattr(
         email_thread.agent_chat, "run_turn",
         lambda *a, **k: pytest.fail("the model must never run for a stranger"),
@@ -86,28 +89,45 @@ def test_reply_goes_to_the_whole_household():
     assert email_thread.household_recipients() == sorted([FORD, SPOUSE])
 
 
-def test_reply_threads_under_the_original():
-    msg = email_thread.build_reply(
+def test_reply_threads_under_the_original(monkeypatch):
+    sent = {}
+    monkeypatch.setattr(
+        email_thread.email_harvest, "send_message", lambda **kw: sent.update(kw) or "ok"
+    )
+    email_thread.send_reply(
         reply_text="Net worth is $1.3M.", subject="Question",
         message_id="<abc@mail>", references="", recipients=[FORD, SPOUSE],
     )
-    assert msg["Subject"] == "Re: Question"
-    assert msg["In-Reply-To"] == "<abc@mail>"
-    assert msg["References"] == "<abc@mail>"
-    assert FORD in msg["To"] and SPOUSE in msg["To"]
+    assert sent["subject"] == "Re: Question"
+    assert sent["headers"]["In-Reply-To"] == "<abc@mail>"
+    assert sent["headers"]["References"] == "<abc@mail>"
+    assert sent["to"] == [FORD, SPOUSE]
 
 
-def test_reply_does_not_double_prefix_re():
-    msg = email_thread.build_reply(
+def test_references_chain_grows_so_long_threads_stay_together():
+    headers = email_thread.threading_headers("<third@mail>", "<first@mail> <second@mail>")
+    assert headers["References"] == "<first@mail> <second@mail> <third@mail>"
+
+
+def test_first_message_without_an_id_sends_without_threading_headers():
+    assert email_thread.threading_headers("", "") == {}
+
+
+def test_reply_does_not_double_prefix_re(monkeypatch):
+    sent = {}
+    monkeypatch.setattr(
+        email_thread.email_harvest, "send_message", lambda **kw: sent.update(kw) or "ok"
+    )
+    email_thread.send_reply(
         reply_text="x", subject="Re: Question", message_id="", references="",
         recipients=[FORD],
     )
-    assert msg["Subject"] == "Re: Question"
+    assert sent["subject"] == "Re: Question"
 
 
 def test_household_email_runs_a_turn_and_replies_to_both(session, monkeypatch):
     sent = []
-    monkeypatch.setattr(email_thread, "send_email_message", lambda m: sent.append(m))
+    monkeypatch.setattr(email_thread.email_harvest, "send_message", lambda **kw: sent.append(kw) or "ok")
     monkeypatch.setattr(
         email_thread.agent_chat, "run_turn",
         lambda s, history, channel="email": f"[{channel}] you have $10.",
@@ -122,7 +142,7 @@ def test_household_email_runs_a_turn_and_replies_to_both(session, monkeypatch):
         ("user", "Ford", "email"), ("assistant", "copilot", "email"),
     }
     assert len(sent) == 1
-    assert FORD in sent[0]["To"] and SPOUSE in sent[0]["To"]
+    assert sent[0]["to"] == sorted([FORD, SPOUSE])
 
 
 def test_spouse_email_joins_the_same_thread(session, monkeypatch):
@@ -130,7 +150,7 @@ def test_spouse_email_joins_the_same_thread(session, monkeypatch):
     session.add(ChatMessage(channel="web", role="user", speaker="Ford", content="earlier"))
     session.commit()
     seen = {}
-    monkeypatch.setattr(email_thread, "send_email_message", lambda m: None)
+    monkeypatch.setattr(email_thread.email_harvest, "send_message", lambda **kw: "ok")
     monkeypatch.setattr(
         email_thread.agent_chat, "run_turn",
         lambda s, history, channel="email": seen.setdefault("history", history) and "" or "ok",
@@ -153,4 +173,14 @@ def test_empty_body_after_stripping_is_not_answered(session, monkeypatch):
 
 def test_not_configured_without_household_addresses(monkeypatch):
     monkeypatch.setattr(config, "HOUSEHOLD_EMAILS", "")
+    assert email_thread.configured() is False
+
+
+def test_resend_key_alone_cannot_receive(monkeypatch):
+    """Resend is send-only: without a mailbox to poll there is no inbound half,
+    so the thread must not report itself ready."""
+    monkeypatch.setattr(config, "GMAIL_ADDRESS", "")
+    monkeypatch.setattr(config, "GMAIL_APP_PASSWORD", "")
+    monkeypatch.setattr(config, "RESEND_API_KEY", "re_test")
+    assert email_harvest.can_send() is True
     assert email_thread.configured() is False
