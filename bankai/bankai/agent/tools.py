@@ -7,12 +7,12 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..connectors import email_harvest
+from ..connectors import email_harvest, sheets
 from ..intelligence.forecast import cash_flow_forecast, spending_anomalies
 from ..intelligence.horizon import affordability, project_wealth
 from ..intelligence.insights import (
@@ -23,6 +23,7 @@ from ..intelligence.insights import (
     upcoming_bills,
 )
 from ..intelligence.recurring import detect_recurring
+from ..ingest import _snapshot_balance, normalize_manual_balance
 from ..models import (
     Account,
     AgentAction,
@@ -484,6 +485,55 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "read_planning_sheet",
+        "description": (
+            "Read the household's own Google Sheets planning model — a daily "
+            "cash-flow ledger with each spouse's running balance, money in and "
+            "out, cash on hand, stocks, and credit-card projections. This is the "
+            "model THEY plan against, so read it before advising on cash timing, "
+            "and treat it as their intent rather than something to overwrite."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"days": {"type": "integer", "description": "Rows either side of today, default 45"}},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "reconcile_planning_sheet",
+        "description": (
+            "Compare the planning sheet's cash figure against the real account "
+            "balances and report the gap. Use it when they ask whether the sheet "
+            "is right, or when your numbers disagree with theirs — name the "
+            "difference and the date, and ask which is correct."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "update_account_balance",
+        "description": (
+            "Correct the balance of a MANUALLY tracked account — the mortgage, a "
+            "loan, a vehicle, anything no bank feed reports. Use it the moment you "
+            "learn a better number (a mortgage statement gives the real payoff "
+            "balance; a payment reduces principal), instead of caveating a stale "
+            "figure forever. Enter liabilities as the amount owed and it is stored "
+            "as a negative. This moves net worth, so it is recorded with your "
+            "reasoning and snapshotted into history — always restate the old value, "
+            "the new value, and your source. Bank-synced accounts cannot be edited "
+            "here: their balance comes from the institution."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "account_id": {"type": "string", "description": "From get_accounts"},
+                "balance": {"type": "number", "description": "Liabilities: the amount owed"},
+                "reasoning": {"type": "string", "description": "Where this number came from"},
+            },
+            "required": ["account_id", "balance", "reasoning"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "propose_code_change",
         "description": (
             "Propose a change to your OWN source code — a new tool, a better "
@@ -826,6 +876,55 @@ def _dispatch(session: Session, name: str, args: dict):
         return {
             "proposed": True, "action_id": action.id, "title": action.title,
             "next_step": "a human must click Approve & run in the dashboard's Copilot actions panel",
+        }
+    if name == "read_planning_sheet":
+        if not sheets.configured():
+            return {"error": "SHEETS_ID is not set in .env — no planning sheet linked"}
+        return sheets.read_plan(limit_days=min(int(args.get("days") or 45), 120))
+    if name == "reconcile_planning_sheet":
+        if not sheets.configured():
+            return {"error": "SHEETS_ID is not set in .env — no planning sheet linked"}
+        return sheets.reconcile(session)
+    if name == "update_account_balance":
+        account = session.get(Account, args["account_id"])
+        if not account:
+            return {"error": "account not found — call get_accounts for ids"}
+        if account.source != "manual":
+            return {
+                "error": (
+                    f"'{account.name}' is synced from {account.source}; its balance "
+                    "comes from the institution and cannot be set by hand. Only "
+                    "manually tracked accounts (mortgage, loans, vehicles, property) "
+                    "are editable."
+                )
+            }
+        old = account.balance
+        new = normalize_manual_balance(account.kind, float(args["balance"]))
+        account.balance = new
+        account.balance_date = datetime.utcnow()
+        session.flush()
+        _snapshot_balance(session, account)
+        # Why this number is what it is, upserted per account so the note stays
+        # current instead of growing a log nobody reads.
+        title = f"Balance basis — {account.name}"[:120]
+        note = session.execute(
+            select(MemoryNote).where(MemoryNote.title == title)
+        ).scalar_one_or_none()
+        basis = (
+            f"{date.today().isoformat()}: {new:,.2f} (was {old:,.2f} if known). "
+            f"{args['reasoning']}"
+        )
+        if note:
+            note.content = basis
+        else:
+            session.add(MemoryNote(title=title, content=basis))
+        session.flush()
+        return {
+            "updated": True,
+            "account": account.name,
+            "old_balance": old,
+            "new_balance": new,
+            "net_worth": net_worth(session)["total"],
         }
     if name == "propose_code_change":
         body = "\n\n".join([

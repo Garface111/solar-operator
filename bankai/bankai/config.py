@@ -71,6 +71,13 @@ EMAIL_FROM = _env("EMAIL_FROM")
 # keeps this copilot reading only its own conversations.
 EMAIL_INBOUND_ADDRESS = _env("EMAIL_INBOUND_ADDRESS")
 
+# --- The household's own Google Sheets planning model ---
+# Reading works with link-sharing alone. Writing needs a Google service account
+# (path to its JSON key) and the sheet shared with that account's address.
+SHEETS_ID = _env("SHEETS_ID")
+SHEETS_GID = _env("SHEETS_GID")  # empty = the workbook's default tab
+SHEETS_SERVICE_ACCOUNT_JSON = _env("SHEETS_SERVICE_ACCOUNT_JSON")
+
 NOTIFY_EMAILS = [e.strip() for e in _env("NOTIFY_EMAILS").split(",") if e.strip()]
 NOTIFY_FROM = _env("NOTIFY_FROM", "bankai@localhost")
 RESEND_API_KEY = _env("RESEND_API_KEY")
