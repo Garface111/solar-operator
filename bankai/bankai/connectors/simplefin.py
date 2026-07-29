@@ -22,11 +22,23 @@ from ..models import SyncLog
 _KIND_HINTS = [
     ("credit", "credit"),
     ("card", "credit"),
+    ("visa", "credit"),
+    ("amex", "credit"),
     ("savings", "savings"),
     ("invest", "investment"),
     ("brokerage", "investment"),
     ("401", "investment"),
     ("ira", "investment"),
+]
+
+# Consulted only when the account name itself gives no hint — e.g. Fidelity
+# names its brokerage accounts just "Individual (1234)".
+_INSTITUTION_HINTS = [
+    ("fidelity", "investment"),
+    ("schwab", "investment"),
+    ("vanguard", "investment"),
+    ("invest", "investment"),
+    ("brokerage", "investment"),
 ]
 
 
@@ -38,10 +50,14 @@ def claim_setup_token(setup_token: str) -> str:
     return resp.text.strip()
 
 
-def _guess_kind(name: str) -> str:
+def _guess_kind(name: str, institution: str = "") -> str:
     lower = name.lower()
     for hint, kind in _KIND_HINTS:
         if hint in lower:
+            return kind
+    lower_inst = institution.lower()
+    for hint, kind in _INSTITUTION_HINTS:
+        if hint in lower_inst:
             return kind
     return "checking"
 
@@ -70,7 +86,9 @@ def sync(lookback_days: int = 90) -> dict:
                     external_id=acct.get("id"),
                     name=acct.get("name") or "Unnamed account",
                     institution=(acct.get("org") or {}).get("name", ""),
-                    kind=_guess_kind(acct.get("name") or ""),
+                    kind=_guess_kind(
+                        acct.get("name") or "", (acct.get("org") or {}).get("name") or ""
+                    ),
                     currency=acct.get("currency") or "USD",
                     balance=float(acct.get("balance") or 0),
                     balance_date=(
