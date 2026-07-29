@@ -21,6 +21,56 @@ def test_dispatch_uses_configured_backend(session, monkeypatch):
     assert calls[0][-1] == {"role": "user", "content": "hello"}
 
 
+def test_backend_chain_falls_back_in_order(session, monkeypatch):
+    monkeypatch.setattr(config, "LLM_BACKEND", "claude-cli,grok")
+
+    def cli_down(s, system, messages):
+        raise RuntimeError("the Claude CLI on this machine is not logged in")
+
+    monkeypatch.setattr(claude_cli, "run", cli_down)
+    monkeypatch.setattr(grok_backend, "run", lambda s, system, messages: "grok took over")
+    reply = agent_chat.run_turn(session, [{"role": "user", "content": "hi"}])
+    assert reply == "grok took over"
+
+
+def test_backend_chain_first_success_stops_the_chain(session, monkeypatch):
+    monkeypatch.setattr(config, "LLM_BACKEND", "claude-cli,grok")
+    monkeypatch.setattr(claude_cli, "run", lambda s, system, messages: "cli answered")
+    monkeypatch.setattr(
+        grok_backend, "run",
+        lambda s, system, messages: (_ for _ in ()).throw(AssertionError("must not run")),
+    )
+    assert agent_chat.run_turn(session, [{"role": "user", "content": "hi"}]) == "cli answered"
+
+
+def test_backend_chain_reports_every_failure(session, monkeypatch):
+    monkeypatch.setattr(config, "LLM_BACKEND", "claude-cli,grok")
+
+    def cli_down(s, system, messages):
+        raise RuntimeError("not logged in — run /login")
+
+    def grok_down(s, system, messages):
+        raise RuntimeError("XAI_API_KEY is not set")
+
+    monkeypatch.setattr(claude_cli, "run", cli_down)
+    monkeypatch.setattr(grok_backend, "run", grok_down)
+    with pytest.raises(RuntimeError) as exc:
+        agent_chat.run_turn(session, [{"role": "user", "content": "hi"}])
+    msg = str(exc.value)
+    assert "claude-cli:" in msg and "grok:" in msg and "XAI_API_KEY" in msg
+
+
+def test_claude_cli_not_logged_in_is_actionable(session, monkeypatch):
+    class FakeProc:
+        returncode = 1
+        stdout = "Not logged in · Please run /login"
+        stderr = ""
+
+    monkeypatch.setattr(claude_cli.subprocess, "run", lambda cmd, **kw: FakeProc())
+    with pytest.raises(RuntimeError, match="not logged in"):
+        claude_cli.run(session, "s", [{"role": "user", "content": "x"}])
+
+
 def test_grok_tools_are_openai_shaped():
     tools = grok_backend.tools_openai_format()
     assert len(tools) == len(TOOLS)

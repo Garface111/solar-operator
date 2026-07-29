@@ -78,7 +78,14 @@ def run(session: Session, system: str, messages: list[dict]) -> str:
             "Install Claude Code and log in, or set CLAUDE_CLI_BIN."
         )
     if proc.returncode != 0:
-        raise RuntimeError(f"claude CLI failed (exit {proc.returncode}): {proc.stderr[:500]}")
+        detail = (proc.stderr or "") + (proc.stdout or "")
+        if "not logged in" in detail.lower() or "/login" in detail:
+            raise RuntimeError(
+                "the Claude CLI on this machine is not logged in — run "
+                f"`{config.CLAUDE_CLI_BIN}` once and type /login to connect the "
+                "Claude subscription"
+            )
+        raise RuntimeError(f"claude CLI failed (exit {proc.returncode}): {detail[:500]}")
     data = json.loads(proc.stdout)
     reply = (data.get("result") or "").strip()
     return reply or "(no response)"

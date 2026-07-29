@@ -10,6 +10,7 @@ tool loop *within* a turn and returns the reply text. Backends (config.LLM_BACKE
 """
 from __future__ import annotations
 
+import logging
 from datetime import date
 
 from sqlalchemy import select
@@ -105,16 +106,35 @@ def build_system(session: Session, channel: str) -> str:
     return system
 
 
+def _backend(name: str):
+    if name == "grok":
+        from .backends import grok_backend as impl
+    elif name == "claude-cli":
+        from .backends import claude_cli as impl
+    elif name == "anthropic":
+        from .backends import anthropic_backend as impl
+    else:
+        raise RuntimeError(f"unknown LLM backend {name!r}")
+    return impl
+
+
 def run_turn(session: Session, messages: list[dict], channel: str = "web") -> str:
     """Run one turn. `messages` are text-only {role, content} and must end with a
-    user message. Returns the reply text."""
-    backend = config.LLM_BACKEND
-    if backend == "grok":
-        from .backends import grok_backend as impl
-    elif backend == "claude-cli":
-        from .backends import claude_cli as impl
-    else:
-        from .backends import anthropic_backend as impl
-    return impl.run(session, build_system(session, channel), list(messages))
+    user message. Returns the reply text.
+
+    LLM_BACKEND may be a comma-separated fallback chain ("claude-cli,grok"):
+    backends are tried in order and the first success wins, so a logged-out CLI or
+    an exhausted credit pool degrades to the next brain instead of a dead chat."""
+    system = build_system(session, channel)
+    errors: list[str] = []
+    for name in [b.strip() for b in config.LLM_BACKEND.split(",") if b.strip()]:
+        try:
+            return _backend(name).run(session, system, list(messages))
+        except Exception as exc:
+            errors.append(f"{name}: {exc}")
+            logging.getLogger("bankai.chat").warning(
+                "backend %s failed, trying next: %s", name, exc
+            )
+    raise RuntimeError(" | ".join(errors) or "no LLM backend configured")
 
 
