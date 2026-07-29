@@ -156,3 +156,73 @@ def test_written_totals_group_accounts_correctly(session, monkeypatch):
     assert rows["Cash (checking + savings)"] == 1_500.0
     assert rows["Credit cards owed"] == -250.0
     assert rows["NET WORTH"] == 1_250.0
+
+
+# --- Apps Script transport (works where service-account keys are blocked) ---
+
+def test_apps_script_url_alone_enables_writing(monkeypatch):
+    monkeypatch.setattr(config, "SHEETS_SERVICE_ACCOUNT_JSON", "")
+    monkeypatch.setattr(config, "SHEETS_WEBHOOK_URL", "https://script.google.com/x/exec")
+    assert sheets.can_write() is True
+
+
+def test_apps_script_is_preferred_over_the_service_account(session, monkeypatch):
+    monkeypatch.setattr(config, "SHEETS_WEBHOOK_URL", "https://script.google.com/x/exec")
+    monkeypatch.setattr(config, "SHEETS_WEBHOOK_SECRET", "s3cret")
+    monkeypatch.setattr(config, "SHEETS_SERVICE_ACCOUNT_JSON", "/fake/key.json")
+    monkeypatch.setattr(
+        sheets, "_api",
+        lambda *a, **k: pytest.fail("must not hit the Sheets API when a script exists"),
+    )
+    posted = {}
+
+    class FakeResponse:
+        text = "ok: wrote 12 rows to BankAI Actuals"
+
+        def raise_for_status(self):
+            return None
+
+    def fake_post(url, json=None, timeout=None, follow_redirects=None):
+        posted.update({"url": url, "body": json})
+        return FakeResponse()
+
+    monkeypatch.setattr(sheets.httpx, "post", fake_post)
+    upsert_account(session, source="simplefin", name="Checking", kind="checking", balance=10.0)
+    session.flush()
+
+    out = sheets.write_actuals(session)
+    assert out["transport"] == "apps_script"
+    assert posted["body"]["secret"] == "s3cret"
+    assert posted["body"]["tab"] == sheets.ACTUALS_TAB
+    assert any("NET WORTH" in str(cell) for row in posted["body"]["values"] for cell in row)
+
+
+def test_a_wrong_secret_is_reported_as_a_secret_problem(monkeypatch):
+    monkeypatch.setattr(config, "SHEETS_WEBHOOK_URL", "https://script.google.com/x/exec")
+    monkeypatch.setattr(config, "SHEETS_WEBHOOK_SECRET", "wrong")
+
+    class FakeResponse:
+        text = "unauthorized"
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(sheets.httpx, "post", lambda *a, **k: FakeResponse())
+    with pytest.raises(RuntimeError, match="secret"):
+        sheets._write_via_apps_script("BankAI Actuals", [["x"]])
+
+
+def test_a_login_page_response_explains_the_deployment_setting(monkeypatch):
+    """The classic Apps Script mistake is deploying with restricted access; the
+    symptom is an HTML sign-in page, which is useless unless we name the fix."""
+    monkeypatch.setattr(config, "SHEETS_WEBHOOK_URL", "https://script.google.com/x/exec")
+
+    class FakeResponse:
+        text = "<!DOCTYPE html><html><head><title>Sign in</title>"
+
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr(sheets.httpx, "post", lambda *a, **k: FakeResponse())
+    with pytest.raises(RuntimeError, match="Anyone"):
+        sheets._write_via_apps_script("BankAI Actuals", [["x"]])

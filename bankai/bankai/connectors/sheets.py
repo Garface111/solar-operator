@@ -50,7 +50,18 @@ def configured() -> bool:
 
 
 def can_write() -> bool:
-    return bool(config.SHEETS_ID and config.SHEETS_SERVICE_ACCOUNT_JSON)
+    """Two ways in, and the simpler one is usually the only one available.
+
+    Google's "Secure by Default" org policy (iam.disableServiceAccountKeyCreation)
+    blocks downloading service-account keys on most new organisations, and turning
+    that policy off to let a household tool write a spreadsheet is a bad trade. An
+    Apps Script web app bound to the sheet needs no key and no IAM change: the
+    script runs as its owner, so it already has access, and a shared secret gates
+    the endpoint.
+    """
+    return bool(config.SHEETS_ID) and bool(
+        config.SHEETS_WEBHOOK_URL or config.SHEETS_SERVICE_ACCOUNT_JSON
+    )
 
 
 def _money(raw: str) -> float | None:
@@ -230,6 +241,43 @@ def ensure_actuals_tab() -> None:
     })
 
 
+def _write_via_apps_script(tab: str, values: list[list]) -> dict:
+    """Hand the rows to a script that already owns the sheet."""
+    resp = httpx.post(
+        config.SHEETS_WEBHOOK_URL,
+        json={"secret": config.SHEETS_WEBHOOK_SECRET, "tab": tab, "values": values},
+        timeout=60,
+        follow_redirects=True,  # Apps Script /exec redirects to googleusercontent
+    )
+    resp.raise_for_status()
+    body = resp.text.strip()
+    if "unauthorized" in body.lower():
+        raise RuntimeError(
+            "the Apps Script rejected the secret — SHEETS_WEBHOOK_SECRET must match "
+            "the SECRET constant in the script"
+        )
+    if body.startswith("<!DOCTYPE") or "<html" in body[:200].lower():
+        raise RuntimeError(
+            "the Apps Script URL returned a login page — redeploy it with "
+            "'Execute as: Me' and 'Who has access: Anyone'"
+        )
+    return {"transport": "apps_script", "response": body[:300]}
+
+
+def write_rows(tab: str, values: list[list]) -> dict:
+    """Write a block of rows, using whichever transport is configured."""
+    if config.SHEETS_WEBHOOK_URL:
+        return _write_via_apps_script(tab, values)
+    ensure_actuals_tab()
+    _api(
+        "PUT",
+        f"/values/{tab}!A1:C{len(values) + 5}",
+        params={"valueInputOption": "USER_ENTERED"},
+        json={"values": values},
+    )
+    return {"transport": "service_account"}
+
+
 def write_actuals(session) -> dict:
     """Publish today's real figures into the copilot's own tab.
 
@@ -242,10 +290,9 @@ def write_actuals(session) -> dict:
 
     if not can_write():
         raise RuntimeError(
-            "writing is not configured — set SHEETS_SERVICE_ACCOUNT_JSON to the "
-            "service account's JSON key file"
+            "writing is not configured — set SHEETS_WEBHOOK_URL (the Apps Script "
+            "web app bound to the sheet) or SHEETS_SERVICE_ACCOUNT_JSON"
         )
-    ensure_actuals_tab()
 
     live = net_worth(session)
     accounts = live["accounts"]
@@ -274,17 +321,13 @@ def write_actuals(session) -> dict:
     for a in sorted(accounts, key=lambda x: x["name"]):
         rows.append([a["name"], a["balance"], a["kind"]])
 
-    _api(
-        "PUT",
-        f"/values/{ACTUALS_TAB}!A1:C{len(rows) + 5}",
-        params={"valueInputOption": "USER_ENTERED"},
-        json={"values": rows},
-    )
+    result = write_rows(ACTUALS_TAB, rows)
     return {
         "written": True,
         "tab": ACTUALS_TAB,
         "rows": len(rows),
         "net_worth": live["total"],
+        "transport": result.get("transport"),
         "note": (
             "Written to a dedicated tab, not into their planning columns — their "
             "formulas are untouched and can reference these cells."

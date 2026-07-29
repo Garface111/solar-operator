@@ -77,6 +77,11 @@ EMAIL_INBOUND_ADDRESS = _env("EMAIL_INBOUND_ADDRESS")
 SHEETS_ID = _env("SHEETS_ID")
 SHEETS_GID = _env("SHEETS_GID")  # empty = the workbook's default tab
 SHEETS_SERVICE_ACCOUNT_JSON = _env("SHEETS_SERVICE_ACCOUNT_JSON")
+# Preferred write path: an Apps Script web app bound to the sheet. Needs no
+# service-account key, so it works under Google's default org policy that blocks
+# key creation. The secret is what gates the endpoint — treat it as a password.
+SHEETS_WEBHOOK_URL = _env("SHEETS_WEBHOOK_URL")
+SHEETS_WEBHOOK_SECRET = _env("SHEETS_WEBHOOK_SECRET")
 
 NOTIFY_EMAILS = [e.strip() for e in _env("NOTIFY_EMAILS").split(",") if e.strip()]
 NOTIFY_FROM = _env("NOTIFY_FROM", "bankai@localhost")

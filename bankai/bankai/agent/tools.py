@@ -903,9 +903,11 @@ def _dispatch(session: Session, name: str, args: dict):
         if not sheets.can_write():
             return {
                 "error": (
-                    "writing to the spreadsheet is not set up yet — it needs the "
-                    "service account's JSON key in SHEETS_SERVICE_ACCOUNT_JSON, and "
-                    "the sheet shared with that account as an Editor. Reading works."
+                    "writing to the spreadsheet is not set up yet. The quick route "
+                    "is the Apps Script bridge in scripts/sheet_bridge.gs: paste it "
+                    "into the sheet's Extensions > Apps Script, deploy it as a web "
+                    "app, and put its URL and secret in SHEETS_WEBHOOK_URL / "
+                    "SHEETS_WEBHOOK_SECRET. Reading already works."
                 )
             }
         return sheets.write_actuals(session)
