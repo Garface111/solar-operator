@@ -573,6 +573,155 @@ def _provider_label(provider: str | None) -> str:
     return prov.upper() if prov else "your utility"
 
 
+# How long Cloud Capture may go without a SUCCESSFUL server-side capture before
+# we stop treating it as "actively harvesting this provider". Mirrors
+# harvester.lockout_alert.STALL_UTILITY_HOURS (utility data is a ~12h cadence),
+# so the digest and the stall watchdog can't disagree about the same login.
+_CLOUD_CAPTURE_STALL_HOURS = 36
+
+
+def _capture_path(db, tenant, provider: str) -> dict:
+    """How this provider's readings ACTUALLY reach this tenant — the question the
+    digest never asked before, and the reason Paul Bozuwa kept being told to
+    "re-connect Vermont Electric Cooperative" (2026-07-30).
+
+    Three genuinely different worlds, and only one of them has a sign-in the
+    OWNER can re-connect:
+
+      * ``device``  — extension mode. The owner logging into the portal is what
+        captures a fresh session, so "re-connect it" is the true instruction.
+      * ``cloud``   — Cloud Capture holds the password and logs in server-side.
+        There is nothing for the owner to re-connect; a browser visit does not
+        feed the stored credential the harvester uses. If it is failing, the
+        honest ask is "update the saved password", and the Cloud Capture
+        watchdogs (harvester.lockout_alert) already own telling them.
+      * ``unmanaged`` — neither: no credential on file and not device mode.
+        Connecting the login in Array Operator IS the fix, so the stock copy is
+        right.
+
+    ``harvesting`` is the ground truth for the cloud case: a successful
+    ``HarvestRun`` inside the stall window. Mirrors scheduler.py's device-mode /
+    has_active_credential gate on the standalone reauth emails — the digest was
+    the one customer-facing surface that never got it.
+    """
+    out = {"mode": "unmanaged", "harvesting": False, "last_ok_at": None}
+    if (getattr(tenant, "capture_mode", None) or "") == "device":
+        out["mode"] = "device"
+        return out
+    try:
+        from ..harvester import credentials
+        if not credentials.has_active_credential(db, tenant.id, provider):
+            return out                       # nothing on file — nothing to fail
+    except Exception:                                # pragma: no cover - defensive
+        log.exception("capture path: credential check failed for %s/%s",
+                      tenant.id, provider)
+        return out
+
+    out["mode"] = "cloud"
+    try:
+        from ..models import HarvestRun
+        last_ok = db.execute(
+            select(func.max(HarvestRun.started_at)).where(
+                HarvestRun.tenant_id == tenant.id,
+                HarvestRun.provider == provider,
+                HarvestRun.status == "ok",
+            )
+        ).scalar()
+    except Exception:                                # pragma: no cover - defensive
+        log.exception("capture path: harvest-run lookup failed for %s/%s",
+                      tenant.id, provider)
+        last_ok = None
+    if last_ok is not None:
+        out["last_ok_at"] = last_ok.isoformat()
+        out["harvesting"] = (
+            datetime.utcnow() - last_ok <= timedelta(hours=_CLOUD_CAPTURE_STALL_HOURS)
+        )
+    return out
+
+
+def _gate_connection_problem(problem: dict, path: dict) -> dict | None:
+    """Decide whether a raw connection signal is REAL for this tenant, and — when
+    it is — say the true thing about it. Returns the problem (possibly reworded)
+    or None to drop it.
+
+    Two failure modes this exists to kill, both from Paul's 2026-07-30 email
+    ("still complaining about VT electric coop" — a daily "your Vermont Electric
+    Cooperative sign-in expired twelve days ago, reconnect VEC" on a fleet that
+    is on Cloud Capture and reported 100% health in the very same email):
+
+      1. THE GHOST TOKEN. ``UtilitySession.expires_at`` is not a login lifetime.
+         For SmartHub co-ops (VEC included) it is written from the adapter's
+         ``_SESSION_TIMEOUT_SECONDS`` — a FIVE MINUTE re-auth hint. The row is
+         therefore "expired" five minutes after the last extension capture and
+         stays that way forever, so the digest reported a login death that grew
+         by one day every morning. A token row alone is not evidence; require a
+         starved array before saying anything to the owner.
+      2. THE WRONG INSTRUCTION. Under Cloud Capture the password lives on the
+         server and the harvester signs in itself. "Re-connect it and I'll
+         backfill" names a mechanism the owner does not have.
+
+    Never a mute for its own sake: when a dependent array really has stopped
+    reporting we still say so — those are often zero-inverter utility arrays the
+    vendor body excludes entirely, so dropping the item would make them vanish
+    (no-self-sabotage-reliability-audit). Only the unevidenced signal and the
+    false instruction go away.
+    """
+    affected = problem.get("arrays_affected") or []
+    starved = [a for a in affected if (a.get("days_since_data") or 0) >= 2]
+    provider_name = problem.get("provider_name", "your utility")
+
+    if not starved:
+        # An expired token row on its own has no independent evidence behind it,
+        # so silence is the honest answer. The co-op death signal DOES have its
+        # own (it fires on data staleness), so it only loses out when we can see
+        # its dependants and every one of them is current.
+        if problem.get("kind") == "session_expired" or affected:
+            log.info("digest: dropping %s for %s — nothing it feeds is starved",
+                     problem.get("kind"), problem.get("provider"))
+            return None
+
+    if path.get("mode") != "cloud":
+        return problem                       # device / unmanaged: stock copy is true
+
+    if path.get("harvesting") and not starved:
+        log.info("digest: dropping %s for %s — Cloud Capture captured "
+                 "successfully at %s", problem.get("kind"), problem.get("provider"),
+                 path.get("last_ok_at"))
+        return None
+
+    problem["capture_mode"] = "cloud"
+    # ``since``/``days_down`` came off the token row, and on Cloud Capture that
+    # row froze the day the fleet stopped capturing through the browser — it is
+    # exactly the "expired twelve days ago" figure that grew by one every
+    # morning. Re-derive the duration from the starved data itself, or drop it:
+    # the note model may state no date we did not hand it.
+    since = min((a.get("last_data_day") for a in starved
+                 if a.get("last_data_day")), default=None)
+    problem["since"] = since
+    problem["days_down"] = _days_since(since)
+    if path.get("harvesting"):
+        # Signing in fine, but the readings still aren't arriving. Say exactly
+        # that — and do NOT hand the owner a reconnect they cannot perform.
+        problem["kind"] = "cloud_feed_gap"
+        problem["detail"] = (
+            f"Cloud Capture is still signing in to {provider_name} successfully, "
+            "but no new meter readings are coming through.")
+        # Deliberately avoids the word "reconnect" in any form: this string is
+        # handed verbatim to the note model, which will happily echo a verb it
+        # sees here into an instruction the owner cannot carry out.
+        problem["fix"] = ("There is nothing to fix on your side — we're on it, "
+                          "and we backfill the missed days automatically.")
+    else:
+        problem["kind"] = "cloud_login_failing"
+        problem["detail"] = (
+            f"Cloud Capture can no longer sign in to {provider_name} with the "
+            "password we have on file, so no new meter readings are reaching us.")
+        problem["fix"] = (f"Update your saved {provider_name} password in Array "
+                          "Operator — we backfill the missed days automatically "
+                          "once it works again.")
+    return problem
+
+
 def build_connection_health(db, tenant) -> dict:
     """Is every data feed this fleet depends on actually ALIVE?
 
@@ -590,6 +739,14 @@ def build_connection_health(db, tenant) -> dict:
     Each problem carries the arrays that DEPEND on it, by name, with each one's
     own last data day — so the note can name the specific starved site instead of
     gesturing at "a site".
+
+    Every candidate then goes through ``_gate_connection_problem``, which asks
+    the question this function used to skip: is that signal real for THIS
+    tenant's capture path, and is the fix we're about to name something they can
+    actually do? Note that signal 1's alert-state row is written by
+    ``coop_session_death_warnings`` even when it deliberately withholds the
+    customer email — so without the gate the digest re-published, every single
+    morning, the exact message that job had decided not to send.
     """
     problems: list[dict] = []
     try:
@@ -652,7 +809,7 @@ def build_connection_health(db, tenant) -> dict:
         prov = str(st.incident_key).rsplit(":", 1)[-1]
         since = st.first_flagged_at.date().isoformat() if st.first_flagged_at else None
         seen.add(prov)
-        problems.append({
+        gated = _gate_connection_problem({
             "provider": prov,
             "provider_name": _provider_label(prov),
             "kind": "login_expired",
@@ -663,7 +820,9 @@ def build_connection_health(db, tenant) -> dict:
             "fix": (f"Re-connect {_provider_label(prov)} in Array Operator — "
                     "we backfill the missed days automatically once it's live."),
             "arrays_affected": _arrays_for(prov),
-        })
+        }, _capture_path(db, tenant, prov))
+        if gated:
+            problems.append(gated)
 
     # 2 ── sessions whose token has simply expired
     try:
@@ -680,7 +839,7 @@ def build_connection_health(db, tenant) -> dict:
             continue
         seen.add(prov)
         since = s.expires_at.date().isoformat()
-        problems.append({
+        gated = _gate_connection_problem({
             "provider": prov,
             "provider_name": _provider_label(prov),
             "kind": "session_expired",
@@ -691,7 +850,9 @@ def build_connection_health(db, tenant) -> dict:
             "fix": (f"Re-connect {_provider_label(prov)} in Array Operator — "
                     "we backfill the missed days automatically once it's live."),
             "arrays_affected": _arrays_for(prov),
-        })
+        }, _capture_path(db, tenant, prov))
+        if gated:
+            problems.append(gated)
 
     return {"ok": not problems, "problems": problems}
 
@@ -885,10 +1046,19 @@ def _connection_items(tree: dict) -> list[dict]:
             last = _fmt_day(starved[0].get("last_data_day"))
             detail += (f" {who} {'has' if len(starved) == 1 else 'have'} no new readings"
                        f"{f' since {last}' if last else ''}.")
+        # The headline has to match the ASK. "needs re-connecting" is an
+        # instruction, and on Cloud Capture there is no re-connect for the owner
+        # to do — the password is on our side (see _gate_connection_problem).
+        kind = p.get("kind")
+        util = p.get("provider_name", "Utility")
+        title = {
+            "cloud_login_failing": f"{util} password needs updating",
+            "cloud_feed_gap": f"{util} readings aren’t coming through",
+        }.get(kind, f"{util} sign-in needs re-connecting")
         items.append({
-            "title": f"{p.get('provider_name', 'Utility')} sign-in needs re-connecting",
+            "title": title,
             "detail": (detail + " " + p.get("fix", "")).strip(),
-            "kind": p.get("kind"),
+            "kind": kind,
         })
 
     for col in _vendor_columns(tree):
