@@ -1,14 +1,31 @@
 """Reading the household's own planning spreadsheet."""
+from datetime import date, timedelta
+
 import pytest
 
 from bankai import config
 from bankai.connectors import sheets
 from bankai.ingest import upsert_account
 
-CSV = """Date,Expense,Type,,Gaurav End Running Balance,Off by,Gaurav In,Gaurav Out,Total Cash In Hand,Stocks,Ford Running Balance,Off by,Ford In,Ford Out,Apple Card Payment,Apple Card Projection,Other CC,AC Off 2,Excess
-02/15/2026,,,,2722,,,,23741.78,,21019.78,,,,,,7626,,23741.78
-07/29/2026,Groceries,food,,"8,049",,,,"17,086",,"9,037",,,,,"(15,340)","(1,800)",,-54
-07/31/2026,,,,7764,,,285,16801,,9037,,,,,,,,-533
+# The sheet's rows are dated RELATIVE to the run date on purpose. read_plan
+# splits rows on date.today(), so a fixture with literal dates is a time bomb:
+# these were written as 07/29 and 07/31, and on 2026-07-31 the row that had
+# always been "tomorrow" became today's, moved out of `upcoming` into `recent`,
+# and every reconcile figure shifted by that row's numbers. What the fixture
+# means is "a stale row, the current row, and one still to come" — encode that.
+OLD = date.today() - timedelta(days=163)
+TODAY = date.today()
+TOMORROW = date.today() + timedelta(days=1)
+
+
+def _us(d: date) -> str:
+    return d.strftime("%m/%d/%Y")
+
+
+CSV = f"""Date,Expense,Type,,Gaurav End Running Balance,Off by,Gaurav In,Gaurav Out,Total Cash In Hand,Stocks,Ford Running Balance,Off by,Ford In,Ford Out,Apple Card Payment,Apple Card Projection,Other CC,AC Off 2,Excess
+{_us(OLD)},,,,2722,,,,23741.78,,21019.78,,,,,,7626,,23741.78
+{_us(TODAY)},Groceries,food,,"8,049",,,,"17,086",,"9,037",,,,,"(15,340)","(1,800)",,-54
+{_us(TOMORROW)},,,,7764,,,285,16801,,9037,,,,,,,,-533
 ,,,,,,,,,,,,,,,,,,
 not a date,,,,1,,,,1,,1,,,,,,,,1
 """
@@ -34,8 +51,8 @@ def sheet_configured(monkeypatch):
 def test_parses_us_dates_and_money():
     data = sheets.parse(CSV)
     rows = {r["date"]: r for r in data["rows"]}
-    assert set(rows) == {"2026-02-15", "2026-07-29", "2026-07-31"}
-    today = rows["2026-07-29"]
+    assert set(rows) == {OLD.isoformat(), TODAY.isoformat(), TOMORROW.isoformat()}
+    today = rows[TODAY.isoformat()]
     assert today["total_cash"] == 17086.0        # comma thousands
     assert today["apple_card_projection"] == -15340.0  # parenthesised negative
     assert today["other_cc"] == -1800.0
@@ -52,8 +69,8 @@ def test_empty_cells_become_none_not_zero():
     """A missing figure is unknown, not zero — treating it as zero would put
     invented numbers into their plan."""
     rows = {r["date"]: r for r in sheets.parse(CSV)["rows"]}
-    assert rows["2026-07-29"]["gaurav_in"] is None
-    assert rows["2026-07-31"]["gaurav_out"] == 285.0
+    assert rows[TODAY.isoformat()]["gaurav_in"] is None
+    assert rows[TOMORROW.isoformat()]["gaurav_out"] == 285.0
 
 
 def test_unknown_columns_are_reported_not_dropped():
@@ -80,6 +97,10 @@ def test_read_plan_splits_past_from_future(monkeypatch):
     assert "not configured yet" in plan["note"]
     dates = [r["date"] for r in plan["recent"]] + [r["date"] for r in plan["upcoming"]]
     assert dates == sorted(dates)
+    # Assert the split itself, not just the ordering: sortedness held even on the
+    # day the future row silently became a past one, so it caught nothing.
+    assert [r["date"] for r in plan["recent"]] == [OLD.isoformat(), TODAY.isoformat()]
+    assert [r["date"] for r in plan["upcoming"]] == [TOMORROW.isoformat()]
 
 
 def test_reconcile_names_the_gap_against_real_accounts(session, monkeypatch):
