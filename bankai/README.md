@@ -1,0 +1,195 @@
+# BankAI — household finance copilot
+
+A self-hosted, **read-only** AI system for Ford + spouse's joint finances. It pulls
+banking data into a local model (accounts, transactions, balances), keeps it fresh on a
+schedule, and gives you:
+
+- **Chat**: ask Claude anything about your money ("what did we spend on groceries in
+  June?", "when is the mortgage due?", "how's net worth trending?"). The agent has
+  tools over the local database only.
+- **Reminders & auto-messages**: a rules engine that emails you — low-balance alerts,
+  large-transaction alerts, upcoming-bill reminders (auto-detected from recurring
+  transactions), scheduled reminders, and weekly digests. The chat agent can create
+  rules for you ("remind us every 25th to move money to savings").
+- **Dashboard**: accounts, net worth, recent transactions, rules, CSV import.
+
+## Read-only, by construction
+
+- **No money movement is possible.** There is no code path that initiates transfers or
+  payments — the app only ingests and analyzes.
+- **Your bank credentials never touch this app.** The recommended connector is
+  [SimpleFIN Bridge](https://beta-bridge.simplefin.org) (~$1.50/mo), which is read-only
+  by protocol design: you link banks on their side, and this app holds only a
+  read-only access URL. CSV/statement import needs no credentials at all.
+- The Claude agent's tools are all read-only against the local DB, except
+  `create_rule`/`delete_rule` (reminders only).
+
+## Quick start
+
+```bash
+cd bankai
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env          # then edit: APP_PASSWORD, ANTHROPIC_API_KEY at minimum
+python run.py                 # http://localhost:8300
+```
+
+Log in with the shared household password (`APP_PASSWORD`). Both of you use the same
+instance — accounts carry an `owner` label (ford / spouse / joint).
+
+## Running it on your computer (the portal)
+
+```bash
+git clone <this repo> && cd bankai
+python3 -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env    # edit: APP_PASSWORD + one LLM backend at minimum
+python run.py
+```
+
+Open **http://localhost:8300** — that's the portal: accounts, net worth, transactions,
+statement import, rules, memory, and the copilot chat. The database is a local
+`bankai.db` file next to the code; back it up like you would any private file.
+
+## Linking your institutions
+
+**Live-updating (SimpleFIN Bridge, ~$1.50/mo — recommended):**
+Bank of America, Fidelity, and American Express can all be linked for automatic
+syncing (every 6h + "Sync now" button):
+1. Sign up at beta-bridge.simplefin.org and connect BofA / Fidelity / Amex there
+   (SimpleFIN aggregates via MX; your credentials stay with them, this app only ever
+   holds a read-only access URL).
+2. Create an app connection → copy the **setup token**.
+3. `python -m bankai.connectors.simplefin claim <SETUP_TOKEN>` — prints the access URL.
+4. Put it in `.env` as `SIMPLEFIN_ACCESS_URL`.
+
+**Apple Card (manual — Apple allows nothing else):** Apple Card has no aggregator or
+web access; the only export is from the iPhone: Wallet → Apple Card → Card Balance →
+Export → OFX (or CSV), monthly. Drop the file in the dashboard's import form. The OFX
+export includes your balance, so Apple Card still participates in net worth.
+
+**Statement files (any bank, zero signup):** the import form takes **CSV, OFX, and
+QFX**. BofA/Fidelity/Amex all offer QFX/OFX downloads ("Quicken format") — prefer
+those over CSV: they carry stable transaction IDs (perfect dedupe) and the account
+balance. Column names in CSVs are auto-detected. Re-importing any file is always safe.
+
+## Memory & the persistent thread
+
+- **One conversation, forever.** The chat thread is stored in the database and shared
+  across the dashboard and SMS — the copilot never loses context, and either spouse
+  can pick up mid-conversation from either surface. Pick your name in the chat box so
+  messages are attributed.
+- **Real memory.** The copilot has `save_memory` / `delete_memory` tools and its notes
+  are always in its context. Say "remember that the Amex is only for travel" and it
+  persists across restarts, models, and channels. Notes are visible (and deletable) in
+  the dashboard's "Copilot memory" panel.
+
+## 3-way text conversation (SMS)
+
+Both of you can text the copilot from your phones, in one shared conversation:
+
+1. Buy a Twilio number, set `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` /
+   `TWILIO_FROM_NUMBER` in `.env`.
+2. List both phones in `HOUSEHOLD_PHONES` (`Ford:+1802...,Partner:+1802...`) — the names
+   label who said what in the thread. **Only these numbers are ever answered.**
+3. Point the Twilio number's incoming-message webhook at
+   `https://<your-deploy>/api/sms/webhook` (requests are signature-validated; set
+   `SMS_PUBLIC_URL` to that exact URL if you're behind a proxy).
+
+How the "group chat" works: carrier group-MMS can't include a Twilio number, so the
+thread is **mirrored** — when one of you texts the copilot, your message is relayed to
+the other ("Ford: what's our net worth?") and the copilot's reply goes to both. Same
+conversation, two mirrored views. The thread is stored in the DB, so context survives
+restarts, and the copilot sees who's speaking.
+
+With Twilio configured, rule notifications (below) are texted to both of you as well
+as emailed (`NOTIFY_SMS=false` to turn off texts).
+
+## Reminders & auto-messages
+
+Email delivery uses, in order of preference: `RESEND_API_KEY`, else `SMTP_*` settings,
+else it just logs. Set `NOTIFY_EMAILS` to both of your addresses (comma-separated).
+
+Rule kinds (create in dashboard, via API, or by asking the chat agent):
+
+| kind | what it does | params |
+|---|---|---|
+| `reminder` | fixed-schedule message | `day_of_month` or `weekday` (0=Mon) |
+| `balance_below` | alert when an account balance drops under a threshold | `threshold`, optional `account_id` |
+| `large_transaction` | alert on any new transaction over a threshold | `threshold` |
+| `bill_reminder` | alert N days before an auto-detected recurring bill | `days_before` |
+| `weekly_digest` | weekly cashflow + upcoming-bills summary email | `weekday` |
+
+## The ultimate tier
+
+Four capabilities that take the copilot past answering questions:
+
+- **The long view.** `project_wealth` puts net worth years or decades out in today's
+  dollars — a median path plus p10/p50/p90 Monte Carlo bands, built from your *observed*
+  median monthly savings, not a number you typed in. `affordability_check` weighs one
+  financed purchase: payment math, what the down payment does to your cash cushion, and
+  both futures compared on identical simulated markets. The seed is pinned, so asking the
+  same question twice gives the same bands; every result carries its assumptions,
+  caveats, and a confidence flag, and the copilot is told never to quote the median alone.
+- **Watchpoints — flags for its future self.** A rule sends a notification; a watchpoint
+  *wakes the copilot up*. It writes down what it wants to reconsider and why, arms a
+  condition (a date, a net-worth or cash threshold, an account balance), and when the
+  condition trips it is woken **in this same thread** as a real agent turn — so it
+  reassesses with fresh balances and documents instead of replaying a canned alert. Each
+  flag fires at most once. The dashboard lists what it's watching and why.
+- **A skills library.** Five operating manuals it wrote for itself — bill negotiation, US
+  household tax levers, insurance claims and appeals, consumer-protection law (FCRA,
+  FDCPA, EFTA, FCBA), and subscription cancellation and dark patterns. Before it drafts a
+  cancellation, an appeal, or a dispute letter, it reads the relevant manual and follows
+  its scripts, thresholds, and deadlines instead of improvising. (The tax pack is
+  deliberately near-numberless: limits change annually, so it verifies before it cites.)
+- **Goals it actually stewards.** Say a goal out loud and it records one, linked to the
+  account whose balance *is* the measurement — so progress is read from the ledger, never
+  from memory. Every goal reports percent complete, the monthly pace needed to hit the
+  date, the pace actually observed, and a `basis` string saying exactly how that was
+  computed. When it can't tell honestly whether you're on track, it says so rather than
+  guessing.
+
+Underneath all of it: **reply verification**. Before a consequential reply leaves the
+copilot — anything with a dollar figure over $100, a percentage, a recommendation, or a
+deadline — a second model pass attacks it for invented numbers, bad arithmetic,
+overconfidence, and missing caveats, and rewrites it once if it finds something material.
+Costs 2–3× the model calls on those turns; `VERIFY_REPLIES=false` turns it off. SMS
+replies skip it (a revision wouldn't respect the 450-character limit).
+
+## Choosing what powers the chat (`LLM_BACKEND`)
+
+| backend | pays with | setup |
+|---|---|---|
+| `anthropic` (default) | Anthropic API credits | `ANTHROPIC_API_KEY` |
+| `claude-cli` | your **Claude subscription** (Pro/Max) | Claude Code installed + logged in on the same machine (`claude` on PATH) |
+| `grok` | your **xAI/Grok credits** | `XAI_API_KEY` (model via `GROK_MODEL`, default `grok-4`) |
+
+All three get the same finance tools. `claude-cli` runs headless `claude -p` per turn
+and hands it the tools through a built-in MCP server (`bankai.agent.mcp_server`), so
+no API key is needed — usage counts against the subscription's limits instead.
+`claude-cli` is best for a home server / laptop; on a cloud host (Railway) use
+`anthropic` or `grok` since the CLI login isn't available there. Replies via
+`claude-cli` are slower (one CLI session per message).
+
+## Configuration (`.env`)
+
+See `.env.example`. SQLite (`bankai.db`) by default; set `DATABASE_URL` for Postgres
+(e.g. on Railway). `ANTHROPIC_API_KEY` powers chat (model: `claude-opus-5`).
+
+## Tests
+
+```bash
+pytest bankai/tests
+```
+
+Pure-logic tests (dedupe, recurring detection, rules, CSV parsing) — no network, no
+API key needed.
+
+## Notes
+
+- This directory is fully standalone (own requirements, own DB) — it can be lifted
+  into its own repo untouched.
+- Security posture: single shared password over HTTPS is fine for a two-person
+  household app, but do put it behind HTTPS if you deploy it (Railway does this for
+  you). Don't expose it unauthenticated.

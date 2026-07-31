@@ -1,0 +1,1079 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BankAI — household finances</title>
+<style>
+  :root { --bg:#101418; --panel:#1a2027; --line:#2a323c; --text:#e8ecf1; --dim:#93a1b1;
+          --accent:#4fa3ff; --good:#5fc98e; --bad:#e0716f; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:15px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display:flex; justify-content:space-between; align-items:center;
+           padding:14px 22px; border-bottom:1px solid var(--line); }
+  header h1 { font-size:17px; margin:0; letter-spacing:.02em; }
+  main { display:grid; grid-template-columns: 1fr 500px; gap:18px; padding:18px 22px;
+         max-width:1400px; margin:0 auto; }
+  @media (max-width: 1080px) { main { grid-template-columns:1fr; } }
+  /* Focus mode: the conversation takes the room, the ledger steps aside. */
+  body.chatfocus main > div:first-child { display:none; }
+  body.chatfocus main { grid-template-columns:minmax(0,900px); justify-content:center; }
+  body.chatfocus main > div:last-child > section:not(:first-child) { display:none; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+            padding:16px 18px; margin-bottom:18px; position:relative; }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim);
+       margin:0 0 10px; }
+  table { width:100%; border-collapse:collapse; font-size:13.5px; }
+  td, th { padding:5px 8px; text-align:left; border-bottom:1px solid var(--line); }
+  th { color:var(--dim); font-weight:600; }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .pos { color:var(--good); } .neg { color:var(--bad); }
+  .big { font-size:28px; font-weight:650; margin:2px 0 8px; }
+  /* --- Net worth composition ------------------------------------------- */
+  #networth { font-size:40px; letter-spacing:-.02em; }
+  .nwgroup { border-top:1px solid var(--line); padding:9px 0 4px; }
+  .nwhead { display:flex; justify-content:space-between; align-items:baseline;
+            font-size:11.5px; text-transform:uppercase; letter-spacing:.07em;
+            color:var(--dim); margin-bottom:5px; }
+  .nwsub { font-variant-numeric:tabular-nums; font-size:13px; color:var(--text); }
+  .nwrow { display:flex; justify-content:space-between; align-items:flex-start;
+           gap:12px; padding:4px 0; }
+  .nwname { font-size:13.5px; display:flex; flex-wrap:wrap; align-items:center; gap:7px; }
+  .nwowner { font-size:10.5px; text-transform:uppercase; letter-spacing:.05em;
+             color:var(--dim); border:1px solid var(--line); border-radius:20px;
+             padding:0 6px; }
+  .nwowner.manual { color:#c9a227; border-color:#5c4a12; }
+  .nwamt { font-variant-numeric:tabular-nums; font-size:14px; white-space:nowrap; }
+  .nwamt button { padding:0 5px; font-size:11px; margin-left:4px; }
+  .terms { flex-basis:100%; font-size:11.5px; color:var(--dim); }
+  .terms.imminent { color:var(--bad); }
+  .terms.stale { color:#c9a227; }
+  .muted { color:var(--dim); font-size:12.5px; }
+  button { background:var(--accent); color:#fff; border:0; border-radius:7px;
+           padding:8px 14px; font-size:14px; cursor:pointer; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--dim); }
+  input, select { background:var(--bg); color:var(--text); border:1px solid var(--line);
+                  border-radius:7px; padding:8px 10px; font-size:14px; }
+  #login { max-width:340px; margin:18vh auto; text-align:center; }
+  #login input { width:100%; margin-bottom:10px; }
+  /* --- Copilot conversation ------------------------------------------------ */
+  #chatpanel { display:flex; flex-direction:column; }
+  /* No smooth scrolling here: the thread is rebuilt whenever the live stream
+     reports a new message, and an in-flight smooth scroll reports a stale
+     scrollTop mid-animation — which read as "the user scrolled up" and left the
+     view stranded at the top. The Latest button animates itself instead. */
+  #chatlog { height:min(58vh, 620px); overflow-y:auto; display:flex; flex-direction:column;
+             gap:12px; padding:6px 4px; overflow-anchor:none; }
+  body.chatfocus #chatlog { height:calc(100vh - 260px); }
+  .turn { display:flex; flex-direction:column; gap:3px; max-width:94%; }
+  .turn.user { align-self:flex-end; align-items:flex-end; }
+  .turn.bot  { align-self:flex-start; align-items:flex-start; }
+  .turn .who { font-size:11px; color:var(--dim); letter-spacing:.04em;
+               display:flex; gap:6px; align-items:center; padding:0 4px; }
+  .chan { border:1px solid var(--line); border-radius:20px; padding:0 6px; font-size:10px;
+          text-transform:uppercase; letter-spacing:.06em; }
+  .chan.email { color:#9db4ff; border-color:#3b4a7a; }
+  .chan.sms { color:#8fd9b6; border-color:#2f5c48; }
+  .msg { padding:10px 13px; border-radius:12px; font-size:14.5px; line-height:1.55;
+         overflow-wrap:anywhere; }
+  .msg.user { background:#28303a; border-top-right-radius:4px; }
+  .msg.bot  { background:#1c2c3f; border-top-left-radius:4px; }
+  /* markdown inside a reply — the copilot writes bold, lists and code */
+  .msg p { margin:0 0 .6em; } .msg p:last-child { margin-bottom:0; }
+  .msg ul, .msg ol { margin:.3em 0 .6em; padding-left:1.25em; }
+  .msg li { margin:.15em 0; }
+  .msg code { background:#0d1319; border:1px solid var(--line); border-radius:4px;
+              padding:1px 5px; font-size:12.5px; font-family:ui-monospace,Menlo,Consolas,monospace; }
+  .msg strong { color:#fff; font-weight:650; }
+  .msg h3 { font-size:14px; margin:.5em 0 .3em; color:var(--text); text-transform:none;
+            letter-spacing:0; }
+  .msg a { color:var(--accent); }
+  .msgtools { display:flex; gap:8px; opacity:0; transition:opacity .15s; padding:0 4px; }
+  .turn:hover .msgtools { opacity:1; }
+  .msgtools button { background:none; border:0; color:var(--dim); font-size:11px;
+                     padding:0; cursor:pointer; }
+  .msgtools button:hover { color:var(--text); }
+  .thinking { display:inline-flex; gap:5px; align-items:center; color:var(--dim); }
+  .thinking i { width:5px; height:5px; border-radius:50%; background:var(--dim);
+                animation:blink 1.2s infinite; }
+  .thinking i:nth-child(2) { animation-delay:.2s; } .thinking i:nth-child(3) { animation-delay:.4s; }
+  @keyframes blink { 0%,80%,100% { opacity:.25; } 40% { opacity:1; } }
+  @media (prefers-reduced-motion: reduce) {
+    .thinking i { animation:none; opacity:.6; } #chatlog { scroll-behavior:auto; }
+  }
+  #jumplatest { position:absolute; right:16px; bottom:96px; display:none; z-index:5;
+                font-size:12px; padding:5px 11px; border-radius:20px; }
+  #composer { border:1px solid var(--line); border-radius:12px; padding:8px 10px;
+              margin-top:10px; background:var(--bg); display:flex; flex-direction:column;
+              gap:8px; transition:border-color .15s, background .15s; }
+  #composer.dragging { border-color:var(--accent); background:#16222e; }
+  #chatinput { width:100%; background:none; border:0; color:var(--text); font:inherit;
+               resize:none; padding:2px; max-height:180px; min-height:22px; outline:none; }
+  .composerbar { display:flex; gap:8px; align-items:center; }
+  .composerbar .spacer { flex:1; }
+  .iconbtn { background:none; border:1px solid var(--line); color:var(--dim); border-radius:8px;
+             padding:5px 10px; font-size:13px; cursor:pointer; }
+  .iconbtn:hover { color:var(--text); border-color:var(--dim); }
+  .hint { font-size:11.5px; color:var(--dim); }
+  #attachlist { display:flex; flex-wrap:wrap; gap:6px; }
+  .chip { display:flex; align-items:center; gap:6px; background:#232b35; border:1px solid var(--line);
+          border-radius:20px; padding:3px 10px; font-size:12px; }
+  .chip button { background:none; border:0; color:var(--dim); cursor:pointer; padding:0;
+                 font-size:13px; line-height:1; }
+  .chip.done { border-color:#2f5c48; color:var(--good); }
+  .chip.failed { border-color:#5c3030; color:var(--bad); }
+  button:focus-visible, .iconbtn:focus-visible, #chatinput:focus-visible,
+  input:focus-visible, select:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  form.inline { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .hidden { display:none; }
+  /* --- What's coming: the money already spoken for, before anything else --- */
+  #whatscoming { max-width:1400px; margin:18px auto 0; padding:0 22px; }
+  .wc-head { display:flex; align-items:baseline; gap:12px; margin-bottom:8px; }
+  .wc-head span:first-child { font-size:13px; text-transform:uppercase;
+                              letter-spacing:.08em; color:var(--dim); }
+  #wc-list { display:flex; gap:10px; overflow-x:auto; padding-bottom:4px; }
+  .wc { flex:0 0 auto; min-width:150px; background:var(--panel); border:1px solid var(--line);
+        border-left:3px solid var(--line); border-radius:10px; padding:10px 13px; }
+  .wc .when { font-size:11.5px; color:var(--dim); text-transform:uppercase;
+              letter-spacing:.05em; }
+  .wc .who { font-size:13.5px; margin:3px 0 2px; }
+  .wc .amt { font-size:17px; font-weight:650; font-variant-numeric:tabular-nums; }
+  .wc.soon { border-left-color:var(--accent); }
+  .wc.imminent { border-left-color:var(--bad); }
+  .wc.imminent .when { color:var(--bad); }
+</style>
+</head>
+<body>
+<div id="login">
+  <h1>BankAI</h1>
+  <p class="muted">Household finance copilot — enter the shared password.</p>
+  <input id="pw" type="password" placeholder="Password" autofocus>
+  <button onclick="doLogin()">Sign in</button>
+  <p id="loginerr" class="muted"></p>
+</div>
+
+<div id="appwrap" class="hidden">
+<header>
+  <h1>BankAI <span class="muted">— read-only household finances</span></h1>
+  <div>
+    <button class="ghost" onclick="syncNow()" id="syncbtn">Sync now</button>
+    <span id="syncstate" class="muted"></span>
+    <span id="livestate" class="muted" title="Live updates — panels refresh themselves">connecting…</span>
+  </div>
+</header>
+<div id="whatscoming" class="hidden">
+  <div class="wc-head">
+    <span>What's coming</span>
+    <span id="wc-runway" class="muted"></span>
+  </div>
+  <div id="wc-list"></div>
+</div>
+<main>
+  <div>
+    <section>
+      <h2>Net worth</h2>
+      <div class="big" id="networth">—</div>
+      <div id="accounts"></div>
+      <p id="nwgaps" style="margin:8px 0 0"></p>
+      <p class="muted" style="margin-bottom:6px">Track what the banks can't see — home, mortgage,
+      vehicles, loans. Liabilities are entered as the amount owed. Re-saving the same name
+      updates its balance.</p>
+      <form class="inline" id="manform">
+        <input type="text" id="manname" placeholder="e.g. Home — 36001 Cabrillo Dr" required>
+        <select id="mankind">
+          <option value="property">property</option><option value="mortgage">mortgage</option>
+          <option value="vehicle">vehicle</option><option value="credit">credit card</option><option value="loan">loan</option>
+          <option value="other">other</option>
+        </select>
+        <input type="number" id="manbalance" placeholder="Value / amount owed" step="0.01" required>
+        <button type="submit">Save</button>
+        <span id="manstatus" class="muted"></span>
+      </form>
+    </section>
+    <section id="realestate" class="hidden">
+      <h2>Real estate <span class="muted">— comps drive the value</span></h2>
+      <div id="properties"></div>
+    </section>
+    <section>
+      <h2>This month</h2>
+      <div id="month" class="muted">—</div>
+      <table id="categories"></table>
+    </section>
+    <section>
+      <h2>Upcoming bills <span class="muted">(auto-detected)</span></h2>
+      <table id="bills"></table>
+    </section>
+    <section>
+      <h2>Goals <span class="muted">— progress read from the ledger</span></h2>
+      <table id="goals"></table>
+    </section>
+    <section>
+      <h2>Watchpoints <span class="muted">— flags the copilot planted for itself</span></h2>
+      <table id="watchpoints"></table>
+    </section>
+    <section>
+      <h2>Recent transactions</h2>
+      <table id="txns"></table>
+    </section>
+    <section>
+      <h2>Import statement (CSV / OFX / QFX)</h2>
+      <p class="muted">QFX/OFX exports (BofA, Fidelity, Amex, Apple Card via Wallet →
+      Export) also carry the account balance; CSV imports transactions only.</p>
+      <form class="inline" id="csvform">
+        <input type="file" id="csvfile" accept=".csv,.ofx,.qfx" required>
+        <input type="text" id="csvaccount" placeholder="Account name" required>
+        <select id="csvkind">
+          <option value="checking">checking</option><option value="savings">savings</option>
+          <option value="credit">credit</option><option value="investment">investment</option>
+        </select>
+        <select id="csvowner">
+          <option value="joint">joint</option><option value="ford">ford</option>
+          <option value="spouse">spouse</option>
+        </select>
+        <button type="submit">Import</button>
+        <span id="csvstatus" class="muted"></span>
+      </form>
+    </section>
+    <section>
+      <h2>Document vault</h2>
+      <p class="muted">Deeds, mortgage papers, contracts, insurance policies, estate documents,
+      tax records — the copilot reads, files, and remembers everything you put here
+      (PDF, Word, or plain text).</p>
+      <form class="inline" id="docform">
+        <input type="file" id="docfile" accept=".pdf,.docx,.txt,.md,.rtf,.csv" required>
+        <input type="text" id="doctitle" placeholder="Title (optional)">
+        <select id="doccategory"></select>
+        <button type="submit">Add to vault</button>
+        <button type="button" class="ghost" id="emailsweep">Sweep email for documents</button>
+        <span id="docstatus" class="muted"></span>
+      </form>
+      <table id="docs"></table>
+    </section>
+    <section>
+      <h2>Rules &amp; reminders</h2>
+      <table id="rules"></table>
+      <p class="muted">Create rules here or just ask the copilot ("remind us every 25th to
+      check the credit card"). Recent notifications:</p>
+      <table id="firings"></table>
+    </section>
+  </div>
+  <div>
+    <section>
+      <h2 style="display:flex;align-items:center;gap:8px">
+        Copilot <span class="muted">— one thread, shared with email &amp; SMS</span>
+        <span class="spacer" style="flex:1"></span>
+        <button class="iconbtn" id="focusbtn" title="Expand the conversation (Esc to exit)">⤢</button>
+      </h2>
+      <div id="chatlog"></div>
+      <button class="ghost" id="jumplatest" onclick="jumpLatest()">↓ Latest</button>
+      <form id="composer">
+        <textarea id="chatinput" rows="1" placeholder="Ask anything, paste a screenshot, or drop a document…"></textarea>
+        <div id="attachlist"></div>
+        <div class="composerbar">
+          <select id="speaker" title="Who's typing"></select>
+          <button type="button" class="iconbtn" id="attachbtn" title="Attach a document to the vault">📎 Attach</button>
+          <input type="file" id="chatfile" multiple class="hidden"
+                 accept=".pdf,.docx,.txt,.md,.rtf,.csv,.png,.jpg,.jpeg,.gif,.webp,.heic">
+          <span class="spacer"></span>
+          <span class="hint" id="composerhint">Enter to send · Shift+Enter for a new line</span>
+          <button type="submit">Send</button>
+        </div>
+      </form>
+    </section>
+    <section>
+      <h2>Copilot actions <span class="muted">— nothing runs without your click</span></h2>
+      <p class="muted">Real-world actions the copilot proposes (cancellation emails etc.).
+      Approve &amp; run executes them from your own email address; everything is logged.</p>
+      <table id="actions"></table>
+    </section>
+    <section>
+      <h2>Copilot memory</h2>
+      <p class="muted">Notes the copilot keeps for itself (say "remember that…" in chat).</p>
+      <table id="memories"></table>
+    </section>
+  </div>
+</main>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+// A chat turn commits the question before the model runs, so live reloads can
+// arrive mid-turn; these keep the thinking bubble alive across them.
+let TURN_IN_FLIGHT = false;
+let PENDING_BUBBLE = null;
+const fmt = (n) => (n < 0 ? "-" : "") + "$" + Math.abs(n).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2});
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, opts);
+  if (r.status === 401) { show(false); throw new Error("auth"); }
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  return r.json();
+}
+
+function show(loggedIn) {
+  $("login").classList.toggle("hidden", loggedIn);
+  $("appwrap").classList.toggle("hidden", !loggedIn);
+}
+
+async function doLogin() {
+  try {
+    await api("/api/login", {method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({password: $("pw").value})});
+    bootDashboard();
+  } catch (e) { $("loginerr").textContent = "Wrong password."; }
+}
+$("pw").addEventListener("keydown", (e) => { if (e.key === "Enter") doLogin(); });
+
+function rows(el, html) { $(el).innerHTML = html; }
+
+async function refresh() {
+  const o = await api("/api/overview");
+  $("networth").textContent = fmt(o.net_worth.total);
+  renderNetWorth(o);
+  const m = o.this_month;
+  $("month").textContent = `Income ${fmt(m.income)}  ·  Spend ${fmt(Math.abs(m.spend))}  ·  Net ${fmt(m.net)}`;
+  rows("categories", m.by_category.filter(c => c.total < 0).slice(0, 8).map(c =>
+    `<tr><td>${c.category}</td><td class="num neg">${fmt(Math.abs(c.total))}</td></tr>`).join(""));
+  renderWhatsComing(o);
+  rows("bills", "<tr><th>Expected</th><th>Merchant</th><th class=num>~Amount</th></tr>" +
+    o.upcoming_bills.map(b =>
+      `<tr><td>${b.expected_date}</td><td>${b.merchant}</td>` +
+      `<td class=num>${fmt(Math.abs(b.avg_amount))}</td></tr>`).join("") ||
+    "<tr><td class=muted>None detected yet — import more history.</td></tr>");
+  $("syncstate").textContent = o.last_sync ?
+    `last sync ${o.last_sync.at.slice(0, 16).replace("T", " ")} (${o.last_sync.status})` :
+    (o.simplefin_configured ? "not synced yet" : "SimpleFIN not configured — CSV import works");
+  const txns = await api("/api/transactions?limit=40");
+  rows("txns", "<tr><th>Date</th><th>Description</th><th>Category</th><th class=num>Amount</th></tr>" +
+    txns.map(t => `<tr><td>${t.posted}</td><td>${t.description.slice(0, 48)}</td>` +
+      `<td class=muted>${t.category}</td>` +
+      `<td class="num ${t.amount < 0 ? "neg" : "pos"}">${fmt(t.amount)}</td></tr>`).join(""));
+  const r = await api("/api/rules");
+  rows("rules", "<tr><th>Rule</th><th>Kind</th><th>Status</th><th></th></tr>" + r.rules.map(x =>
+    `<tr><td>${x.name}</td><td class=muted>${x.kind}</td>` +
+    `<td class=muted>${x.enabled ? "on" : "off"}${x.created_by === "agent" ? " · via chat" : ""}</td>` +
+    `<td>${x.enabled ? `<button class=ghost onclick="delRule('${x.id}')">disable</button>` : ""}</td></tr>`).join(""));
+  rows("firings", r.recent_firings.map(f =>
+    `<tr><td class=muted>${f.fired_at.slice(0, 16).replace("T", " ")}</td><td>${f.subject}</td>` +
+    `<td class=muted>${f.delivered ? "emailed" : "logged"}</td></tr>`).join(""));
+  const g = await api("/api/goals?status=all");
+  rows("goals", "<tr><th>Goal</th><th>Progress</th><th class=num>Target</th></tr>" +
+    g.goals.map(x => {
+      // on_track === null means "not yet determinable" — never render that as failure.
+      const track = x.on_track === true ? `<span class=pos>on track</span>`
+        : x.on_track === false ? `<span class=neg>off track</span>`
+        : `<span class=muted>pace not yet determinable</span>`;
+      const pct = x.percent_complete == null ? "—" : x.percent_complete.toFixed(1) + "%";
+      return `<tr><td>${x.name}<br><span class=muted>${x.status}${x.target_date ? " · by " + x.target_date : ""}</span></td>` +
+        `<td>${pct} · ${track}</td>` +
+        `<td class=num>${fmt(x.target_amount)}</td></tr>`;
+    }).join("") ||
+    "<tr><td class=muted>No goals yet — tell the copilot one and it will record it.</td></tr>");
+  const w = await api("/api/watchpoints");
+  rows("watchpoints", "<tr><th>Flag</th><th>Waiting for</th><th>Status</th></tr>" +
+    w.watchpoints.map(x =>
+      `<tr><td>${x.title}</td><td class=muted>${x.waits_for}</td>` +
+      `<td class=muted>${x.status}</td></tr>`).join("") ||
+    "<tr><td class=muted>Nothing being watched yet.</td></tr>");
+}
+
+// --- Net worth: the number, and everything that composes it ---------------
+// Grouped, because a flat list of twelve accounts makes you do the arithmetic
+// in your head. Cards carry what is owed and when it is due, since a balance
+// alone cannot answer "can we cover the cards this month" — and an account
+// with no due date says so, because a missing date reads as nothing owed.
+const GROUPS = [
+  {key: "cash", label: "Cash", kinds: ["checking", "savings"]},
+  {key: "invest", label: "Investments", kinds: ["investment"]},
+  {key: "property", label: "Property", kinds: ["property", "vehicle"]},
+  {key: "cards", label: "Credit cards", kinds: ["credit"]},
+  {key: "debt", label: "Loans & mortgage", kinds: ["mortgage", "loan"]},
+  {key: "other", label: "Other", kinds: ["other"]},
+];
+
+function dueLabel(t) {
+  if (!t || !t.payment_due_date) return "";
+  const d = t.days_until_due;
+  const when = t.stale ? `due ${t.payment_due_date} (statement is old)`
+    : d === 0 ? "due today" : d === 1 ? "due tomorrow" : `due in ${d} days`;
+  const min = t.minimum_payment != null ? ` · min ${fmt(t.minimum_payment)}` : "";
+  return `<div class="terms ${t.stale ? "stale" : (d <= 5 ? "imminent" : "")}">${when}${min}</div>`;
+}
+
+function renderNetWorth(o) {
+  const terms = o.account_terms || {};
+  const accounts = o.net_worth.accounts.filter(a => a.balance != null);
+  let html = "";
+
+  for (const g of GROUPS) {
+    const mine = accounts.filter(a => g.kinds.includes(a.kind));
+    if (!mine.length) continue;
+    const subtotal = mine.reduce((s, a) => s + a.balance, 0);
+    html += `<div class="nwgroup"><div class="nwhead">` +
+      `<span>${g.label}</span>` +
+      `<span class="nwsub ${subtotal < 0 ? "neg" : ""}">${fmt(subtotal)}</span></div>`;
+    for (const a of mine.sort((x, y) => Math.abs(y.balance) - Math.abs(x.balance))) {
+      const t = terms[a.account_id];
+      html += `<div class="nwrow">` +
+        `<div class="nwname">${a.name}` +
+          `<span class="nwowner">${a.owner}</span>` +
+          (a.source === "manual" ? `<span class="nwowner manual">manual</span>` : "") +
+          dueLabel(t) +
+        `</div>` +
+        `<div class="nwamt ${a.balance < 0 ? "neg" : ""}">${fmt(a.balance)}` +
+          (a.source === "manual"
+            ? ` <button class=ghost title="Stop tracking" onclick="delAccount('${a.account_id}')">✕</button>`
+            : "") +
+        `</div></div>`;
+    }
+    html += `</div>`;
+  }
+  $("accounts").innerHTML = html;
+
+  // Anything with no feed and no statement terms is a hole in the picture.
+  const unsynced = accounts.filter(a =>
+    a.source === "manual" && a.kind === "credit" && !terms[a.account_id]);
+  $("nwgaps").innerHTML = unsynced.length
+    ? `<span class="muted">No statement terms yet for ${unsynced.map(a => a.name).join(", ")} — ask the copilot to read the latest statement.</span>`
+    : "";
+}
+
+// The money already spoken for, surfaced above everything else — with the
+// spendable cash it has to come out of, because a bill only matters relative
+// to what is there to pay it.
+function renderWhatsComing(o) {
+  const bills = (o.upcoming_bills || []).slice(0, 8);
+  const band = $("whatscoming");
+  band.classList.toggle("hidden", !bills.length);
+  if (!bills.length) return;
+
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const days = (iso) => Math.round((new Date(iso + "T00:00:00") - today) / 86400000);
+
+  const liquid = o.net_worth.accounts
+    .filter(a => ["checking", "savings"].includes(a.kind))
+    .reduce((sum, a) => sum + (a.balance || 0), 0);
+  const due14 = bills.filter(b => days(b.expected_date) <= 14)
+    .reduce((sum, b) => sum + Math.abs(b.avg_amount), 0);
+
+  $("wc-runway").textContent =
+    `${fmt(due14)} due in the next 14 days · ${fmt(liquid)} in cash` +
+    (due14 > liquid ? " — more due than you hold" : "");
+  $("wc-runway").style.color = due14 > liquid ? "var(--bad)" : "var(--dim)";
+
+  $("wc-list").innerHTML = bills.map(b => {
+    const d = days(b.expected_date);
+    const when = d <= 0 ? "today" : d === 1 ? "tomorrow" : `in ${d} days`;
+    const urgency = d <= 3 ? "imminent" : d <= 10 ? "soon" : "";
+    return `<div class="wc ${urgency}">` +
+      `<div class="when">${when}</div>` +
+      `<div class="who">${b.merchant.slice(0, 26)}</div>` +
+      `<div class="amt">${fmt(Math.abs(b.avg_amount))}</div></div>`;
+  }).join("");
+}
+
+async function syncNow() {
+  $("syncbtn").disabled = true; $("syncstate").textContent = "syncing…";
+  try { await api("/api/sync", {method: "POST"}); await api("/api/rules/run", {method: "POST"}); }
+  finally { $("syncbtn").disabled = false; refresh(); }
+}
+
+async function delRule(id) { await api("/api/rules/" + id, {method: "DELETE"}); refresh(); }
+
+async function delAccount(id) {
+  if (!confirm("Stop tracking this manual asset/liability? Its balance history goes too.")) return;
+  await api("/api/accounts/" + id, {method: "DELETE"}); refresh();
+}
+
+$("manform").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  $("manstatus").textContent = "saving…";
+  try {
+    const res = await api("/api/accounts", {method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({name: $("manname").value, kind: $("mankind").value,
+                            balance: parseFloat($("manbalance").value)})});
+    $("manstatus").textContent = `saved ${res.name} at ${fmt(res.balance)}`;
+    $("manname").value = ""; $("manbalance").value = "";
+    refresh();
+  } catch (err) { $("manstatus").textContent = err.message; }
+});
+
+$("csvform").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const fd = new FormData();
+  fd.append("file", $("csvfile").files[0]);
+  fd.append("account_name", $("csvaccount").value);
+  fd.append("kind", $("csvkind").value);
+  fd.append("owner", $("csvowner").value);
+  $("csvstatus").textContent = "importing…";
+  try {
+    const res = await api("/api/import/csv", {method: "POST", body: fd});
+    $("csvstatus").textContent = `added ${res.added}, skipped ${res.skipped} duplicates`;
+    refresh();
+  } catch (err) { $("csvstatus").textContent = err.message; }
+});
+
+// --- Markdown ---------------------------------------------------------------
+// The copilot writes bold, lists and code; rendering it raw showed literal
+// asterisks. Everything is escaped BEFORE any markup is added — replies can
+// carry text that arrived by email, so it is never trusted as HTML.
+function escapeHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function renderMarkdown(src) {
+  const inline = (s) => escapeHtml(s)
+    .replace(/`([^`]+)`/g, (_, c) => `<code>${c}</code>`)
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+             '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+  const out = [];
+  let list = null;
+  const closeList = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  for (const raw of src.split("\n")) {
+    const line = raw.trimEnd();
+    const bullet = line.match(/^\s*[-*+]\s+(.*)$/);
+    const numbered = line.match(/^\s*\d+[.)]\s+(.*)$/);
+    const heading = line.match(/^#{1,6}\s+(.*)$/);
+    if (bullet) {
+      if (list !== "ul") { closeList(); out.push("<ul>"); list = "ul"; }
+      out.push(`<li>${inline(bullet[1])}</li>`);
+    } else if (numbered) {
+      if (list !== "ol") { closeList(); out.push("<ol>"); list = "ol"; }
+      out.push(`<li>${inline(numbered[1])}</li>`);
+    } else if (heading) {
+      closeList(); out.push(`<h3>${inline(heading[1])}</h3>`);
+    } else if (!line.trim()) {
+      closeList();
+    } else {
+      closeList(); out.push(`<p>${inline(line)}</p>`);
+    }
+  }
+  closeList();
+  return out.join("");
+}
+
+// --- Messages ---------------------------------------------------------------
+// Whether the reader is following the conversation. This is EXPLICIT state,
+// updated only when a human scrolls — deriving it during a rebuild is what
+// broke: clearing the log resets scrollTop to 0, so every re-render looked
+// like the reader had deliberately scrolled to the top, and the view stuck there.
+let STICK_TO_BOTTOM = true;
+let REBUILDING = false;
+
+function nearBottom() {
+  const el = $("chatlog");
+  return el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+}
+
+function pinToBottom() {
+  const el = $("chatlog");
+  el.scrollTop = el.scrollHeight;
+  $("jumplatest").style.display = "none";
+}
+
+function scrollChat(force) {
+  if (force) {
+    STICK_TO_BOTTOM = true;
+    pinToBottom();
+  } else if (STICK_TO_BOTTOM) {
+    pinToBottom();
+  }
+}
+
+/** Deliberately instant. A smooth scrollTo over a long thread did not reliably
+ *  reach the end here, and a control called "Latest" that stops short is worse
+ *  than one that simply works. */
+function jumpLatest() {
+  STICK_TO_BOTTOM = true;
+  pinToBottom();
+}
+
+function addMsg(text, cls, speaker, channel) {
+  const turn = document.createElement("div");
+  turn.className = "turn " + cls;
+
+  if (speaker || channel) {
+    const who = document.createElement("div");
+    who.className = "who";
+    who.textContent = speaker || "";
+    // A thread spanning three channels should say where each message came from.
+    if (channel && channel !== "web") {
+      const tag = document.createElement("span");
+      tag.className = "chan " + channel;
+      tag.textContent = channel;
+      who.appendChild(tag);
+    }
+    turn.appendChild(who);
+  }
+
+  const div = document.createElement("div");
+  div.className = "msg " + cls;
+  if (cls === "bot") div.innerHTML = renderMarkdown(text);
+  else div.textContent = text;
+  turn.appendChild(div);
+
+  const tools = document.createElement("div");
+  tools.className = "msgtools";
+  const copy = document.createElement("button");
+  copy.textContent = "copy";
+  copy.onclick = () => {
+    navigator.clipboard.writeText(text);
+    copy.textContent = "copied"; setTimeout(() => (copy.textContent = "copy"), 1200);
+  };
+  tools.appendChild(copy);
+  turn.appendChild(tools);
+
+  $("chatlog").appendChild(turn);
+  // During a rebuild the caller scrolls once at the end; scrolling per message
+  // fights itself and is what made the thread jump.
+  if (!REBUILDING) {
+    if (STICK_TO_BOTTOM) pinToBottom();
+    else $("jumplatest").style.display = "block";
+  }
+  // The bubble is what callers mutate while a turn is running.
+  div.setMarkdown = (t) => { div.innerHTML = renderMarkdown(t); copy.onclick = () =>
+    navigator.clipboard.writeText(t); };
+  return div;
+}
+
+function addThinking() {
+  const bubble = addMsg("…", "bot", "copilot");
+  const started = Date.now();
+  bubble.innerHTML = '<span class="thinking"><i></i><i></i><i></i> <span class="el"></span></span>';
+  const el = bubble.querySelector(".el");
+  const tick = setInterval(() => {
+    const s = Math.round((Date.now() - started) / 1000);
+    el.textContent = s > 3 ? `thinking… ${s}s` : "thinking…";
+  }, 1000);
+  bubble.stopTimer = () => clearInterval(tick);
+  return bubble;
+}
+
+async function loadThread() {
+  const o = await api("/api/overview");
+  const sel = $("speaker");
+  if (!sel.options.length) {
+    o.members.forEach(m => { const opt = document.createElement("option"); opt.value = opt.textContent = m; sel.appendChild(opt); });
+    const saved = localStorage.getItem("bankai_speaker");
+    if (saved && o.members.includes(saved)) sel.value = saved;
+    sel.addEventListener("change", () => localStorage.setItem("bankai_speaker", sel.value));
+  }
+  const history = await api("/api/chat/history?limit=60");
+  REBUILDING = true;
+  $("chatlog").innerHTML = "";
+  history.forEach(m => addMsg(
+    m.content,
+    m.role === "user" ? "user" : "bot",
+    m.role === "user" ? m.speaker : "copilot",
+    m.channel,
+  ));
+  // A turn commits the question BEFORE the model runs, so a live reload can land
+  // mid-turn — re-hang the thinking bubble so it doesn't vanish while we wait.
+  if (TURN_IN_FLIGHT) PENDING_BUBBLE = addThinking();
+  REBUILDING = false;
+  // Default is to follow the conversation. Only a reader who scrolled away
+  // keeps their place, and they get the Latest button instead.
+  if (STICK_TO_BOTTOM) pinToBottom();
+  else $("jumplatest").style.display = "block";
+}
+
+async function loadMemories() {
+  const notes = await api("/api/memories");
+  rows("memories", notes.map(n =>
+    `<tr><td><b>${n.title}</b><br><span class=muted>${n.content.slice(0, 200)}</span></td>` +
+    `<td><button class=ghost onclick="delMemory('${n.id}')">forget</button></td></tr>`).join("") ||
+    "<tr><td class=muted>No memories yet.</td></tr>");
+}
+
+async function delMemory(id) { await api("/api/memories/" + id, {method: "DELETE"}); loadMemories(); }
+
+async function loadDocs() {
+  const d = await api("/api/documents");
+  EMAIL_ON = d.email_configured;
+  $("emailsweep").title = EMAIL_ON ? "Search the inbox for financial/legal documents"
+    : "Set GMAIL_ADDRESS + GMAIL_APP_PASSWORD in .env to enable";
+  const sel = $("doccategory");
+  if (!sel.options.length) d.categories.forEach(c => {
+    const opt = document.createElement("option"); opt.value = opt.textContent = c; sel.appendChild(opt);
+  });
+  rows("docs", d.documents.map(x =>
+    `<tr><td><b>${x.title}</b><br><span class=muted>${x.summary ? x.summary.slice(0, 180) :
+      "not yet read by the copilot — ask it to review this"}</span></td>` +
+    `<td class=muted>${x.category}</td>` +
+    `<td class="num muted">${x.size_bytes < 1024 ? x.size_bytes + " B" : (x.size_bytes / 1024).toFixed(0) + " KB"}</td>` +
+    `<td><button class=ghost onclick="delDoc('${x.id}')">remove</button></td></tr>`).join("") ||
+    "<tr><td class=muted>Vault is empty — start with the deed, mortgage note, and insurance policies.</td></tr>");
+}
+
+let RENTCAST_ON = false;
+
+async function loadProperties() {
+  const [d, o] = await Promise.all([api("/api/properties"), api("/api/overview")]);
+  RENTCAST_ON = d.rentcast_configured;
+  const tracked = new Set(d.properties.map(p => p.account_id));
+  const untracked = o.net_worth.accounts.filter(a =>
+    a.source === "manual" && a.kind === "property" && !tracked.has(a.account_id));
+  const sec = $("realestate");
+  sec.classList.toggle("hidden", !d.properties.length && !untracked.length);
+  let html = d.properties.map(p => {
+    const specs = [p.sqft && `${p.sqft} sqft`, p.beds && `${p.beds} bd`,
+                   p.baths && `${p.baths} ba`, p.year_built && `built ${p.year_built}`]
+                  .filter(Boolean).join(" · ");
+    const est = p.estimate;
+    const lv = p.latest_valuation;
+    const basis = est
+      ? `comps estimate ${fmt(est.value)} — ${est.basis}`
+      : "no usable comps yet — add recent nearby sales below";
+    const applied = lv
+      ? `last valuation ${fmt(lv.value)} (${lv.method}${lv.applied ? ", applied" : ", not applied"}) ${lv.at.slice(0, 10)}`
+      : "no valuations recorded yet";
+    return `<div class="prop" data-id="${p.id}" style="margin-bottom:14px">
+      <b>${p.street}, ${p.city}, ${p.state} ${p.zip_code}</b>
+      <span class="muted">${specs ? " — " + specs : ""}</span>
+      <div class="big">${p.current_value == null ? "—" : fmt(p.current_value)}</div>
+      <div class="muted">${basis}<br>${applied}</div>
+      <table>` +
+      (p.comps.length ? "<tr><th>Comp</th><th>Status</th><th>Sold</th><th class=num>Price</th><th class=num>$/sqft</th><th class=num>mi</th><th></th></tr>" : "") +
+      p.comps.map(c =>
+        `<tr><td>${c.address}<span class=muted> · ${c.source}</span></td><td class=muted>${c.status}</td>` +
+        `<td class=muted>${c.sale_date || "—"}</td><td class=num>${fmt(c.price)}</td>` +
+        `<td class=num>${c.sqft ? "$" + Math.round(c.price / c.sqft) : "—"}</td>` +
+        `<td class=num>${c.distance_miles == null ? "—" : c.distance_miles.toFixed(1)}</td>` +
+        `<td><button class=ghost onclick="delComp('${c.id}')">✕</button></td></tr>`).join("") +
+      `</table>
+      <form class="inline" style="margin-top:8px" onsubmit="return addComp(event,'${p.id}')">
+        <input type="text" name="address" placeholder="Comp address" required style="width:190px">
+        <input type="number" name="price" placeholder="Sale price" required style="width:110px">
+        <input type="date" name="sale_date" title="Sale date">
+        <input type="number" name="sqft" placeholder="sqft" style="width:80px">
+        <input type="number" name="distance_miles" placeholder="mi" step="0.1" style="width:70px">
+        <button type="submit">Add comp</button>
+        <button type="button" class="ghost" ${RENTCAST_ON ? "" : "disabled title='Set RENTCAST_API_KEY in .env to pull comps automatically'"}
+          onclick="refreshProp('${p.id}')">Refresh from market</button>
+        <label class="muted"><input type="checkbox" ${p.auto_update ? "checked" : ""}
+          onchange="toggleAuto('${p.id}', this.checked)"> auto-apply to net worth</label>
+        <span class="muted propstatus"></span>
+      </form>
+    </div>`;
+  }).join("");
+  if (untracked.length) {
+    html += `<form class="inline" id="trackform" style="margin-top:6px">
+      <select id="trackaccount">` +
+      untracked.map(a => `<option value="${a.account_id}">${a.name}</option>`).join("") +
+      `</select>
+      <input type="text" id="trstreet" placeholder="Street address" required>
+      <input type="text" id="trcity" placeholder="City" required style="width:110px">
+      <input type="text" id="trstate" placeholder="ST" required style="width:50px">
+      <input type="text" id="trzip" placeholder="ZIP" style="width:80px">
+      <input type="number" id="trsqft" placeholder="sqft" style="width:80px">
+      <button type="submit">Track comps</button>
+    </form>
+    <p class="muted">Attach neighborhood-comps tracking to this property.</p>`;
+  }
+  $("properties").innerHTML = html;
+  const tf = $("trackform");
+  if (tf) tf.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    await api("/api/properties", {method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({account_id: $("trackaccount").value, street: $("trstreet").value,
+        city: $("trcity").value, state: $("trstate").value, zip_code: $("trzip").value,
+        sqft: $("trsqft").value ? parseInt($("trsqft").value) : null})});
+    loadProperties();
+  });
+}
+
+async function addComp(e, propId) {
+  e.preventDefault();
+  const f = e.target;
+  const body = {address: f.address.value, price: parseFloat(f.price.value),
+    sale_date: f.sale_date.value || "", status: "sold",
+    sqft: f.sqft.value ? parseInt(f.sqft.value) : null,
+    distance_miles: f.distance_miles.value ? parseFloat(f.distance_miles.value) : null};
+  await api(`/api/properties/${propId}/comps`, {method: "POST",
+    headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  loadProperties();
+  return false;
+}
+
+async function delComp(id) { await api("/api/comps/" + id, {method: "DELETE"}); loadProperties(); }
+
+async function refreshProp(id) {
+  const status = document.querySelector(`.prop[data-id="${id}"] .propstatus`);
+  if (status) status.textContent = "checking the market…";
+  try {
+    const r = await api(`/api/properties/${id}/refresh`, {method: "POST"});
+    if (status) status.textContent = r.fetch_error ? "fetch failed: " + r.fetch_error :
+      `${r.comps_added} new comp(s)` + (r.applied ? `, value updated to ${fmt(r.value)}` : "");
+  } catch (err) { if (status) status.textContent = err.message; }
+  refresh(); loadProperties();
+}
+
+async function toggleAuto(id, on) {
+  const d = await api("/api/properties");
+  const p = d.properties.find(x => x.id === id);
+  if (!p) return;
+  await api("/api/properties", {method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({account_id: p.account_id, street: p.street, city: p.city,
+      state: p.state, zip_code: p.zip_code, sqft: p.sqft, beds: p.beds, baths: p.baths,
+      year_built: p.year_built, auto_update: on})});
+  loadProperties();
+}
+
+let EMAIL_ON = false;
+
+$("emailsweep").addEventListener("click", async () => {
+  if (!EMAIL_ON) {
+    $("docstatus").textContent = "connect email first: GMAIL_ADDRESS + GMAIL_APP_PASSWORD in .env";
+    return;
+  }
+  $("docstatus").textContent = "sweeping inbox…";
+  try {
+    const r = await api("/api/email/harvest", {method: "POST"});
+    $("docstatus").textContent =
+      `scanned ${r.messages_scanned} emails — filed ${r.documents_filed} new, ${r.duplicates_skipped} already known`;
+    loadDocs();
+  } catch (err) { $("docstatus").textContent = err.message; }
+});
+
+async function loadActions() {
+  const actions = await api("/api/actions");
+  rows("actions", actions.map(a => {
+    const isCode = a.kind === "code_change";
+    const verb = isCode ? "Accept" : "Approve &amp; run";
+    const buttons = a.status === "proposed"
+      ? `<button onclick="runAction('${a.id}')">${verb}</button> ` +
+        `<button class=ghost onclick="declineAction('${a.id}')">Decline</button>`
+      : `<span class=muted>${a.status}${a.result ? " — " + a.result.slice(0, 80) : ""}</span>`;
+    const detail = isCode
+      ? `self-improvement${a.subject ? " · " + a.subject : ""}`
+      : "email to " + a.to_email + ": “" + a.subject + "”";
+    const body = isCode
+      ? `<details><summary class=muted style="cursor:pointer">proposal</summary>` +
+        `<pre style="white-space:pre-wrap;font-size:12px;color:var(--dim)">${escapeHtml(a.body)}</pre></details>`
+      : `<span class=muted>${escapeHtml(a.rationale.slice(0, 140))}</span>`;
+    return `<tr><td><b>${escapeHtml(a.title)}</b><br>` +
+      `<span class=muted>${escapeHtml(detail)}</span><br>${body}</td>` +
+      `<td>${buttons}</td></tr>`;
+  }).join("") || "<tr><td class=muted>No proposals yet — the copilot will bring ideas here for your approval.</td></tr>");
+}
+
+async function runAction(id) {
+  if (!confirm("Approve and run this action now? It will send for real.")) return;
+  const r = await api("/api/actions/" + id + "/execute", {method: "POST"});
+  alert("Result: " + r.status + (r.result ? " — " + r.result : ""));
+  loadActions();
+}
+
+async function declineAction(id) { await api("/api/actions/" + id + "/decline", {method: "POST"}); loadActions(); }
+
+async function delDoc(id) {
+  if (!confirm("Remove this document from the vault? The original file is deleted too.")) return;
+  await api("/api/documents/" + id, {method: "DELETE"}); loadDocs();
+}
+
+$("docform").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const fd = new FormData();
+  fd.append("file", $("docfile").files[0]);
+  fd.append("title", $("doctitle").value);
+  fd.append("category", $("doccategory").value);
+  $("docstatus").textContent = "reading…";
+  try {
+    const res = await api("/api/documents", {method: "POST", body: fd});
+    $("docstatus").textContent = res.created
+      ? `filed "${res.title}" — ${res.chars.toLocaleString()} chars extracted`
+      : "already in the vault (same file)";
+    $("docfile").value = ""; $("doctitle").value = "";
+    loadDocs();
+  } catch (err) { $("docstatus").textContent = err.message; }
+});
+
+// --- Attachments -------------------------------------------------------------
+// Anything dropped, pasted or picked goes STRAIGHT into the vault, then the
+// copilot is told what arrived so it reads and annotates it in the same turn.
+let ATTACHED = [];  // {name, id, status}
+
+function renderAttachments() {
+  $("attachlist").innerHTML = "";
+  ATTACHED.forEach((a, i) => {
+    const chip = document.createElement("span");
+    chip.className = "chip " + (a.status || "");
+    chip.textContent = a.status === "done" ? `✓ ${a.name}`
+                     : a.status === "failed" ? `✕ ${a.name}` : `… ${a.name}`;
+    if (a.status !== "pending") {
+      const x = document.createElement("button");
+      x.textContent = "×"; x.title = "Remove from this message";
+      x.onclick = () => { ATTACHED.splice(i, 1); renderAttachments(); };
+      chip.appendChild(x);
+    }
+    $("attachlist").appendChild(chip);
+  });
+}
+
+async function uploadToVault(file) {
+  const entry = {name: file.name || "pasted-image.png", status: "pending"};
+  ATTACHED.push(entry); renderAttachments();
+  try {
+    const fd = new FormData();
+    fd.append("file", file, entry.name);
+    fd.append("title", "");
+    fd.append("category", "other");
+    const res = await api("/api/documents", {method: "POST", body: fd});
+    entry.status = "done"; entry.id = res.id; entry.created = res.created;
+    entry.name = res.title || entry.name;
+  } catch (err) {
+    entry.status = "failed"; entry.error = err.message;
+  }
+  renderAttachments();
+  loadDocs();
+  return entry;
+}
+
+function takeFiles(files) {
+  [...files].forEach(f => { if (f) uploadToVault(f); });
+}
+
+$("attachbtn").onclick = () => $("chatfile").click();
+$("chatfile").addEventListener("change", (e) => { takeFiles(e.target.files); e.target.value = ""; });
+
+// Paste a screenshot straight into the conversation.
+$("chatinput").addEventListener("paste", (e) => {
+  const files = [...(e.clipboardData?.items || [])]
+    .filter(i => i.kind === "file").map(i => i.getAsFile()).filter(Boolean);
+  if (files.length) { e.preventDefault(); takeFiles(files); }
+});
+
+// Drag a document anywhere onto the composer.
+["dragenter", "dragover"].forEach(ev => $("composer").addEventListener(ev, (e) => {
+  e.preventDefault(); $("composer").classList.add("dragging");
+}));
+["dragleave", "drop"].forEach(ev => $("composer").addEventListener(ev, (e) => {
+  e.preventDefault(); $("composer").classList.remove("dragging");
+}));
+$("composer").addEventListener("drop", (e) => {
+  if (e.dataTransfer?.files?.length) takeFiles(e.dataTransfer.files);
+});
+
+// --- Composer ---------------------------------------------------------------
+function autogrow() {
+  const el = $("chatinput");
+  el.style.height = "auto";
+  el.style.height = Math.min(el.scrollHeight, 180) + "px";
+}
+$("chatinput").addEventListener("input", autogrow);
+$("chatinput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    $("composer").requestSubmit();
+  }
+});
+
+$("focusbtn").onclick = () => document.body.classList.toggle("chatfocus");
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") document.body.classList.remove("chatfocus");
+});
+// The ONLY place following-state changes: a human moving the scrollbar.
+$("chatlog").addEventListener("scroll", () => {
+  if (REBUILDING) return;  // programmatic reflow is not the reader's intent
+  STICK_TO_BOTTOM = nearBottom();
+  $("jumplatest").style.display = STICK_TO_BOTTOM ? "none" : "block";
+});
+
+$("composer").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const typed = $("chatinput").value.trim();
+  const filed = ATTACHED.filter(a => a.status === "done");
+  if (!typed && !filed.length) return;
+  if (ATTACHED.some(a => a.status === "pending")) {
+    $("composerhint").textContent = "still filing your attachment…";
+    return;
+  }
+
+  // Name the documents so the copilot reads them rather than guessing.
+  let message = typed;
+  if (filed.length) {
+    const manifest = filed
+      .map(a => `${a.name} (document_id ${a.id}${a.created ? "" : ", already in the vault"})`)
+      .join("; ");
+    const note = `[Added to the vault: ${manifest}. Read each one and annotate it.]`;
+    message = typed ? `${typed}\n\n${note}` : note;
+  }
+
+  $("chatinput").value = ""; autogrow();
+  STICK_TO_BOTTOM = true;  // sending is an intent to watch for the answer
+  const shown = typed || `📎 ${filed.map(a => a.name).join(", ")}`;
+  addMsg(shown, "user", $("speaker").value, "web");
+  ATTACHED = []; renderAttachments();
+  $("composerhint").textContent = "Enter to send · Shift+Enter for a new line";
+
+  TURN_IN_FLIGHT = true;
+  PENDING_BUBBLE = addThinking();
+  try {
+    const res = await api("/api/chat", {method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({message, speaker: $("speaker").value})});
+    TURN_IN_FLIGHT = false;
+    if (PENDING_BUBBLE) { PENDING_BUBBLE.stopTimer?.(); PENDING_BUBBLE.setMarkdown(res.reply); }
+    scrollChat();
+    // Other panels repaint from the live stream.
+  } catch (err) {
+    TURN_IN_FLIGHT = false;
+    if (PENDING_BUBBLE) { PENDING_BUBBLE.stopTimer?.(); PENDING_BUBBLE.textContent = "Error: " + err.message; }
+  }
+});
+
+// --- Live updates -----------------------------------------------------------
+// The server streams the names of topics whose data moved (Server-Sent Events).
+// Writes come from several places — this browser, the other spouse's browser,
+// the copilot's own tools mid-turn, email, SMS, and the background loops — so
+// the page reacts to all of them without anyone pressing refresh.
+const TOPIC_LOADERS = {
+  accounts: refresh, transactions: refresh, sync: refresh,
+  goals: refresh, watchpoints: refresh, rules: refresh,
+  chat: loadThread, documents: loadDocs, properties: loadProperties,
+  actions: loadActions, memories: loadMemories,
+};
+
+let EVENTS;
+
+function setLive(on, detail) {
+  const el = $("livestate");
+  if (!el) return;
+  el.textContent = on ? "live" : (detail || "reconnecting…");
+  el.style.color = on ? "var(--good)" : "var(--dim)";
+}
+
+function startLiveUpdates() {
+  if (EVENTS) return;
+  EVENTS = new EventSource("/api/events");
+  EVENTS.onopen = () => setLive(true);
+  EVENTS.onerror = () => setLive(false);  // EventSource retries on its own
+  EVENTS.onmessage = (e) => {
+    let payload;
+    try { payload = JSON.parse(e.data); } catch { return; }
+    setLive(true);
+    const topics = payload.topics || [];
+    // Collapse to unique loaders: several topics share refresh().
+    const pending = new Set();
+    topics.forEach(t => { if (TOPIC_LOADERS[t]) pending.add(TOPIC_LOADERS[t]); });
+    pending.forEach(fn => { try { fn(); } catch (err) { console.warn(err); } });
+  };
+}
+
+function bootDashboard() {
+  show(true);
+  refresh(); loadThread(); loadMemories(); loadDocs(); loadProperties(); loadActions();
+  startLiveUpdates();
+}
+
+// Auto-login check: overview 401s if not authenticated.
+api("/api/overview").then(bootDashboard).catch(() => show(false));
+</script>
+</body>
+</html>
