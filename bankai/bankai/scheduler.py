@@ -96,11 +96,51 @@ def run_watchpoints_once() -> dict:
     return {"fired": len(pending), "woken": woken, "deferred": deferred}
 
 
+SYNC_WAKE_PROMPT = (
+    "(fresh bank data just synced — {added} new transaction(s) arrived from the "
+    "connected accounts. Read what came in: anything unexpected, a bill posting, "
+    "a deposit you were waiting on (check your watchpoints), a charge that "
+    "changes this month's picture. Update memory notes if a standing figure "
+    "moved. Then either stay silent, or tell the household the one thing in the "
+    "new data that actually warrants their attention — in the thread, or with "
+    "email_household if it should not wait for them to look.)"
+)
+
+
+def run_sync_wake_once(sync_result: dict) -> dict:
+    """Wake the copilot on fresh bank data. Same contract as tending: the
+    prompt is never stored, silence is the expected outcome, and only a reply
+    worth hearing lands in the thread."""
+    added = int(sync_result.get("added") or 0)
+    if not config.SYNC_WAKE or added < 1:
+        return {"status": "skip"}
+    with session_scope() as session:
+        history = chat_thread.build_history(session)
+    history.append({"role": "user", "content": SYNC_WAKE_PROMPT.format(added=added)})
+    with session_scope() as session:
+        reply = agent_chat.run_turn(session, history, channel="tending")
+    if agent_chat.is_silence(reply):
+        return {"status": "quiet", "added": added}
+    with session_scope() as session:
+        session.add(
+            ChatMessage(
+                channel="web", role="assistant", speaker="copilot", content=reply
+            )
+        )
+    return {"status": "spoke", "added": added, "said": reply[:200]}
+
+
 async def _sync_loop() -> None:
     while True:
         if config.SIMPLEFIN_ACCESS_URLS:
             result = await asyncio.to_thread(simplefin.sync)
             log.info("simplefin sync: %s", result)
+            try:
+                wake = await asyncio.to_thread(run_sync_wake_once, result)
+                if wake["status"] != "skip":
+                    log.info("sync wake: %s", wake["status"])
+            except Exception:
+                log.exception("sync wake error")
         await asyncio.sleep(config.SYNC_INTERVAL_MINUTES * 60)
 
 

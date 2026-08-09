@@ -125,6 +125,10 @@ SMS_PUBLIC_URL = _env("SMS_PUBLIC_URL")
 NOTIFY_SMS = _env("NOTIFY_SMS", "true").lower() != "false"
 
 SYNC_INTERVAL_MINUTES = int(_env("SYNC_INTERVAL_MINUTES", "360") or 360)
+# Wake the copilot for a self-directed look whenever a sync brings new
+# transactions in from the banks. Silence is the expected outcome; it speaks
+# (or emails, via email_household) only when the new data warrants it.
+SYNC_WAKE = _env("SYNC_WAKE", "true").lower() != "false"
 RULES_INTERVAL_MINUTES = int(_env("RULES_INTERVAL_MINUTES", "15") or 15)
 # How often the copilot works on its own initiative with nobody watching.
 TENDING_INTERVAL_HOURS = int(_env("TENDING_INTERVAL_HOURS", "6") or 6)

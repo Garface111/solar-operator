@@ -264,3 +264,53 @@ def test_zero_interval_disables_the_checkin(monkeypatch):
 def test_the_checkin_loop_is_registered_with_the_others():
     assert hasattr(scheduler, "_checkin_loop")
     assert config.CHECKIN_INTERVAL_DAYS >= 1
+
+
+# --- the sync wake (mind activates when new bank data arrives) ---
+
+def test_sync_wake_skips_without_new_data(session, monkeypatch):
+    monkeypatch.setattr(
+        scheduler.agent_chat, "run_turn",
+        lambda s, history, channel="tending": pytest.fail("no turn without new data"),
+    )
+    assert scheduler.run_sync_wake_once({"status": "ok", "added": 0}) == {"status": "skip"}
+
+
+def test_sync_wake_can_be_disabled(session, monkeypatch):
+    monkeypatch.setattr(config, "SYNC_WAKE", False)
+    monkeypatch.setattr(
+        scheduler.agent_chat, "run_turn",
+        lambda s, history, channel="tending": pytest.fail("disabled means no turn"),
+    )
+    assert scheduler.run_sync_wake_once({"added": 9}) == {"status": "skip"}
+
+
+def test_sync_wake_stays_quiet_when_the_data_is_boring(session, monkeypatch):
+    monkeypatch.setattr(
+        scheduler.agent_chat, "run_turn",
+        lambda s, history, channel="tending": agent_chat.SILENCE,
+    )
+    result = scheduler.run_sync_wake_once({"added": 3})
+    assert result == {"status": "quiet", "added": 3}
+
+
+def test_sync_wake_speaks_and_the_prompt_is_never_stored(session, monkeypatch):
+    from bankai.db import session_scope
+
+    seen = {}
+
+    def fake_turn(s, history, channel="tending"):
+        seen["history"] = history
+        return "The trust redemption just posted — you are covered into September."
+
+    monkeypatch.setattr(scheduler.agent_chat, "run_turn", fake_turn)
+    result = scheduler.run_sync_wake_once({"added": 2})
+    assert result["status"] == "spoke"
+    assert "trust redemption" in result["said"]
+    # the wake prompt reached the model with the count...
+    assert "2 new transaction(s)" in seen["history"][-1]["content"]
+    # ...but was never persisted as something the household said
+    with session_scope() as s:
+        stored = s.query(ChatMessage).all()
+    assert not any("fresh bank data just synced" in m.content for m in stored)
+    assert any("trust redemption" in m.content for m in stored)
