@@ -158,3 +158,19 @@ def test_print_tool_prints_when_the_printer_answers(session, monkeypatch, tmp_pa
         result = json.loads(result)
     assert result["printed"] is True
     assert "household-7" in result["job"]
+
+
+# --- portal dictation wiring (Ctrl+D) ---------------------------------------
+# The dashboard is plain static HTML; this pins the load-bearing hooks so a
+# refactor can't silently drop verbal input.
+
+def test_portal_wires_ctrl_d_dictation():
+    from bankai import config as _cfg
+    html = (_cfg.BASE_DIR / "bankai" / "static" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    assert 'id="micbtn"' in html
+    assert "webkitSpeechRecognition" in html
+    assert 'e.key === "d"' in html          # the Ctrl+D toggle
+    assert "e.preventDefault()" in html      # or Chrome bookmarks the page
+    assert "interimResults = true" in html   # words appear as you speak

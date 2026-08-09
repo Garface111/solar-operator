@@ -108,6 +108,8 @@
               margin-top:10px; background:var(--bg); display:flex; flex-direction:column;
               gap:8px; transition:border-color .15s, background .15s; }
   #composer.dragging { border-color:var(--accent); background:#16222e; }
+  body.dictating #chatinput { outline:2px solid #d66; border-radius:6px; }
+  #micbtn.live { color:#d66; font-weight:600; }
   #chatinput { width:100%; background:none; border:0; color:var(--text); font:inherit;
                resize:none; padding:2px; max-height:180px; min-height:22px; outline:none; }
   .composerbar { display:flex; gap:8px; align-items:center; }
@@ -273,6 +275,7 @@
         <div class="composerbar">
           <select id="speaker" title="Who's typing"></select>
           <button type="button" class="iconbtn" id="attachbtn" title="Attach a document to the vault">📎 Attach</button>
+          <button type="button" class="iconbtn" id="micbtn" title="Dictate (Ctrl+D to start/stop)">🎤 Dictate</button>
           <input type="file" id="chatfile" multiple class="hidden"
                  accept=".pdf,.docx,.txt,.md,.rtf,.csv,.png,.jpg,.jpeg,.gif,.webp,.heic">
           <span class="spacer"></span>
@@ -976,7 +979,68 @@ $("chatinput").addEventListener("keydown", (e) => {
 
 $("focusbtn").onclick = () => document.body.classList.toggle("chatfocus");
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") document.body.classList.remove("chatfocus");
+  if (e.key === "Escape") { document.body.classList.remove("chatfocus"); stopDictation(); }
+});
+
+// --- Dictation (Ctrl+D), like Claude Code's verbal input --------------------
+// Browser speech engine (Chrome/Edge). Interim words land in the input live;
+// you still press Enter to send, so nothing is said on your behalf.
+const SPEECH = window.SpeechRecognition || window.webkitSpeechRecognition;
+let DICT = null, DICT_BASE = "";
+function startDictation() {
+  if (DICT) return;
+  if (!SPEECH) {
+    $("composerhint").textContent = "dictation needs Chrome or Edge (Web Speech API)";
+    return;
+  }
+  const el = $("chatinput");
+  const rec = new SPEECH();
+  rec.lang = navigator.language || "en-US";
+  rec.continuous = true;
+  rec.interimResults = true;
+  DICT_BASE = el.value ? el.value.replace(/\s+$/, "") + " " : "";
+  rec.onresult = (ev) => {
+    let finals = "", interim = "";
+    for (const r of ev.results) {
+      if (r.isFinal) finals += r[0].transcript.trim() + " ";
+      else interim += r[0].transcript;
+    }
+    el.value = DICT_BASE + finals + interim;
+    autogrow();
+  };
+  rec.onerror = (ev) => {
+    stopDictation(ev.error === "not-allowed"
+      ? "microphone blocked — click the mic icon in the address bar to allow it"
+      : ev.error === "no-speech" ? null : "dictation error: " + ev.error);
+  };
+  // Chrome ends recognition on pauses; keep listening until Ctrl+D says stop.
+  rec.onend = () => {
+    if (DICT !== rec) return;
+    DICT_BASE = el.value ? el.value.replace(/\s+$/, "") + " " : "";
+    try { rec.start(); } catch (e) { stopDictation(); }
+  };
+  DICT = rec;
+  document.body.classList.add("dictating");
+  $("micbtn").classList.add("live");
+  $("composerhint").textContent = "● listening — Ctrl+D to stop, Enter to send";
+  try { rec.start(); } catch (e) { stopDictation("dictation failed to start"); }
+}
+function stopDictation(note) {
+  const rec = DICT;
+  DICT = null;
+  if (rec) { try { rec.stop(); } catch (e) {} }
+  document.body.classList.remove("dictating");
+  $("micbtn").classList.remove("live");
+  $("composerhint").textContent = note || "Enter to send · Shift+Enter for a new line";
+  if (rec) $("chatinput").focus();
+}
+$("micbtn").onclick = () => (DICT ? stopDictation() : startDictation());
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey
+      && (e.key === "d" || e.key === "D")) {
+    e.preventDefault();  // Chrome would open the bookmark dialog
+    DICT ? stopDictation() : startDictation();
+  }
 });
 // The ONLY place following-state changes: a human moving the scrollbar.
 $("chatlog").addEventListener("scroll", () => {
