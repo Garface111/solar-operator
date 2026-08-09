@@ -78,6 +78,8 @@ def run(session: Session, system: str, messages: list[dict]) -> str:
     ]
     if config.CLAUDE_CLI_MODEL:
         cmd += ["--model", config.CLAUDE_CLI_MODEL]
+    if config.CLAUDE_CLI_EFFORT:
+        cmd += ["--effort", config.CLAUDE_CLI_EFFORT]
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=TIMEOUT_SECONDS, cwd=config.BASE_DIR

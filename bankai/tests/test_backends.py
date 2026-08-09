@@ -332,3 +332,46 @@ def test_the_turn_budget_allows_real_document_work(session, monkeypatch):
     claude_cli.run(session, "s", [{"role": "user", "content": "x"}])
     cmd = captured["cmd"]
     assert int(cmd[cmd.index("--max-turns") + 1]) >= 30
+
+
+def test_claude_cli_passes_model_and_effort_flags(session, monkeypatch):
+    """Ford runs the copilot on a specific model at max reasoning; the flags
+    must actually reach the subprocess or the CLI silently uses its defaults."""
+    monkeypatch.setattr(config, "CLAUDE_CLI_MODEL", "claude-fable-5")
+    monkeypatch.setattr(config, "CLAUDE_CLI_EFFORT", "max")
+    seen = {}
+
+    class FakeProc:
+        returncode = 0
+        stdout = json.dumps({"result": "ok"})
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return FakeProc()
+
+    monkeypatch.setattr(claude_cli.subprocess, "run", fake_run)
+    reply = claude_cli.run(session, "system", [{"role": "user", "content": "hi"}])
+    assert reply == "ok"
+    cmd = seen["cmd"]
+    assert cmd[cmd.index("--model") + 1] == "claude-fable-5"
+    assert cmd[cmd.index("--effort") + 1] == "max"
+
+
+def test_claude_cli_omits_effort_flag_when_unset(session, monkeypatch):
+    monkeypatch.setattr(config, "CLAUDE_CLI_MODEL", "")
+    monkeypatch.setattr(config, "CLAUDE_CLI_EFFORT", "")
+    seen = {}
+
+    class FakeProc:
+        returncode = 0
+        stdout = json.dumps({"result": "ok"})
+        stderr = ""
+
+    monkeypatch.setattr(
+        claude_cli.subprocess, "run",
+        lambda cmd, **kwargs: seen.update(cmd=cmd) or FakeProc(),
+    )
+    claude_cli.run(session, "system", [{"role": "user", "content": "hi"}])
+    assert "--model" not in seen["cmd"]
+    assert "--effort" not in seen["cmd"]

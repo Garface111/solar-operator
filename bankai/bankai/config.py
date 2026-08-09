@@ -38,6 +38,10 @@ GROK_MODEL = _env("GROK_MODEL", "grok-4")
 # bankai.xai_auth reads ~/.grok/auth.json and falls back to Hermes ~/.hermes/auth.json.
 XAI_PREFER_GROK_BUILD_OIDC = _env("XAI_PREFER_GROK_BUILD_OIDC", "1")
 CLAUDE_CLI_BIN = _env("CLAUDE_CLI_BIN", "claude")
+# Reasoning effort per turn (low|medium|high|xhigh|max). Empty = CLI default.
+# Scoped to BankAI's own subprocesses — never set the CLI's global config for
+# this; other agents on the machine share the same claude install.
+CLAUDE_CLI_EFFORT = _env("CLAUDE_CLI_EFFORT")
 # Per-turn wall clock for the headless CLI. Keep short (120) when claude-cli is
 # a fallback behind another backend; give real headroom when it is the primary
 # brain doing tool-heavy turns.
