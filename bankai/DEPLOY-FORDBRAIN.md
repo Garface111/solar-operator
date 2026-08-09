@@ -59,12 +59,14 @@ and `.env` live *inside it* (`config.BASE_DIR` is the directory containing
 ```bash
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
-./venv/bin/python -m pytest tests -q     # expect: 377 passed
+./venv/bin/python -m pytest tests -q     # expect: 380 passed
 ```
 
 **Run the tests.** They are pure logic — no network, no API key — and they are
 your only proof the tree arrived intact before you wire in real credentials.
-If the count is lower than 377 you have an older copy of the branch; re-pull.
+If the count is lower than 380 you have an older copy of the branch; re-pull.
+A `ModuleNotFoundError: fpdf` means the venv predates the `fpdf2` requirement —
+re-run the `pip install -r` above rather than hunting for a bug.
 
 Safe to run in the deployed tree: `tests/conftest.py` pins `DATABASE_URL` to a
 throwaway file *before* the first bankai import, so the suite can never touch the
@@ -154,9 +156,16 @@ that emails a non-household address.**
 
 ---
 
-### 3a. The printer (only if Ford wants the Saturday page)
+### 3a. The printer
 
-The weekly report shells out to `lp -d "$PRINTER_NAME"`, so it needs a CUPS queue
+Printing is not just the Saturday page — the copilot holds three tools it can
+reach for in any conversation: `print_weekly_report` (regenerate and print the
+page on demand), `print_page` (anything it writes — a shopping list, a draft
+letter), and `print_document` (a paper copy of something already in the vault).
+So if Ford ever says "print that," this is the section that decides whether it
+works.
+
+Every path shells out to `lp -d "$PRINTER_NAME"`, so it needs a CUPS queue
 that exists **for the service user**, not just in Ford's desktop session:
 
 ```bash
@@ -176,10 +185,16 @@ Then run `lpstat -p household` **as the systemd service user** (`sudo -u <user>
 lpstat -p household`). A queue that only exists for Ford's login will make every
 Saturday print fail while the rest of the report still arrives.
 
-If Ford does not want a printed page, set `WEEKLY_REPORT=false` and skip all of
-this. A dead or absent printer is *not* fatal by design — the PDF is saved, the
-numbers and narrative still go out by email or thread, and the failure is
-reported honestly rather than swallowed. Don't "fix" that by making it fatal.
+`WEEKLY_REPORT=false` stops the *scheduled* Saturday page. It does not remove the
+print tools — those stay available whenever the household asks. With no working
+queue they simply report the failure and keep the PDF.
+
+A dead or absent printer is *not* fatal by design — the PDF is saved, the numbers
+and narrative still go out by email or thread, and the failure is reported
+honestly rather than swallowed. Don't "fix" that by making it fatal.
+
+PDFs accumulate in `bankai/reports/` (gitignored). Nothing prunes them; if the
+household prints a lot, add them to whatever cleanup you set up for backups.
 
 ---
 
