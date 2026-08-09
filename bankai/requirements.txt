@@ -8,3 +8,4 @@ python-dotenv>=1.0
 pypdf>=4.0
 pytest>=8.0
 google-auth>=2.30
+fpdf2>=2.7

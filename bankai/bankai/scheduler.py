@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date
+from datetime import date, datetime
 
 from sqlalchemy import select
 
@@ -424,6 +424,130 @@ async def _checkin_loop() -> None:
         await asyncio.sleep(6 * 3600)
 
 
+WEEKLY_REPORT_MARKER_TITLE = "Last weekly report"
+
+WEEKLY_NARRATIVE_PROMPT = (
+    "(Saturday-morning printed report — this goes on paper, on the fridge. Below "
+    "is this week's data, already computed. Write the 'From your copilot' section: "
+    "a warm, plain-language summary of how the household did this week versus last "
+    "week and the month, the one thing that most deserves attention, and how the "
+    "road ahead looks if nothing changes. 4-8 sentences, plain text only — no "
+    "markdown, no bullet points, no tool calls needed. Data:\n{data})"
+)
+
+
+def weekly_report_action(session, now: datetime) -> str:
+    """'run' | 'skip'. Fires once per report day, on/after the report hour.
+    No init pattern: if it IS Saturday morning, the household wants the page —
+    a deploy that morning should print, not wait a week."""
+    if not config.WEEKLY_REPORT:
+        return "skip"
+    if now.weekday() != config.WEEKLY_REPORT_WEEKDAY or now.hour < config.WEEKLY_REPORT_HOUR:
+        return "skip"
+    note = session.execute(
+        select(MemoryNote).where(MemoryNote.title == WEEKLY_REPORT_MARKER_TITLE)
+    ).scalar_one_or_none()
+    if note is None:
+        return "run"
+    try:
+        last = date.fromisoformat(note.content.strip())
+    except ValueError:
+        return "run"
+    return "skip" if last >= now.date() else "run"
+
+
+def _set_weekly_marker(session, today: date) -> None:
+    note = session.execute(
+        select(MemoryNote).where(MemoryNote.title == WEEKLY_REPORT_MARKER_TITLE)
+    ).scalar_one_or_none()
+    if note:
+        note.content = today.isoformat()
+    else:
+        session.add(MemoryNote(title=WEEKLY_REPORT_MARKER_TITLE, content=today.isoformat()))
+
+
+def run_weekly_report_once(now: datetime | None = None) -> dict:
+    """Assemble, narrate, render, print, and deliver the weekly page.
+
+    Delivery is layered so a dead printer never eats the report: the numbers
+    and narrative always reach the household (email when configured, thread
+    otherwise), and the print outcome is reported honestly either way. The
+    marker is set after delivery, so a crash mid-flow retries next tick."""
+    import json as _json
+
+    from . import reports
+
+    now = now or datetime.now()
+    with session_scope() as session:
+        if weekly_report_action(session, now) != "run":
+            return {"status": "skip"}
+        data = reports.gather_weekly_data(session, now.date())
+
+    compact = {k: v for k, v in data.items() if k != "projection"}
+    compact["projection_p50_5y"] = (
+        (data.get("projection") or {}).get("bands") or [{}]
+    )[-1].get("p50")
+    try:
+        with session_scope() as session:
+            history = chat_thread.build_history(session)
+            history.append({
+                "role": "user",
+                "content": WEEKLY_NARRATIVE_PROMPT.format(data=_json.dumps(compact)),
+            })
+            narrative = agent_chat.run_turn(session, history, channel="web")
+        if agent_chat.is_silence(narrative):
+            narrative = ""
+    except Exception:
+        log.exception("weekly report: narrative turn failed; printing numbers only")
+        narrative = ""
+
+    pdf_path = reports.REPORTS_DIR / f"weekly-{data['date']}.pdf"
+    reports.render_pdf(data, narrative, pdf_path)
+
+    printed, print_note = True, ""
+    try:
+        job = reports.print_pdf(pdf_path)
+        log.info("weekly report printed: %s", job)
+    except Exception as exc:
+        printed, print_note = False, (
+            f"\n\n(The printer was unreachable this morning — {exc}. "
+            "The report is saved; ask me to print it again once the printer is on.)"
+        )
+        log.warning("weekly report: print failed: %s", exc)
+
+    nw = (data.get("net_worth") or {}).get("total")
+    body = (
+        f"Weekly report for {data['date']}. Net worth: ${nw:,.0f}.\n\n{narrative}"
+        f"{print_note}"
+    ) if isinstance(nw, (int, float)) else f"Weekly report for {data['date']}.\n\n{narrative}{print_note}"
+
+    from .messaging import email_thread
+
+    with session_scope() as session:
+        if email_thread.configured():
+            email_thread.start_thread(
+                session, f"Weekly household report — {data['date']}", body
+            )
+        else:
+            session.add(ChatMessage(
+                channel="web", role="assistant", speaker="copilot", content=body
+            ))
+    with session_scope() as session:
+        _set_weekly_marker(session, now.date())
+    return {"status": "ran", "printed": printed, "pdf": str(pdf_path)}
+
+
+async def _weekly_report_loop() -> None:
+    while True:
+        try:
+            result = await asyncio.to_thread(run_weekly_report_once)
+            if result["status"] == "ran":
+                log.info("weekly report: printed=%s", result["printed"])
+        except Exception:
+            log.exception("weekly report loop error")
+        await asyncio.sleep(30 * 60)
+
+
 def start_background_tasks() -> list[asyncio.Task]:
     return [
         asyncio.create_task(_sync_loop(), name="bankai-sync"),
@@ -434,4 +558,5 @@ def start_background_tasks() -> list[asyncio.Task]:
         asyncio.create_task(_monthly_review_loop(), name="bankai-monthly-review"),
         asyncio.create_task(_tending_loop(), name="bankai-tending"),
         asyncio.create_task(_checkin_loop(), name="bankai-checkin"),
+        asyncio.create_task(_weekly_report_loop(), name="bankai-weekly-report"),
     ]

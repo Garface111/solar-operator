@@ -533,6 +533,34 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "print_weekly_report",
+        "description": (
+            "Regenerate the household's weekly report page with FRESH numbers — "
+            "net worth and balances, this week vs last week vs the month, expense "
+            "breakdown, and the forward projection — and send it to the household "
+            "printer (the Epson by the desk). You write the 'From your copilot' "
+            "summary that appears on the page. Use when they ask for the report, "
+            "ask to reprint it, or when a Saturday print failed and the printer "
+            "is back. The PDF is saved either way, so a dead printer is reported, "
+            "not fatal."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": (
+                        "4-8 plain-text sentences for the printed page: how the "
+                        "week went vs last week and the month, what deserves "
+                        "attention, and the road ahead. No markdown."
+                    ),
+                },
+            },
+            "required": ["summary"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "publish_actuals_to_sheet",
         "description": (
             "Write the household's real current figures — cash, investments, cards, "
@@ -996,6 +1024,22 @@ def _dispatch(session: Session, name: str, args: dict):
         if not email_thread.configured():
             return {"error": "the email channel is not configured"}
         return email_thread.start_thread(session, args["subject"], args["body"])
+    if name == "print_weekly_report":
+        from .. import reports
+
+        data = reports.gather_weekly_data(session)
+        pdf_path = reports.REPORTS_DIR / f"weekly-{data['date']}.pdf"
+        reports.render_pdf(data, args["summary"], pdf_path)
+        try:
+            job = reports.print_pdf(pdf_path)
+            return {"printed": True, "job": job, "pdf": str(pdf_path)}
+        except Exception as exc:
+            return {
+                "printed": False,
+                "error": str(exc)[:200],
+                "pdf_saved": str(pdf_path),
+                "note": "tell the household plainly that the page did not print",
+            }
     if name == "publish_actuals_to_sheet":
         if not sheets.can_write():
             return {

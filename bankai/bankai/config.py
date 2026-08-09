@@ -136,6 +136,14 @@ SYNC_WAKE = _env("SYNC_WAKE", "true").lower() != "false"
 RULES_INTERVAL_MINUTES = int(_env("RULES_INTERVAL_MINUTES", "15") or 15)
 # How often the copilot works on its own initiative with nobody watching.
 TENDING_INTERVAL_HOURS = int(_env("TENDING_INTERVAL_HOURS", "6") or 6)
+# --- The Saturday-morning printed report ---
+# CUPS destination for the household printer (lpadmin-registered). On FordBrain:
+# the Epson ET-2800 at 10.0.0.59, queue name "household".
+PRINTER_NAME = _env("PRINTER_NAME", "household")
+WEEKLY_REPORT = _env("WEEKLY_REPORT", "true").lower() != "false"
+WEEKLY_REPORT_WEEKDAY = int(_env("WEEKLY_REPORT_WEEKDAY", "5") or 5)  # Mon=0 .. Sat=5
+WEEKLY_REPORT_HOUR = int(_env("WEEKLY_REPORT_HOUR", "8") or 8)  # local time, on/after
+
 # Every N days the copilot writes the household a short check-in — emailed to
 # both spouses when the email channel is up, posted to the thread otherwise.
 # Unlike tending, arriving is the point: it always speaks. 0 disables.
