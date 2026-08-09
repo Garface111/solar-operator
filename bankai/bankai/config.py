@@ -38,6 +38,10 @@ GROK_MODEL = _env("GROK_MODEL", "grok-4")
 # bankai.xai_auth reads ~/.grok/auth.json and falls back to Hermes ~/.hermes/auth.json.
 XAI_PREFER_GROK_BUILD_OIDC = _env("XAI_PREFER_GROK_BUILD_OIDC", "1")
 CLAUDE_CLI_BIN = _env("CLAUDE_CLI_BIN", "claude")
+# Per-turn wall clock for the headless CLI. Keep short (120) when claude-cli is
+# a fallback behind another backend; give real headroom when it is the primary
+# brain doing tool-heavy turns.
+CLAUDE_CLI_TIMEOUT_SECONDS = int(_env("CLAUDE_CLI_TIMEOUT_SECONDS", "600") or 600)
 CLAUDE_CLI_MODEL = _env("CLAUDE_CLI_MODEL")  # empty = the CLI's default model
 
 # --- Reply verification: a second model pass critiques consequential replies

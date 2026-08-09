@@ -17,7 +17,11 @@ from sqlalchemy.orm import Session
 
 from ... import config
 
-TIMEOUT_SECONDS = 120
+# 120 was tuned for fallback duty behind grok — short enough that a hung CLI
+# doesn't brick the chain. As the PRIMARY brain a real tool-using turn (MCP
+# server startup + several tool calls + a verify pass) legitimately runs past
+# it, and timing out just burns the whole turn. Configurable for both roles.
+TIMEOUT_SECONDS = config.CLAUDE_CLI_TIMEOUT_SECONDS
 
 
 def _mcp_config() -> str:
