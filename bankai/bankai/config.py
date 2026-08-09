@@ -124,4 +124,8 @@ SYNC_INTERVAL_MINUTES = int(_env("SYNC_INTERVAL_MINUTES", "360") or 360)
 RULES_INTERVAL_MINUTES = int(_env("RULES_INTERVAL_MINUTES", "15") or 15)
 # How often the copilot works on its own initiative with nobody watching.
 TENDING_INTERVAL_HOURS = int(_env("TENDING_INTERVAL_HOURS", "6") or 6)
+# Every N days the copilot writes the household a short check-in — emailed to
+# both spouses when the email channel is up, posted to the thread otherwise.
+# Unlike tending, arriving is the point: it always speaks. 0 disables.
+CHECKIN_INTERVAL_DAYS = int(_env("CHECKIN_INTERVAL_DAYS", "3") or 3)
 PORT = int(_env("PORT", "8300") or 8300)

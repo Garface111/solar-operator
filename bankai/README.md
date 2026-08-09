@@ -163,7 +163,7 @@ replies skip it (a revision wouldn't respect the 450-character limit).
 |---|---|---|
 | `anthropic` (default) | Anthropic API credits | `ANTHROPIC_API_KEY` |
 | `claude-cli` | your **Claude subscription** (Pro/Max) | Claude Code installed + logged in on the same machine (`claude` on PATH) |
-| `grok` | your **xAI/Grok credits** | `XAI_API_KEY` (model via `GROK_MODEL`, default `grok-4`) |
+| `grok` | your **Grok Build prepaid credits** (OIDC team) | No key needed if `grok login` **or** Hermes Agent `xai-oauth` is live on this host. Reads `~/.grok/auth.json`, falls back to `~/.hermes/auth.json`. Optional classic `XAI_API_KEY`. Model via `GROK_MODEL` (default `grok-4`). Prefer-OIDC is on by default so a capped console key is never billed by accident. |
 
 All three get the same finance tools. `claude-cli` runs headless `claude -p` per turn
 and hands it the tools through a built-in MCP server (`bankai.agent.mcp_server`), so

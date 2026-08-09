@@ -176,9 +176,10 @@ your PlayStation subscription?') and try to cancel it." Built (100/100 tests):
   **all should be rotated after setup** (they were told). Nothing stored in the repo.
   No phone number purchased yet; A2P/toll-free verification not done. Compliance
   pages + exact form answers were provided (see /optin, /privacy, /terms).
-- LLM backends: user asked for Claude-subscription and "Grok Build credits" support —
-  both built. On their box, `LLM_BACKEND=claude-cli` needs Claude Code installed+
-  logged in; `grok` needs XAI_API_KEY from console.x.ai.
+- LLM backends: Claude-subscription (`claude-cli`) + Grok Build prepaid OIDC (`grok`)
+  both built. Live FordBrain order is `LLM_BACKEND=grok,claude-cli`. Grok does NOT
+  need a console API key — `bankai/xai_auth.py` bills the Build team via OIDC
+  (`~/.grok/auth.json` or Hermes xai-oauth). See gotcha below.
 
 ## Gotchas learned the hard way
 
@@ -196,6 +197,15 @@ your PlayStation subscription?') and try to cancel it." Built (100/100 tests):
 - Twilio API keys can't validate inbound webhook signatures — only the Auth Token can.
 - Git: commits need the Co-Authored-By + Claude-Session footer (see repo history);
   never push to other branches; after pushing to a NEW branch, open a draft PR.
+- **Grok Build OIDC vs classic API key (2026-07-29):** prepaid credits live on team
+  `41aa6b82-…`, not the console API-key team. `bankai/xai_auth.py` resolves a bearer
+  from `~/.grok/auth.json` (Grok CLI) and falls back to Hermes `~/.hermes/auth.json`
+  `xai-oauth` (same team). Prefer-OIDC is default. Grok CLI refresh tokens rotate and
+  can be revoked if another client refreshes first — if chat says OIDC failed, either
+  keep Hermes on xai-oauth (BankAI reuses it) or re-run `grok login`. FordBrain live
+  config: `LLM_BACKEND=grok,claude-cli`, DB at `/root/bankai-data/bankai.db`, server
+  on `:8300`. `/api/health` exposes non-secret xai status. Claude-cli timeout is 120s
+  so a 529 doesn't brick the chain for 10 minutes.
 
 ## Suggested order for the next agent
 

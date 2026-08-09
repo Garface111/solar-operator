@@ -284,6 +284,106 @@ async def _monthly_review_loop() -> None:
         await asyncio.sleep(12 * 3600)
 
 
+CHECKIN_MARKER_TITLE = "Last household check-in"
+
+CHECKIN_PROMPT = (
+    "(scheduled check-in — a few days have passed since the household last heard "
+    "from you directly. Look at what changed: balances and how net worth moved, "
+    "anything spending_anomalies flags, bills coming due, goals' pace, watchpoints "
+    "near their line. Then write a SHORT check-in addressed to the household — a "
+    "few sentences, lead with the one thing that matters most. If everything is "
+    "genuinely quiet, say so in a line or two; the check-in arriving IS the point, "
+    "so do not stay silent.)"
+)
+
+
+def checkin_action(session, today: date) -> str:
+    """Returns 'run' | 'init' | 'skip'. Same first-tick contract as the monthly
+    review: a fresh deploy initializes the marker instead of surprise-mailing the
+    household; after that the check-in runs whenever the marker date is
+    CHECKIN_INTERVAL_DAYS or more behind today."""
+    note = session.execute(
+        select(MemoryNote).where(MemoryNote.title == CHECKIN_MARKER_TITLE)
+    ).scalar_one_or_none()
+    if note is None:
+        return "init"
+    try:
+        last = date.fromisoformat(note.content.strip())
+    except ValueError:
+        return "run"
+    return "run" if (today - last).days >= config.CHECKIN_INTERVAL_DAYS else "skip"
+
+
+def _set_checkin_marker(session, today: date) -> None:
+    note = session.execute(
+        select(MemoryNote).where(MemoryNote.title == CHECKIN_MARKER_TITLE)
+    ).scalar_one_or_none()
+    if note:
+        note.content = today.isoformat()
+    else:
+        session.add(MemoryNote(title=CHECKIN_MARKER_TITLE, content=today.isoformat()))
+
+
+def run_checkin_once() -> dict:
+    """One scheduled household check-in: a real agent turn whose reply is emailed
+    to both spouses (or posted to the thread while email is dark).
+
+    The prompt is not stored — same reasoning as tending. The marker is set only
+    after the check-in actually went out, so a downed backend or a failed send is
+    retried on the next tick rather than silently skipping a cycle."""
+    if config.CHECKIN_INTERVAL_DAYS <= 0:
+        return {"status": "disabled"}
+    today = date.today()
+    with session_scope() as session:
+        action = checkin_action(session, today)
+        if action == "init":
+            _set_checkin_marker(session, today)
+            return {"status": "initialized"}
+        if action == "skip":
+            return {"status": "skip"}
+
+    with session_scope() as session:
+        history = chat_thread.build_history(session)
+    history.append({"role": "user", "content": CHECKIN_PROMPT})
+    with session_scope() as session:
+        reply = agent_chat.run_turn(session, history, channel="web")
+
+    if agent_chat.is_silence(reply):
+        # The prompt forbids silence, but never put words in the copilot's mouth:
+        # count the cycle, log it honestly, and let the next one run on schedule.
+        with session_scope() as session:
+            _set_checkin_marker(session, today)
+        return {"status": "quiet"}
+
+    from .messaging import email_thread
+
+    with session_scope() as session:
+        if email_thread.configured():
+            email_thread.start_thread(
+                session, f"Household check-in — {today.isoformat()}", reply
+            )
+        else:
+            session.add(
+                ChatMessage(
+                    channel="web", role="assistant", speaker="copilot", content=reply
+                )
+            )
+    with session_scope() as session:
+        _set_checkin_marker(session, today)
+    return {"status": "sent", "said": reply[:200]}
+
+
+async def _checkin_loop() -> None:
+    while True:
+        try:
+            result = await asyncio.to_thread(run_checkin_once)
+            if result["status"] in ("sent", "quiet"):
+                log.info("household check-in: %s", result["status"])
+        except Exception:
+            log.exception("check-in loop error")
+        await asyncio.sleep(6 * 3600)
+
+
 def start_background_tasks() -> list[asyncio.Task]:
     return [
         asyncio.create_task(_sync_loop(), name="bankai-sync"),
@@ -293,4 +393,5 @@ def start_background_tasks() -> list[asyncio.Task]:
         asyncio.create_task(_email_chat_loop(), name="bankai-email-chat"),
         asyncio.create_task(_monthly_review_loop(), name="bankai-monthly-review"),
         asyncio.create_task(_tending_loop(), name="bankai-tending"),
+        asyncio.create_task(_checkin_loop(), name="bankai-checkin"),
     ]

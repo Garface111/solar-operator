@@ -108,3 +108,159 @@ def test_a_failed_pass_does_not_take_the_loop_down(session, monkeypatch):
     monkeypatch.setattr(scheduler.agent_chat, "run_turn", boom)
     with pytest.raises(RuntimeError):
         scheduler.run_tending_once()  # the loop catches this; the function may raise
+
+
+# --- the scheduled household check-in (every CHECKIN_INTERVAL_DAYS) ---
+#
+# Tending stays quiet unless something matters; the check-in is the opposite
+# contract — Ford asked for a copilot that reaches out on a fixed cadence, so
+# arriving IS the point. It is emailed to both spouses when email is up.
+
+def test_checkin_marker_logic(session):
+    from datetime import date
+    from bankai.models import MemoryNote
+
+    today = date(2026, 8, 9)
+    assert scheduler.checkin_action(session, today) == "init"
+    session.add(MemoryNote(title="Last household check-in", content="2026-08-09"))
+    session.flush()
+    assert scheduler.checkin_action(session, today) == "skip"
+    assert scheduler.checkin_action(session, date(2026, 8, 11)) == "skip"
+    assert scheduler.checkin_action(session, date(2026, 8, 12)) == "run"
+    # an unreadable marker must fail toward contact, not silence
+    session.query(MemoryNote).filter_by(title="Last household check-in").one().content = "garbled"
+    session.flush()
+    assert scheduler.checkin_action(session, today) == "run"
+
+
+def test_first_checkin_tick_initializes_without_mailing(session, monkeypatch):
+    """A fresh deploy plants the marker; the first real check-in comes a full
+    interval later — never a surprise email the moment the service boots."""
+    from bankai.messaging import email_thread
+
+    monkeypatch.setattr(
+        scheduler.agent_chat, "run_turn",
+        lambda s, history, channel="web": pytest.fail("no turn on the init tick"),
+    )
+    monkeypatch.setattr(
+        email_thread, "start_thread",
+        lambda *a, **k: pytest.fail("no email on the init tick"),
+    )
+    assert scheduler.run_checkin_once() == {"status": "initialized"}
+    assert scheduler.run_checkin_once()["status"] == "skip"
+
+
+def _age_checkin_marker(days: int) -> None:
+    from datetime import date, timedelta
+    from bankai.db import session_scope
+    from bankai.models import MemoryNote
+
+    stale = (date.today() - timedelta(days=days)).isoformat()
+    with session_scope() as s:
+        note = s.query(MemoryNote).filter_by(title="Last household check-in").first()
+        if note:
+            note.content = stale
+        else:
+            s.add(MemoryNote(title="Last household check-in", content=stale))
+
+
+def test_checkin_emails_the_household_when_configured(session, monkeypatch):
+    from datetime import date
+    from bankai.db import session_scope
+    from bankai.messaging import email_thread
+    from bankai.models import MemoryNote
+
+    _age_checkin_marker(config.CHECKIN_INTERVAL_DAYS)
+    seen = {}
+    monkeypatch.setattr(
+        scheduler.agent_chat, "run_turn",
+        lambda s, history, channel="web": "Net worth held steady; nothing needs you.",
+    )
+    monkeypatch.setattr(email_thread, "configured", lambda: True)
+    monkeypatch.setattr(
+        email_thread, "start_thread",
+        lambda s, subject, body: seen.update(subject=subject, body=body) or {"sent": True},
+    )
+    result = scheduler.run_checkin_once()
+    assert result["status"] == "sent"
+    assert "check-in" in seen["subject"].lower()
+    assert "Net worth held steady" in seen["body"]
+    with session_scope() as s:
+        marker = s.query(MemoryNote).filter_by(title="Last household check-in").one()
+        assert marker.content == date.today().isoformat()
+
+
+def test_checkin_falls_back_to_the_thread_while_email_is_dark(session, monkeypatch):
+    from bankai.db import session_scope
+    from bankai.messaging import email_thread
+
+    _age_checkin_marker(config.CHECKIN_INTERVAL_DAYS)
+    monkeypatch.setattr(
+        scheduler.agent_chat, "run_turn",
+        lambda s, history, channel="web": "All quiet this week.",
+    )
+    monkeypatch.setattr(email_thread, "configured", lambda: False)
+    monkeypatch.setattr(
+        email_thread, "start_thread",
+        lambda *a, **k: pytest.fail("must not email while unconfigured"),
+    )
+    assert scheduler.run_checkin_once()["status"] == "sent"
+    with session_scope() as s:
+        stored = s.query(ChatMessage).all()
+    assert any("All quiet this week." in m.content for m in stored)
+
+
+def test_checkin_prompt_is_never_stored_as_something_they_said(session, monkeypatch):
+    from bankai.db import session_scope
+    from bankai.messaging import email_thread
+
+    _age_checkin_marker(config.CHECKIN_INTERVAL_DAYS)
+    seen = {}
+
+    def fake_turn(s, history, channel="web"):
+        seen["history"] = history
+        return "Checking in: the picture is unchanged."
+
+    monkeypatch.setattr(scheduler.agent_chat, "run_turn", fake_turn)
+    monkeypatch.setattr(email_thread, "configured", lambda: False)
+    scheduler.run_checkin_once()
+    # the prompt reached the model...
+    assert "scheduled check-in" in seen["history"][-1]["content"]
+    # ...but was never persisted as a household message
+    with session_scope() as s:
+        stored = s.query(ChatMessage).all()
+    assert not any("scheduled check-in" in m.content for m in stored)
+
+
+def test_a_failed_send_leaves_the_marker_so_the_next_tick_retries(session, monkeypatch):
+    from bankai.db import session_scope
+    from bankai.messaging import email_thread
+    from bankai.models import MemoryNote
+
+    _age_checkin_marker(days := config.CHECKIN_INTERVAL_DAYS)
+    monkeypatch.setattr(
+        scheduler.agent_chat, "run_turn",
+        lambda s, history, channel="web": "A reply that never arrives.",
+    )
+    monkeypatch.setattr(email_thread, "configured", lambda: True)
+
+    def boom(*a, **k):
+        raise RuntimeError("resend down")
+
+    monkeypatch.setattr(email_thread, "start_thread", boom)
+    with pytest.raises(RuntimeError):
+        scheduler.run_checkin_once()  # the loop catches this; the function may raise
+    from datetime import date, timedelta
+    with session_scope() as s:
+        marker = s.query(MemoryNote).filter_by(title="Last household check-in").one()
+        assert marker.content == (date.today() - timedelta(days=days)).isoformat()
+
+
+def test_zero_interval_disables_the_checkin(monkeypatch):
+    monkeypatch.setattr(config, "CHECKIN_INTERVAL_DAYS", 0)
+    assert scheduler.run_checkin_once() == {"status": "disabled"}
+
+
+def test_the_checkin_loop_is_registered_with_the_others():
+    assert hasattr(scheduler, "_checkin_loop")
+    assert config.CHECKIN_INTERVAL_DAYS >= 1
