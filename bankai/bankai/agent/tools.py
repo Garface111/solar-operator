@@ -561,6 +561,43 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "print_page",
+        "description": (
+            "Print anything you write on the household printer as a clean titled "
+            "page — a shopping list, a draft letter, a plan, numbers they asked "
+            "to hold in their hands. Plain text body (no markdown); long text "
+            "flows onto more pages. Use when the household asks you to print "
+            "something, or when paper genuinely beats a chat message. The PDF is "
+            "saved either way, so a dead printer is reported, not fatal."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Heading on the page"},
+                "body": {"type": "string", "description": "Plain text. No markdown."},
+            },
+            "required": ["title", "body"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "print_document",
+        "description": (
+            "Print a document from the vault on the household printer. A stored "
+            "PDF prints as the original, page for page; other formats print as "
+            "their extracted text. Use when the household asks for a paper copy "
+            "of something you hold — a statement, a contract, a policy."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "document_id": {"type": "string"},
+            },
+            "required": ["document_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "publish_actuals_to_sheet",
         "description": (
             "Write the household's real current figures — cash, investments, cards, "
@@ -788,6 +825,23 @@ TOOLS: list[dict] = [
         },
     },
 ]
+
+
+def _send_to_printer(pdf_path, title: str) -> dict:
+    """One honest shape for every print tool: the job id when it printed, the
+    saved path and a plain-speech note when it did not."""
+    from .. import reports
+
+    try:
+        job = reports.print_pdf(pdf_path, title=title)
+        return {"printed": True, "job": job, "pdf": str(pdf_path)}
+    except Exception as exc:
+        return {
+            "printed": False,
+            "error": str(exc)[:200],
+            "pdf_saved": str(pdf_path),
+            "note": "tell the household plainly that the page did not print",
+        }
 
 
 def execute_tool(session: Session, name: str, tool_input: dict) -> str:
@@ -1030,16 +1084,33 @@ def _dispatch(session: Session, name: str, args: dict):
         data = reports.gather_weekly_data(session)
         pdf_path = reports.REPORTS_DIR / f"weekly-{data['date']}.pdf"
         reports.render_pdf(data, args["summary"], pdf_path)
-        try:
-            job = reports.print_pdf(pdf_path)
-            return {"printed": True, "job": job, "pdf": str(pdf_path)}
-        except Exception as exc:
-            return {
-                "printed": False,
-                "error": str(exc)[:200],
-                "pdf_saved": str(pdf_path),
-                "note": "tell the household plainly that the page did not print",
-            }
+        return _send_to_printer(pdf_path, "household weekly report")
+    if name == "print_page":
+        import re as _re
+
+        from .. import reports
+
+        slug = _re.sub(r"[^a-z0-9]+", "-", args["title"].lower()).strip("-")[:40] or "page"
+        pdf_path = reports.REPORTS_DIR / f"page-{slug}.pdf"
+        reports.render_text_page(args["title"], args["body"], pdf_path)
+        return _send_to_printer(pdf_path, args["title"][:60])
+    if name == "print_document":
+        # NB: import only reports — a local `from .. import vault` here would
+        # shadow the module-level vault for the WHOLE function and break every
+        # earlier branch that touches it (UnboundLocalError).
+        from .. import reports
+
+        doc = session.get(Document, args["document_id"])
+        if doc is None:
+            return {"error": f"no document with id {args['document_id']}"}
+        original = vault.stored_path(doc)
+        if original is not None and original.suffix.lower() == ".pdf":
+            return _send_to_printer(original, doc.title[:60])
+        if not doc.content_text:
+            return {"error": "that document has no printable text extracted"}
+        pdf_path = reports.REPORTS_DIR / f"doc-{doc.id}.pdf"
+        reports.render_text_page(doc.title, doc.content_text, pdf_path)
+        return _send_to_printer(pdf_path, doc.title[:60])
     if name == "publish_actuals_to_sheet":
         if not sheets.can_write():
             return {

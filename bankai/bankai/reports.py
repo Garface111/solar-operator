@@ -216,6 +216,30 @@ def render_pdf(data: dict, narrative: str, path: Path) -> Path:
     return path
 
 
+def render_text_page(title: str, body: str, path: Path) -> Path:
+    """Anything the copilot writes, as a clean printable page (or several) —
+    shopping lists, dispute-letter drafts, a summary the household asked to
+    hold in their hands. Auto page-breaks; latin-1 sanitized like the report."""
+    from fpdf import FPDF
+
+    pdf = FPDF(format="letter")
+    pdf.set_auto_page_break(auto=True, margin=14)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 15)
+    pdf.cell(0, 9, _clean(title or "From your copilot"), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 9)
+    pdf.set_text_color(120, 120, 120)
+    pdf.cell(0, 5, _clean(f"Printed by the household copilot - {date.today().isoformat()}"),
+             new_x="LMARGIN", new_y="NEXT")
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(3)
+    pdf.set_font("Helvetica", "", 10)
+    pdf.multi_cell(0, 5.5, _clean(body))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pdf.output(str(path))
+    return path
+
+
 def print_pdf(path: Path, title: str = "household weekly report") -> str:
     """Send the page to the household printer via CUPS. Returns the job id."""
     proc = subprocess.run(

@@ -174,3 +174,67 @@ def test_portal_wires_ctrl_d_dictation():
     assert 'e.key === "d"' in html          # the Ctrl+D toggle
     assert "e.preventDefault()" in html      # or Chrome bookmarks the page
     assert "interimResults = true" in html   # words appear as you speak
+
+
+def test_print_page_renders_and_prints_what_the_copilot_writes(
+    session, monkeypatch, tmp_path
+):
+    from bankai.agent.tools import execute_tool
+
+    monkeypatch.setattr(reports, "REPORTS_DIR", tmp_path)
+    monkeypatch.setattr(
+        reports, "print_pdf",
+        lambda path, title="": f"request id is household-11 [{title}]",
+    )
+    result = execute_tool(session, "print_page", {
+        "title": "Groceries for the week",
+        "body": "Eggs — a dozen.\nOat milk.\nSomething green.",
+    })
+    if isinstance(result, str):
+        result = json.loads(result)
+    assert result["printed"] is True
+    assert "Groceries" in result["job"]
+    pdf = tmp_path / "page-groceries-for-the-week.pdf"
+    assert pdf.exists() and pdf.read_bytes().startswith(b"%PDF")
+
+
+def test_print_document_prints_pdf_original_and_falls_back_to_text(
+    session, monkeypatch, tmp_path
+):
+    from bankai import vault
+    from bankai.agent.tools import execute_tool
+    from bankai.models import Document
+
+    monkeypatch.setattr(reports, "REPORTS_DIR", tmp_path)
+    printed = []
+    monkeypatch.setattr(
+        reports, "print_pdf",
+        lambda path, title="": printed.append(str(path)) or "request id is household-12",
+    )
+    # A stored PDF original prints as-is
+    original = tmp_path / "doc_abc__statement.pdf"
+    original.write_bytes(b"%PDF-1.4 fake")
+    doc_pdf = Document(id="doc_abc", title="Apple Card Statement", sha256="a" * 64,
+                       content_text="June statement text")
+    # A docx-style doc falls back to its extracted text
+    doc_txt = Document(id="doc_def", title="Trust Notes", sha256="b" * 64,
+                       content_text="The trust redemption arrives mid-month.")
+    session.add_all([doc_pdf, doc_txt])
+    session.flush()
+    monkeypatch.setattr(
+        vault, "stored_path",
+        lambda d: original if d.id == "doc_abc" else None,
+    )
+
+    r1 = execute_tool(session, "print_document", {"document_id": "doc_abc"})
+    r1 = json.loads(r1) if isinstance(r1, str) else r1
+    assert r1["printed"] is True and printed[-1] == str(original)
+
+    r2 = execute_tool(session, "print_document", {"document_id": "doc_def"})
+    r2 = json.loads(r2) if isinstance(r2, str) else r2
+    assert r2["printed"] is True
+    assert (tmp_path / "doc-doc_def.pdf").exists()
+
+    r3 = execute_tool(session, "print_document", {"document_id": "doc_nope"})
+    r3 = json.loads(r3) if isinstance(r3, str) else r3
+    assert "no document" in r3["error"]
