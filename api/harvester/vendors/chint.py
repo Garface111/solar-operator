@@ -195,10 +195,18 @@ def _is_inverter_device(dvc: dict, gw: dict | None = None) -> bool:
                 or (gw or {}).get("gatewaySn") or "").strip()
     if sn and gw_sn and sn == gw_sn:
         return False
-    # 4) Positive identification: named "Inverter", or the assetType==2 fallback
-    #    (used only when the vendor left assetTypeName blank).
+    # 4) Positive identification by name always wins.
     if type_name.lower() == "inverter":
         return True
+    # 5) Structural reject BEFORE the assetType==2 fallback: a logger under a
+    #    DIFFERENT gateway (multi-gateway sites) arrives typeless AND modelless
+    #    with a 16-char HEX serial — rule 3 can't catch it and the fallback was
+    #    admitting it (Londonderry grew 0000e7be1902c000 / 000053571e02ca00 /
+    #    00005cad1f022a00 as phantom dead "inverters"). Real CPS inverter
+    #    serials are all digits; a model-less hex serial is never an inverter.
+    if not dvc.get("model") and re.fullmatch(r"[0-9a-f]{12,20}", sn, re.I) \
+            and re.search(r"[a-f]", sn, re.I):
+        return False
     if dvc.get("assetType") == 2:
         return True
     return False

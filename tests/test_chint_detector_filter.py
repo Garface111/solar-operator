@@ -19,9 +19,40 @@ def test_is_inverter_device_rejects_non_inverter_kinds():
     assert _is_inverter_device({"assetType": 1, "sn": "X"}, gw) is False
     # the logger echoed as a commDevice under its own gateway (serial == gateway serial)
     assert _is_inverter_device({"sn": "00009e021902bb00", "assetType": 2}, gw) is False
+    # a logger under a DIFFERENT gateway: typeless, modelless, hex serial —
+    # the assetType==2 fallback must NOT admit it (prod grew phantoms
+    # 0000e7be1902c000 / 000053571e02ca00 / 00005cad1f022a00 this way, 2026-08).
+    for hex_sn in ("0000e7be1902c000", "000053571e02ca00", "00005cad1f022a00"):
+        assert _is_inverter_device({"assetType": 2, "sn": hex_sn}, gw) is False
+        assert _is_inverter_device({"sn": hex_sn}, gw) is False
     # real inverters pass — by name and by the assetType==2 fallback
     assert _is_inverter_device({"assetTypeName": "Inverter", "sn": "0001013791738041"}, gw) is True
     assert _is_inverter_device({"assetType": 2, "sn": "0001013791737108"}, gw) is True
+    # a hex-serial device WITH a model is positively identified — still an inverter
+    assert _is_inverter_device({"assetType": 2, "sn": "0000aa021902bb00", "model": "SCA50KTL-DO/US-480"}, gw) is True
+
+
+def test_ingest_guard_rejects_modelless_hex_serial_chint_device():
+    """The ingest chokepoint (array_owners._is_non_inverter_device) must reject a
+    Chint logger that arrives with no name match, no model, and a hex serial —
+    this is the layer that actually creates/resurrects Inverter rows, so it must
+    hold even when an older extension ships the unfiltered device list."""
+    from api.array_owners import _is_non_inverter_device
+
+    for hex_sn in ("0000e7be1902c000", "000053571e02ca00", "00005cad1f022a00"):
+        assert _is_non_inverter_device(hex_sn, None, vendor="chint", serial=hex_sn) is True
+    # real chint inverter: all-digit serial → passes even with model missing
+    assert _is_non_inverter_device("0001013791738041", None, vendor="chint",
+                                   serial="0001013791738041") is False
+    # hex serial but model present → real device, passes
+    assert _is_non_inverter_device(None, "SCA50KTL-DO/US-480", vendor="chint",
+                                   serial="0000aa021902bb00") is False
+    # other vendors: hex serials are normal (Fronius GUIDs) → untouched
+    assert _is_non_inverter_device("Primo 8.2", None, vendor="fronius",
+                                   serial="1c22f5b8-9f92-4bd7-8f3c-aa11") is False
+    # the original SMA name/model net still works
+    assert _is_non_inverter_device("Sunny Datamanager", "EDMM-10", vendor="sma",
+                                   serial="3010598765") is True
 
 
 def test_inverters_excludes_logger_keeps_four_real():

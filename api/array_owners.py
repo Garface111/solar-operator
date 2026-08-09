@@ -63,11 +63,24 @@ _NON_INVERTER_RE = re.compile(
 )
 
 
-def _is_non_inverter_device(name, model) -> bool:
+def _is_non_inverter_device(name, model, *, vendor=None, serial=None) -> bool:
     """True when a captured 'inverter' is really a logger/meter/gateway (see above).
     Defense-in-depth: the extension filters these at capture, but this also catches
     payloads from older extension versions and any future portal that lists them."""
-    return bool(_NON_INVERTER_RE.search(f"{name or ''} {model or ''}"))
+    if _NON_INVERTER_RE.search(f"{name or ''} {model or ''}"):
+        return True
+    # Chint/CPS FlexOM data loggers can reach the capture list with NO
+    # assetTypeName and NO model — nothing for the keyword net above to catch
+    # (Bruce's Londonderry 186 grew phantom "inverters" 0000e7be1902c000 /
+    # 000053571e02ca00 / 00005cad1f022a00 exactly this way, each then flagged
+    # as a dead unit). Their serials are 16-char HEX; every real CPS inverter
+    # serial is all digits (0001013791738041). A model-less hex serial on chint
+    # is a logger, never an inverter. Devices with a model still pass.
+    if vendor == "chint" and not model:
+        s = str(serial or "").strip()
+        if re.fullmatch(r"[0-9a-f]{12,20}", s, re.I) and re.search(r"[a-f]", s, re.I):
+            return True
+    return False
 
 
 def _safe_create_array(db, tenant_id, name, **kw):
@@ -5254,9 +5267,11 @@ def _inverter_capture_for_tenant(tenant: Tenant, provider: str, body: "InverterC
                 serial = str(ci.serial or "").strip()
                 if not serial:
                     continue
-                # Never persist a non-inverter device (SMA Data Manager, meter, …)
-                # as an inverter — it would show as a permanently-0 kW phantom.
-                if _is_non_inverter_device(getattr(ci, "name", None), getattr(ci, "model", None)):
+                # Never persist a non-inverter device (SMA Data Manager, Chint
+                # FlexOM logger, meter, …) as an inverter — it would show as a
+                # permanently-0 kW phantom.
+                if _is_non_inverter_device(getattr(ci, "name", None), getattr(ci, "model", None),
+                                           vendor=provider, serial=serial):
                     continue
                 iv = db.execute(
                     select(Inverter).where(
