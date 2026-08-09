@@ -31,7 +31,8 @@ finance + legal copilot for Ford and their husband.
   `test_the_agent_has_no_tool_that_writes_source` must keep passing.
 
 **Requirements:** Python 3.11+, `git`, and systemd (this doc assumes systemd; if
-FordBrain is not systemd-based, see §5b).
+FordBrain is not systemd-based, see §5b). For the Saturday printed report you
+also need **CUPS** — see §3a; skip it and everything else still runs.
 
 ---
 
@@ -58,12 +59,12 @@ and `.env` live *inside it* (`config.BASE_DIR` is the directory containing
 ```bash
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
-./venv/bin/python -m pytest tests -q     # expect: 368 passed
+./venv/bin/python -m pytest tests -q     # expect: 377 passed
 ```
 
 **Run the tests.** They are pure logic — no network, no API key — and they are
 your only proof the tree arrived intact before you wire in real credentials.
-If the count is lower than 368 you have an older copy of the branch; re-pull.
+If the count is lower than 377 you have an older copy of the branch; re-pull.
 
 Safe to run in the deployed tree: `tests/conftest.py` pins `DATABASE_URL` to a
 throwaway file *before* the first bankai import, so the suite can never touch the
@@ -137,6 +138,7 @@ This is not a passive dashboard. Once it is running it acts unprompted:
 | Tending | `TENDING_INTERVAL_HOURS` (6) | Self-directed work. **Silence is the expected outcome.** |
 | Sync wake | after any sync that brings new transactions | Reads what arrived; speaks only if it warrants it. `SYNC_WAKE=false` disables. |
 | Check-in | `CHECKIN_INTERVAL_DAYS` (3) | **Always speaks** — arriving is the point. Emails both spouses when email is configured, posts to the thread otherwise. `0` disables. |
+| Weekly report | Saturday from 08:00 (`WEEKLY_REPORT_WEEKDAY` / `_HOUR`) | Renders a one-page PDF and **prints it**, then delivers the numbers by email/thread regardless. `WEEKLY_REPORT=false` disables. |
 
 So the moment `HOUSEHOLD_EMAILS` + a send path are set, **the copilot starts
 emailing the household every three days by itself.** That is the intended design,
@@ -149,6 +151,35 @@ recipients from `HOUSEHOLD_EMAILS` and nothing else, never from an inbound
 message's To/Cc. Anything aimed at an outside party must go through
 `propose_action` and the dashboard's human approval gate. **Do not add a code path
 that emails a non-household address.**
+
+---
+
+### 3a. The printer (only if Ford wants the Saturday page)
+
+The weekly report shells out to `lp -d "$PRINTER_NAME"`, so it needs a CUPS queue
+that exists **for the service user**, not just in Ford's desktop session:
+
+```bash
+lpstat -p                     # list queues visible to you
+lpstat -d                     # default destination
+```
+
+If the queue is missing, register it once (adjust the URI to the real printer)
+and name it to match `PRINTER_NAME` — the default is `household`:
+
+```bash
+sudo lpadmin -p household -E -v ipp://<printer-ip>/ipp/print -m everywhere
+lp -d household /usr/share/cups/data/testprint    # prove it before trusting it
+```
+
+Then run `lpstat -p household` **as the systemd service user** (`sudo -u <user>
+lpstat -p household`). A queue that only exists for Ford's login will make every
+Saturday print fail while the rest of the report still arrives.
+
+If Ford does not want a printed page, set `WEEKLY_REPORT=false` and skip all of
+this. A dead or absent printer is *not* fatal by design — the PDF is saved, the
+numbers and narrative still go out by email or thread, and the failure is
+reported honestly rather than swallowed. Don't "fix" that by making it fatal.
 
 ---
 
