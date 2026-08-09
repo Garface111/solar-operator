@@ -58,12 +58,16 @@ and `.env` live *inside it* (`config.BASE_DIR` is the directory containing
 ```bash
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
-./venv/bin/python -m pytest tests -q     # expect: 356 passed
+./venv/bin/python -m pytest tests -q     # expect: 368 passed
 ```
 
 **Run the tests.** They are pure logic — no network, no API key — and they are
 your only proof the tree arrived intact before you wire in real credentials.
-If the count is lower than 356 you have an older copy of the branch; re-pull.
+If the count is lower than 368 you have an older copy of the branch; re-pull.
+
+Safe to run in the deployed tree: `tests/conftest.py` pins `DATABASE_URL` to a
+throwaway file *before* the first bankai import, so the suite can never touch the
+live household DB even though `.env` sits right there pointing at it.
 
 ---
 
@@ -89,7 +93,20 @@ rather than picking silently):
   Ford**. Verify with `claude -p "say ok"` as the *service user* before relying
   on it; a login that only exists in Ford's interactive shell will not be visible
   to a systemd service running as another user.
-- `grok` + `XAI_API_KEY` — uses Grok credits.
+- `grok` — billed to Grok Build prepaid credits with no key at all if `grok login`
+  or Hermes `xai-oauth` is live on this host (reads `~/.grok/auth.json`, falls
+  back to `~/.hermes/auth.json`). Same service-user caveat as above. A classic
+  `XAI_API_KEY` also works.
+
+`LLM_BACKEND` accepts a **comma-separated fallback chain**, and the shipped
+default is `claude-cli,grok` — first backend that answers wins, so a subscription
+turn is tried before spending credits. If you set a single backend instead, you
+have removed the fallback; say so when you report.
+
+If `claude-cli` is the *primary* brain, leave `CLAUDE_CLI_TIMEOUT_SECONDS` at its
+600 default. A real tool-using turn (MCP server startup + several tool calls + a
+verify pass) legitimately runs past the old 120s, and timing out burns the whole
+turn rather than degrading.
 
 **Everything else is optional and can be added later without a reinstall** — the
 app degrades gracefully when a connector is unconfigured. Add them when Ford
@@ -110,6 +127,28 @@ supplies the credentials:
 
 ⚠️ **`.env` and `bankai.db` are gitignored and must stay that way.** Never commit
 either, and never paste their contents into an issue, PR, or commit message.
+
+### The copilot speaks on its own — know this before you enable email
+
+This is not a passive dashboard. Once it is running it acts unprompted:
+
+| Loop | Cadence | Behaviour |
+|---|---|---|
+| Tending | `TENDING_INTERVAL_HOURS` (6) | Self-directed work. **Silence is the expected outcome.** |
+| Sync wake | after any sync that brings new transactions | Reads what arrived; speaks only if it warrants it. `SYNC_WAKE=false` disables. |
+| Check-in | `CHECKIN_INTERVAL_DAYS` (3) | **Always speaks** — arriving is the point. Emails both spouses when email is configured, posts to the thread otherwise. `0` disables. |
+
+So the moment `HOUSEHOLD_EMAILS` + a send path are set, **the copilot starts
+emailing the household every three days by itself.** That is the intended design,
+but Ford should be told it's about to start rather than discovering it in his
+inbox. First tick after a fresh deploy only initialises the marker — it will not
+surprise-mail on day one.
+
+Outbound is household-only by construction: `email_thread.start_thread()` resolves
+recipients from `HOUSEHOLD_EMAILS` and nothing else, never from an inbound
+message's To/Cc. Anything aimed at an outside party must go through
+`propose_action` and the dashboard's human approval gate. **Do not add a code path
+that emails a non-household address.**
 
 ---
 
