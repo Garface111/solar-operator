@@ -31,6 +31,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import DateTime, Integer, String, Text, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from .. import config
@@ -63,7 +64,9 @@ class SecurityEvent(Base):
     actor: Mapped[str] = mapped_column(String(24), default="system")
     summary: Mapped[str] = mapped_column(String(500), default="")
     detail: Mapped[str] = mapped_column(Text, default="{}")  # canonical JSON
-    prev_hash: Mapped[str] = mapped_column(String(64), default="")
+    # UNIQUE so two processes cannot chain off the same tip and fork the log: the
+    # race-loser's insert fails and it retries against the new tip (record_event).
+    prev_hash: Mapped[str] = mapped_column(String(64), default="", unique=True)
     hash: Mapped[str] = mapped_column(String(64), default="")
 
 
@@ -81,26 +84,55 @@ def _event_hash(prev_hash: str, at_iso: str, kind: str, severity: str,
 
 def record_event(session: Session, *, kind: str, severity: str = "info",
                  actor: str = "system", summary: str = "", detail: dict | None = None) -> SecurityEvent:
-    """Append one event to the hash chain. Never raises into the caller's flow —
-    a broken alarm must not break the thing it is guarding."""
-    try:
-        last = session.execute(
-            select(SecurityEvent).order_by(SecurityEvent.seq.desc()).limit(1)
-        ).scalar_one_or_none()
-        prev_hash = last.hash if last else ""
-        at = datetime.utcnow()
-        summary = (summary or "")[:500]
-        detail_json = _canonical(detail)
-        ev = SecurityEvent(
-            at=at, kind=kind, severity=severity if severity in SEVERITIES else "info",
-            actor=actor, summary=summary, detail=detail_json, prev_hash=prev_hash,
-            hash=_event_hash(prev_hash, at.isoformat(), kind, severity, actor, summary, detail_json),
-        )
-        session.add(ev)
-        session.flush()
-        return ev
-    except Exception:  # a failed audit write must not sink the guarded action
-        return None  # type: ignore[return-value]
+    """Append one event to the hash chain, safely under CONCURRENT writers.
+
+    The web app, the scheduler sweep, and the permission self-heal script all
+    write the same SQLite file. prev_hash is UNIQUE, so if two of them chain off
+    the same tip at once, one insert wins and the other raises IntegrityError and
+    retries against the new tip — the chain stays strictly linear instead of
+    forking (a fork reads later as tampering). Committed immediately: an audit
+    record must persist even if the caller's own transaction later rolls back.
+    Never raises into the caller's flow — a broken alarm must not break the thing
+    it is guarding."""
+    severity = severity if severity in SEVERITIES else "info"
+    summary = (summary or "")[:500]
+    detail_json = _canonical(detail)
+    for _ in range(8):
+        try:
+            last = session.execute(
+                select(SecurityEvent).order_by(SecurityEvent.seq.desc()).limit(1)
+            ).scalar_one_or_none()
+            prev_hash = last.hash if last else ""
+            at = datetime.utcnow()
+            ev = SecurityEvent(
+                at=at, kind=kind, severity=severity, actor=actor, summary=summary,
+                detail=detail_json, prev_hash=prev_hash,
+                hash=_event_hash(prev_hash, at.isoformat(), kind, severity, actor, summary, detail_json),
+            )
+            session.add(ev)
+            session.commit()
+            return ev
+        except IntegrityError:
+            session.rollback()  # another writer took this tip — re-read and retry
+            continue
+        except Exception:  # a failed audit write must not sink the guarded action
+            session.rollback()
+            return None  # type: ignore[return-value]
+    return None  # type: ignore[return-value]
+
+
+def rebuild_chain(session: Session) -> int:
+    """One-time repair: recompute prev_hash + hash for every event in seq order.
+    Event CONTENT is untouched — this only re-links a chain that a concurrent
+    write forked before the UNIQUE(prev_hash) guard existed. Returns the count."""
+    rows = session.execute(select(SecurityEvent).order_by(SecurityEvent.seq)).scalars().all()
+    prev = ""
+    for r in rows:
+        r.prev_hash = prev
+        r.hash = _event_hash(prev, r.at.isoformat(), r.kind, r.severity, r.actor, r.summary, r.detail)
+        prev = r.hash
+    session.flush()
+    return len(rows)
 
 
 def verify_chain(session: Session) -> dict:

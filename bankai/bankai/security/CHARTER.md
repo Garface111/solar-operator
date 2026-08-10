@@ -58,6 +58,32 @@ When Sentinel finds something new and real, it emails the household and drops a
 note in the shared thread so the copilot sees it — framed as *report this to the
 family*, never *act on it*.
 
+## The one sanctioned auto-action: permission self-heal
+
+There is exactly one thing Sentinel is allowed to change on its own, and it is
+worth being precise about why it is the safe exception rather than a crack in the
+doctrine.
+
+Deploys keep copying the code in from a `/mnt/c` (Windows/DrvFs) worktree, where
+every file is mode 0777, so the runtime tree keeps reverting to world-writable.
+A root systemd timer (`bankai-harden`, script at `/root/bankai-harden.sh`, plus
+an `ExecStartPre` on the service) re-locks `/opt/bankai` to owner(root)-only on a
+schedule and on every restart.
+
+This is safe as an autonomous action for reasons that do NOT generalize to
+anything else:
+
+- it only ever REMOVES access — it strips group/other bits, never grants any;
+- it restores a fixed, known-good baseline of the system's OWN files — it makes
+  no judgement and touches nothing outside the sandbox, no third party;
+- it runs OUTSIDE the copilot, as root, so the model cannot trigger it, disable
+  it, or change what it does; and
+- every heal is written to the tamper-evident ledger (`perms_relocked`), so the
+  self-healing is itself auditable.
+
+That is the whole exception. Anything that would GRANT access, reach outside the
+box, make a judgement call, or be reachable by the model stays detect-and-alarm.
+
 ## The three classes of "rogue element", and how each is met
 
 - **Rogue AI (including this one, prompt-injected).** Injection-marker detection

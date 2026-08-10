@@ -76,6 +76,34 @@ def test_report_shape(session):
     assert any(e["kind"] == "login_ok" for e in rep["recent_events"])
 
 
+def test_prev_hash_is_unique_so_the_chain_cannot_fork(session):
+    # Two events cannot share a prev_hash — this is what stops concurrent writers
+    # from forking the log (which reads later as tampering). Test the behaviour,
+    # not the schema representation.
+    import pytest
+    from sqlalchemy.exc import IntegrityError
+
+    session.add(sentinel.SecurityEvent(kind="a", prev_hash="SHARED", hash="h1"))
+    session.commit()
+    session.add(sentinel.SecurityEvent(kind="b", prev_hash="SHARED", hash="h2"))
+    with pytest.raises(IntegrityError):
+        session.commit()
+    session.rollback()
+
+
+def test_rebuild_chain_repairs_a_desynchronized_chain(session):
+    for i in range(4):
+        sentinel.record_event(session, kind="test", summary=f"e{i}")
+    # Simulate a desynchronized chain (e.g. a legacy fork) by clobbering hashes.
+    for r in session.query(sentinel.SecurityEvent).all():
+        r.hash = "0" * 64
+    session.commit()
+    assert sentinel.verify_chain(session)["ok"] is False
+    sentinel.rebuild_chain(session)
+    session.commit()
+    assert sentinel.verify_chain(session)["ok"] is True
+
+
 def test_run_sentinel_once_records_a_scan_and_returns_summary(session):
     summary = sentinel.run_sentinel_once(session, alert=False)
     session.commit()
