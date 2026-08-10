@@ -150,6 +150,60 @@ def test_emailed_attachment_lands_in_the_vault(session, monkeypatch):
     assert "Emailed in by Ford" in doc.summary
 
 
+def test_metadata_only_attachment_is_downloaded(monkeypatch):
+    """The current inbound API sends attachment metadata only — the bytes sit
+    behind GET /emails/inbound/{email}/attachments/{id} as a presigned URL."""
+    calls = []
+
+    class Resp:
+        def __init__(self, json_data=None, content=b""):
+            self._json, self.content = json_data, content
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._json
+
+    def fake_get(url, headers=None, timeout=None, follow_redirects=False):
+        calls.append((url, headers or {}))
+        if url.startswith(resend_inbound.INBOUND_URL):
+            return Resp(json_data={"download_url": "https://cdn.resend.example/x?sig=1"})
+        return Resp(content=b"Date,Amount\n2026-08-01,12.34\n")
+
+    monkeypatch.setattr(resend_inbound.httpx, "get", fake_get)
+    attachment = {"id": "att1", "filename": "Apple Card Transactions.csv", "size": 29}
+    data = resend_inbound.attachment_bytes(attachment, email_id="em1")
+    assert data == b"Date,Amount\n2026-08-01,12.34\n"
+    assert calls[0][0] == f"{resend_inbound.INBOUND_URL}/em1/attachments/att1"
+    # the API key must never ride along to the presigned CDN link
+    assert "Authorization" not in calls[1][1]
+
+
+def test_undownloadable_attachment_still_reaches_the_turn(session, monkeypatch):
+    """Regression (Gaurav's Apple Card export, 2026-08-09): an attachment whose
+    bytes cannot be fetched plus an empty body must still be answered — not
+    silently settled as ignored."""
+    resend_inbound.mark(session, "seed", "adopted")
+    sent = []
+    seen = {}
+    wire(monkeypatch, [summary("m10", sender=SPOUSE)],
+         {"m10": full("m10", sender=SPOUSE, subject="Apple Card Transactions", text="",
+                      attachments=[{"id": "att9", "filename": "Apple Card.csv"}])},
+         sent)
+    monkeypatch.setattr(resend_inbound, "attachment_bytes", lambda a, email_id=None: None)
+
+    def capture(s, history, channel="email"):
+        seen["history"] = history
+        return "Gaurav — the file arrived but I couldn't read it; please resend."
+
+    monkeypatch.setattr(email_thread.agent_chat, "run_turn", capture)
+    result = email_thread.poll_resend(session)
+    assert result["answered"] == 1 and len(sent) == 1
+    assert "could not be downloaded" in seen["history"][-1]["content"]
+    assert session.query(Document).count() == 0  # nothing pretended into the vault
+
+
 def test_a_broken_attachment_does_not_lose_the_message(session, monkeypatch):
     resend_inbound.mark(session, "seed", "adopted")
     wire(monkeypatch, [summary("m3")],

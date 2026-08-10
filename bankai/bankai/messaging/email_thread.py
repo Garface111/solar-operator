@@ -201,6 +201,12 @@ def _describe_attachments(results: list[dict]) -> str:
                 f"nothing says which account it belongs to. ASK which account, "
                 f"then import it. Do not guess."
             )
+        elif r.get("download_error"):
+            lines.append(
+                f"- {name}: arrived attached to the email, but its contents could "
+                f"not be downloaded, so nothing was saved or imported. Say so "
+                f"plainly and ask the sender to send it again."
+            )
         elif r.get("import_error"):
             lines.append(
                 f"- {name}: saved to the vault, but its transactions could NOT be "
@@ -312,9 +318,13 @@ def poll_resend(session: Session) -> dict:
 
         attachment_results = []
         for attachment in message.get("attachments") or []:
-            data = resend_inbound.attachment_bytes(attachment)
-            filename = attachment.get("filename") or attachment.get("name") or ""
-            if not data or not filename:
+            filename = attachment.get("filename") or attachment.get("name") or "unnamed file"
+            data = resend_inbound.attachment_bytes(attachment, email_id=resend_id)
+            if not data:
+                # The turn must still hear that a file arrived. An Apple Wallet
+                # export is an attachment with an empty body — swallowing the
+                # attachment here silently ignores the whole email.
+                attachment_results.append({"filename": filename, "download_error": True})
                 continue
             try:
                 outcome = attachments.handle(

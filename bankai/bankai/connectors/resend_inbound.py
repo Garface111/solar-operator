@@ -113,9 +113,25 @@ def body_text(message: dict) -> str:
     return (message.get("text") or "").strip() or html_to_text(message.get("html") or "")
 
 
-def attachment_bytes(attachment: dict) -> bytes | None:
-    """Attachment payloads arrive inline (base64) or as a link — support both,
-    and never let one malformed attachment sink the whole message."""
+def _download(url: str) -> bytes | None:
+    """GET an attachment URL. The API key goes ONLY to api.resend.com — download
+    links are presigned CDN URLs that need no auth, and an S3-style presigned URL
+    rejects a request carrying a second auth mechanism outright."""
+    headers = _headers() if url.startswith("https://api.resend.com/") else {}
+    try:
+        resp = httpx.get(url, headers=headers, timeout=60, follow_redirects=True)
+        resp.raise_for_status()
+        return resp.content
+    except Exception as exc:
+        log.warning("attachment download failed: %s", exc)
+        return None
+
+
+def attachment_bytes(attachment: dict, email_id: str | None = None) -> bytes | None:
+    """Attachment payloads arrive three ways — inline base64, a direct link, or
+    (the current inbound API) metadata only, where the bytes sit behind
+    `GET /emails/inbound/{email}/attachments/{id}` as a presigned download_url.
+    Support all three, and never let one malformed attachment sink the message."""
     content = attachment.get("content")
     if isinstance(content, str) and content:
         try:
@@ -129,12 +145,21 @@ def attachment_bytes(attachment: dict) -> bytes | None:
             return None
     url = attachment.get("url") or attachment.get("download_url")
     if url:
+        return _download(url)
+    attachment_id = attachment.get("id")
+    if attachment_id and email_id:
         try:
-            resp = httpx.get(url, headers=_headers(), timeout=60)
+            resp = httpx.get(
+                f"{INBOUND_URL}/{email_id}/attachments/{attachment_id}",
+                headers=_headers(), timeout=30,
+            )
             resp.raise_for_status()
-            return resp.content
+            url = resp.json().get("download_url")
         except Exception as exc:
-            log.warning("attachment download failed: %s", exc)
+            log.warning("attachment metadata fetch failed: %s", exc)
+            return None
+        if url:
+            return _download(url)
     return None
 
 
