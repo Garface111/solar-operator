@@ -207,7 +207,20 @@ household prints a lot, add them to whatever cleanup you set up for backups.
 Then, from another terminal:
 
 ```bash
-curl -s localhost:8300/api/health     # -> {"ok":true,"llm_backend":"…",…}
+curl -s localhost:8300/api/health     # -> {"ok":true}   (liveness only)
+```
+
+`/api/health` is deliberately bare — it used to leak the LLM backend, model, and
+full xAI auth status (account email, team id, other agents' on-disk auth paths)
+to anything that could reach the port. The diagnostics moved to
+**`/api/health/detail`**, which requires a session cookie. To read it, log in
+first and reuse the cookie:
+
+```bash
+curl -s -c /tmp/bankai.jar -X POST localhost:8300/api/login \
+  -H 'content-type: application/json' -d '{"password":"<APP_PASSWORD>"}'
+curl -s -b /tmp/bankai.jar localhost:8300/api/health/detail   # backend, model, xai status
+rm -f /tmp/bankai.jar
 ```
 
 Open `http://localhost:8300` and log in with `APP_PASSWORD`. Confirm the
@@ -266,6 +279,14 @@ Three things about that unit file are deliberate:
    on the LAN, that is a conscious decision — put it behind a reverse proxy with
    TLS, or a firewall rule scoped to specific devices, and tell him what he's
    accepting. Don't just flip it to `0.0.0.0`.
+
+   **If you do expose it, it must be HTTPS.** The session cookie is set with
+   `Secure`. Browsers treat `http://localhost` as a secure context and accept it
+   there, but over plain HTTP to a LAN address (`http://10.0.0.x:8300`) the
+   browser **silently drops the cookie** — login returns 200 and every request
+   after it 401s, which reads like a broken password rather than a missing
+   scheme. Terminate TLS at the proxy and the problem disappears. Do not "fix"
+   it by removing `Secure`.
 2. **`Restart=always`.** This is what "permanently" means in practice — it comes
    back from a crash, and `enable` brings it back from a reboot.
 3. **No `EnvironmentFile`.** `config.py` loads `.env` itself via `python-dotenv`
@@ -326,7 +347,8 @@ also unreplicated. Include it in whatever backup Ford already runs for the machi
 Tell him plainly:
 
 - The URL and that it is loopback-only (and what that means for phone access).
-- Which LLM backend is live and what it costs him.
+- Which LLM backend is live and what it costs him — read it from
+  `/api/health/detail`, not `/api/health`, which now reports liveness only.
 - Which connectors are configured vs. still dark. Be specific — "email replies
   are not on yet because `RESEND_API_KEY` is unset" beats "mostly working."
 - The reboot-test result, quoted.
