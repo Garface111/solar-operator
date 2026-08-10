@@ -205,17 +205,32 @@ class CompBody(BaseModel):
     distance_miles: float | None = None
 
 
+def _sec_event(kind: str, severity: str = "info", actor: str = "system", summary: str = "") -> None:
+    """Best-effort write to Sentinel's tamper-evident ledger. Wrapped so a failed
+    audit write can never break the request it is recording."""
+    try:
+        from .security import sentinel
+
+        with session_scope() as s:
+            sentinel.record_event(s, kind=kind, severity=severity, actor=actor, summary=summary)
+    except Exception:
+        pass
+
+
 @app.post("/api/login")
 def login(body: LoginBody):
     now = time.time()
     global _login_failures
     _login_failures = [t for t in _login_failures if now - t < _LOGIN_WINDOW_SECONDS]
     if len(_login_failures) >= _LOGIN_MAX_FAILURES:
+        _sec_event("login_throttled", "warning", "unknown", "login blocked — too many recent failures")
         raise HTTPException(429, "Too many attempts — wait a few minutes and try again")
     if not config.APP_PASSWORD or not hmac.compare_digest(body.password, config.APP_PASSWORD):
         _login_failures.append(now)
+        _sec_event("login_failed", "notice", "unknown", "wrong password")
         raise HTTPException(401, "Wrong password")
     _login_failures.clear()
+    _sec_event("login_ok", "info", "household", "successful sign-in")
     resp = JSONResponse({"ok": True})
     resp.set_cookie(
         COOKIE_NAME,
@@ -228,9 +243,20 @@ def login(body: LoginBody):
     return resp
 
 
+@app.get("/api/security")
+def security_report(_: str = Depends(require_auth)):
+    """The Defense panel: current posture, ledger integrity, and recent security
+    events. Read-only — nothing here changes a control."""
+    from .security import sentinel
+
+    with session_scope() as session:
+        return sentinel.report(session)
+
+
 @app.post("/api/logout")
 def logout():
     """Clear the session cookie. There was no way to sign out before."""
+    _sec_event("logout", "info", "household", "signed out")
     resp = JSONResponse({"ok": True})
     resp.delete_cookie(COOKIE_NAME)
     return resp

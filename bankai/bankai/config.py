@@ -149,3 +149,9 @@ WEEKLY_REPORT_HOUR = int(_env("WEEKLY_REPORT_HOUR", "8") or 8)  # local time, on
 # Unlike tending, arriving is the point: it always speaks. 0 disables.
 CHECKIN_INTERVAL_DAYS = int(_env("CHECKIN_INTERVAL_DAYS", "3") or 3)
 PORT = int(_env("PORT", "8300") or 8300)
+
+# --- Sentinel: the self-defense subsystem (security/sentinel.py) ---
+# How often the posture self-audit + threat watch runs. It detects and alarms;
+# it never changes security controls on its own.
+SENTINEL_INTERVAL_MINUTES = int(_env("SENTINEL_INTERVAL_MINUTES", "60") or 60)
+SENTINEL_ENABLED = _env("SENTINEL_ENABLED", "true").lower() != "false"

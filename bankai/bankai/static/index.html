@@ -295,6 +295,17 @@
       <p class="muted">Notes the copilot keeps for itself (say "remember that…" in chat).</p>
       <table id="memories"></table>
     </section>
+    <section id="defense-section">
+      <h2>Defense <span class="muted">— Sentinel: self-audit &amp; threat watch</span>
+        <button class="ghost" onclick="loadSecurity()" style="float:right">refresh</button></h2>
+      <p class="muted">BankAI watches its own security posture and the perimeter, and keeps a
+        tamper-evident record of everything it does. It reports problems here and alarms you;
+        it never changes security settings or fights back on its own.</p>
+      <div id="defense-status"></div>
+      <table id="defense-posture"></table>
+      <h3 style="margin-top:12px">Recent security events</h3>
+      <table id="defense-events"></table>
+    </section>
   </div>
 </main>
 </div>
@@ -688,6 +699,28 @@ async function loadThread() {
   // keeps their place, and they get the Latest button instead.
   if (STICK_TO_BOTTOM) pinToBottom();
   else $("jumplatest").style.display = "block";
+}
+
+async function loadSecurity() {
+  let r;
+  try { r = await api("/api/security"); }
+  catch (e) { $("defense-status").textContent = "could not load security status"; return; }
+  const tone = r.status === "clear" ? "pos" : r.status === "critical" ? "neg" : "";
+  const shield = r.status === "clear" ? "🛡️" : "⚠️";
+  $("defense-status").innerHTML =
+    `<div class="big ${tone}">${shield} ${esc(r.headline)}</div>` +
+    `<div class="muted">Tamper-evident ledger: ${r.ledger.ok ? "intact" : "BROKEN at #" + esc(r.ledger.broken_at)}` +
+    ` · ${esc(r.ledger.events)} events recorded</div>`;
+  $("defense-posture").innerHTML =
+    "<tr><th>Self-audit check</th><th>Status</th></tr>" + r.posture.map(c =>
+      `<tr><td>${esc(c.check)}` +
+        (c.ok ? "" : `<br><span class=muted>${esc(c.detail)}${c.remediation ? " — fix: " + esc(c.remediation) : ""}</span>`) +
+      `</td><td class="${c.ok ? "pos" : "neg"}">${c.ok ? "ok" : esc(c.severity)}</td></tr>`).join("");
+  $("defense-events").innerHTML = r.recent_events.map(e =>
+    `<tr><td class=muted>${esc(e.at.slice(0, 16).replace("T", " "))}</td>` +
+    `<td>${esc(e.kind)}</td><td class=muted>${esc(e.actor)}</td>` +
+    `<td>${esc(e.summary)}</td></tr>`).join("") ||
+    "<tr><td class=muted>No security events recorded yet.</td></tr>";
 }
 
 async function loadMemories() {
@@ -1138,7 +1171,7 @@ function startLiveUpdates() {
 
 function bootDashboard() {
   show(true);
-  refresh(); loadThread(); loadMemories(); loadDocs(); loadProperties(); loadActions();
+  refresh(); loadThread(); loadMemories(); loadDocs(); loadProperties(); loadActions(); loadSecurity();
   startLiveUpdates();
 }
 

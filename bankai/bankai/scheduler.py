@@ -18,6 +18,7 @@ from .messaging import thread as chat_thread
 from .models import ChatMessage, MemoryNote, Property
 from .rules.engine import evaluate_rules
 from .rules.notify import deliver_firings
+from .security import sentinel
 from .watchpoints import (
     STATUS_ARMED,
     STATUS_FIRED,
@@ -548,8 +549,28 @@ async def _weekly_report_loop() -> None:
         await asyncio.sleep(30 * 60)
 
 
+def run_sentinel_sweep() -> dict:
+    """One Sentinel sweep in its own session (posture self-audit + ledger
+    integrity + threat watch). Detects and alarms; never changes controls."""
+    with session_scope() as session:
+        return sentinel.run_sentinel_once(session)
+
+
+async def _sentinel_loop() -> None:
+    await asyncio.sleep(30)  # a first sweep shortly after boot
+    while True:
+        if config.SENTINEL_ENABLED:
+            try:
+                result = await asyncio.to_thread(run_sentinel_sweep)
+                log.info("sentinel sweep: %s", result)
+            except Exception:
+                log.exception("sentinel sweep error")
+        await asyncio.sleep(config.SENTINEL_INTERVAL_MINUTES * 60)
+
+
 def start_background_tasks() -> list[asyncio.Task]:
     return [
+        asyncio.create_task(_sentinel_loop(), name="bankai-sentinel"),
         asyncio.create_task(_sync_loop(), name="bankai-sync"),
         asyncio.create_task(_rules_loop(), name="bankai-rules"),
         asyncio.create_task(_realestate_loop(), name="bankai-realestate"),

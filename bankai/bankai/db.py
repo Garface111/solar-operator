@@ -34,6 +34,7 @@ def init_db() -> None:
     from . import watchpoints  # noqa: F401 — registers the watchpoints table
     from .connectors import resend_inbound  # noqa: F401 — registers inbound_emails
     from . import accounts_terms  # noqa: F401 — registers account_terms
+    from .security import sentinel  # noqa: F401 — registers security_events (tamper-evident audit)
 
     models.Base.metadata.create_all(engine)
 
