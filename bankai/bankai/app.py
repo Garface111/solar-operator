@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import logging
+import time
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -59,18 +60,36 @@ STATIC_DIR = Path(__file__).parent / "static"
 COOKIE_NAME = "bankai_session"
 
 
-def _session_token() -> str:
+SESSION_MAX_AGE = 60 * 60 * 24 * 90  # 90 days, enforced server-side, not just via cookie max-age
+
+
+def _sign(issued: int) -> str:
     return hmac.new(
-        config.SESSION_SECRET.encode(), b"bankai-authenticated", hashlib.sha256
+        config.SESSION_SECRET.encode(),
+        f"bankai-authenticated:{issued}".encode(),
+        hashlib.sha256,
     ).hexdigest()
+
+
+def _mint_token() -> str:
+    """A session token stamped with the current time. The signature binds the
+    issue time, so the token carries its own expiry and rotating SESSION_SECRET
+    invalidates every outstanding token at once (the only way to revoke before)."""
+    issued = int(time.time())
+    return f"{issued}.{_sign(issued)}"
 
 
 def require_auth(request: Request) -> str:
     token = request.cookies.get(COOKIE_NAME, "")
     if not config.APP_PASSWORD:
         raise HTTPException(500, "APP_PASSWORD is not configured")
-    if not hmac.compare_digest(token, _session_token()):
+    issued_str, _, sig = token.partition(".")
+    if not sig or not issued_str.isdigit():
         raise HTTPException(401, "Not authenticated")
+    if not hmac.compare_digest(sig, _sign(int(issued_str))):
+        raise HTTPException(401, "Not authenticated")
+    if int(time.time()) - int(issued_str) > SESSION_MAX_AGE:
+        raise HTTPException(401, "Session expired — sign in again")
     return token
 
 
@@ -84,6 +103,49 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="BankAI", lifespan=lifespan)
+
+
+# Security headers on every response. The dashboard renders bank- and
+# email-derived text; connect-src/img-src 'self' means that even if an escaping
+# slip ever let script run, it could not exfiltrate the household's data to
+# another origin. script/style keep 'unsafe-inline' because the dashboard ships
+# inline handlers — the output-encoding in index.html is the primary XSS defense;
+# this is the egress + clickjacking backstop.
+_SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "font-src 'self' data:; "
+        "connect-src 'self'; "
+        "object-src 'none'; "
+        "base-uri 'none'; "
+        "form-action 'self'; "
+        "frame-ancestors 'none'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "no-referrer",
+    "Cross-Origin-Opener-Policy": "same-origin",
+}
+
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    response = await call_next(request)
+    for key, value in _SECURITY_HEADERS.items():
+        response.headers.setdefault(key, value)
+    return response
+
+
+# Login throttle: localhost-only plus a strong password already make brute force
+# impractical, but an unbounded /api/login is still worth closing. One global
+# window (single household, single process) backs everyone off briefly after a
+# burst of failures rather than allowing unlimited guesses.
+_LOGIN_WINDOW_SECONDS = 300
+_LOGIN_MAX_FAILURES = 10
+_login_failures: list[float] = []
 
 
 class LoginBody(BaseModel):
@@ -145,12 +207,32 @@ class CompBody(BaseModel):
 
 @app.post("/api/login")
 def login(body: LoginBody):
+    now = time.time()
+    global _login_failures
+    _login_failures = [t for t in _login_failures if now - t < _LOGIN_WINDOW_SECONDS]
+    if len(_login_failures) >= _LOGIN_MAX_FAILURES:
+        raise HTTPException(429, "Too many attempts — wait a few minutes and try again")
     if not config.APP_PASSWORD or not hmac.compare_digest(body.password, config.APP_PASSWORD):
+        _login_failures.append(now)
         raise HTTPException(401, "Wrong password")
+    _login_failures.clear()
     resp = JSONResponse({"ok": True})
     resp.set_cookie(
-        COOKIE_NAME, _session_token(), httponly=True, samesite="lax", max_age=60 * 60 * 24 * 90
+        COOKIE_NAME,
+        _mint_token(),
+        httponly=True,
+        secure=True,  # localhost is a secure context, so browsers still accept it
+        samesite="lax",
+        max_age=SESSION_MAX_AGE,
     )
+    return resp
+
+
+@app.post("/api/logout")
+def logout():
+    """Clear the session cookie. There was no way to sign out before."""
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(COOKIE_NAME)
     return resp
 
 
@@ -161,6 +243,15 @@ def index():
 
 @app.get("/api/health")
 def health():
+    # Public liveness only. This used to return the LLM backend, model, and the
+    # full xAI auth status (account email, team id, on-disk auth-file paths of
+    # other agents on the box) with no authentication — an info-disclosure to
+    # anything that could reach the port. Diagnostics moved to /api/health/detail.
+    return {"ok": True}
+
+
+@app.get("/api/health/detail")
+def health_detail(_: str = Depends(require_auth)):
     from . import config
     from .xai_auth import xai_auth_status
 

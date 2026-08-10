@@ -9,6 +9,7 @@ CLI: python -m bankai.connectors.simplefin claim <SETUP_TOKEN>
 from __future__ import annotations
 
 import base64
+import re
 import sys
 from datetime import date, datetime, timedelta, timezone
 
@@ -18,6 +19,21 @@ from .. import config
 from ..db import session_scope
 from ..ingest import TxnIn, ingest_transactions, upsert_account
 from ..models import SyncLog
+
+
+def _redact(text: str) -> str:
+    """Scrub the SimpleFIN access URL — the household's only bank credential,
+    carried as basic-auth userinfo (https://user:pass@bridge...) — from any
+    string before it can reach a log, the SyncLog table, or an API response.
+
+    httpx does NOT mask the password when it formats a request URL into an
+    HTTPStatusError, so a single 4xx/5xx from the bridge would otherwise write a
+    working, replayable-from-anywhere bank credential into the at-rest DB."""
+    text = re.sub(r"(https?://)[^/\s@]+@", r"\1<redacted>@", text)
+    for url in config.SIMPLEFIN_ACCESS_URLS:
+        if url:
+            text = text.replace(url, "<simplefin-url>")
+    return text
 
 _KIND_HINTS = [
     ("credit", "credit"),
@@ -142,9 +158,10 @@ def _sync_one(access_url: str, lookback_days: int = 90) -> dict:
             )
         return {"status": "ok", "accounts": accounts_seen, "added": added, "skipped": skipped}
     except Exception as exc:  # log the failure, never crash the scheduler
+        detail = _redact(str(exc))[:2000]
         with session_scope() as session:
-            session.add(SyncLog(source="simplefin", status="error", detail=str(exc)[:2000]))
-        return {"status": "error", "detail": str(exc)}
+            session.add(SyncLog(source="simplefin", status="error", detail=detail))
+        return {"status": "error", "detail": detail}
 
 
 if __name__ == "__main__":

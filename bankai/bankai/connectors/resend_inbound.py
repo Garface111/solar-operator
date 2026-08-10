@@ -22,7 +22,7 @@ from __future__ import annotations
 import base64
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import httpx
 from sqlalchemy import String, select
@@ -209,6 +209,36 @@ def release(session: Session, resend_id: str) -> None:
     if row and row.outcome == "claimed":
         session.delete(row)
         session.commit()
+
+
+CLAIM_LEASE_SECONDS = 1200  # 20 min — safely longer than the 600s CLI turn cap, so a
+#                             legitimately in-flight turn is never reaped (double-answer)
+
+
+def reap_stale_claims(session: Session, lease_seconds: int = CLAIM_LEASE_SECONDS) -> int:
+    """Release inbound-email claims orphaned by a hard crash.
+
+    claim() commits an outcome='claimed' row as a lock, and release() only runs
+    from the caught-exception paths. A hard kill — OOM, `systemctl restart`, or
+    the WSL2 idle-death this box is prone to — between claim and settle leaves the
+    row stuck at 'claimed' forever, and seen_ids() then filters that message out
+    on every future poll, so the household email is silently dropped and never
+    retried. processed_at is set when the row is inserted (i.e. at claim time), so
+    a 'claimed' row older than the lease is an orphan: delete it and the next poll
+    re-claims and answers it. The lease (rather than just dropping 'claimed' from
+    seen_ids) preserves the exactly-once protection claim() exists for."""
+    cutoff = datetime.utcnow() - timedelta(seconds=lease_seconds)
+    stale = session.execute(
+        select(InboundEmail).where(
+            InboundEmail.outcome == "claimed", InboundEmail.processed_at < cutoff
+        )
+    ).scalars().all()
+    for row in stale:
+        session.delete(row)
+    if stale:
+        session.commit()
+        log.info("released %d orphaned inbound-email claim(s)", len(stale))
+    return len(stale)
 
 
 def adopt_backlog(session: Session) -> int:

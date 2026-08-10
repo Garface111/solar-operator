@@ -23,6 +23,15 @@ from .models import Document
 DOCUMENTS_DIR = config.BASE_DIR / "documents"
 MAX_TEXT_CHARS = 500_000
 
+# Ingestion caps so a hostile attachment can't exhaust memory. The web upload
+# route caps bytes too, but the inbound-email path reaches add_document without
+# one — this is the single choke point every path passes through. A file or a
+# decompressed member over the limit is refused (the caller files it without
+# extracted text) rather than materialized in full and regex-scanned.
+MAX_DOCUMENT_BYTES = 15 * 1024 * 1024      # raw file size
+MAX_DOCX_XML_BYTES = 50 * 1024 * 1024      # decompressed word/document.xml (zip-bomb guard)
+MAX_PDF_PAGES = 500                        # bound pypdf work on a crafted PDF
+
 CATEGORIES = [
     "home", "contract", "insurance", "estate", "tax", "identity", "financial", "other",
 ]
@@ -68,6 +77,9 @@ def _extract_pdf(data: bytes) -> str:
     reader = PdfReader(io.BytesIO(data))
     pages = []
     for i, page in enumerate(reader.pages):
+        if i >= MAX_PDF_PAGES:
+            pages.append(f"[document truncated at {MAX_PDF_PAGES} pages]")
+            break
         text = page.extract_text() or ""
         pages.append(f"[page {i + 1}]\n{text}")
     return "\n\n".join(pages)
@@ -75,7 +87,16 @@ def _extract_pdf(data: bytes) -> str:
 
 def _extract_docx(data: bytes) -> str:
     with zipfile.ZipFile(io.BytesIO(data)) as zf:
-        xml = zf.read("word/document.xml").decode("utf-8", errors="replace")
+        # Refuse a decompression bomb: check the declared uncompressed size, then
+        # read with a hard byte budget so a lying header can't slip past either.
+        info = zf.getinfo("word/document.xml")
+        if info.file_size > MAX_DOCX_XML_BYTES:
+            raise ValueError("docx document.xml exceeds the size limit")
+        with zf.open(info) as fh:
+            raw = fh.read(MAX_DOCX_XML_BYTES + 1)
+        if len(raw) > MAX_DOCX_XML_BYTES:
+            raise ValueError("docx document.xml exceeds the size limit")
+        xml = raw.decode("utf-8", errors="replace")
     xml = _DOCX_PARA.sub("\n", xml)
     parts = [html.unescape(m) for m in _DOCX_TEXT.findall(xml)]
     return re.sub(r"\n{3,}", "\n\n", "".join(
@@ -92,6 +113,8 @@ def add_document(
     category: str = "other",
 ) -> tuple[Document, bool]:
     """Store a document; returns (document, created). Same bytes twice = no-op."""
+    if len(data) > MAX_DOCUMENT_BYTES:
+        raise ValueError(f"file exceeds the {MAX_DOCUMENT_BYTES // (1024 * 1024)} MB limit")
     digest = hashlib.sha256(data).hexdigest()
     existing = session.execute(
         select(Document).where(Document.sha256 == digest)

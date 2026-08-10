@@ -68,7 +68,15 @@ def run(session: Session, system: str, messages: list[dict]) -> str:
         "--allowedTools",
         # Read lets it open vault images (pasted screenshots) at the path
         # read_document hands back — an MCP tool can only return text.
-        "mcp__bankai__*,WebSearch,WebFetch,Read",
+        #
+        # WebSearch/WebFetch are deliberately NOT granted: this turn's prompt
+        # carries untrusted third-party text (inbound email bodies, extracted
+        # document text), and a headless CLI auto-runs allowed tools with no
+        # human gate — so web egress here is a silent exfiltration channel for
+        # the household's crown-jewel data under prompt injection. The copilot's
+        # job is the local financial/legal record; if live web research is ever
+        # wanted back, scope it to a domain allowlist rather than granting bare.
+        "mcp__bankai__*,Read",
         # 15 was too few for real work: reading two statement PDFs paged at 30k
         # chars each, annotating both, and creating an account exhausted the
         # budget before it could say what it had done — the work landed and the

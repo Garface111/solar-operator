@@ -296,6 +296,10 @@ def poll_resend(session: Session) -> dict:
         adopted = resend_inbound.adopt_backlog(session)
         return {"status": "initialized", "adopted": adopted}
 
+    # Free any claim a crash orphaned mid-turn, so a dropped household email is
+    # retried on this poll instead of lost forever.
+    resend_inbound.reap_stale_claims(session)
+
     answered, ignored, filed, imported, silent = 0, 0, 0, 0, 0
     for summary in resend_inbound.new_messages(session):
         resend_id = summary["id"]
