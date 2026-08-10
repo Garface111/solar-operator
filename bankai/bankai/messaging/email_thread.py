@@ -195,6 +195,13 @@ def _describe_attachments(results: list[dict]) -> str:
             else:
                 line += " The balances now reflect it; confirm what you can see."
             lines.append(line)
+            for m in r.get("pending_matched") or []:
+                lines.append(
+                    f"  It also CONFIRMED a spend the household had mentioned: "
+                    f"they said \"{m['said']}\" on {m['mentioned_on']}; the "
+                    f"statement shows {m['actual']} posted {m['posted']}. That "
+                    f"mention is settled now — no longer pending."
+                )
         elif r.get("needs_account"):
             lines.append(
                 f"- {name}: saved to the vault, but it looks like a statement and "

@@ -120,6 +120,32 @@ class CategoryRule(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class PendingExpense(Base):
+    """A spend the household MENTIONED that no data source has shown yet.
+
+    The Apple Card is why this exists: it has no feed — its transactions arrive
+    only when someone emails a Wallet export, weeks after the spending. Between
+    exports, "put the tires on the Apple Card" is real knowledge with no ledger
+    row. It lands here instead: counted when the household asks where money is
+    going, matched automatically against the statement when it finally imports,
+    and surfaced if it never appears at all (a forgotten export — or a charge
+    that was never theirs)."""
+
+    __tablename__ = "pending_expenses"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _uid("pend"))
+    mentioned_on: Mapped[date] = mapped_column(Date, index=True)
+    amount: Mapped[float] = mapped_column(Float)  # negative = money out, like Transaction
+    description: Mapped[str] = mapped_column(String(240))
+    account_hint: Mapped[str] = mapped_column(String(120), default="")  # e.g. "Apple Card"
+    speaker: Mapped[str] = mapped_column(String(60), default="")
+    #: open | matched | dismissed
+    status: Mapped[str] = mapped_column(String(20), default="open", index=True)
+    matched_transaction_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class Document(Base):
     """The household document vault: deeds, contracts, policies, estate docs.
     Original file kept on disk; extracted text stored here so the copilot can

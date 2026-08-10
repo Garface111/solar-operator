@@ -84,6 +84,8 @@ def gather_weekly_data(session: Session, today: date | None = None) -> dict:
     except Exception:
         projection = {}
 
+    from . import pending as pending_lib
+
     return {
         "date": today.isoformat(),
         "net_worth": net_worth(session),
@@ -93,6 +95,10 @@ def gather_weekly_data(session: Session, today: date | None = None) -> dict:
         "prior_month": prior_month,
         "forecast": forecast,
         "projection": projection,
+        # Spends the household mentioned that no statement has shown yet —
+        # mostly Apple Card activity waiting on the next Wallet export. On the
+        # page so the totals above are never mistaken for the whole story.
+        "pending_mentions": pending_lib.open_items(session, today),
     }
 
 
@@ -202,6 +208,23 @@ def render_pdf(data: dict, narrative: str, path: Path) -> Path:
         pdf.cell(0, 5, "Not enough recurring history yet to project forward.",
                  new_x="LMARGIN", new_y="NEXT")
     pdf.ln(2)
+
+    pending_mentions = data.get("pending_mentions") or []
+    if pending_mentions:
+        total = sum(p["amount"] for p in pending_mentions)
+        heading(f"Mentioned, awaiting statement: {_money(abs(total))}")
+        pdf.set_font("Helvetica", "", 9)
+        for p in pending_mentions[:6]:
+            marker = "  (!) overdue - ask for a fresh export" if p.get("stale") else ""
+            pdf.cell(0, 5, _clean(
+                f"  {p['mentioned_on']}: {p['description']} ~{_money(abs(p['amount']))}"
+                f" on {p.get('account_hint') or 'a card'}{marker}"
+            ), new_x="LMARGIN", new_y="NEXT")
+        pdf.set_font("Helvetica", "I", 8)
+        pdf.cell(0, 5, "Spending you told me about that no statement has confirmed yet"
+                 " - mostly Apple Card activity between Wallet exports.",
+                 new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(2)
 
     heading("From your copilot")
     pdf.set_font("Helvetica", "", 10)

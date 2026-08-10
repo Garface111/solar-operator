@@ -20,7 +20,7 @@ import re
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .. import vault
+from .. import pending, vault
 from ..models import Account
 from .csv_import import import_csv
 from .ofx_import import import_ofx
@@ -152,6 +152,13 @@ def handle(
         "added": imported.added,
         "duplicates_skipped": imported.skipped,
     })
+
+    # The statement just told us what actually happened — settle what the
+    # household only SAID had happened. Runs on the actually-added ids, so a
+    # re-import can never confirm a mention twice.
+    matches = pending.reconcile(session, imported.ids)
+    if matches:
+        result["pending_matched"] = matches
 
     # A CSV is a list of transactions, not a ledger — it carries no balance, so
     # the account would sit at zero and quietly understate what is owed. OFX/QFX

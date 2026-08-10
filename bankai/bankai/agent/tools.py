@@ -720,7 +720,10 @@ TOOLS: list[dict] = [
             "positive amount here and is stored negative; set received=true for "
             "money that came IN. NEVER log a spend that will appear on a linked "
             "card or bank feed — the sync will bring it in and this would count "
-            "it twice. Re-logging the same expense same-day is deduplicated."
+            "it twice. A spend on a STATEMENT-FED account (the Apple Card — no "
+            "feed, data arrives only when an export is emailed in) is not cash "
+            "either: use note_pending_expense for those. Re-logging the same "
+            "expense same-day is deduplicated."
         ),
         "input_schema": {
             "type": "object",
@@ -735,6 +738,46 @@ TOOLS: list[dict] = [
             "required": ["amount", "description"],
             "additionalProperties": False,
         },
+    },
+    {
+        "name": "note_pending_expense",
+        "description": (
+            "Record a mentioned spend that WILL eventually appear in the data "
+            "but hasn't yet — the canonical case is the Apple Card, which has "
+            "no bank feed: its transactions arrive only when someone emails a "
+            "Wallet export, weeks later. A pending expense is how you hold that "
+            "knowledge honestly in between: it shows up when the household asks "
+            "where money is going (say it's 'mentioned, not yet posted'), it is "
+            "matched AUTOMATICALLY against the statement when the export "
+            "arrives, and if it never appears you can raise it. Amount is "
+            "positive dollars spent. Use log_expense instead for cash/P2P money "
+            "no source will ever show; use neither for live-feed accounts."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "amount": {"type": "number", "description": "Dollars spent, positive"},
+                "description": {"type": "string", "description": "What it was, e.g. 'New tires, Costco'"},
+                "account": {"type": "string", "description": "Where they said it went, e.g. 'Apple Card'"},
+                "date": {"type": "string", "description": "ISO date it happened/was mentioned; omit for today"},
+                "spender": {"type": "string", "description": "Ford | Gaurav | joint"},
+            },
+            "required": ["amount", "description", "account"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "list_pending_expenses",
+        "description": (
+            "Every mentioned-but-not-yet-posted spend still waiting for data "
+            "(see note_pending_expense), oldest first with age. Consult this "
+            "whenever spending, a balance, or a discrepancy is discussed — a "
+            "gap between what the household says and what the ledger shows is "
+            "very often just Apple Card spending waiting on the next export. "
+            "Entries flagged stale have waited 45+ days: ask for a fresh Wallet "
+            "export, or question the charge."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
         "name": "update_account_balance",
@@ -1333,6 +1376,52 @@ def _dispatch(session: Session, name: str, args: dict):
             "posted": posted.isoformat(),
             "amount": signed,
             "description": description,
+        }
+    if name == "note_pending_expense":
+        from .. import pending as pending_lib
+
+        try:
+            amount = abs(float(args["amount"]))
+        except (TypeError, ValueError):
+            return {"error": "amount must be a number"}
+        if amount == 0:
+            return {"error": "amount must be non-zero"}
+        description = (args.get("description") or "").strip()
+        if not description:
+            return {"error": "description is required"}
+        raw_date = (args.get("date") or "").strip()
+        try:
+            mentioned = date.fromisoformat(raw_date) if raw_date else date.today()
+        except ValueError:
+            return {"error": f"date {raw_date!r} is not ISO (YYYY-MM-DD)"}
+        row, created = pending_lib.note(
+            session,
+            amount=amount,
+            description=description,
+            account_hint=(args.get("account") or "").strip(),
+            speaker=(args.get("spender") or "").strip(),
+            mentioned_on=mentioned,
+        )
+        return {
+            "noted": created,
+            "duplicate_of": None if created else row.id,
+            "pending_id": row.id,
+            "amount": row.amount,
+            "account": row.account_hint,
+            "open_pending_count": len(pending_lib.open_items(session)),
+        }
+    if name == "list_pending_expenses":
+        from .. import pending as pending_lib
+
+        items = pending_lib.open_items(session)
+        return {
+            "open": items,
+            "total_open_amount": round(sum(i["amount"] for i in items), 2),
+            "note": (
+                "These are spends the household mentioned that no statement or "
+                "feed has shown yet. Count them when asked where money went; "
+                "stale ones deserve a nudge for a fresh Apple Card export."
+            ),
         }
     if name == "update_account_balance":
         account = session.get(Account, args["account_id"])
