@@ -120,6 +120,31 @@ class CategoryRule(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class LifeFact(Base):
+    """One inference in the copilot's model of the household's LIFE — the
+    reality generator's memory. Transactions are a diary written in merchants
+    and amounts; this table is what the copilot has understood from reading it:
+    events ("built a home gym in late July"), rhythms ("cash withdrawal ~$200
+    around the 24th, monthly"), predictions ("the two Planet Fitness fees are
+    now redundant"), opportunities. Facts carry their evidence and an honest
+    confidence, are injected into every turn, and are retired when life moves
+    on — a model that never forgets is as wrong as one that never learns."""
+
+    __tablename__ = "life_facts"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _uid("life"))
+    #: event | rhythm | prediction | opportunity
+    kind: Mapped[str] = mapped_column(String(20), default="event", index=True)
+    statement: Mapped[str] = mapped_column(String(300))
+    evidence: Mapped[str] = mapped_column(Text, default="")
+    #: low | medium | high
+    confidence: Mapped[str] = mapped_column(String(10), default="medium")
+    #: active | confirmed | retired | refuted
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+    first_noted: Mapped[date] = mapped_column(Date, default=date.today)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class PendingExpense(Base):
     """A spend the household MENTIONED that no data source has shown yet.
 

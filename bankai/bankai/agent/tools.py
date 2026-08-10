@@ -740,6 +740,70 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "record_life_fact",
+        "description": (
+            "Add one inference to your LIFE MODEL of this household — the "
+            "living picture their data has taught you, injected into every "
+            "conversation so you never rediscover it. Kinds: 'event' (something "
+            "happened — a trip, a big purchase, a new pet), 'rhythm' (a "
+            "recurring pattern of how they live), 'prediction' (what the model "
+            "says comes next — check these later and confirm or refute "
+            "honestly), 'opportunity' (a concrete improvement you could own). "
+            "Always attach the evidence (merchants, dates, amounts) and an "
+            "honest confidence — a life model built on vibes is worse than "
+            "none. One fact per statement; update_life_fact revises or retires."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "statement": {"type": "string", "description": "The inference, one sentence, e.g. 'They built a home gym in late July'"},
+                "kind": {"type": "string", "enum": ["event", "rhythm", "prediction", "opportunity"]},
+                "evidence": {"type": "string", "description": "The data behind it: merchants, dates, amounts"},
+                "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+            },
+            "required": ["statement", "kind", "evidence"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "update_life_fact",
+        "description": (
+            "Revise the life model as reality answers back: raise or lower "
+            "confidence, sharpen a statement, add evidence, or close a fact "
+            "out — status 'confirmed' (they said so / the data proved it), "
+            "'refuted' (you were wrong — keep it, wrongness is information), "
+            "'retired' (true then, life moved on). An honest model prunes."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "fact_id": {"type": "string", "description": "From list_life_facts"},
+                "statement": {"type": "string"},
+                "evidence": {"type": "string"},
+                "confidence": {"type": "string", "enum": ["low", "medium", "high"]},
+                "status": {"type": "string", "enum": ["active", "confirmed", "retired", "refuted"]},
+            },
+            "required": ["fact_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "list_life_facts",
+        "description": (
+            "The full life model with ids — everything you currently believe "
+            "about how this household lives, with evidence and confidence. "
+            "include_closed=true adds retired/refuted facts (the model's "
+            "track record)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "include_closed": {"type": "boolean"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "note_pending_expense",
         "description": (
             "Record a mentioned spend that WILL eventually appear in the data "
@@ -1377,6 +1441,42 @@ def _dispatch(session: Session, name: str, args: dict):
             "amount": signed,
             "description": description,
         }
+    if name == "record_life_fact":
+        from .. import lifemodel
+
+        statement = (args.get("statement") or "").strip()
+        if not statement:
+            return {"error": "statement is required"}
+        row = lifemodel.record(
+            session,
+            statement=statement,
+            kind=(args.get("kind") or "event").strip(),
+            evidence=(args.get("evidence") or "").strip(),
+            confidence=(args.get("confidence") or "medium").strip(),
+        )
+        return {"recorded": True, "fact_id": row.id, "kind": row.kind,
+                "statement": row.statement}
+    if name == "update_life_fact":
+        from .. import lifemodel
+
+        row = lifemodel.update(
+            session,
+            (args.get("fact_id") or "").strip(),
+            statement=args.get("statement"),
+            evidence=args.get("evidence"),
+            confidence=args.get("confidence"),
+            status=args.get("status"),
+        )
+        if row is None:
+            return {"error": "fact not found — call list_life_facts for ids"}
+        return {"updated": True, "fact_id": row.id, "status": row.status,
+                "confidence": row.confidence}
+    if name == "list_life_facts":
+        from .. import lifemodel
+
+        return {"facts": lifemodel.as_dicts(
+            session, include_closed=bool(args.get("include_closed"))
+        )}
     if name == "note_pending_expense":
         from .. import pending as pending_lib
 

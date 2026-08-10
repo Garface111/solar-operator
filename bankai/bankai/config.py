@@ -176,6 +176,11 @@ WEEKLY_REPORT_HOUR = int(_env("WEEKLY_REPORT_HOUR", "8") or 8)  # local time, on
 # both spouses when the email channel is up, posted to the thread otherwise.
 # Unlike tending, arriving is the point: it always speaks. 0 disables.
 CHECKIN_INTERVAL_DAYS = int(_env("CHECKIN_INTERVAL_DAYS", "3") or 3)
+# Every N days the copilot re-reads the recent data as a DIARY and updates its
+# life model (life_facts): events, rhythms, predictions checked against what
+# actually happened, opportunities. Internal work — silence is the normal
+# outcome. 0 disables.
+LIFE_REVIEW_DAYS = int(_env("LIFE_REVIEW_DAYS", "7") or 7)
 PORT = int(_env("PORT", "8300") or 8300)
 
 # --- Sentinel: the self-defense subsystem (security/sentinel.py) ---

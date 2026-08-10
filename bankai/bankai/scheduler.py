@@ -450,6 +450,71 @@ async def _checkin_loop() -> None:
         await asyncio.sleep(6 * 3600)
 
 
+LIFE_REVIEW_MARKER_TITLE = "Last life review"
+
+LIFE_REVIEW_PROMPT = (
+    "(scheduled life review — private work, nobody is waiting on a reply. Read the last few "
+    "weeks of data the way a detective reads a diary: transactions across every account, "
+    "recurring bills, anomalies, pending mentions, the thread. Then work your LIFE MODEL with "
+    "your tools: record what happened as events, name the rhythms, check every open "
+    "prediction against what actually came true — confirm or refute honestly — and record "
+    "the opportunities you can own. Sharpen or retire stale facts. If, and only if, this "
+    "review surfaces something the household should hear now, say it or use email_household; "
+    "otherwise reply with silence — the updated model IS the work.)"
+)
+
+
+def run_life_review_once(now: datetime | None = None) -> dict:
+    """A periodic re-read of the household's data as a life, marker-gated like
+    the check-in: the marker only advances on success, so a failed review is
+    retried next tick instead of skipped for a week."""
+    if not config.LIFE_REVIEW_DAYS:
+        return {"status": "disabled"}
+    now = now or datetime.now()
+    with session_scope() as session:
+        note = session.execute(
+            select(MemoryNote).where(MemoryNote.title == LIFE_REVIEW_MARKER_TITLE)
+        ).scalar_one_or_none()
+        if note is not None:
+            try:
+                last = date.fromisoformat(note.content.strip())
+                if (now.date() - last).days < config.LIFE_REVIEW_DAYS:
+                    return {"status": "not_due"}
+            except ValueError:
+                pass
+        history = chat_thread.build_history(session)
+    history.append({"role": "user", "content": LIFE_REVIEW_PROMPT})
+    with session_scope() as session:
+        reply = agent_chat.run_turn(session, history, channel="tending")
+    with session_scope() as session:
+        note = session.execute(
+            select(MemoryNote).where(MemoryNote.title == LIFE_REVIEW_MARKER_TITLE)
+        ).scalar_one_or_none()
+        if note:
+            note.content = now.date().isoformat()
+        else:
+            session.add(MemoryNote(
+                title=LIFE_REVIEW_MARKER_TITLE, content=now.date().isoformat()
+            ))
+        if not agent_chat.is_silence(reply):
+            session.add(ChatMessage(
+                channel="web", role="assistant", speaker="copilot", content=reply
+            ))
+            return {"status": "spoke"}
+    return {"status": "quiet"}
+
+
+async def _life_review_loop() -> None:
+    while True:
+        try:
+            result = await asyncio.to_thread(run_life_review_once)
+            if result["status"] in ("spoke", "quiet"):
+                log.info("life review: %s", result["status"])
+        except Exception:
+            log.exception("life review loop error")
+        await asyncio.sleep(6 * 3600)
+
+
 WEEKLY_REPORT_MARKER_TITLE = "Last weekly report"
 
 WEEKLY_NARRATIVE_PROMPT = (
@@ -605,5 +670,6 @@ def start_background_tasks() -> list[asyncio.Task]:
         asyncio.create_task(_monthly_review_loop(), name="bankai-monthly-review"),
         asyncio.create_task(_tending_loop(), name="bankai-tending"),
         asyncio.create_task(_checkin_loop(), name="bankai-checkin"),
+        asyncio.create_task(_life_review_loop(), name="bankai-life-review"),
         asyncio.create_task(_weekly_report_loop(), name="bankai-weekly-report"),
     ]

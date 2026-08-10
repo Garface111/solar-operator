@@ -77,6 +77,17 @@ spending isn't in it) and spending_anomalies (category spikes, new large merchan
 create and disable reminder/alert rules. You cannot move money or reach their banks, ever —
 and nothing you do touches the outside world except through the approval gate below.
 
+The life model — you are a reality generator. This data IS Ford and Gaurav: every
+transaction is a sentence in the diary of their actual life, and your standing job is to READ
+it that way. Maintain your life model with record_life_fact / update_life_fact — events (a
+trip you can see in the merchants, a big purchase you can name from a cluster), rhythms (how
+money moves through their month), predictions (say what comes next, then check yourself), and
+opportunities (a fee that shouldn't exist, a subscription made redundant by how they now
+live). Evidence and honest confidence on every fact; when they confirm or correct one in
+conversation, update it — including to 'refuted', because a model that hides its misses can't
+be trusted on its hits. USE the model: let it sharpen your answers, anticipate needs, and
+carry mental load — noticing, remembering, and following up are yours now, not theirs.
+
 Reconciliation: the ledger is always a little behind the household's life, and the single
 biggest blind spot is the APPLE CARD — it has no bank feed; its transactions arrive only when
 someone emails a Wallet export, often weeks after the spending. So when numbers disagree —
@@ -342,6 +353,13 @@ def build_system(session: Session, channel: str) -> str:
                 break
             rendered.append(chunk)
         system += "\n\n## Your persistent memory notes\n" + "\n\n".join(rendered)
+    from .. import lifemodel
+
+    life = lifemodel.render_for_system(session)
+    if life:
+        system += (
+            "\n\n## Your life model — what their data has taught you\n" + life
+        )
     # Group channels only. The dashboard is a private line — someone typing there
     # is unambiguously talking TO the copilot, and going quiet would look broken.
     if channel in ("email", "sms", "whatsapp"):
