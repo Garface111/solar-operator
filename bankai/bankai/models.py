@@ -103,6 +103,23 @@ class RuleFiring(Base):
     rule: Mapped[Rule] = relationship(back_populates="firings")
 
 
+class CategoryRule(Base):
+    """Household-taught categorization, persisted. The keyword categorizer gets
+    merchants roughly right; it cannot know that a 'Mobile Banking payment to
+    CRD 1420' is the household paying its own card (a transfer, not spending)
+    or that the Chase ACH is the mortgage. When the copilot reclassifies with
+    remember=true, the correction lands here and every future sync applies it
+    first — the report stops crying wolf for good, not just for last week."""
+
+    __tablename__ = "category_rules"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _uid("catr"))
+    pattern: Mapped[str] = mapped_column(String(120), unique=True)  # case-insensitive substring
+    category: Mapped[str] = mapped_column(String(60))
+    reason: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class Document(Base):
     """The household document vault: deeds, contracts, policies, estate docs.
     Original file kept on disk; extracted text stored here so the copilot can

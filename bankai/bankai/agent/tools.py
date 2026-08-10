@@ -27,6 +27,7 @@ from ..ingest import MANUAL_KINDS, _snapshot_balance, normalize_manual_balance, 
 from ..models import (
     Account,
     AgentAction,
+    CategoryRule,
     Document,
     MemoryNote,
     Property,
@@ -598,6 +599,34 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "recategorize_transactions",
+        "description": (
+            "Fix mislabeled transactions — the categorizer's guess is not the "
+            "household's truth. Select by description_contains (case-insensitive "
+            "substring, min 4 chars) and/or explicit transaction_ids, optionally "
+            "narrowed by current_category, and set new_category. Use category "
+            "'transfer' for money moving between the household's own accounts "
+            "(card payments, trust redemptions) — transfers are excluded from "
+            "every spend/income total automatically. With remember=true (the "
+            "default when description_contains is given) the correction becomes "
+            "a standing rule: future syncs label matching transactions the same "
+            "way, so the fix holds beyond this week. Say what you changed."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "description_contains": {"type": "string"},
+                "transaction_ids": {"type": "array", "items": {"type": "string"}},
+                "current_category": {"type": "string"},
+                "new_category": {"type": "string"},
+                "remember": {"type": "boolean", "description": "Persist as a standing rule (needs description_contains)"},
+                "reason": {"type": "string", "description": "One line: why this reclassification is right"},
+            },
+            "required": ["new_category"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "publish_actuals_to_sheet",
         "description": (
             "Write the household's real current figures — cash, investments, cards, "
@@ -1111,6 +1140,45 @@ def _dispatch(session: Session, name: str, args: dict):
         pdf_path = reports.REPORTS_DIR / f"doc-{doc.id}.pdf"
         reports.render_text_page(doc.title, doc.content_text, pdf_path)
         return _send_to_printer(pdf_path, doc.title[:60])
+    if name == "recategorize_transactions":
+        pattern = (args.get("description_contains") or "").strip()
+        ids = args.get("transaction_ids") or []
+        new_category = args["new_category"].strip()
+        if not pattern and not ids:
+            return {"error": "give description_contains or transaction_ids — refusing to relabel everything"}
+        if pattern and len(pattern) < 4:
+            return {"error": "description_contains must be at least 4 characters — shorter patterns catch strangers"}
+        query = select(Transaction)
+        if pattern:
+            query = query.where(Transaction.description.ilike(f"%{pattern}%"))
+        if ids:
+            query = query.where(Transaction.id.in_(ids))
+        if args.get("current_category"):
+            query = query.where(Transaction.category == args["current_category"])
+        rows = session.execute(query).scalars().all()
+        for row in rows:
+            row.category = new_category
+        rule_saved = False
+        if pattern and args.get("remember", True):
+            rule = session.execute(
+                select(CategoryRule).where(CategoryRule.pattern == pattern)
+            ).scalar_one_or_none()
+            if rule:
+                rule.category = new_category
+                rule.reason = args.get("reason", "") or rule.reason
+            else:
+                session.add(CategoryRule(
+                    pattern=pattern, category=new_category,
+                    reason=args.get("reason", ""),
+                ))
+            rule_saved = True
+        session.flush()
+        return {
+            "updated": len(rows),
+            "new_category": new_category,
+            "rule_saved": rule_saved,
+            "sample": [r.description[:80] for r in rows[:3]],
+        }
     if name == "publish_actuals_to_sheet":
         if not sheets.can_write():
             return {

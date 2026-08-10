@@ -28,8 +28,18 @@ _RULES: list[tuple[str, tuple[str, ...]]] = [
 ]
 
 
-def categorize(description: str, amount: float) -> str:
+def categorize(
+    description: str,
+    amount: float,
+    house_rules: tuple[tuple[str, str], ...] = (),
+) -> str:
+    """house_rules are (pattern, category) pairs the household taught the
+    copilot (CategoryRule rows). They win over the keyword table: a correction
+    the household made outranks a guess we shipped."""
     d = description.upper()
+    for pattern, category in house_rules:
+        if pattern.upper() in d:
+            return category
     for category, keywords in _RULES:
         if any(k in d for k in keywords):
             return category

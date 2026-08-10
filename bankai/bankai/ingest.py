@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .intelligence.categorize import categorize
-from .models import Account, BalanceSnapshot, Transaction
+from .models import Account, BalanceSnapshot, CategoryRule, Transaction
 
 _WS = re.compile(r"\s+")
 # strip #/* separators and any token containing a 3+ digit run (card/ref numbers)
@@ -133,6 +133,10 @@ def ingest_transactions(session: Session, account: Account, txns: list[TxnIn]) -
     a re-import of the same batch is still a no-op."""
     result = IngestResult()
     batch_counts: dict[str, int] = {}
+    house_rules = tuple(
+        (r.pattern, r.category)
+        for r in session.execute(select(CategoryRule)).scalars()
+    )
     for txn in txns:
         base_key = f"{txn.posted}|{txn.amount:.2f}|{normalize_desc(txn.description)}"
         occurrence = batch_counts.get(base_key, 0)
@@ -151,7 +155,7 @@ def ingest_transactions(session: Session, account: Account, txns: list[TxnIn]) -
             amount=round(txn.amount, 2),
             description=txn.description.strip(),
             normalized_desc=normalize_desc(txn.description),
-            category=categorize(txn.description, txn.amount),
+            category=categorize(txn.description, txn.amount, house_rules),
             pending=txn.pending,
             fingerprint=fp,
         )
