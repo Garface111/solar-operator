@@ -15,6 +15,7 @@ from datetime import date, datetime
 from sqlalchemy.orm import Session
 
 from ..ingest import IngestResult, TxnIn, ingest_transactions, upsert_account
+from ..models import Account
 
 _DATE_FORMATS = ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%m-%d-%Y", "%b %d, %Y", "%d %b %Y")
 
@@ -107,14 +108,19 @@ def import_csv(
     kind: str = "checking",
     owner: str = "joint",
     institution: str = "",
+    account: Account | None = None,
 ) -> IngestResult:
+    """Pass `account` to import into a specific existing account; otherwise one
+    is found-or-created by (source='csv', name) — which will NOT match a
+    same-named account another source created."""
     txns = parse_csv(text)
-    account = upsert_account(
-        session,
-        source="csv",
-        name=account_name,
-        kind=kind,
-        owner=owner,
-        institution=institution,
-    )
+    if account is None:
+        account = upsert_account(
+            session,
+            source="csv",
+            name=account_name,
+            kind=kind,
+            owner=owner,
+            institution=institution,
+        )
     return ingest_transactions(session, account, txns)

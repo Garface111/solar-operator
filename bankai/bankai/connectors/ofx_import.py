@@ -9,11 +9,12 @@ real balances for net worth and balance_below rules).
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, datetime
 
 from sqlalchemy.orm import Session
 
-from ..ingest import IngestResult, TxnIn, ingest_transactions, upsert_account
+from ..ingest import IngestResult, TxnIn, _snapshot_balance, ingest_transactions, upsert_account
+from ..models import Account
 
 _TXN_RE = re.compile(r"<STMTTRN>(.*?)</STMTTRN>", re.S | re.I)
 _BAL_RE = re.compile(r"<LEDGERBAL>.*?<BALAMT>\s*(-?[\d.]+)", re.S | re.I)
@@ -71,15 +72,27 @@ def import_ofx(
     account_name: str,
     kind: str = "checking",
     owner: str = "joint",
+    account: Account | None = None,
 ) -> IngestResult:
+    """Pass `account` to import into a specific existing account; otherwise one
+    is found-or-created by (source='csv', name) — which will NOT match a
+    same-named account another source created."""
     txns, balance, institution = parse_ofx(text)
-    account = upsert_account(
-        session,
-        source="csv",
-        name=account_name,
-        kind=kind,
-        owner=owner,
-        institution=institution,
-        balance=balance,
-    )
+    if account is None:
+        account = upsert_account(
+            session,
+            source="csv",
+            name=account_name,
+            kind=kind,
+            owner=owner,
+            institution=institution,
+            balance=balance,
+        )
+    else:
+        account.institution = institution or account.institution
+        if balance is not None:
+            account.balance = balance
+            account.balance_date = datetime.utcnow()
+            session.flush()
+            _snapshot_balance(session, account)
     return ingest_transactions(session, account, txns)

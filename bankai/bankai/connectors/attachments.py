@@ -68,6 +68,20 @@ def is_ofx(text: str, filename: str) -> bool:
     return filename.lower().endswith((".ofx", ".qfx")) or "<OFX" in text[:2000].upper()
 
 
+def find_account(session: Session, name: str, kind: str) -> Account | None:
+    """The existing account this export belongs to, regardless of which source
+    created it. upsert_account matches on (source, name) — right for feeds,
+    wrong here: a manually created 'Apple Card' and an emailed export of the
+    same card are the same account, and importing into a same-named sibling
+    silently splits the card's history in two. Oldest wins if duplicates
+    somehow already exist."""
+    return session.execute(
+        select(Account)
+        .where(Account.name == name, Account.kind == kind)
+        .order_by(Account.created_at)
+    ).scalars().first()
+
+
 def handle(
     session: Session,
     *,
@@ -110,12 +124,17 @@ def handle(
         return result
 
     account_name, kind = guess
+    account = find_account(session, account_name, kind)
     try:
         if is_ofx(text, filename):
-            imported = import_ofx(session, text=text, account_name=account_name, kind=kind)
+            imported = import_ofx(
+                session, text=text, account_name=account_name, kind=kind, account=account
+            )
             fmt = "ofx"
         else:
-            imported = import_csv(session, text=text, account_name=account_name, kind=kind)
+            imported = import_csv(
+                session, text=text, account_name=account_name, kind=kind, account=account
+            )
             fmt = "csv"
     except Exception as exc:
         log.exception("could not import %s", filename)
@@ -137,9 +156,7 @@ def handle(
     # A CSV is a list of transactions, not a ledger — it carries no balance, so
     # the account would sit at zero and quietly understate what is owed. OFX/QFX
     # do carry one. Surface the difference instead of showing a confident $0.
-    account = session.execute(
-        select(Account).where(Account.name == account_name)
-    ).scalar_one_or_none()
+    account = account or find_account(session, account_name, kind)
     if account is not None and account.balance is None:
         result["balance_unknown"] = True
         result["note"] = (

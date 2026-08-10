@@ -75,6 +75,27 @@ def test_re_sending_the_same_export_adds_nothing(session):
     assert session.query(Transaction).count() == 3
 
 
+def test_an_export_adopts_the_existing_account_instead_of_a_sibling(session):
+    """Regression (2026-08-09): a manual 'Apple Card' already existed with a
+    balance; the emailed export must land THERE, not in a new same-named account
+    with source='csv' — that split the card's balance and history in two and
+    made the post-import balance check crash on MultipleResultsFound."""
+    manual = Account(name="Apple Card", kind="credit", source="manual", balance=-457.17)
+    session.add(manual)
+    session.flush()
+
+    out = attachments.handle(
+        session, filename="apple-card-july.csv", data=APPLE_CSV.encode(),
+        sender="Gaurav", subject="Apple Card export",
+    )
+    assert out["imported"] is True and out["added"] == 3
+    # no sibling invented, and the balance the manual account carried still holds
+    account = session.query(Account).filter(Account.name == "Apple Card").one()
+    assert account.id == manual.id and account.balance == -457.17
+    assert not out.get("balance_unknown")
+    assert session.query(Transaction).filter(Transaction.account_id == manual.id).count() == 3
+
+
 def test_an_unidentifiable_statement_asks_instead_of_guessing(session):
     out = attachments.handle(
         session, filename="transactions.csv", data=APPLE_CSV.encode(),
