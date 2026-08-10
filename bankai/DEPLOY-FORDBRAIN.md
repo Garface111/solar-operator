@@ -29,6 +29,10 @@ finance + legal copilot for Ford and their husband.
 - **Read-only by construction.** No code path can move money. Keep it that way:
   if a task would add a tool that writes to a bank, stop and ask Ford first.
   `test_the_agent_has_no_tool_that_writes_source` must keep passing.
+- **One exception to "never acts on the outside world":** `cancel_subscription`
+  emails merchants directly, with no dashboard Approve. Ford authorized this
+  standing power on 2026-08-10. **Read §10 before deploying it** — its
+  authorization check is weaker than its docstring says.
 
 **Requirements:** Python 3.11+, `git`, and systemd (this doc assumes systemd; if
 FordBrain is not systemd-based, see §5b). For the Saturday printed report you
@@ -59,12 +63,12 @@ and `.env` live *inside it* (`config.BASE_DIR` is the directory containing
 ```bash
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
-./venv/bin/python -m pytest tests -q     # expect: 413 passed
+./venv/bin/python -m pytest tests -q     # expect: 450 passed
 ```
 
 **Run the tests.** They are pure logic — no network, no API key — and they are
 your only proof the tree arrived intact before you wire in real credentials.
-If the count is lower than 413 you have an older copy of the branch; re-pull.
+If the count is lower than 450 you have an older copy of the branch; re-pull.
 A `ModuleNotFoundError: fpdf` means the venv predates the `fpdf2` requirement —
 re-run the `pip install -r` above rather than hunting for a bug.
 
@@ -443,3 +447,54 @@ Two things to watch when it does this:
 - Category rules outrank the shipped keyword table by design. That is correct —
   the household's correction should beat our guess — but it means a bad rule
   keeps winning until someone overwrites it with the same pattern.
+
+---
+
+## 10. `cancel_subscription` — the standing power, and the gap in its guard
+
+Ford authorized this on 2026-08-10: the copilot may cancel a subscription by
+emailing the merchant, with **no dashboard Approve**. It is the only tool that
+acts on the outside world unattended. Flagging it here because the deploying
+agent should understand what is and is not actually enforced before it runs
+against real accounts.
+
+**What genuinely holds, in code:**
+
+- **Guarded categories are refused.** `guard_reason()` runs *before* execute and
+  blocks insurance, health, utilities, phone/internet, mortgage/rent, and debt —
+  by transaction category *and* by merchant-name keyword, so a missing category
+  doesn't open the door. Those become `propose_action` proposals instead.
+- **Template-only outbound.** The model picks the merchant and the recipient
+  address; it does **not** write the prose. So a hostile transaction description
+  or document cannot turn this into a general exfiltration channel.
+- **Audited and self-verifying.** Every execution writes an `AgentAction`
+  (status `executed`) and plants an `on_date` watchpoint ~35 days out to check
+  the merchant actually stopped charging, escalating if not.
+
+**The gap — read this part carefully.** The module's docstring says the
+"only on a spouse's instruction" rule is "enforced HERE, in code, not in the
+prompt." It is not. `instructed_by` is a **string the model supplies**, and the
+check is only `instructor in household_members()` — it validates that the *name*
+is Ford or Gaurav, not that either of them said anything. Nothing ties the
+execution to an actual household message.
+
+That matters because this copilot ingests untrusted content by design — emailed
+attachments, harvested documents, WhatsApp messages, transaction descriptions —
+and the Sentinel charter's own premise is that a prompt is a disposition, not a
+wall. A successful injection that gets the model to call `cancel_subscription`
+with `instructed_by="Ford"` sends a real cancellation to a third party with no
+human in the loop. The guarded list bounds the damage to a non-essential
+subscription, and it is recoverable, but it is still an outside-world action on
+the model's own say-so.
+
+**Do not "fix" this by editing the docstring to match the code.** The honest
+fixes are either:
+
+1. bind authorization to evidence — require a recent household `ChatMessage`
+   that requested it, and store that message's id on the `AgentAction`; or
+2. route cancellations through `propose_action`'s Approve gate like everything
+   else, and accept that it is no longer a standing power.
+
+Which one is Ford's call, not yours. Until he decides, deploy with the power
+available if he wants it, and tell him plainly that the guard is name-shaped
+rather than instruction-shaped.
