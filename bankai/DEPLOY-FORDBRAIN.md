@@ -59,12 +59,12 @@ and `.env` live *inside it* (`config.BASE_DIR` is the directory containing
 ```bash
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
-./venv/bin/python -m pytest tests -q     # expect: 387 passed
+./venv/bin/python -m pytest tests -q     # expect: 400 passed
 ```
 
 **Run the tests.** They are pure logic — no network, no API key — and they are
 your only proof the tree arrived intact before you wire in real credentials.
-If the count is lower than 387 you have an older copy of the branch; re-pull.
+If the count is lower than 400 you have an older copy of the branch; re-pull.
 A `ModuleNotFoundError: fpdf` means the venv predates the `fpdf2` requirement —
 re-run the `pip install -r` above rather than hunting for a bug.
 
@@ -141,6 +141,7 @@ This is not a passive dashboard. Once it is running it acts unprompted:
 | Sync wake | after any sync that brings new transactions | Reads what arrived; speaks only if it warrants it. `SYNC_WAKE=false` disables. |
 | Check-in | `CHECKIN_INTERVAL_DAYS` (3) | **Always speaks** — arriving is the point. Emails both spouses when email is configured, posts to the thread otherwise. `0` disables. |
 | Weekly report | Saturday from 08:00 (`WEEKLY_REPORT_WEEKDAY` / `_HOUR`) | Renders a one-page PDF and **prints it**, then delivers the numbers by email/thread regardless. `WEEKLY_REPORT=false` disables. |
+| Sentinel | `SENTINEL_INTERVAL_MINUTES` (60), first sweep ~30s after boot | Security posture self-audit + ledger integrity + threat watch. Detects and alarms; **never changes controls**. `SENTINEL_ENABLED=false` disables. See §5c. |
 
 So the moment `HOUSEHOLD_EMAILS` + a send path are set, **the copilot starts
 emailing the household every three days by itself.** That is the intended design,
@@ -303,6 +304,32 @@ curl -s localhost:8300/api/health
 ```
 
 A reboot test is the only real proof. Report the actual output to Ford.
+
+### 5c. Sentinel will grade your deployment
+
+A self-defense subsystem (`bankai/security/`, doctrine in `security/CHARTER.md`)
+sweeps hourly and writes to a hash-chained audit ledger. Read `/api/security`
+(behind auth) or the dashboard's Defense panel after your first boot — it checks
+exactly the things this document tells you to get right, so treat its first
+report as your deployment's grade:
+
+- **file permissions** on the tree, DB, and `.env`;
+- **loopback-only binding** — it shells out to `ss -tlnH` and flags any listener
+  on your port that is not on 127.0.0.1;
+- **secrets in logs**, session-secret strength, and whether backups exist.
+
+Two consequences for you:
+
+- If you deliberately expose the app to the LAN behind a TLS proxy (§5), that
+  binding check **will alarm**. That is the system working, not a bug. Do not
+  silence it by editing Sentinel — tell Ford the alarm is expected and why.
+- Sentinel only ever reports. It will not "fix" a finding, and neither should
+  the copilot: the charter's whole premise is that the model never holds the keys
+  to its own cage. If a future change would let the agent edit security settings,
+  the ledger, or its own code, that change is the thing to stop.
+
+`ss` comes from `iproute2`. If it is missing, the binding check degrades to a
+`notice` rather than failing the sweep — install it so the check actually runs.
 
 ### 5b. If FordBrain is not systemd
 
