@@ -59,12 +59,12 @@ and `.env` live *inside it* (`config.BASE_DIR` is the directory containing
 ```bash
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
-./venv/bin/python -m pytest tests -q     # expect: 400 passed
+./venv/bin/python -m pytest tests -q     # expect: 413 passed
 ```
 
 **Run the tests.** They are pure logic — no network, no API key — and they are
 your only proof the tree arrived intact before you wire in real credentials.
-If the count is lower than 400 you have an older copy of the branch; re-pull.
+If the count is lower than 413 you have an older copy of the branch; re-pull.
 A `ModuleNotFoundError: fpdf` means the venv predates the `fpdf2` requirement —
 re-run the `pip install -r` above rather than hunting for a bug.
 
@@ -127,6 +127,25 @@ supplies the credentials:
 - **SMS thread:** the `TWILIO_*` block. Note Ford's existing Twilio credentials
   were pasted into a chat and **must be rotated before use** — do not deploy the
   old Auth Token or API key secret.
+- **WhatsApp group seat:** `WHATSAPP_ENABLED=true` + `WHATSAPP_DATA_DIR`, plus
+  the Node bridge in `whatsapp-bridge/` (its own systemd unit ships there). The
+  copilot gets its **own** WhatsApp account on its own number — never a person's,
+  since a ban would take their number with it. **Read the pinning note below
+  before enabling.**
+
+⚠️ **Pin the WhatsApp group.** `WHATSAPP_GROUP_JID` is empty by default, which
+means *any group the copilot has been added to*. Senders are still gated to the
+household, but the reply goes back to whichever group the message arrived in — so
+if Ford or Gaurav writes to the copilot from some **other** group, the copilot
+answers **in that group**, in front of whoever else is in it, with household
+financial detail. Set `WHATSAPP_GROUP_JID` to the family group's JID (it appears
+in the bridge's `status.json` group list once the copilot has been added) and the
+copilot will answer nowhere else. Do this at the same time you enable WhatsApp,
+not after.
+
+Sender identity is matched on phone number or privacy LID
+(`WHATSAPP_HOUSEHOLD_LIDS`), **never** on push name — a display name is text
+anyone can set. Don't "improve" identification by trusting `push_name`.
 
 ⚠️ **`.env` and `bankai.db` are gitignored and must stay that way.** Never commit
 either, and never paste their contents into an issue, PR, or commit message.
@@ -142,6 +161,7 @@ This is not a passive dashboard. Once it is running it acts unprompted:
 | Check-in | `CHECKIN_INTERVAL_DAYS` (3) | **Always speaks** — arriving is the point. Emails both spouses when email is configured, posts to the thread otherwise. `0` disables. |
 | Weekly report | Saturday from 08:00 (`WEEKLY_REPORT_WEEKDAY` / `_HOUR`) | Renders a one-page PDF and **prints it**, then delivers the numbers by email/thread regardless. `WEEKLY_REPORT=false` disables. |
 | Sentinel | `SENTINEL_INTERVAL_MINUTES` (60), first sweep ~30s after boot | Security posture self-audit + ledger integrity + threat watch. Detects and alarms; **never changes controls**. `SENTINEL_ENABLED=false` disables. See §5c. |
+| WhatsApp | `WHATSAPP_POLL_SECONDS` (10), only when `WHATSAPP_ENABLED=true` | Listens in the family group, logs money mentioned in passing via `log_expense`, and mostly stays quiet — one turn per batch, not one reply per message. |
 
 So the moment `HOUSEHOLD_EMAILS` + a send path are set, **the copilot starts
 emailing the household every three days by itself.** That is the intended design,
