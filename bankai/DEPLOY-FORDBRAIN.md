@@ -59,12 +59,12 @@ and `.env` live *inside it* (`config.BASE_DIR` is the directory containing
 ```bash
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
-./venv/bin/python -m pytest tests -q     # expect: 380 passed
+./venv/bin/python -m pytest tests -q     # expect: 387 passed
 ```
 
 **Run the tests.** They are pure logic — no network, no API key — and they are
 your only proof the tree arrived intact before you wire in real credentials.
-If the count is lower than 380 you have an older copy of the branch; re-pull.
+If the count is lower than 387 you have an older copy of the branch; re-pull.
 A `ModuleNotFoundError: fpdf` means the venv predates the `fpdf2` requirement —
 re-run the `pip install -r` above rather than hunting for a bug.
 
@@ -349,10 +349,28 @@ These are open and blocked on Ford, not on you. Mention them once; don't nag.
    one.
 3. **Rotate the Twilio Auth Token and API key secret** before any SMS deployment.
 
-## 9. Known gap in the model
+## 9. Internal transfers — closed, but needs one setup step
 
-There is no way to mark a transaction as an **internal transfer**. The monthly
-trust redemption is currently counted as income, which inflates every income
-figure the copilot reports. If Ford asks why income looks high, that's why. Fixing
-it means a transfer flag on the transaction model plus exclusion from the income
-side of summaries — a real change, worth doing deliberately rather than in passing.
+This used to be a real gap: the monthly trust redemption counted as income and
+inflated every income figure. It is fixed. The `transfer` category is now
+excluded from both the income and spend sides of `spending_summary()` and of the
+weekly report's figures, and the copilot has a `recategorize_transactions` tool
+that can relabel matching transactions and persist the correction as a standing
+`CategoryRule`, so future syncs label them the same way.
+
+**But nothing is labeled until someone labels it.** On a fresh deploy the trust
+redemption still lands as income. Once real data is in, ask the copilot to
+recategorize it — something like *"the monthly redemption from the trust is a
+transfer between our own accounts, not income — fix it and remember"* — and it
+will relabel the matches and write the standing rule.
+
+Two things to watch when it does this:
+
+- The tool refuses an empty selection and requires `description_contains` to be
+  at least 4 characters, but a short generic pattern (`card`, `visa`) can still
+  sweep in far more than intended, and `remember` defaults to true — so a broad
+  pattern becomes a *permanent* rule. Have it report what it changed, and check
+  the count is what you expected.
+- Category rules outrank the shipped keyword table by design. That is correct —
+  the household's correction should beat our guess — but it means a bad rule
+  keeps winning until someone overwrites it with the same pattern.
