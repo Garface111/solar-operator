@@ -231,8 +231,18 @@ async function start() {
       writeStatus();
       const code = lastDisconnect?.error?.output?.statusCode;
       if (code === DisconnectReason.loggedOut) {
-        // Session revoked from the phone. Do NOT clear it ourselves — that is
-        // a human call. Park and report.
+        if (!state.creds.registered) {
+          // Never paired — the server invalidates a session whose QR/pairing
+          // code sat unused. Nothing of value exists yet: reset and offer a
+          // fresh code instead of idling forever.
+          log("unpaired session invalidated — resetting and retrying pairing");
+          fs.rmSync(SESSION_DIR, { recursive: true, force: true });
+          fs.mkdirSync(SESSION_DIR, { recursive: true });
+          setTimeout(start, 3000);
+          return;
+        }
+        // A REAL session revoked from the phone. Do NOT clear it ourselves —
+        // that is a human call. Park and report.
         log("LOGGED OUT by the phone — re-pairing required. Bridge idling.");
         return;
       }
