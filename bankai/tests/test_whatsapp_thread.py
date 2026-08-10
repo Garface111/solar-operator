@@ -18,7 +18,9 @@ GROUP = "120363000000000001@g.us"
 def wired(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "WHATSAPP_ENABLED", True)
     monkeypatch.setattr(config, "WHATSAPP_DATA_DIR", str(tmp_path))
-    monkeypatch.setattr(config, "WHATSAPP_GROUP_JID", "")
+    monkeypatch.setattr(config, "WHATSAPP_GROUP_JID", GROUP)
+    monkeypatch.setattr(config, "WHATSAPP_WATCH_ONLY", False)
+    monkeypatch.setattr(config, "WHATSAPP_ACCOUNT_OWNER", "")
     monkeypatch.setattr(config, "WHATSAPP_HOUSEHOLD_LIDS", "Gaurav:123098057695369")
     monkeypatch.setattr(config, "HOUSEHOLD_PHONES", f"Ford:{FORD},Gaurav:{SPOUSE}")
     return tmp_path
@@ -33,10 +35,30 @@ def spool(tmp_path, *messages):
 def line(text, sender=FORD, group=GROUP, jid=None, push_name="someone"):
     return {
         "id": f"id-{abs(hash(text)) % 10**8}",
-        "group_jid": group,
+        "chat_jid": group,
+        "chat_kind": "group",
+        "from_me": False,
         "sender_jid": jid or f"{sender.lstrip('+')}@s.whatsapp.net",
         "sender_number": sender if jid is None else "",
         "push_name": push_name,
+        "text": text,
+        "timestamp": 1754870400,
+    }
+
+
+def dm(text, partner=SPOUSE, from_me=False, me=FORD):
+    """A direct-message spool line as the bridge writes it in shoulder mode."""
+    return {
+        "id": f"id-{abs(hash(text)) % 10**8}",
+        "chat_jid": f"{partner.lstrip('+')}@s.whatsapp.net",
+        "chat_kind": "dm",
+        "from_me": from_me,
+        "sender_jid": (
+            f"{me.lstrip('+')}@s.whatsapp.net" if from_me
+            else f"{partner.lstrip('+')}@s.whatsapp.net"
+        ),
+        "sender_number": me if from_me else partner,
+        "push_name": "someone",
         "text": text,
         "timestamp": 1754870400,
     }
@@ -113,12 +135,77 @@ def test_strangers_are_ignored_without_a_turn(session, monkeypatch, wired):
     assert session.query(ChatMessage).count() == 0
 
 
-def test_group_lock_ignores_other_groups(session, monkeypatch, wired):
-    monkeypatch.setattr(config, "WHATSAPP_GROUP_JID", GROUP)
+def test_only_the_pinned_group_is_read(session, monkeypatch, wired):
     spool(wired, line("hello?", group="120363999999999999@g.us"))
     result = whatsapp_thread.poll_once(session)
     assert result["stored"] == 0
     assert session.query(ChatMessage).count() == 0
+
+
+def test_an_unpinned_group_is_never_read(session, monkeypatch, wired):
+    """On a person's own account, every group they did not pin is their life,
+    not the copilot's — even when household members are talking in it."""
+    monkeypatch.setattr(config, "WHATSAPP_GROUP_JID", "")
+    spool(wired, line("family reunion planning $$", sender=FORD))
+    result = whatsapp_thread.poll_once(session)
+    assert result["stored"] == 0
+    assert session.query(ChatMessage).count() == 0
+
+
+# --- over-the-shoulder (watch-only on a spouse's own account) ---
+
+def test_a_dm_between_the_spouses_is_read_without_any_pin(session, monkeypatch, wired):
+    monkeypatch.setattr(config, "WHATSAPP_ACCOUNT_OWNER", "Ford")
+    spool(
+        wired,
+        dm("paid the sitter 80 in cash", partner=SPOUSE, from_me=True),
+        dm("nice, I'll grab groceries", partner=SPOUSE, from_me=False),
+    )
+    monkeypatch.setattr(agent_chat, "run_turn", lambda s, h, channel="web": agent_chat.SILENCE)
+    result = whatsapp_thread.poll_once(session)
+    assert result["stored"] == 2
+    speakers = [m.speaker for m in session.query(ChatMessage).all()]
+    assert speakers == ["Ford", "Gaurav"]  # from_me became the account owner
+
+
+def test_the_owners_dms_with_anyone_else_are_none_of_our_business(session, monkeypatch, wired):
+    monkeypatch.setattr(config, "WHATSAPP_ACCOUNT_OWNER", "Ford")
+    spool(wired, dm("mom I sent you $200", partner="+19995551234", from_me=True))
+    result = whatsapp_thread.poll_once(session)
+    assert result["stored"] == 0 and result["ignored"] == 0
+    assert session.query(ChatMessage).count() == 0
+
+
+def test_own_seat_echo_is_dropped_not_logged_as_a_stranger(session, monkeypatch, wired):
+    # No ACCOUNT_OWNER: from_me is the copilot's own sent message coming back
+    msg = line("About $600 this month.", sender=FORD)
+    msg["from_me"] = True
+    spool(wired, msg)
+    result = whatsapp_thread.poll_once(session)
+    assert result == {"status": "ok", "stored": 0, "ignored": 0, "answered": 0}
+
+
+def test_watch_only_never_sends_but_keeps_the_note(session, monkeypatch, wired):
+    monkeypatch.setattr(config, "WHATSAPP_WATCH_ONLY", True)
+    monkeypatch.setattr(config, "WHATSAPP_ACCOUNT_OWNER", "Ford")
+    spool(wired, dm("copilot what's our net worth?", partner=SPOUSE, from_me=False))
+    monkeypatch.setattr(
+        agent_chat, "run_turn", lambda s, h, channel="web": "About $1.26M."
+    )
+    result = whatsapp_thread.poll_once(session)
+    assert result["answered"] == 0 and result["noted"] == 1
+    # the reply lives in the shared thread for the dashboard...
+    assert session.query(ChatMessage).filter_by(speaker="copilot").count() == 1
+    # ...but nothing was queued for WhatsApp: a borrowed account never speaks
+    outbox = wired / "outbox"
+    assert not outbox.exists() or not list(outbox.glob("*.json"))
+
+
+def test_watch_only_turns_are_told_their_words_are_not_delivered(session, monkeypatch):
+    monkeypatch.setattr(config, "WHATSAPP_WATCH_ONLY", True)
+    system = agent_chat.build_system(session, channel="whatsapp")
+    assert "OVER A SPOUSE'S SHOULDER" in system
+    assert "email_household" in system
 
 
 def test_the_cursor_never_rereads_a_message(session, monkeypatch, wired):

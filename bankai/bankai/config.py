@@ -135,9 +135,19 @@ NOTIFY_SMS = _env("NOTIFY_SMS", "true").lower() != "false"
 # WHATSAPP_DATA_DIR/outbox/.
 WHATSAPP_ENABLED = _env("WHATSAPP_ENABLED", "false").lower() in ("true", "1", "yes", "on")
 WHATSAPP_DATA_DIR = _env("WHATSAPP_DATA_DIR")  # e.g. /root/bankai-data/whatsapp
-# Optional: answer only this group (JID like 1203...@g.us, from status.json's
-# group list once the copilot has been added). Empty = any group it is in,
-# still limited to household senders.
+# Watch-only ("over the shoulder"): the bridge session is a HUMAN's own account
+# paired as a linked device, not the copilot's. The copilot listens and logs
+# expenses but its replies are never delivered to WhatsApp — a borrowed account
+# must never speak, that would be its human talking.
+WHATSAPP_WATCH_ONLY = _env("WHATSAPP_WATCH_ONLY", "false").lower() in ("true", "1", "yes", "on")
+# Whose account the bridge is paired to, by household name ("Ford"). Their own
+# messages arrive as from_me and are attributed to this name; without it,
+# from_me messages are treated as the copilot's own echo and dropped.
+WHATSAPP_ACCOUNT_OWNER = _env("WHATSAPP_ACCOUNT_OWNER")
+# GROUP messages are only read from this one pinned group (JID like
+# 1203...@g.us, from status.json's group list). Unpinned groups are ignored —
+# over a person's shoulder every other group is none of the copilot's business.
+# DMs need no pin: only chats between household members are ever read.
 WHATSAPP_GROUP_JID = _env("WHATSAPP_GROUP_JID")
 WHATSAPP_POLL_SECONDS = int(_env("WHATSAPP_POLL_SECONDS", "10") or 10)
 # WhatsApp increasingly shows group senders as privacy LIDs (12309...@lid)

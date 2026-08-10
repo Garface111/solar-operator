@@ -297,6 +297,15 @@ genuinely cannot tell which it is, one short question beats a wrong ledger.
 Replies are chat messages: short, plain text, no markdown headers or bullet walls. WhatsApp
 renders *bold* and _italics_; a couple of sentences nearly always suffices."""
 
+WHATSAPP_WATCH_ONLY_ADDENDUM = """
+
+You are watching this chat OVER A SPOUSE'S SHOULDER — the WhatsApp session belongs to one of
+them, not to you, so nothing you write here is ever delivered to the chat. Work accordingly:
+log expenses silently and reply {silence} almost always. If you notice something the household
+genuinely needs to hear — an error about to stand, a deadline, a number they got wrong — do not
+type it into the void: send it with email_household, or say it when they next talk to you on
+the dashboard. Anything you do reply lands only in the dashboard thread as a note."""
+
 
 def build_system(session: Session, channel: str) -> str:
     system = SYSTEM_PROMPT.format(today=date.today().isoformat())
@@ -324,6 +333,8 @@ def build_system(session: Session, channel: str) -> str:
         system += SMS_ADDENDUM
     if channel == "whatsapp":
         system += WHATSAPP_ADDENDUM.format(silence=SILENCE)
+        if config.WHATSAPP_WATCH_ONLY:
+            system += WHATSAPP_WATCH_ONLY_ADDENDUM.format(silence=SILENCE)
     if channel == "tending":
         system += TENDING_ADDENDUM.format(silence=SILENCE)
     return system

@@ -40,6 +40,10 @@ const OUTBOX_DIR = path.join(DATA_DIR, "outbox");
 const SENT_DIR = path.join(DATA_DIR, "sent");
 const STATUS_FILE = path.join(DATA_DIR, "status.json");
 const PAIRING_NUMBER = (process.env.WHATSAPP_PAIRING_NUMBER || "").replace(/\D/g, "");
+// Watch-only: the session is a HUMAN's own account (a linked device looking
+// over their shoulder). Sending anything would put words in their mouth, so the
+// outbox is never drained — no matter what lands in it.
+const WATCH_ONLY = /^(true|1|yes|on)$/i.test(process.env.WHATSAPP_WATCH_ONLY || "");
 
 for (const dir of [DATA_DIR, SESSION_DIR, OUTBOX_DIR, SENT_DIR]) {
   fs.mkdirSync(dir, { recursive: true });
@@ -49,6 +53,7 @@ const log = (...args) => console.log(new Date().toISOString(), ...args);
 
 const status = {
   connected: false,
+  watch_only: WATCH_ONLY,
   me: null,
   groups: {}, // jid -> subject, refreshed on connect and on group metadata events
   pairing_code: null,
@@ -101,16 +106,28 @@ async function refreshGroups() {
 }
 
 function recordInbound(msg) {
-  const jid = msg.key.remoteJid || "";
-  if (!jid.endsWith("@g.us")) return; // group seat only — no DMs in v1
-  if (msg.key.fromMe) return;
+  const chatJid = msg.key.remoteJid || "";
+  if (chatJid.endsWith("@broadcast")) return; // stories/status — never ours
+  const isGroup = chatJid.endsWith("@g.us");
+  const isDm = chatJid.endsWith("@s.whatsapp.net") || chatJid.endsWith("@lid");
+  if (!isGroup && !isDm) return;
   const text = extractText(msg.message);
   if (!text) return;
-  const senderJid = msg.key.participant || "";
+  // fromMe survives into the spool: over a person's shoulder their OWN messages
+  // are half the conversation. The Python side decides whether fromMe means
+  // "the account's human" (watch-only) or "our own echo, drop it" (own seat).
+  const fromMe = !!msg.key.fromMe;
+  const senderJid = isGroup
+    ? msg.key.participant || ""
+    : fromMe
+      ? (sock.user && sock.user.id) || ""
+      : chatJid;
   const line = {
     id: msg.key.id,
-    group_jid: jid,
-    group_subject: status.groups[jid] || "",
+    chat_jid: chatJid,
+    chat_kind: isGroup ? "group" : "dm",
+    chat_subject: isGroup ? status.groups[chatJid] || "" : "",
+    from_me: fromMe,
     sender_jid: senderJid,
     // participantPn appears on lid-addressed messages in newer server payloads;
     // it is the phone number behind the LID when the server provides it.
@@ -121,7 +138,10 @@ function recordInbound(msg) {
     timestamp: Number(msg.messageTimestamp) || Math.floor(Date.now() / 1000),
   };
   fs.appendFileSync(INBOUND_FILE, JSON.stringify(line) + "\n");
-  log(`inbound <- ${line.push_name || line.sender_jid} in ${line.group_subject || jid}: ${text.slice(0, 80)}`);
+  log(
+    `inbound <- ${fromMe ? "me" : line.push_name || line.sender_jid} in ` +
+    `${line.chat_subject || chatJid}: ${text.slice(0, 80)}`
+  );
 }
 
 async function drainOutbox() {
@@ -235,9 +255,10 @@ async function start() {
   sock.ev.on("groups.upsert", refreshGroups);
 
   if (!heartbeat) {
+    if (WATCH_ONLY) log("WATCH-ONLY mode: outbox will never be sent");
     heartbeat = setInterval(() => {
       writeStatus();
-      if (status.connected) drainOutbox();
+      if (status.connected && !WATCH_ONLY) drainOutbox();
     }, 2000);
   }
 }

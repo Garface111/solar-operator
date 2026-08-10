@@ -64,23 +64,38 @@ def household_lids() -> dict[str, str]:
     return out
 
 
-def identify_sender(message: dict) -> str | None:
-    """Map a spool line to a household member's name, or None if unknown.
-
-    Phone number first (stable, shared with the SMS channel), then privacy LID.
-    The push name is deliberately never consulted: it is whatever the sender
-    typed into their own profile.
-    """
-    number = sms.normalize_phone(message.get("sender_number") or "")
+def _household_name_for_jid(jid: str, number_hint: str = "") -> str | None:
+    """Household member behind a JID (phone form or privacy LID), or None."""
+    number = sms.normalize_phone(number_hint)
+    if not number and jid.endswith("@s.whatsapp.net"):
+        number = sms.normalize_phone("+" + jid.split("@")[0].split(":")[0])
     if number:
         for name, known in sms.household_phones().items():
             if known == number:
                 return name
-    sender_jid = str(message.get("sender_jid") or "")
-    if sender_jid.endswith("@lid"):
-        lid = sender_jid.split("@")[0].split(":")[0]
+    if jid.endswith("@lid"):
+        lid = jid.split("@")[0].split(":")[0]
         return household_lids().get(lid)
     return None
+
+
+def identify_sender(message: dict) -> str | None:
+    """Map a spool line to a household member's name, or None if unknown.
+
+    A from_me message was typed by whoever owns the paired account — that is
+    WHATSAPP_ACCOUNT_OWNER in watch-only mode, and nobody (our own echo) when
+    the copilot holds its own seat. For everyone else: phone number first
+    (stable, shared with the SMS channel), then privacy LID. The push name is
+    deliberately never consulted: it is whatever the sender typed into their
+    own profile.
+    """
+    if message.get("from_me"):
+        owner = config.WHATSAPP_ACCOUNT_OWNER.strip()
+        return owner or None
+    return _household_name_for_jid(
+        str(message.get("sender_jid") or ""),
+        message.get("sender_number") or "",
+    )
 
 
 def bridge_status() -> dict:
@@ -147,9 +162,34 @@ def _read_new_lines(base: Path) -> list[dict]:
 
 
 def _wanted(message: dict) -> bool:
-    if config.WHATSAPP_GROUP_JID:
-        return message.get("group_jid") == config.WHATSAPP_GROUP_JID
-    return True
+    """Is this chat the copilot's business at all?
+
+    Groups: only the one pinned via WHATSAPP_GROUP_JID — on a person's own
+    account every other group is their life, not the copilot's. Unpinned groups
+    leave a discovery line in the log so pinning is a copy-paste, not a hunt.
+
+    DMs: only conversations between household members — the DM partner must map
+    to a household name. That single rule keeps the account owner's messages to
+    anyone else (from_me in some other chat) out of the spool's reach.
+    """
+    chat_jid = str(message.get("chat_jid") or message.get("group_jid") or "")
+    kind = message.get("chat_kind") or ("group" if chat_jid.endswith("@g.us") else "dm")
+    if kind == "group":
+        if not config.WHATSAPP_GROUP_JID:
+            log.info(
+                "group %s (%r) seen but not pinned — set WHATSAPP_GROUP_JID=%s to watch it",
+                chat_jid, str(message.get("chat_subject") or "")[:40], chat_jid,
+            )
+            return False
+        return chat_jid == config.WHATSAPP_GROUP_JID
+    if message.get("from_me"):
+        # The owner talking — but to whom? Only a household partner counts.
+        partner = _household_name_for_jid(chat_jid)
+        owner = config.WHATSAPP_ACCOUNT_OWNER.strip()
+        return partner is not None and partner != owner
+    return _household_name_for_jid(
+        chat_jid, message.get("sender_number") or ""
+    ) is not None
 
 
 def send_group_message(group_jid: str, text: str) -> None:
@@ -174,10 +214,12 @@ def poll_once(session: Session) -> dict:
         return {"status": "skipped", "detail": "whatsapp not configured"}
     base = data_dir()
     stored, ignored = 0, 0
-    last_group = ""
+    last_chat = ""
     for message in _read_new_lines(base)[:MAX_BATCH]:
         if not _wanted(message):
             continue
+        if message.get("from_me") and not config.WHATSAPP_ACCOUNT_OWNER.strip():
+            continue  # our own seat's echo — not a stranger, just us
         sender = identify_sender(message)
         if sender is None:
             # Silence for strangers, but leave the operator a trail: an
@@ -196,7 +238,7 @@ def poll_once(session: Session) -> dict:
             ChatMessage(channel="whatsapp", role="user", speaker=sender, content=text)
         )
         stored += 1
-        last_group = message.get("group_jid") or last_group
+        last_chat = message.get("chat_jid") or message.get("group_jid") or last_chat
     if not stored:
         return {"status": "ok", "stored": 0, "ignored": ignored, "answered": 0}
 
@@ -216,5 +258,12 @@ def poll_once(session: Session) -> dict:
         ChatMessage(channel="whatsapp", role="assistant", speaker="copilot", content=reply)
     )
     session.flush()
-    send_group_message(last_group, reply)
+    if config.WHATSAPP_WATCH_ONLY:
+        # A borrowed account never speaks. The reply still lives in the shared
+        # thread (dashboard), and anything urgent goes out via email_household —
+        # the addendum tells the turn so, this is just the enforcement.
+        log.info("watch-only: reply kept in the thread, not sent to WhatsApp")
+        return {"status": "ok", "stored": stored, "ignored": ignored,
+                "answered": 0, "noted": 1}
+    send_group_message(last_chat, reply)
     return {"status": "ok", "stored": stored, "ignored": ignored, "answered": 1}
