@@ -740,6 +740,45 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "cancel_subscription",
+        "description": (
+            "EXECUTE a subscription cancellation — your one standing power to "
+            "act on the outside world without the dashboard gate, granted by "
+            "Ford on 2026-08-10. Hard boundaries, enforced in code: it runs "
+            "ONLY on a household member's explicit instruction (instructed_by "
+            "= who told you, in this conversation — your own initiative stays "
+            "propose_action until a spouse says yes), and guarded categories "
+            "(insurance, health, utilities, phone/internet, debt) are refused "
+            "here and must go through the dashboard. What it does: sends a "
+            "fixed-template cancellation notice to the merchant's support "
+            "address — as the household's own email when possible, so replies "
+            "land where you can read them — records the action in the audit "
+            "trail, and plants a watchpoint ~35 days out to verify the "
+            "charges actually stopped (charged again = tell the household + "
+            "draft the FCBA dispute). Before calling: consult the "
+            "subscription-cancellation skill for this merchant's route; if "
+            "the merchant only cancels by portal, phone, or letter (Planet "
+            "Fitness is letter/in-person), do NOT pretend email works — say "
+            "so, produce the artifact (print_page a signed-ready letter), and "
+            "still plant the verification by asking for a watchpoint. Find "
+            "the right support email before calling; a wrong recipient is a "
+            "no-op you would falsely trust."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "merchant": {"type": "string", "description": "As it appears in transactions, e.g. 'PLANET FITNESS'"},
+                "service_name": {"type": "string", "description": "Human name, e.g. 'Planet Fitness membership'"},
+                "support_email": {"type": "string", "description": "The merchant's support/cancellation address"},
+                "instructed_by": {"type": "string", "description": "Ford | Gaurav — who told you to cancel"},
+                "account_name": {"type": "string", "description": "Whose account it is, e.g. 'Ford Genereaux'"},
+                "account_identifier": {"type": "string", "description": "Member/account number when known"},
+            },
+            "required": ["merchant", "service_name", "support_email", "instructed_by", "account_name"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "record_life_fact",
         "description": (
             "Add one inference to your LIFE MODEL of this household — the "
@@ -1441,6 +1480,33 @@ def _dispatch(session: Session, name: str, args: dict):
             "amount": signed,
             "description": description,
         }
+    if name == "cancel_subscription":
+        from .. import cancellations
+
+        merchant = (args.get("merchant") or "").strip()
+        if not merchant:
+            return {"error": "merchant is required"}
+        reason = cancellations.guard_reason(session, merchant)
+        if reason:
+            return {
+                "refused": True,
+                "reason": reason,
+                "next_step": (
+                    "This category is too consequential for the standing "
+                    "authorization. Use propose_action so the household can "
+                    "approve it in the dashboard, and explain the stakes "
+                    "(coverage gap, service loss, credit impact) when you do."
+                ),
+            }
+        return cancellations.execute(
+            session,
+            merchant=merchant,
+            service_name=(args.get("service_name") or merchant).strip(),
+            support_email=(args.get("support_email") or "").strip(),
+            instructed_by=(args.get("instructed_by") or "").strip(),
+            account_name=(args.get("account_name") or "").strip(),
+            account_identifier=(args.get("account_identifier") or "").strip(),
+        )
     if name == "record_life_fact":
         from .. import lifemodel
 

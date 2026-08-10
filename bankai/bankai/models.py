@@ -256,10 +256,12 @@ class Valuation(Base):
 
 
 class AgentAction(Base):
-    """Side-effectful actions the copilot proposes (cancel a subscription by
-    emailing support, etc.). NOTHING here executes without a human clicking
-    Approve & run in the portal; every outcome is recorded, so this table is the
-    audit trail of the copilot's reach into the world."""
+    """Side-effectful actions of the copilot — the audit trail of its reach
+    into the world. Default rule: nothing executes without a human clicking
+    Approve & run in the portal. ONE standing exception, granted by Ford on
+    2026-08-10: subscription cancellations a spouse explicitly instructed
+    execute directly (bankai/cancellations.py enforces the boundary) and are
+    recorded here as kind='subscription_cancellation', status='executed'."""
 
     __tablename__ = "agent_actions"
 
