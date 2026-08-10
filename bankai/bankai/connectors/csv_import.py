@@ -4,6 +4,11 @@ Handles the common bank-export shapes:
 - date / description / amount            (signed amount)
 - date / description / debit / credit    (separate columns)
 Header names are matched loosely, dates in several formats, amounts with $ , ( ).
+
+Apple Card (Wallet) exports are the one shape whose signs arrive inverted:
+Apple writes charges POSITIVE and payments/refunds NEGATIVE — the card's
+perspective, not the cardholder's. Everything here stores money-out as
+negative, so keeping Apple's raw signs turns every coffee into income.
 """
 from __future__ import annotations
 
@@ -26,6 +31,15 @@ _DEBIT_KEYS = ("debit", "withdrawal", "withdrawals", "money out")
 _CREDIT_KEYS = ("credit", "deposit", "deposits", "money in")
 
 _AMOUNT_CLEAN = re.compile(r"[$,\s]")
+
+#: Wallet always exports this exact header set (plus Description/Category/Type/
+#: Purchased By). Requiring the trio keeps the signature tight enough that no
+#: bank CSV trips it — "Clearing Date" alongside "Amount (USD)" is Apple's alone.
+_APPLE_CARD_COLUMNS = frozenset({"transaction date", "clearing date", "amount (usd)"})
+
+
+def is_apple_card_export(fieldnames: list[str]) -> bool:
+    return _APPLE_CARD_COLUMNS <= {f.lower().strip() for f in fieldnames}
 
 
 def parse_amount(raw: str) -> float | None:
@@ -79,6 +93,7 @@ def parse_csv(text: str) -> list[TxnIn]:
             f"Could not detect columns in header {reader.fieldnames}; "
             "need date + description + amount (or debit/credit)"
         )
+    apple = is_apple_card_export(reader.fieldnames)
     txns: list[TxnIn] = []
     for row in reader:
         posted = parse_date(row.get(date_col) or "")
@@ -96,6 +111,8 @@ def parse_csv(text: str) -> list[TxnIn]:
                 amount = abs(credit)
         if amount is None:
             continue
+        if apple and amount != 0:
+            amount = -amount
         txns.append(TxnIn(posted=posted, amount=amount, description=(row.get(desc_col) or "").strip()))
     return txns
 
