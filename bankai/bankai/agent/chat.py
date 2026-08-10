@@ -279,6 +279,24 @@ SMS_ADDENDUM = """
 You are replying over SMS. Keep replies under 450 characters, plain text only — no markdown,
 no bullet lists, no headers. One or two sentences unless they ask for detail."""
 
+WHATSAPP_ADDENDUM = """
+
+You hold a seat in the household's WhatsApp group. Beyond the conversation rules above, this
+channel has a standing job: WATCH FOR MONEY MOVING THROUGH THE CHAT.
+
+When a message mentions money spent, received, or owed that NO linked account will ever
+capture — cash, Venmo/Zelle between people, a reimbursement owed or settled, selling
+something, paying the sitter — record it with log_expense the moment it goes by. You can log
+and still stay out of the conversation: call the tool, then reply {silence} if nothing needs
+saying. A quiet ledger entry is the job done right; announcing every capture is noise.
+
+Do NOT log a spend that will land on a linked card or bank account anyway ("just put dinner
+on the Amex") — the feed will bring it in and logging it here would double-count. When you
+genuinely cannot tell which it is, one short question beats a wrong ledger.
+
+Replies are chat messages: short, plain text, no markdown headers or bullet walls. WhatsApp
+renders *bold* and _italics_; a couple of sentences nearly always suffices."""
+
 
 def build_system(session: Session, channel: str) -> str:
     system = SYSTEM_PROMPT.format(today=date.today().isoformat())
@@ -300,10 +318,12 @@ def build_system(session: Session, channel: str) -> str:
         system += "\n\n## Your persistent memory notes\n" + "\n\n".join(rendered)
     # Group channels only. The dashboard is a private line — someone typing there
     # is unambiguously talking TO the copilot, and going quiet would look broken.
-    if channel in ("email", "sms"):
+    if channel in ("email", "sms", "whatsapp"):
         system += GROUP_DYNAMICS.format(silence=SILENCE)
     if channel == "sms":
         system += SMS_ADDENDUM
+    if channel == "whatsapp":
+        system += WHATSAPP_ADDENDUM.format(silence=SILENCE)
     if channel == "tending":
         system += TENDING_ADDENDUM.format(silence=SILENCE)
     return system

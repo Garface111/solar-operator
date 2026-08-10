@@ -709,6 +709,34 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "log_expense",
+        "description": (
+            "Record one cash / off-ledger transaction NO linked account will ever "
+            "see — cash out of a wallet, Venmo or Zelle between people, a "
+            "reimbursement, selling something, paying the sitter. This is how "
+            "money mentioned in conversation becomes a real ledger row: it lands "
+            "in the manual 'Cash & untracked' account and counts in spending "
+            "summaries, anomalies, and the weekly report. Money SPENT is a "
+            "positive amount here and is stored negative; set received=true for "
+            "money that came IN. NEVER log a spend that will appear on a linked "
+            "card or bank feed — the sync will bring it in and this would count "
+            "it twice. Re-logging the same expense same-day is deduplicated."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "amount": {"type": "number", "description": "Dollars, positive (12.50 for $12.50 spent)"},
+                "description": {"type": "string", "description": "What it was — 'Dog sitter, weekend' beats 'payment'"},
+                "spender": {"type": "string", "description": "Ford | Gaurav | joint — who the money moved for"},
+                "date": {"type": "string", "description": "ISO date it happened; omit for today"},
+                "category": {"type": "string", "description": "Override the auto-category when you know better"},
+                "received": {"type": "boolean", "description": "true = money IN (a reimbursement arriving, cash from a sale)"},
+            },
+            "required": ["amount", "description"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "update_account_balance",
         "description": (
             "Correct the balance of a MANUALLY tracked account — the mortgage, a "
@@ -1257,6 +1285,54 @@ def _dispatch(session: Session, name: str, args: dict):
             "old_balance": old,
             "balance": account.balance,
             "net_worth": net_worth(session)["total"],
+        }
+    if name == "log_expense":
+        from ..ingest import TxnIn, ingest_transactions
+
+        try:
+            amount = abs(float(args["amount"]))
+        except (TypeError, ValueError):
+            return {"error": "amount must be a number"}
+        if amount == 0:
+            return {"error": "amount must be non-zero"}
+        description = (args.get("description") or "").strip()
+        if not description:
+            return {"error": "description is required"}
+        spender = (args.get("spender") or "").strip()
+        if spender:
+            description = f"{description} ({spender})"
+        raw_date = (args.get("date") or "").strip()
+        try:
+            posted = date.fromisoformat(raw_date) if raw_date else date.today()
+        except ValueError:
+            return {"error": f"date {raw_date!r} is not ISO (YYYY-MM-DD)"}
+        signed = amount if args.get("received") else -amount
+
+        account = session.execute(
+            select(Account).where(
+                Account.source == "manual", Account.name == "Cash & untracked"
+            )
+        ).scalar_one_or_none()
+        if account is None:
+            # kind "other": a spending log, not an asset — no balance, so it
+            # feeds spending summaries without inventing a net-worth figure.
+            account = upsert_account(
+                session, source="manual", name="Cash & untracked", kind="other"
+            )
+        result = ingest_transactions(
+            session, account, [TxnIn(posted=posted, amount=signed, description=description)]
+        )
+        if result.added and args.get("category"):
+            txn = session.get(Transaction, result.ids[0])
+            txn.category = str(args["category"]).strip().lower()
+        session.flush()
+        return {
+            "logged": bool(result.added),
+            "duplicate": result.skipped > 0,
+            "account": account.name,
+            "posted": posted.isoformat(),
+            "amount": signed,
+            "description": description,
         }
     if name == "update_account_balance":
         account = session.get(Account, args["account_id"])

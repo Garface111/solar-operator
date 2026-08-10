@@ -205,6 +205,31 @@ async def _email_chat_loop() -> None:
         await asyncio.sleep(config.EMAIL_POLL_SECONDS)
 
 
+def run_whatsapp_poll_once() -> dict:
+    from .messaging import whatsapp_thread
+
+    with session_scope() as session:
+        return whatsapp_thread.poll_once(session)
+
+
+async def _whatsapp_loop() -> None:
+    """Household WhatsApp group -> the shared thread -> mostly listening.
+
+    Polled tighter than email: chat has chat expectations, and the expensive
+    part (an agent turn) only runs when household messages actually arrived."""
+    from .messaging import whatsapp_thread
+
+    while True:
+        if whatsapp_thread.configured():
+            try:
+                result = await asyncio.to_thread(run_whatsapp_poll_once)
+                if result.get("stored"):
+                    log.info("whatsapp chat: %s", result)
+            except Exception:
+                log.exception("whatsapp chat loop error")
+        await asyncio.sleep(config.WHATSAPP_POLL_SECONDS)
+
+
 def run_email_harvest_once() -> dict:
     with session_scope() as session:
         return email_harvest.harvest(session)
@@ -576,6 +601,7 @@ def start_background_tasks() -> list[asyncio.Task]:
         asyncio.create_task(_realestate_loop(), name="bankai-realestate"),
         asyncio.create_task(_email_loop(), name="bankai-email"),
         asyncio.create_task(_email_chat_loop(), name="bankai-email-chat"),
+        asyncio.create_task(_whatsapp_loop(), name="bankai-whatsapp-chat"),
         asyncio.create_task(_monthly_review_loop(), name="bankai-monthly-review"),
         asyncio.create_task(_tending_loop(), name="bankai-tending"),
         asyncio.create_task(_checkin_loop(), name="bankai-checkin"),

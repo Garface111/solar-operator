@@ -128,6 +128,24 @@ HOUSEHOLD_PHONES = _env("HOUSEHOLD_PHONES")
 SMS_PUBLIC_URL = _env("SMS_PUBLIC_URL")
 NOTIFY_SMS = _env("NOTIFY_SMS", "true").lower() != "false"
 
+# --- WhatsApp group thread (Baileys bridge sidecar, whatsapp-bridge/) ---
+# The bridge is a separate Node process holding the copilot's OWN WhatsApp
+# session (never a person's — a ban would take their number with it). It spools
+# group messages to WHATSAPP_DATA_DIR/inbound.jsonl; replies go out through
+# WHATSAPP_DATA_DIR/outbox/.
+WHATSAPP_ENABLED = _env("WHATSAPP_ENABLED", "false").lower() in ("true", "1", "yes", "on")
+WHATSAPP_DATA_DIR = _env("WHATSAPP_DATA_DIR")  # e.g. /root/bankai-data/whatsapp
+# Optional: answer only this group (JID like 1203...@g.us, from status.json's
+# group list once the copilot has been added). Empty = any group it is in,
+# still limited to household senders.
+WHATSAPP_GROUP_JID = _env("WHATSAPP_GROUP_JID")
+WHATSAPP_POLL_SECONDS = int(_env("WHATSAPP_POLL_SECONDS", "10") or 10)
+# WhatsApp increasingly shows group senders as privacy LIDs (12309...@lid)
+# instead of phone JIDs, so HOUSEHOLD_PHONES alone cannot always identify a
+# spouse. "Ford:123098057695369,Gaurav:456..." — LIDs appear in the copilot's
+# log the first time each person writes.
+WHATSAPP_HOUSEHOLD_LIDS = _env("WHATSAPP_HOUSEHOLD_LIDS")
+
 SYNC_INTERVAL_MINUTES = int(_env("SYNC_INTERVAL_MINUTES", "360") or 360)
 # Wake the copilot for a self-directed look whenever a sync brings new
 # transactions in from the banks. Silence is the expected outcome; it speaks
