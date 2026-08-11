@@ -63,12 +63,12 @@ and `.env` live *inside it* (`config.BASE_DIR` is the directory containing
 ```bash
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
-./venv/bin/python -m pytest tests -q     # expect: 450 passed
+./venv/bin/python -m pytest tests -q     # expect: 473 passed
 ```
 
 **Run the tests.** They are pure logic — no network, no API key — and they are
 your only proof the tree arrived intact before you wire in real credentials.
-If the count is lower than 450 you have an older copy of the branch; re-pull.
+If the count is lower than 473 you have an older copy of the branch; re-pull.
 A `ModuleNotFoundError: fpdf` means the venv predates the `fpdf2` requirement —
 re-run the `pip install -r` above rather than hunting for a bug.
 
@@ -498,3 +498,42 @@ fixes are either:
 Which one is Ford's call, not yours. Until he decides, deploy with the power
 available if he wants it, and tell him plainly that the guard is name-shaped
 rather than instruction-shaped.
+
+---
+
+## 11. Self-improvement — the copilot reads its own code
+
+The copilot can now read its own source and write patch **proposals**. The
+self-modification lock still holds and you should confirm it yourself:
+`test_the_agent_has_no_tool_that_writes_source` passes, and there is no tool that
+writes source to disk or deploys anything. The loop is read → propose → evaluate
+in a jail → **a human merges**. Verified in code, not taken on faith:
+
+- `read_source` / `list_source` are path-guarded to `bankai/` and `tests/` only,
+  with `.env`, `*.db` and `*.sqlite` refused outright.
+- `propose_patch` stores full file contents as a `CodeProposal` row and diffs
+  them with `difflib` against the deployed tree. No git, no execution, no write.
+- Agent-authored tests are treated as hostile code, because they are: they run
+  only inside a sandbox that cuts the network (`unshare --net`) and drops to an
+  unprivileged user (`setpriv --reuid`). **If no sandbox is configured,
+  evaluation is refused rather than faked.**
+
+**If Ford wants evaluation enabled**, run `scripts/setup-selfimprove-sandbox.sh`
+as root and set the `SELFIMPROVE_*` block in `.env`. Then **prove the jail before
+trusting it** — `selfimprove_sandbox.verify_sandbox()` actively probes it, and
+both probes must fail closed: a network connect must not succeed, and reading
+`/opt/bankai/.env` from inside must not succeed. Do not report evaluation as
+working on the strength of the script having run.
+
+Leaving `SELFIMPROVE_EVAL_ENABLED=false` (or simply not configuring a sandbox) is
+a perfectly good deployment. Reading and proposing still work; only the automatic
+test-run is off.
+
+**One soft edge worth knowing.** `safe_repo_path()` validates the path *string* —
+it rejects absolute paths, `..`, `.env` and database files — but `read_source`
+does not resolve the final path to re-check containment. A symlink placed inside
+`bankai/` pointing at something outside it would pass the guard and be read. The
+copilot cannot create one (it has no write tool), so this is not exploitable by
+the model today. Keep it that way: **do not put symlinks in the deployed tree**,
+and if you ever add a tool that writes files, resolve the path and verify it is
+inside the source root before this becomes real.
