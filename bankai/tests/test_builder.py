@@ -255,3 +255,52 @@ def test_the_deploy_reports_its_own_outcome(action, monkeypatch, tmp_path):
     assert "record " in written                      # writes its own outcome
     assert "api/health" in written                   # and verifies before claiming success
     assert "outcome='claimed'" in written            # claim-safe restart discipline
+
+
+def _fake_pytest_run(rc, out):
+    class P:
+        returncode = rc
+        stdout = out
+        stderr = ""
+    return P()
+
+
+def test_a_red_suite_names_the_failing_tests(monkeypatch, tmp_path):
+    """'2 failed' is not a report. The first blocked build said exactly that and
+    the failures never reproduced — nobody could act on it."""
+    monkeypatch.setattr(builder, "TEST_LOG", tmp_path / "t.log")
+    out = ("FAILED tests/test_rules.py::test_digest - assert\n"
+           "FAILED tests/test_sms.py::test_reply - assert\n"
+           "2 failed, 530 passed in 5.98s")
+    monkeypatch.setattr(builder.subprocess, "run",
+                        lambda *a, **k: _fake_pytest_run(1, out))
+    green, note = builder.run_tests("/tmp/wt")
+    assert green is False
+    assert "tests/test_rules.py::test_digest" in note
+    assert "tests/test_sms.py::test_reply" in note
+    assert (tmp_path / "t.log").exists()
+
+
+def test_a_flake_is_called_a_flake_and_still_refused(monkeypatch, tmp_path):
+    monkeypatch.setattr(builder, "TEST_LOG", tmp_path / "t.log")
+    runs = iter([
+        _fake_pytest_run(1, "FAILED tests/test_rules.py::test_digest - assert\n"
+                            "2 failed, 530 passed in 5.98s"),
+        _fake_pytest_run(0, "532 passed in 5.21s"),
+    ])
+    monkeypatch.setattr(builder.subprocess, "run", lambda *a, **k: next(runs))
+    green, note = builder.run_tests("/tmp/wt")
+    assert green is False, "a flaky suite must not clear a change to money software"
+    assert "FLAKY" in note
+    assert "tests/test_rules.py::test_digest" in note
+
+
+def test_a_real_break_reports_what_failed_both_times(monkeypatch, tmp_path):
+    monkeypatch.setattr(builder, "TEST_LOG", tmp_path / "t.log")
+    red = _fake_pytest_run(1, "FAILED tests/test_models.py::test_default - assert\n"
+                              "1 failed, 531 passed in 5.5s")
+    monkeypatch.setattr(builder.subprocess, "run", lambda *a, **k: red)
+    green, note = builder.run_tests("/tmp/wt")
+    assert green is False
+    assert "failing consistently" in note
+    assert "tests/test_models.py::test_default" in note

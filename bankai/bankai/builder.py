@@ -184,8 +184,10 @@ def out_of_scope(paths: list[str]) -> list[str]:
     return [p for p in paths if not p.startswith(_ALLOWED_REPO_PREFIXES)]
 
 
-def run_tests(worktree: str) -> tuple[bool, str]:
-    """Re-run the suite ourselves. The agent's claim is not evidence."""
+TEST_LOG = Path("/root/bankai-data/builder-tests.log")
+
+
+def _pytest(worktree: str) -> tuple[bool, str, list[str]]:
     proc = subprocess.run(
         shlex.split(config.BUILDER_TEST_CMD),
         cwd=str(Path(worktree) / "bankai"),
@@ -193,9 +195,46 @@ def run_tests(worktree: str) -> tuple[bool, str]:
         text=True,
         timeout=config.BUILDER_TEST_TIMEOUT_SECONDS,
     )
-    tail = ((proc.stdout or "") + (proc.stderr or "")).strip().splitlines()
-    summary = tail[-1] if tail else "no output"
-    return proc.returncode == 0, summary[:300]
+    output = (proc.stdout or "") + (proc.stderr or "")
+    lines = output.strip().splitlines()
+    summary = lines[-1][:200] if lines else "no output"
+    # Strip the prefix BEFORE splitting — the other order yields "FAILED" for
+    # every entry, which is how the first version reported nothing useful.
+    failed = [ln.removeprefix("FAILED ").split(" ")[0]
+              for ln in lines if ln.startswith("FAILED")]
+    try:
+        TEST_LOG.parent.mkdir(parents=True, exist_ok=True)
+        TEST_LOG.write_text(output[-200_000:])
+    except Exception:
+        pass
+    return proc.returncode == 0, summary, failed
+
+
+def run_tests(worktree: str) -> tuple[bool, str]:
+    """Re-run the suite ourselves — the agent's claim is not evidence.
+
+    On red, run it once more. Not to get a second chance at shipping (a red
+    second run and a flaky first are both refusals), but because "which tests
+    failed, and did they fail twice?" is the difference between a report a human
+    can act on and a number they cannot. The first blocked build reported only
+    '2 failed' and the failures never reproduced — undiagnosable, and that was
+    this function's fault."""
+    green, summary, failed = _pytest(worktree)
+    if green:
+        return True, summary
+    names = ", ".join(failed[:4]) or "see /root/bankai-data/builder-tests.log"
+    log.warning("builder: suite red (%s) — %s", summary, names)
+
+    green2, summary2, failed2 = _pytest(worktree)
+    if green2:
+        return False, (
+            f"FLAKY — red then green on identical code. First run: {summary} "
+            f"({names}). Not deploying: a suite that disagrees with itself cannot "
+            "clear a change to money software. Fix the flake, then re-approve."
+        )
+    both = sorted(set(failed) & set(failed2))
+    consistent = ", ".join(both[:4]) if both else names
+    return False, f"{summary2} — failing consistently: {consistent}"
 
 
 #: Written at deploy time, outside the deployed tree — the script has to
