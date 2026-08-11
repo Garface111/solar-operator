@@ -304,3 +304,37 @@ def test_a_real_break_reports_what_failed_both_times(monkeypatch, tmp_path):
     assert green is False
     assert "failing consistently" in note
     assert "tests/test_models.py::test_default" in note
+
+
+def test_build_subprocesses_never_inherit_household_secrets(monkeypatch):
+    """config.load_dotenv puts every live secret in this process's environment.
+    Two builds were blocked because the verification suite inherited them and
+    ran against the household's real mailbox — and an agent writing code should
+    not hold their API keys either."""
+    monkeypatch.setenv("RESEND_API_KEY", "re_live_secret")
+    monkeypatch.setenv("SIMPLEFIN_ACCESS_URL", "https://user:pass@bridge")
+    monkeypatch.setenv("APP_PASSWORD", "maple-ledger")
+    monkeypatch.setenv("HOME", "/root")
+    env = builder._clean_env()
+    assert "RESEND_API_KEY" not in env
+    assert "SIMPLEFIN_ACCESS_URL" not in env
+    assert "APP_PASSWORD" not in env
+    assert env["HOME"] == "/root", "the Claude CLI finds its own auth via HOME"
+    assert "PATH" in env
+
+
+def test_the_test_runner_uses_the_scrubbed_environment(monkeypatch, tmp_path):
+    monkeypatch.setattr(builder, "TEST_LOG", tmp_path / "t.log")
+    monkeypatch.setenv("RESEND_API_KEY", "re_live_secret")
+    seen = {}
+
+    class P:
+        returncode = 0
+        stdout = "543 passed in 5.5s"
+        stderr = ""
+
+    monkeypatch.setattr(builder.subprocess, "run",
+                        lambda *a, **k: seen.update(k) or P())
+    builder.run_tests("/tmp/wt")
+    assert "env" in seen, "pytest must run with an explicit environment"
+    assert "RESEND_API_KEY" not in seen["env"]

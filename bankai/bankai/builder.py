@@ -36,6 +36,7 @@ last line, which is why every build reports what changed.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shlex
 import subprocess
@@ -186,6 +187,29 @@ def out_of_scope(paths: list[str]) -> list[str]:
 
 TEST_LOG = Path("/root/bankai-data/builder-tests.log")
 
+#: The only variables a build subprocess inherits. Everything else is dropped.
+_ENV_KEEP = ("PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "USER", "SHELL")
+
+
+def _clean_env(**extra: str) -> dict:
+    """Never hand the household's live credentials to a build subprocess.
+
+    `bankai.config` calls load_dotenv at import, so this process holds every
+    secret in /opt/bankai/.env in its own environment — and subprocesses
+    inherit it. That did two bad things at once. It broke the gate: tests
+    written against an unconfigured mailbox ran against the household's real
+    Resend key and failed, blocking two builds for reasons that reproduced
+    nowhere else (the same leak could equally have hidden a real failure). And
+    it put live API keys in the environment of an agent writing code.
+
+    Subprocesses get an explicit, minimal environment instead. HOME stays
+    because the Claude CLI reads its own credentials from there.
+    """
+    env = {k: v for k, v in os.environ.items() if k in _ENV_KEEP}
+    env.setdefault("PYTHONDONTWRITEBYTECODE", "1")
+    env.update(extra)
+    return env
+
 
 def _pytest(worktree: str) -> tuple[bool, str, list[str]]:
     proc = subprocess.run(
@@ -194,6 +218,7 @@ def _pytest(worktree: str) -> tuple[bool, str, list[str]]:
         capture_output=True,
         text=True,
         timeout=config.BUILDER_TEST_TIMEOUT_SECONDS,
+        env=_clean_env(),
     )
     output = (proc.stdout or "") + (proc.stderr or "")
     lines = output.strip().splitlines()
@@ -382,7 +407,7 @@ def run_build(action_id: str) -> dict:
         try:
             proc = subprocess.run(
                 cmd, cwd=worktree, capture_output=True, text=True,
-                timeout=config.BUILDER_TIMEOUT_SECONDS,
+                timeout=config.BUILDER_TIMEOUT_SECONDS, env=_clean_env(),
             )
         except subprocess.TimeoutExpired:
             return _finish(action_id, "failed", (
