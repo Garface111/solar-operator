@@ -106,12 +106,14 @@ def sync(lookback_days: int = 90) -> dict:
         "accounts": sum(r.get("accounts", 0) for r in results),
         "added": sum(r.get("added", 0) for r in results),
         "skipped": sum(r.get("skipped", 0) for r in results),
+        "pending_matched": sum(r.get("pending_matched", 0) for r in results),
         "failures": [r.get("detail") for r in failed],
     }
 
 
 def _sync_one(access_url: str, lookback_days: int = 90) -> dict:
     added = skipped = accounts_seen = 0
+    added_ids: list[str] = []
     try:
         data = fetch(access_url, lookback_days)
         with session_scope() as session:
@@ -149,14 +151,23 @@ def _sync_one(access_url: str, lookback_days: int = 90) -> dict:
                 result = ingest_transactions(session, account, txns)
                 added += result.added
                 skipped += result.skipped
+                added_ids.extend(result.ids)
+            # Fresh feed data is ground truth: match any chat-mentioned spend
+            # that has now actually posted on a bank card, so it stops being
+            # provisional. Runs on the ids just added, so nothing is matched twice.
+            matched = 0
+            if added_ids:
+                from .. import pending
+                matched = len(pending.reconcile(session, added_ids))
             session.add(
                 SyncLog(
                     source="simplefin",
                     status="ok",
-                    detail=f"accounts={accounts_seen} added={added} skipped={skipped}",
+                    detail=f"accounts={accounts_seen} added={added} skipped={skipped} pending_matched={matched}",
                 )
             )
-        return {"status": "ok", "accounts": accounts_seen, "added": added, "skipped": skipped}
+        return {"status": "ok", "accounts": accounts_seen, "added": added,
+                "skipped": skipped, "pending_matched": matched}
     except Exception as exc:  # log the failure, never crash the scheduler
         detail = _redact(str(exc))[:2000]
         with session_scope() as session:

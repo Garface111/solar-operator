@@ -18,6 +18,7 @@ matches at most one transaction and vice versa, oldest mention first.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date, datetime, timedelta
 
 from sqlalchemy import select
@@ -40,6 +41,21 @@ MATCH_DAYS_AFTER = 60
 #: Open this long with no statement showing it: worth saying out loud — the
 #: export is overdue, or the charge never existed.
 STALE_DAYS = 45
+
+
+def _desc_tokens(text: str) -> set[str]:
+    return set(re.findall(r"[a-z0-9]{3,}", (text or "").lower()))
+
+
+def _is_same_spend(a_amount: float, a_desc: str, b_amount: float, b_desc: str) -> bool:
+    """Dedup ONLY a genuine re-mention: the SAME amount to the cent AND a shared
+    word. The old guard used a $1-floor tolerance, which wrongly rejected two
+    distinct small spends ($8 meds as a repeat of $7 hose). Logging every real
+    expense matters far more than collapsing the rare true double-mention — a
+    duplicate is cleaned up at reconciliation; a rejected spend is just lost."""
+    if round(abs(a_amount - b_amount), 2) > 0.005:
+        return False
+    return bool(_desc_tokens(a_desc) & _desc_tokens(b_desc))
 
 
 KINDS = ("itemized", "estimate")
@@ -69,16 +85,16 @@ def note(
     kind = kind if kind in KINDS else "itemized"
     mentioned_on = mentioned_on or date.today()
     if kind == "itemized":
-        window_start = mentioned_on - timedelta(days=7)
+        window_start = mentioned_on - timedelta(days=3)
         for existing in session.execute(
             select(PendingExpense).where(
                 PendingExpense.status == "open",
                 PendingExpense.kind == "itemized",
                 PendingExpense.mentioned_on >= window_start,
-                PendingExpense.mentioned_on <= mentioned_on + timedelta(days=7),
+                PendingExpense.mentioned_on <= mentioned_on + timedelta(days=3),
             )
         ).scalars():
-            if abs(existing.amount - amount) <= amount_tolerance(amount):
+            if _is_same_spend(existing.amount, existing.description, amount, description):
                 return existing, False
     row = PendingExpense(
         mentioned_on=mentioned_on,

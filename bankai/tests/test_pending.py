@@ -52,6 +52,30 @@ def test_a_mention_is_stored_negative_and_deduped(session):
     assert session.query(PendingExpense).count() == 1
 
 
+def test_distinct_small_expenses_are_never_rejected_as_duplicates(session):
+    """The bug Ford hit: a $1-floor tolerance rejected $8 meds as a repeat of
+    $7 hose and $8.81 Zyns as a repeat of $9.41 breakfast. Every distinct spend
+    must log — logging beats collapsing a rare true double-mention."""
+    d = date(2026, 8, 11)
+    r1, c1 = pending.note(session, amount=7, description="sprinkler hose", mentioned_on=d)
+    r2, c2 = pending.note(session, amount=8, description="medication", mentioned_on=d)
+    r3, c3 = pending.note(session, amount=9.41, description="breakfast", mentioned_on=d)
+    r4, c4 = pending.note(session, amount=8.81, description="Zyns", mentioned_on=d)
+    assert c1 and c2 and c3 and c4          # all four logged
+    assert len({r1.id, r2.id, r3.id, r4.id}) == 4
+    assert session.query(PendingExpense).count() == 4
+
+
+def test_a_true_re_mention_still_collapses(session):
+    d = date(2026, 8, 11)
+    first, created = pending.note(session, amount=840, description="new tires", mentioned_on=d)
+    again, created2 = pending.note(session, amount=840, description="the tires", mentioned_on=d)
+    assert created and not created2 and again.id == first.id  # same amount + shared word
+    # same amount but unrelated words is treated as a separate spend, not a dup
+    other, created3 = pending.note(session, amount=840, description="couch delivery", mentioned_on=d)
+    assert created3 and other.id != first.id
+
+
 def test_estimates_are_a_first_class_kind_and_not_deduped(session):
     est, created = pending.note(session, amount=500, description="house setup",
                                 account_hint="Apple Card", kind="estimate")
