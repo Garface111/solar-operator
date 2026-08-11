@@ -120,6 +120,38 @@ class CategoryRule(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class Initiative(Base):
+    """A standing PROJECT the copilot is carrying for the household — the spine
+    of its ability to complete multi-step work across days instead of one turn
+    at a time. The reality generator surfaces things worth owning (the debt
+    triage desk, the surrogacy finance file, syncing the planning sheet); an
+    initiative is how the copilot actually WORKS one to completion: a goal, a
+    plan it wrote, an append-only worklog of what it has done, and the single
+    next concrete action it will take when it next has a free cycle.
+
+    An initiative sequences and persists WORK; it grants no new power. Every
+    action a step takes still goes through that action's own gate — side-
+    effectful things propose, cancellations need a spouse, email is household-
+    only. Autonomy here means owning the follow-through, not the authority."""
+
+    __tablename__ = "initiatives"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _uid("init"))
+    title: Mapped[str] = mapped_column(String(200))
+    goal: Mapped[str] = mapped_column(Text, default="")  # what "done" looks like
+    plan: Mapped[str] = mapped_column(Text, default="")  # the copilot's own steps
+    worklog: Mapped[str] = mapped_column(Text, default="")  # append-only progress
+    next_action: Mapped[str] = mapped_column(Text, default="")  # the single next step
+    #: active | blocked | done | abandoned
+    status: Mapped[str] = mapped_column(String(20), default="active", index=True)
+    #: lower = sooner; ties break on updated_at
+    priority: Mapped[int] = mapped_column(Integer, default=100)
+    #: set when blocked on the household — what is needed, so it can be surfaced
+    blocked_on: Mapped[str] = mapped_column(String(300), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class CodeProposal(Base):
     """A concrete, reviewable change the copilot proposes to its OWN code.
 

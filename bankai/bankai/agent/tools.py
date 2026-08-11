@@ -779,6 +779,111 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "open_initiative",
+        "description": (
+            "Start a standing PROJECT you will carry to completion over days — "
+            "this is how you actually finish multi-step work instead of losing "
+            "it between turns. Give it a goal (what 'done' looks like), a plan "
+            "(your own steps), and the single next concrete action. On your "
+            "free cycles you'll advance the highest-priority active one a step "
+            "at a time. Use this for the real work you keep noticing you could "
+            "own — the debt triage desk, the surrogacy finance file, syncing "
+            "the planning sheet — not for one-turn tasks. An initiative "
+            "organizes your work; it grants no new power, so every step still "
+            "goes through the normal gates (propose side-effects, household-only "
+            "email, spouse-instructed cancellations). Lower priority = sooner."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "e.g. 'Debt triage desk'"},
+                "goal": {"type": "string", "description": "What done looks like, concretely"},
+                "plan": {"type": "string", "description": "Your step list to get there"},
+                "next_action": {"type": "string", "description": "The single next concrete step"},
+                "priority": {"type": "integer", "description": "Lower = sooner (default 100)"},
+            },
+            "required": ["title", "goal"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "update_initiative",
+        "description": (
+            "Advance one of your projects: append what you just did to its "
+            "worklog, set the next action, revise the plan, change priority, or "
+            "close it (status 'done' when the goal is met, 'abandoned' if it no "
+            "longer matters). If you are stuck waiting on the household for "
+            "something — a document, a decision, a number only they have — set "
+            "blocked_on to exactly what you need; that moves it to blocked and "
+            "surfaces the ask instead of silently stalling. Record progress "
+            "every time you work an initiative, even a small step."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "initiative_id": {"type": "string", "description": "From list_initiatives"},
+                "worklog_entry": {"type": "string", "description": "What you just did"},
+                "next_action": {"type": "string"},
+                "plan": {"type": "string"},
+                "status": {"type": "string", "enum": ["active", "blocked", "done", "abandoned"]},
+                "priority": {"type": "integer"},
+                "blocked_on": {"type": "string", "description": "What you need from the household to proceed"},
+            },
+            "required": ["initiative_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "list_initiatives",
+        "description": (
+            "Your standing projects with goal, plan, next action, status, and "
+            "recent worklog. Check before opening a new one (don't duplicate), "
+            "at the start of a free cycle to decide what to advance, and when "
+            "asked what you are working on. include_closed=true adds done/"
+            "abandoned ones."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"include_closed": {"type": "boolean"}},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "generate_report",
+        "description": (
+            "Produce a titled multi-section PDF and deliver it to the household "
+            "— printed on the house printer when reachable, and always emailed "
+            "to both spouses. Use it when a question deserves a real document "
+            "rather than a chat reply: a debt-paydown plan, a net-worth "
+            "one-pager, a surrogacy paid-vs-remaining ledger, a monthly deep "
+            "dive. Compose the sections yourself from real figures you looked "
+            "up; this only renders and delivers what you write. Goes ONLY to "
+            "the household, like every other thing you send."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "e.g. 'Debt paydown plan — Aug 2026'"},
+                "sections": {
+                    "type": "array",
+                    "description": "Ordered sections, each a heading + body",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "heading": {"type": "string"},
+                            "body": {"type": "string"},
+                        },
+                        "required": ["heading", "body"],
+                        "additionalProperties": False,
+                    },
+                },
+                "print_copy": {"type": "boolean", "description": "Also print it (default true)"},
+            },
+            "required": ["title", "sections"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "read_source",
         "description": (
             "Read your OWN source code so you can improve it. Path is repo-"
@@ -1579,6 +1684,87 @@ def _dispatch(session: Session, name: str, args: dict):
             account_name=(args.get("account_name") or "").strip(),
             account_identifier=(args.get("account_identifier") or "").strip(),
         )
+    if name == "open_initiative":
+        from .. import initiatives
+
+        title = (args.get("title") or "").strip()
+        if not title:
+            return {"error": "title is required"}
+        row = initiatives.open_initiative(
+            session,
+            title=title,
+            goal=(args.get("goal") or "").strip(),
+            plan=(args.get("plan") or "").strip(),
+            next_action=(args.get("next_action") or "").strip(),
+            priority=int(args.get("priority") or 100),
+        )
+        return {"opened": True, "initiative_id": row.id, "title": row.title,
+                "open_count": len(initiatives.as_dicts(session))}
+    if name == "update_initiative":
+        from .. import initiatives
+
+        row = initiatives.update_initiative(
+            session,
+            (args.get("initiative_id") or "").strip(),
+            worklog_entry=args.get("worklog_entry"),
+            next_action=args.get("next_action"),
+            plan=args.get("plan"),
+            status=args.get("status"),
+            priority=args.get("priority"),
+            blocked_on=args.get("blocked_on"),
+        )
+        if row is None:
+            return {"error": "initiative not found — call list_initiatives for ids"}
+        return {"updated": True, "initiative_id": row.id, "status": row.status,
+                "next_action": row.next_action, "blocked_on": row.blocked_on}
+    if name == "list_initiatives":
+        from .. import initiatives
+
+        return {"initiatives": initiatives.as_dicts(
+            session, include_closed=bool(args.get("include_closed"))
+        )}
+    if name == "generate_report":
+        import re as _re
+
+        from .. import reports
+        from ..messaging import email_thread
+
+        title = (args.get("title") or "").strip()
+        sections = args.get("sections") or []
+        if not title or not isinstance(sections, list) or not sections:
+            return {"error": "title and a non-empty sections list are required"}
+        clean_sections = [
+            {"heading": str(s.get("heading", "")), "body": str(s.get("body", ""))}
+            for s in sections if isinstance(s, dict)
+        ]
+        slug = _re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:50] or "report"
+        pdf_path = reports.REPORTS_DIR / f"report-{slug}.pdf"
+        reports.render_report_pdf(title, clean_sections, pdf_path)
+
+        printed = None
+        if args.get("print_copy", True):
+            printed = _send_to_printer(pdf_path, title[:60])
+
+        emailed = None
+        if email_thread.configured():
+            body = f"{title}\n\n" + "\n\n".join(
+                f"{s['heading']}\n{s['body']}".strip() for s in clean_sections
+            )
+            try:
+                emailed = email_thread.start_thread(session, subject=title[:120], body=body)
+            except Exception as exc:  # delivery failure must be honest, not hidden
+                emailed = {"error": str(exc)[:200]}
+        return {
+            "generated": True,
+            "pdf": str(pdf_path),
+            "printed": printed,
+            "emailed_to_household": bool(emailed and not emailed.get("error")),
+            "delivery_note": (
+                "Rendered. " + ("Printed. " if printed and printed.get("job") else "")
+                + ("Emailed to both spouses." if emailed and not emailed.get("error")
+                   else "Email channel not configured — it is saved and printed.")
+            ),
+        }
     if name == "read_source":
         from .. import selfimprove
 

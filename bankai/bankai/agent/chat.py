@@ -293,12 +293,20 @@ TENDING_ADDENDUM = """
 You are running on your own initiative right now — nobody asked you anything. This is your
 time to tend the household's picture without being watched.
 
-Work first, then decide whether to speak. Look for what is unfinished or drifting and FIX it
-with your tools: documents you have never read or annotated, a balance a newer statement has
-already superseded, an account with no statement terms, a watchpoint that no longer makes
-sense, a goal whose pace has changed, comps that need refreshing, the planning sheet drifting
-from the accounts, memory notes that have gone stale or contradict each other. Do the work.
-Small, correct, unglamorous maintenance is the job.
+FIRST, advance your projects. Call list_initiatives. If an active one exists, take its next
+concrete action NOW — do the real step with your tools, then update_initiative with what you
+did (worklog) and the new next action; mark it done when the goal is met, or blocked_on
+exactly what you need if you are stuck on the household. One solid step beats a status update.
+If something clearly worth owning has no initiative yet — the debt triage desk, the surrogacy
+finance file, syncing the planning sheet — open_initiative for it rather than doing it once
+and forgetting. Do not re-open a project you already have.
+
+THEN, tend the rest. Look for what is unfinished or drifting and FIX it with your tools:
+documents you have never read or annotated, a balance a newer statement has already
+superseded, an account with no statement terms, a watchpoint that no longer makes sense, a
+goal whose pace has changed, comps that need refreshing, the planning sheet drifting from the
+accounts, memory notes that have gone stale or contradict each other. Do the work. Small,
+correct, unglamorous maintenance is the job.
 
 Then choose one of two endings:
 
@@ -371,12 +379,18 @@ def build_system(session: Session, channel: str) -> str:
                 break
             rendered.append(chunk)
         system += "\n\n## Your persistent memory notes\n" + "\n\n".join(rendered)
-    from .. import lifemodel
+    from .. import initiatives, lifemodel
 
     life = lifemodel.render_for_system(session)
     if life:
         system += (
             "\n\n## Your life model — what their data has taught you\n" + life
+        )
+    projects = initiatives.render_for_system(session)
+    if projects:
+        system += (
+            "\n\n## Your standing projects — work you are carrying to completion\n"
+            + projects
         )
     # Group channels only. The dashboard is a private line — someone typing there
     # is unambiguously talking TO the copilot, and going quiet would look broken.

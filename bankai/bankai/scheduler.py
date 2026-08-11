@@ -249,13 +249,15 @@ async def _email_loop() -> None:
 TENDING_SPEAKER = "self-directed work"
 
 TENDING_PROMPT = (
-    "(no one asked — this is your own initiative. Tend the household's picture: read and "
-    "annotate anything in the vault you have not, replace figures a newer statement has "
-    "superseded, add statement terms to accounts missing them, retire or move watchpoints "
-    "that no longer fit, check goals' pace, refresh comps if stale, reconcile the planning "
-    "sheet and publish actuals if it has drifted, and tidy memory notes that have gone stale "
-    "or contradict each other. Then either stay silent, or tell them the one thing that "
-    "actually warrants their attention.)"
+    "(no one asked — this is your own initiative. FIRST advance your projects: list_initiatives, "
+    "take the next concrete step on the top active one with your tools, and update_initiative "
+    "with the progress and next step (or open_initiative for real work worth owning that has "
+    "none yet). THEN tend the household's picture: read and annotate anything in the vault you "
+    "have not, replace figures a newer statement has superseded, add statement terms to "
+    "accounts missing them, retire or move watchpoints that no longer fit, check goals' pace, "
+    "refresh comps if stale, reconcile the planning sheet and publish actuals if it has "
+    "drifted, and tidy memory notes that have gone stale or contradict each other. Then either "
+    "stay silent, or tell them the one thing that actually warrants their attention.)"
 )
 
 

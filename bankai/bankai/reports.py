@@ -239,6 +239,38 @@ def render_pdf(data: dict, narrative: str, path: Path) -> Path:
     return path
 
 
+def render_report_pdf(title: str, sections: list[dict], path: Path) -> Path:
+    """A titled, multi-section document the copilot composes on demand — a debt
+    plan, a net-worth one-pager, a paid-vs-remaining ledger. Same latin-1
+    sanitizing and auto page-breaks as the weekly report."""
+    from fpdf import FPDF
+
+    pdf = FPDF(format="letter")
+    pdf.set_auto_page_break(auto=True, margin=14)
+    pdf.add_page()
+    pdf.set_font("Helvetica", "B", 17)
+    pdf.multi_cell(0, 9, _clean(title or "From your copilot"), new_x="LMARGIN", new_y="NEXT")
+    pdf.set_font("Helvetica", "", 9)
+    pdf.set_text_color(120, 120, 120)
+    pdf.cell(0, 5, _clean(f"Prepared by the household copilot - {date.today().isoformat()}"),
+             new_x="LMARGIN", new_y="NEXT")
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(3)
+    for section in sections:
+        heading = _clean(str(section.get("heading", "")).strip())
+        body = _clean(str(section.get("body", "")).strip())
+        if heading:
+            pdf.set_font("Helvetica", "B", 12)
+            pdf.multi_cell(0, 7, heading, new_x="LMARGIN", new_y="NEXT")
+        if body:
+            pdf.set_font("Helvetica", "", 10)
+            pdf.multi_cell(0, 5.5, body, new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(2)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pdf.output(str(path))
+    return path
+
+
 def render_text_page(title: str, body: str, path: Path) -> Path:
     """Anything the copilot writes, as a clean printable page (or several) —
     shopping lists, dispute-letter drafts, a summary the household asked to
