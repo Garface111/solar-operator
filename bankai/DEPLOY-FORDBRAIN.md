@@ -63,12 +63,12 @@ and `.env` live *inside it* (`config.BASE_DIR` is the directory containing
 ```bash
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
-./venv/bin/python -m pytest tests -q     # expect: 511 passed
+./venv/bin/python -m pytest tests -q     # expect: 516 passed
 ```
 
 **Run the tests.** They are pure logic — no network, no API key — and they are
 your only proof the tree arrived intact before you wire in real credentials.
-If the count is lower than 511 you have an older copy of the branch; re-pull.
+If the count is lower than 516 you have an older copy of the branch; re-pull.
 A `ModuleNotFoundError: fpdf` means the venv predates the `fpdf2` requirement —
 re-run the `pip install -r` above rather than hunting for a bug.
 
