@@ -63,12 +63,12 @@ and `.env` live *inside it* (`config.BASE_DIR` is the directory containing
 ```bash
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
-./venv/bin/python -m pytest tests -q     # expect: 483 passed
+./venv/bin/python -m pytest tests -q     # expect: 511 passed
 ```
 
 **Run the tests.** They are pure logic — no network, no API key — and they are
 your only proof the tree arrived intact before you wire in real credentials.
-If the count is lower than 483 you have an older copy of the branch; re-pull.
+If the count is lower than 511 you have an older copy of the branch; re-pull.
 A `ModuleNotFoundError: fpdf` means the venv predates the `fpdf2` requirement —
 re-run the `pip install -r` above rather than hunting for a bug.
 
@@ -545,3 +545,41 @@ copilot cannot create one (it has no write tool), so this is not exploitable by
 the model today. Keep it that way: **do not put symlinks in the deployed tree**,
 and if you ever add a tool that writes files, resolve the path and verify it is
 inside the source root before this becomes real.
+
+---
+
+## 12. Model routing changed when the adversarial verifier runs
+
+Ford asked for a speed fix, and the router (`bankai/router.py`) delivers it by
+matching model and effort to the ask: a balance readback runs quick and shallow,
+a planning question runs Fable at max effort. Background/tending turns always
+take the deep path, and callers that *know* the work is heavy (the Saturday
+report, the monthly review) force the top tier via `for_tier()`.
+
+**The part worth understanding before you trust the output.** The adversarial
+verify pass — the second model that attacks a reply for hallucinated or
+inconsistent numbers — is now gated on the router's decision:
+
+```python
+if channel != "sms" and decision.verify:
+    reply, report = verify.verified_turn(...)
+```
+
+Previously `verified_turn` was always called off-SMS, and *it* decided whether to
+critique based on the **answer's** content (dollar amounts ≥ $100, percentages,
+recommendations, deadlines). Now the decision is made from the **question's**
+shape, by keyword and length heuristics, before any answer exists. A question the
+router reads as simple never reaches the content trigger at all.
+
+So "what's our net worth?" — short, no complexity keyword — routes fast with
+`verify=False`, and the dollar figure in the reply goes out unchecked. That is
+defensible for a pure lookup, where the number comes straight from a DB tool
+call; it is thinner ground for something like "how are we doing?", which is also
+short and keyword-free but invites a synthesized answer.
+
+This is a deliberate speed/assurance trade, not a bug — but it is Ford's to
+calibrate, not yours. If he wants the old assurance back, the smallest honest fix
+is to call `verified_turn` whenever the tier is complex **or** the reply contains
+money/percentages/recommendations, so the content trigger keeps its say. Setting
+`ROUTER_ENABLED=false` restores the previous behavior wholesale at the cost of
+the speed win.
