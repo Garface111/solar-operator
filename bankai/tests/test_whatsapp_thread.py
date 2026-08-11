@@ -243,6 +243,18 @@ def test_whatsapp_turns_get_group_dynamics_and_the_expense_mandate(session):
     assert agent_chat.SILENCE in system
 
 
+def test_whatsapp_doctrine_treats_the_group_as_a_confirmed_expense_log(session):
+    """The fix for 'it's not recognizing our expenses': default posted spends to
+    the Apple Card, log every one, and confirm each so the household sees it."""
+    system = agent_chat.build_system(session, channel="whatsapp")
+    assert "EXPENSE LOG" in system
+    assert "DEFAULT TO THE APPLE CARD" in system
+    assert "note_pending_expense" in system
+    assert "CONFIRM IT" in system
+    # it must NOT go silent after logging an expense (the old behavior)
+    assert "do NOT go" in system and "after logging an expense" in system
+
+
 # --- the expense ledger the watching feeds ---
 
 def test_log_expense_becomes_a_real_ledger_row(session):
