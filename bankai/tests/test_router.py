@@ -34,6 +34,17 @@ def test_a_simple_lookup_picks_opus_fast():
     assert d.tier == "fast" and d.model == "claude-opus-5" and d.verify is False
 
 
+def test_a_net_worth_lookup_is_fast_not_a_deep_think():
+    # regression: 'net worth' as a bare word wrongly routed to Fable-max (169s)
+    assert router.choose(msg("[Gaurav] what's our net worth right now")).tier == "fast"
+    assert router.choose(msg("[Ford] how much cash do we have?")).tier == "fast"
+
+
+def test_a_long_horizon_projection_still_goes_deep():
+    assert router.choose(msg("what will our net worth be in 10 years?")).tier == "complex"
+    assert router.choose(msg("project our retirement savings")).tier == "complex"
+
+
 def test_analysis_picks_fable_max_and_verifies():
     d = router.choose(msg("[Ford] should we refinance the mortgage given rates?"))
     assert d.tier == "complex" and d.model == "claude-fable-5"

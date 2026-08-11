@@ -43,9 +43,9 @@ _COMPLEX_RE = re.compile(
     r"model\s+out|compare|comparison|versus|vs\.?|should\s+(?:we|i)|worth\s+it|"
     r"break\s+(?:it\s+)?down|walk\s+me\s+through|deep\s+dive|thorough|comprehensive|"
     r"evaluate|assess|trade[\s-]?off|scenario|what\s+if|optimi[sz]e|restructure|"
-    r"refinance|afford|retirement|net\s+worth|decades|years\s+out|contract|lease|"
-    r"legal|estate|\bwill\b|trust\s+agreement|\btax(?:es)?\b|payoff|pay\s+off|"
-    r"debt\s+plan|budget|allocate|rebalance|recommend|cancel|transfer)\b",
+    r"refinance|afford|retirement|decades|years\s+out|\d+\s*years?|contract|lease|"
+    r"legal|estate|trust\s+agreement|payoff|pay\s+off|"
+    r"debt\s+plan|budget\s+plan|allocate|rebalance|recommend|cancel|transfer)\b",
     re.IGNORECASE,
 )
 
