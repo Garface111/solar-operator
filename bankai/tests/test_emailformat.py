@@ -52,6 +52,21 @@ def test_the_document_is_whole_and_branded():
     assert html.rstrip().endswith("</html>")
 
 
+def test_callout_panels_render_with_their_colour():
+    tip = emailformat.render_email("x", "> [!TIP]\n> Pay the Apple Card in full.")
+    assert "#0f6b57" in tip and "Tip" in tip and "Pay the Apple Card" in tip
+    warn = emailformat.render_email("x", "> [!WARNING] A late fee breaks the plan.")
+    assert "Heads up" in warn and "late fee" in warn
+    # an ordinary blockquote (no [!TYPE]) is still a blockquote, not a callout
+    plain = emailformat.render_email("x", "> just a quote")
+    assert "<blockquote" in plain
+
+
+def test_an_unknown_callout_type_falls_back_to_a_blockquote():
+    html = emailformat.render_email("x", "> [!BOGUS] hello")
+    assert "<blockquote" in html and "hello" in html
+
+
 def test_plain_prose_still_becomes_paragraphs():
     html = emailformat.render_email("x", "Just a normal sentence.\n\nAnd another one.")
     assert html.count("<p") == 2

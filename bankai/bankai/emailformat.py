@@ -25,6 +25,19 @@ LINE = "#e4e9ef"    # borders / rules
 BG = "#f4f6f9"      # page background
 CARD = "#ffffff"    # message card
 
+#: GitHub-style callout panels: a blockquote whose first line is [!TYPE].
+#: (border, tint background, label colour, label text)
+CALLOUTS = {
+    "NOTE": ("#3b82f6", "#eff6ff", "#1d4ed8", "Note"),
+    "INFO": ("#3b82f6", "#eff6ff", "#1d4ed8", "Note"),
+    "TIP": ("#0f6b57", "#f0f7f4", "#0f6b57", "Tip"),
+    "SUCCESS": ("#0f6b57", "#f0f7f4", "#0f6b57", "Done"),
+    "IMPORTANT": ("#7c3aed", "#f5f3ff", "#6d28d9", "Important"),
+    "WARNING": ("#d97706", "#fffbeb", "#b45309", "Heads up"),
+    "CAUTION": ("#dc2626", "#fef2f2", "#b91c1c", "Caution"),
+}
+_CALLOUT_RE = re.compile(r"^\s*\[!(\w+)\]\s*(.*)$")
+
 _INLINE_CODE = re.compile(r"`([^`]+)`")
 _BOLD = re.compile(r"\*\*([^*]+)\*\*")
 _ITALIC = re.compile(r"(?<![\*_])[*_]([^*_\n]+)[*_](?![\*_])")
@@ -138,12 +151,27 @@ def _render_blocks(md: str) -> str:
             out.append(_render_table(rows))
             continue
 
-        # blockquote
+        # blockquote — or a colored callout panel when it opens with [!TYPE]
         if stripped.startswith(">"):
             quote = []
             while i < n and lines[i].strip().startswith(">"):
                 quote.append(re.sub(r"^\s*>\s?", "", lines[i]))
                 i += 1
+            m_call = _CALLOUT_RE.match(quote[0]) if quote else None
+            if m_call and m_call.group(1).upper() in CALLOUTS:
+                border, bg, label_color, label = CALLOUTS[m_call.group(1).upper()]
+                first = m_call.group(2).strip()
+                rest = [first, *quote[1:]] if first else quote[1:]
+                body_html = "<br>".join(_inline(html.escape(p)) for p in rest if p is not None)
+                out.append(
+                    f'<div style="margin:16px 0;padding:12px 16px;border-left:4px solid {border};'
+                    f'background:{bg};border-radius:0 8px 8px 0;">'
+                    f'<div style="font-size:12px;font-weight:700;text-transform:uppercase;'
+                    f'letter-spacing:.05em;color:{label_color};margin-bottom:4px;">{label}</div>'
+                    f'<div style="font-size:14px;line-height:1.55;color:{INK};">{body_html}</div>'
+                    f"</div>"
+                )
+                continue
             out.append(
                 f'<blockquote style="margin:14px 0;padding:8px 16px;border-left:3px solid {ACCENT};'
                 f'background:#f0f7f4;color:{INK};font-size:14px;">'
