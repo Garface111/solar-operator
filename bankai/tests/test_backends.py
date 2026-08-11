@@ -6,7 +6,7 @@ from bankai import config
 from bankai.agent import chat as agent_chat
 from bankai.agent import mcp_server
 from bankai.agent import verify
-from bankai.agent.backends import claude_cli, grok_backend
+from bankai.agent.backends import claude_cli, grok_backend, kimi_backend
 from bankai.agent.tools import TOOLS
 from bankai.ingest import upsert_account
 
@@ -199,6 +199,92 @@ def test_grok_requires_credentials(session, monkeypatch):
     monkeypatch.setattr(grok_backend, "get_xai_bearer", no_creds)
     with pytest.raises(RuntimeError, match="no xAI credentials"):
         grok_backend.run(session, "s", [{"role": "user", "content": "x"}])
+
+
+# --- Kimi K3 (Moonshot) fallback backend ---
+
+
+def test_kimi_dispatches_from_the_chain(session, monkeypatch):
+    """The chat router must resolve the 'kimi' name to the Moonshot backend."""
+    monkeypatch.setattr(config, "LLM_BACKEND", "kimi")
+    monkeypatch.setattr(kimi_backend, "run", lambda s, system, messages: "hi from kimi")
+    assert agent_chat.run_turn(session, [{"role": "user", "content": "hello"}]) == "hi from kimi"
+
+
+def test_chain_falls_back_from_claude_to_kimi(session, monkeypatch):
+    """Ford's ask: when the Claude subscription runs out, Kimi takes over."""
+    monkeypatch.setattr(config, "LLM_BACKEND", "claude-cli,kimi")
+
+    def cli_out_of_credits(s, system, messages):
+        raise RuntimeError("claude CLI failed (exit 1): usage limit reached")
+
+    monkeypatch.setattr(claude_cli, "run", cli_out_of_credits)
+    monkeypatch.setattr(kimi_backend, "run", lambda s, system, messages: "kimi caught the fall")
+    reply = agent_chat.run_turn(session, [{"role": "user", "content": "hi"}])
+    assert reply == "kimi caught the fall"
+
+
+def test_kimi_tools_are_openai_shaped():
+    tools = kimi_backend.tools_openai_format()
+    assert len(tools) == len(TOOLS)
+    fn = tools[0]["function"]
+    assert tools[0]["type"] == "function"
+    assert set(fn) == {"name", "description", "parameters"}
+    assert fn["parameters"]["type"] == "object"
+
+
+def test_kimi_tool_loop(session, monkeypatch):
+    upsert_account(session, source="csv", name="Checking", balance=250.0)
+    monkeypatch.setattr(config, "KIMI_API_KEY", "sk-test")
+    responses = [
+        {
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "get_accounts", "arguments": "{}"},
+                    }],
+                }
+            }]
+        },
+        {"choices": [{"message": {"role": "assistant", "content": "You have $250 in Checking."}}]},
+    ]
+    payloads = []
+    monkeypatch.setattr(
+        kimi_backend, "_post",
+        lambda payload: payloads.append(payload) or responses.pop(0),
+    )
+    reply = kimi_backend.run(session, "system", [{"role": "user", "content": "balance?"}])
+    assert reply == "You have $250 in Checking."
+    tool_msgs = [m for m in payloads[1]["messages"] if m.get("role") == "tool"]
+    assert len(tool_msgs) == 1 and tool_msgs[0]["tool_call_id"] == "call_1"
+    assert "250" in tool_msgs[0]["content"]
+
+
+def test_kimi_ignores_routed_claude_model_and_uses_kimi_default(session, monkeypatch):
+    """On a fallback turn the router hands a Claude model name; Moonshot would
+    reject it, so the backend must substitute its own configured model."""
+    monkeypatch.setattr(config, "KIMI_API_KEY", "sk-test")
+    monkeypatch.setattr(config, "KIMI_MODEL", "kimi-k3")
+    seen = []
+    monkeypatch.setattr(
+        kimi_backend, "_post",
+        lambda payload: seen.append(payload["model"])
+        or {"choices": [{"message": {"content": "ok"}}]},
+    )
+    kimi_backend.run(
+        session, "s", [{"role": "user", "content": "x"}], model="claude-fable-5", effort="max"
+    )
+    assert seen == ["kimi-k3"]  # the Claude name was discarded
+
+
+def test_kimi_requires_credentials(session, monkeypatch):
+    monkeypatch.setattr(config, "KIMI_API_KEY", "")
+    with pytest.raises(RuntimeError, match="no Moonshot credentials"):
+        kimi_backend.run(session, "s", [{"role": "user", "content": "x"}])
 
 
 def test_claude_cli_command_and_parse(session, monkeypatch):

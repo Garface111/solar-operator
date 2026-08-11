@@ -6,6 +6,8 @@ tool loop *within* a turn and returns the reply text. Backends (config.LLM_BACKE
   anthropic   Anthropic API (default) — pay-per-token with ANTHROPIC_API_KEY
   claude-cli  headless Claude Code CLI (`claude -p`) — bills the Claude
               subscription the CLI is logged into; tools exposed via MCP
+  kimi        Moonshot API (OpenAI-compatible tool calling) — Kimi K3, the
+              strongest open-weights model; the fallback brain behind claude-cli
   grok        xAI API (OpenAI-compatible tool calling) — uses Grok credits
 """
 from __future__ import annotations
@@ -462,6 +464,8 @@ def _backend(name: str):
         from .backends import claude_cli as impl
     elif name == "anthropic":
         from .backends import anthropic_backend as impl
+    elif name in ("kimi", "moonshot"):
+        from .backends import kimi_backend as impl
     else:
         raise RuntimeError(f"unknown LLM backend {name!r}")
     return impl
