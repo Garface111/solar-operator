@@ -109,6 +109,43 @@ work, say so plainly — an honest failure is far more useful here than a
 half-change that ships."""
 
 
+def ensure_worktree() -> str:
+    """Give the builder its own checkout, freshly synced to the remote.
+
+    The first version of this built in the tree humans and other agents use,
+    and refused to run whenever anyone had uncommitted work — which, on this
+    machine, is most of the time. A dedicated detached worktree fixes that and
+    two other things: builds can never entangle a person's in-progress edits,
+    and it sits on ext4 instead of the 9p mount, so the suite runs several times
+    faster.
+
+    Detached on purpose: git will not check out the same branch in two
+    worktrees, and the shared tree already holds it. Commits are pushed with an
+    explicit `HEAD:<branch>` refspec.
+    """
+    path = Path(config.BUILDER_WORKTREE)
+    branch = config.BUILDER_BRANCH
+    if not (path / ".git").exists():
+        log.info("builder: creating build worktree at %s", path)
+        subprocess.run(
+            ["git", "fetch", "origin", branch],
+            cwd=config.BUILDER_SOURCE_REPO, capture_output=True, text=True,
+            timeout=300, check=True,
+        )
+        subprocess.run(
+            ["git", "worktree", "add", "--detach", str(path), f"origin/{branch}"],
+            cwd=config.BUILDER_SOURCE_REPO, capture_output=True, text=True,
+            timeout=300, check=True,
+        )
+    # Start every build from exactly what the remote has — never from whatever
+    # the last build happened to leave behind.
+    _git(str(path), "fetch", "origin", branch, timeout=300)
+    _git(str(path), "checkout", "--detach", f"origin/{branch}")
+    _git(str(path), "reset", "--hard", f"origin/{branch}")
+    _git(str(path), "clean", "-fd")
+    return str(path)
+
+
 def _git(worktree: str, *args: str, timeout: int = 120) -> str:
     proc = subprocess.run(
         ["git", *args], cwd=worktree, capture_output=True, text=True, timeout=timeout
@@ -222,19 +259,10 @@ def run_build(action_id: str) -> dict:
                 return {"status": "error", "note": "action not found"}
             title, prompt = action.title, build_prompt(action)
 
-        worktree = config.BUILDER_WORKTREE
         try:
-            baseline = _git(worktree, "rev-parse", "HEAD").strip()
-            dirty = changed_files(worktree)
+            worktree = ensure_worktree()
         except Exception as exc:
-            return _finish(action_id, "failed", f"worktree unusable: {exc}")
-        if dirty:
-            # Someone else is mid-edit. Building on top would tangle their work
-            # into this diff and ship it under an approval it never had.
-            return _finish(action_id, "proposed", (
-                "the worktree has uncommitted changes from another session "
-                f"({', '.join(dirty[:4])}) — not building over them; approve again when clear"
-            ))
+            return _finish(action_id, "failed", f"build worktree unusable: {exc}")
 
         cmd = [
             config.CLAUDE_CLI_BIN, "-p", prompt,
@@ -305,8 +333,9 @@ def run_build(action_id: str) -> dict:
         sha = _git(worktree, "rev-parse", "--short", "HEAD").strip()
         pushed = True
         try:
-            branch = _git(worktree, "rev-parse", "--abbrev-ref", "HEAD").strip()
-            _git(worktree, "push", "origin", branch, timeout=180)
+            # Explicit refspec: the build worktree is detached, so there is no
+            # current branch name to push by.
+            _git(worktree, "push", "origin", f"HEAD:{config.BUILDER_BRANCH}", timeout=180)
         except Exception as exc:
             pushed = False
             log.warning("builder: push failed (%s) — commit %s is local only", exc, sha)

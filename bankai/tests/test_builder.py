@@ -57,14 +57,31 @@ def test_scope_guard_names_every_stray_path():
                      ".github/workflows/deploy.yml"]
 
 
-def test_refuses_to_build_over_someone_elses_uncommitted_work(action, monkeypatch):
-    monkeypatch.setattr(builder, "_git", lambda *a, **k: "abc123\n")
-    monkeypatch.setattr(builder, "changed_files", lambda w: ["bankai/bankai/app.py"])
+def test_every_build_starts_from_the_remote_not_the_last_build(monkeypatch, tmp_path):
+    """The build worktree is reset to origin before each run, so leftovers from
+    a previous build can never ride along in an approved diff."""
+    calls = []
+    monkeypatch.setattr(config, "BUILDER_WORKTREE", str(tmp_path))
+    monkeypatch.setattr(config, "BUILDER_BRANCH", "the-branch")
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setattr(builder, "_git",
+                        lambda w, *a, **k: calls.append(a) or "")
+    builder.ensure_worktree()
+    assert ("fetch", "origin", "the-branch") in calls
+    assert ("reset", "--hard", "origin/the-branch") in calls
+    assert ("clean", "-fd") in calls
+
+
+def test_a_broken_build_worktree_fails_loudly(action, monkeypatch):
+    def boom():
+        raise RuntimeError("worktree add failed: no such remote")
+
+    monkeypatch.setattr(builder, "ensure_worktree", boom)
     monkeypatch.setattr(builder.subprocess, "run",
                         lambda *a, **k: pytest.fail("must not start the agent"))
     out = builder.run_build("act_test_build")
-    assert out["status"] == "proposed"
-    assert "uncommitted changes" in out["note"]
+    assert out["status"] == "failed"
+    assert "build worktree unusable" in out["note"]
 
 
 def test_out_of_scope_edit_is_refused_and_never_committed(action, monkeypatch):
@@ -72,7 +89,8 @@ def test_out_of_scope_edit_is_refused_and_never_committed(action, monkeypatch):
     monkeypatch.setattr(builder, "_git",
                         lambda w, *a, **k: calls.append(a) or "abc123\n")
     # clean before, strays after
-    seq = iter([[], ["bankai/bankai/app.py", "bankai/.env"]])
+    monkeypatch.setattr(builder, "ensure_worktree", lambda: "/tmp/build")
+    seq = iter([["bankai/bankai/app.py", "bankai/.env"]])
     monkeypatch.setattr(builder, "changed_files", lambda w: next(seq))
     monkeypatch.setattr(builder.subprocess, "run",
                         lambda *a, **k: _agent_says("Done! Also updated .env."))
@@ -93,7 +111,8 @@ def test_red_suite_blocks_commit_and_deploy_even_if_the_agent_claims_green(
     calls = []
     monkeypatch.setattr(builder, "_git",
                         lambda w, *a, **k: calls.append(a) or "abc123\n")
-    seq = iter([[], ["bankai/bankai/models.py"]])
+    monkeypatch.setattr(builder, "ensure_worktree", lambda: "/tmp/build")
+    seq = iter([["bankai/bankai/models.py"]])
     monkeypatch.setattr(builder, "changed_files", lambda w: next(seq))
     monkeypatch.setattr(builder.subprocess, "run",
                         lambda *a, **k: _agent_says("All 384 tests pass."))
@@ -120,7 +139,8 @@ def test_green_build_commits_deploys_and_tells_the_household(action, monkeypatch
         return "abc123\n"
 
     monkeypatch.setattr(builder, "_git", fake_git)
-    seq = iter([[], ["bankai/bankai/models.py", "bankai/tests/test_models.py"]])
+    monkeypatch.setattr(builder, "ensure_worktree", lambda: "/tmp/build")
+    seq = iter([["bankai/bankai/models.py", "bankai/tests/test_models.py"]])
     monkeypatch.setattr(builder, "changed_files", lambda w: next(seq))
     monkeypatch.setattr(builder.subprocess, "run",
                         lambda *a, **k: _agent_says("Added the transfer flag and two tests."))
@@ -147,7 +167,8 @@ def test_green_build_commits_deploys_and_tells_the_household(action, monkeypatch
 
 def test_a_failed_deploy_is_reported_not_swallowed(action, monkeypatch):
     monkeypatch.setattr(builder, "_git", lambda w, *a, **k: "deadbee\n")
-    seq = iter([[], ["bankai/bankai/models.py"]])
+    monkeypatch.setattr(builder, "ensure_worktree", lambda: "/tmp/build")
+    seq = iter([["bankai/bankai/models.py"]])
     monkeypatch.setattr(builder, "changed_files", lambda w: next(seq))
     monkeypatch.setattr(builder.subprocess, "run", lambda *a, **k: _agent_says("done"))
     monkeypatch.setattr(builder, "run_tests", lambda w: (True, "386 passed"))

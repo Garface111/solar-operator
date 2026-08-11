@@ -67,7 +67,15 @@ CLAUDE_CLI_MODEL = _env("CLAUDE_CLI_MODEL")  # empty = the CLI's default model
 BUILDER_ENABLED = _env("BUILDER_ENABLED", "true").lower() != "false"
 BUILDER_MODEL = _env("BUILDER_MODEL", "claude-opus-4-8")
 BUILDER_EFFORT = _env("BUILDER_EFFORT", "xhigh")  # best tier for coding work
-BUILDER_WORKTREE = _env("BUILDER_WORKTREE", "/mnt/c/Users/fordg/solar-operator-bankai")
+# The builder gets its OWN detached worktree on ext4 — never the tree humans
+# and other agents edit (builds would refuse whenever anyone had work in
+# progress, and a shared tree risks entangling their edits into an approved
+# diff). Created on first build from BUILDER_SOURCE_REPO.
+BUILDER_WORKTREE = _env("BUILDER_WORKTREE", "/root/bankai-build")
+BUILDER_SOURCE_REPO = _env(
+    "BUILDER_SOURCE_REPO", "/mnt/c/Users/fordg/solar-operator-bankai"
+)
+BUILDER_BRANCH = _env("BUILDER_BRANCH", "claude/joint-banking-ai-dashboard-vp8gyq")
 BUILDER_TEST_CMD = _env(
     "BUILDER_TEST_CMD", "/root/bankai-test-venv/bin/python -m pytest tests -q"
 )
