@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 from sqlalchemy import (
     JSON,
@@ -23,6 +23,19 @@ def _uid(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:16]}"
 
 
+def _utcnow() -> datetime:
+    """The current UTC instant, as a naive datetime.
+
+    datetime.utcnow() is deprecated (and slated for removal) because the value it
+    returns claims to be local time while actually holding UTC. datetime.now(
+    timezone.utc) is the supported way to read an unambiguous UTC instant; we drop
+    the tzinfo so what lands in the column stays naive-UTC — byte-for-byte the same
+    as every row already stored, and comparable to the naive datetime.utcnow() the
+    rest of the app still passes into queries. This changes how we ask for "now",
+    not what we store."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -40,7 +53,7 @@ class Account(Base):
     currency: Mapped[str] = mapped_column(String(8), default="USD")
     balance: Mapped[float | None] = mapped_column(Float, nullable=True)
     balance_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
     transactions: Mapped[list["Transaction"]] = relationship(back_populates="account")
 
@@ -58,7 +71,7 @@ class Transaction(Base):
     category: Mapped[str] = mapped_column(String(60), default="uncategorized", index=True)
     pending: Mapped[bool] = mapped_column(Boolean, default=False)
     fingerprint: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
     account: Mapped[Account] = relationship(back_populates="transactions")
 
@@ -83,7 +96,7 @@ class Rule(Base):
     message: Mapped[str] = mapped_column(Text, default="")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_by: Mapped[str] = mapped_column(String(20), default="user")  # user | agent
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
     firings: Mapped[list["RuleFiring"]] = relationship(back_populates="rule")
 
@@ -95,7 +108,7 @@ class RuleFiring(Base):
     id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _uid("fire"))
     rule_id: Mapped[str] = mapped_column(ForeignKey("rules.id"))
     dedupe_key: Mapped[str] = mapped_column(String(200))
-    fired_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    fired_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     subject: Mapped[str] = mapped_column(String(200), default="")
     body: Mapped[str] = mapped_column(Text, default="")
     delivered: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -117,7 +130,7 @@ class CategoryRule(Base):
     pattern: Mapped[str] = mapped_column(String(120), unique=True)  # case-insensitive substring
     category: Mapped[str] = mapped_column(String(60))
     reason: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
 class Initiative(Base):
@@ -148,8 +161,8 @@ class Initiative(Base):
     priority: Mapped[int] = mapped_column(Integer, default=100)
     #: set when blocked on the household — what is needed, so it can be surfaced
     blocked_on: Mapped[str] = mapped_column(String(300), default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
 class CodeProposal(Base):
@@ -179,7 +192,7 @@ class CodeProposal(Base):
     diff: Mapped[str] = mapped_column(Text, default="")
     test_output: Mapped[str] = mapped_column(Text, default="")
     proposed_by: Mapped[str] = mapped_column(String(60), default="copilot")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     evaluated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
@@ -205,7 +218,7 @@ class LifeFact(Base):
     #: active | confirmed | retired | refuted
     status: Mapped[str] = mapped_column(String(20), default="active", index=True)
     first_noted: Mapped[date] = mapped_column(Date, default=date.today)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
 class PendingExpense(Base):
@@ -234,7 +247,7 @@ class PendingExpense(Base):
     status: Mapped[str] = mapped_column(String(20), default="open", index=True)
     matched_transaction_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
 class Document(Base):
@@ -252,7 +265,7 @@ class Document(Base):
     size_bytes: Mapped[int] = mapped_column(Integer, default=0)
     content_text: Mapped[str] = mapped_column(Text, default="")
     summary: Mapped[str] = mapped_column(Text, default="")  # the copilot's own digest
-    added_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    added_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
 class Property(Base):
@@ -274,7 +287,7 @@ class Property(Base):
     # When True, a refresh applies its estimate to the account balance (with a
     # snapshot); when False, estimates are recorded but the value is hand-set.
     auto_update: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
     account: Mapped[Account] = relationship()
     comps: Mapped[list["Comp"]] = relationship(back_populates="property_", cascade="all, delete-orphan")
@@ -299,7 +312,7 @@ class Comp(Base):
     beds: Mapped[float | None] = mapped_column(Float, nullable=True)
     baths: Mapped[float | None] = mapped_column(Float, nullable=True)
     distance_miles: Mapped[float | None] = mapped_column(Float, nullable=True)
-    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
     property_: Mapped[Property] = relationship(back_populates="comps")
 
@@ -316,7 +329,7 @@ class Valuation(Base):
     method: Mapped[str] = mapped_column(String(20))  # avm | comps_median | manual | agent
     detail: Mapped[str] = mapped_column(Text, default="")  # evidence: comp count, $/sqft, reasoning
     applied: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
     property_: Mapped[Property] = relationship(back_populates="valuations")
 
@@ -341,7 +354,7 @@ class AgentAction(Base):
     status: Mapped[str] = mapped_column(String(20), default="proposed", index=True)
     # proposed | executed | declined | failed
     result: Mapped[str] = mapped_column(Text, default="")
-    proposed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    proposed_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     executed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
@@ -355,7 +368,7 @@ class MemoryNote(Base):
     title: Mapped[str] = mapped_column(String(120), unique=True, index=True)
     content: Mapped[str] = mapped_column(Text, default="")
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime, default=_utcnow, onupdate=_utcnow
     )
 
 
@@ -369,7 +382,7 @@ class ChatMessage(Base):
     role: Mapped[str] = mapped_column(String(10))  # user | assistant
     speaker: Mapped[str] = mapped_column(String(60), default="")  # household member name | copilot
     content: Mapped[str] = mapped_column(Text, default="")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
 
 
 class SyncLog(Base):
@@ -377,6 +390,6 @@ class SyncLog(Base):
 
     id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _uid("sync"))
     source: Mapped[str] = mapped_column(String(20))
-    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     status: Mapped[str] = mapped_column(String(20), default="ok")  # ok | error
     detail: Mapped[str] = mapped_column(Text, default="")
