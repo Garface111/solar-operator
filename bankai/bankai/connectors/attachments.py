@@ -159,6 +159,14 @@ def handle(
     matches = pending.reconcile(session, imported.ids)
     if matches:
         result["pending_matched"] = matches
+    # Reality just landed — any rough estimate these charges replace should be
+    # trued up now, so signal it to the turn that processes this import.
+    open_estimates = [i for i in pending.open_items(session) if i.get("kind") == "estimate"]
+    if open_estimates:
+        result["open_estimates"] = [
+            {"id": e["id"], "description": e["description"], "amount": e["amount"]}
+            for e in open_estimates
+        ]
 
     # A CSV is a list of transactions, not a ledger — it carries no balance, so
     # the account would sit at zero and quietly understate what is owed. OFX/QFX

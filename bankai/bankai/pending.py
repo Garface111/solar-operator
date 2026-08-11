@@ -42,6 +42,10 @@ MATCH_DAYS_AFTER = 60
 STALE_DAYS = 45
 
 
+KINDS = ("itemized", "estimate")
+STATUSES = ("open", "matched", "dismissed")
+
+
 def note(
     session: Session,
     *,
@@ -50,36 +54,95 @@ def note(
     account_hint: str = "",
     speaker: str = "",
     mentioned_on: date | None = None,
+    kind: str = "itemized",
 ) -> tuple[PendingExpense, bool]:
     """Record a mentioned spend as pending. Returns (row, created).
 
     Re-mentions collapse: the same amount (within tolerance) with an open
     pending inside a week is the household talking about the same spend twice,
     not two spends — the copilot re-hearing "yeah, the $840 tires" must not
-    manufacture an $1,680 hole.
+    manufacture an $1,680 hole. Estimates are exempt from this collapse: a rough
+    "$500 of house stuff" and a real $500 charge are different things, and an
+    estimate is meant to be revised, not deduped away.
     """
     amount = -abs(amount)
+    kind = kind if kind in KINDS else "itemized"
     mentioned_on = mentioned_on or date.today()
-    window_start = mentioned_on - timedelta(days=7)
-    for existing in session.execute(
-        select(PendingExpense).where(
-            PendingExpense.status == "open",
-            PendingExpense.mentioned_on >= window_start,
-            PendingExpense.mentioned_on <= mentioned_on + timedelta(days=7),
-        )
-    ).scalars():
-        if abs(existing.amount - amount) <= amount_tolerance(amount):
-            return existing, False
+    if kind == "itemized":
+        window_start = mentioned_on - timedelta(days=7)
+        for existing in session.execute(
+            select(PendingExpense).where(
+                PendingExpense.status == "open",
+                PendingExpense.kind == "itemized",
+                PendingExpense.mentioned_on >= window_start,
+                PendingExpense.mentioned_on <= mentioned_on + timedelta(days=7),
+            )
+        ).scalars():
+            if abs(existing.amount - amount) <= amount_tolerance(amount):
+                return existing, False
     row = PendingExpense(
         mentioned_on=mentioned_on,
         amount=round(amount, 2),
         description=description.strip()[:240],
         account_hint=account_hint.strip(),
         speaker=speaker.strip(),
+        kind=kind,
     )
     session.add(row)
     session.flush()
     return row, True
+
+
+def revise(
+    session: Session,
+    pending_id: str,
+    *,
+    amount: float | None = None,
+    description: str | None = None,
+    status: str | None = None,
+    kind: str | None = None,
+) -> PendingExpense | None:
+    """Adjust a pending entry as understanding improves — the lever the copilot
+    uses to reconcile. Shrink an estimate as itemized detail is attributed to it
+    (amount=), close one out (status='dismissed'), relabel it, or reclassify a
+    lump as an estimate. Returns the row, or None if not found."""
+    row = session.get(PendingExpense, pending_id)
+    if row is None:
+        return None
+    if amount is not None:
+        row.amount = -abs(round(float(amount), 2))
+    if description is not None and description.strip():
+        row.description = description.strip()[:240]
+    if kind in KINDS:
+        row.kind = kind
+    if status in STATUSES:
+        row.status = status
+        if status != "open":
+            row.resolved_at = datetime.utcnow()
+    session.flush()
+    return row
+
+
+def summary(session: Session, today: date | None = None) -> dict:
+    """A coherent picture that never double-counts: itemized spends plus the
+    still-unexplained remainder of any estimates.
+
+    Because the copilot shrinks an estimate as itemized detail is attributed to
+    it, the raw sum of open amounts IS the honest total — this just splits it so
+    the household sees 'known items' vs 'rough envelopes still to be pinned
+    down'."""
+    items = open_items(session, today)
+    itemized = [i for i in items if i.get("kind") != "estimate"]
+    estimates = [i for i in items if i.get("kind") == "estimate"]
+    itemized_total = round(sum(i["amount"] for i in itemized), 2)
+    estimate_total = round(sum(i["amount"] for i in estimates), 2)
+    return {
+        "itemized": itemized,
+        "estimates": estimates,
+        "itemized_total": itemized_total,
+        "estimate_total": estimate_total,
+        "net_total": round(itemized_total + estimate_total, 2),
+    }
 
 
 def open_items(session: Session, today: date | None = None) -> list[dict]:
@@ -99,6 +162,7 @@ def open_items(session: Session, today: date | None = None) -> list[dict]:
             "description": row.description,
             "account_hint": row.account_hint,
             "speaker": row.speaker,
+            "kind": row.kind,
             "age_days": age,
             "stale": age >= STALE_DAYS,
         })
@@ -127,9 +191,12 @@ def reconcile(session: Session, transaction_ids: list[str]) -> list[dict]:
     ) if t is not None and t.amount < 0]
     if not txns:
         return []
+    # Only itemized mentions map to a single real charge. An estimate is an
+    # envelope over many charges — it is reconciled by the copilot (shrunk or
+    # dismissed), never auto-matched to one transaction.
     open_rows = list(session.execute(
         select(PendingExpense)
-        .where(PendingExpense.status == "open")
+        .where(PendingExpense.status == "open", PendingExpense.kind == "itemized")
         .order_by(PendingExpense.mentioned_on)
     ).scalars())
 

@@ -1044,7 +1044,11 @@ TOOLS: list[dict] = [
             "matched AUTOMATICALLY against the statement when the export "
             "arrives, and if it never appears you can raise it. Amount is "
             "positive dollars spent. Use log_expense instead for cash/P2P money "
-            "no source will ever show; use neither for live-feed accounts."
+            "no source will ever show; use neither for live-feed accounts. "
+            "kind='itemized' (default) is a specific spend. kind='estimate' is a "
+            "ROUGH ENVELOPE — 'about $500 of house stuff' — that you will shrink "
+            "with revise_pending_expense as itemized detail arrives and finalize "
+            "when the real charges import, so the picture never double-counts."
         ),
         "input_schema": {
             "type": "object",
@@ -1054,8 +1058,35 @@ TOOLS: list[dict] = [
                 "account": {"type": "string", "description": "Where they said it went, e.g. 'Apple Card'"},
                 "date": {"type": "string", "description": "ISO date it happened/was mentioned; omit for today"},
                 "spender": {"type": "string", "description": "Ford | Gaurav | joint"},
+                "kind": {"type": "string", "enum": ["itemized", "estimate"], "description": "estimate = a rough envelope to reconcile later"},
             },
             "required": ["amount", "description", "account"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "revise_pending_expense",
+        "description": (
+            "Reconcile a pending entry as the picture sharpens — this is how you "
+            "keep estimates honest. When itemized spends arrive that fall under "
+            "a rough estimate (the sprinkler parts under the '$500 house-setup' "
+            "envelope), SHRINK the estimate by their total so it isn't counted "
+            "twice: revise it to the remaining unexplained amount. When the real "
+            "Apple Card export imports and the actual charges land, close out any "
+            "estimate it replaces (status='dismissed') — reality supersedes the "
+            "guess. You can also relabel an entry or fix its amount. Get the id "
+            "from list_pending_expenses."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pending_id": {"type": "string", "description": "From list_pending_expenses"},
+                "amount": {"type": "number", "description": "New amount (positive dollars) — e.g. an estimate's remaining unexplained total"},
+                "description": {"type": "string"},
+                "status": {"type": "string", "enum": ["open", "matched", "dismissed"]},
+                "kind": {"type": "string", "enum": ["itemized", "estimate"]},
+            },
+            "required": ["pending_id"],
             "additionalProperties": False,
         },
     },
@@ -1063,12 +1094,14 @@ TOOLS: list[dict] = [
         "name": "list_pending_expenses",
         "description": (
             "Every mentioned-but-not-yet-posted spend still waiting for data "
-            "(see note_pending_expense), oldest first with age. Consult this "
-            "whenever spending, a balance, or a discrepancy is discussed — a "
-            "gap between what the household says and what the ledger shows is "
-            "very often just Apple Card spending waiting on the next export. "
-            "Entries flagged stale have waited 45+ days: ask for a fresh Wallet "
-            "export, or question the charge."
+            "(see note_pending_expense), oldest first with age, each tagged "
+            "itemized or estimate, plus split totals that never double-count. "
+            "Consult this whenever spending, a balance, or a discrepancy is "
+            "discussed — a gap between what the household says and what the "
+            "ledger shows is very often just Apple Card spending waiting on the "
+            "next export. When itemized entries and an estimate overlap, "
+            "reconcile them with revise_pending_expense. Entries flagged stale "
+            "have waited 45+ days: ask for a fresh Wallet export, or question it."
         ),
         "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
@@ -1883,6 +1916,7 @@ def _dispatch(session: Session, name: str, args: dict):
             account_hint=(args.get("account") or "").strip(),
             speaker=(args.get("spender") or "").strip(),
             mentioned_on=mentioned,
+            kind=(args.get("kind") or "itemized").strip(),
         )
         return {
             "noted": created,
@@ -1890,19 +1924,46 @@ def _dispatch(session: Session, name: str, args: dict):
             "pending_id": row.id,
             "amount": row.amount,
             "account": row.account_hint,
+            "kind": row.kind,
             "open_pending_count": len(pending_lib.open_items(session)),
+        }
+    if name == "revise_pending_expense":
+        from .. import pending as pending_lib
+
+        row = pending_lib.revise(
+            session,
+            (args.get("pending_id") or "").strip(),
+            amount=args.get("amount"),
+            description=args.get("description"),
+            status=args.get("status"),
+            kind=args.get("kind"),
+        )
+        if row is None:
+            return {"error": "pending expense not found — call list_pending_expenses for ids"}
+        return {
+            "revised": True,
+            "pending_id": row.id,
+            "amount": row.amount,
+            "kind": row.kind,
+            "status": row.status,
+            "picture": pending_lib.summary(session),
         }
     if name == "list_pending_expenses":
         from .. import pending as pending_lib
 
-        items = pending_lib.open_items(session)
+        picture = pending_lib.summary(session)
         return {
-            "open": items,
-            "total_open_amount": round(sum(i["amount"] for i in items), 2),
+            "itemized": picture["itemized"],
+            "estimates": picture["estimates"],
+            "itemized_total": picture["itemized_total"],
+            "estimate_total": picture["estimate_total"],
+            "net_total": picture["net_total"],
             "note": (
-                "These are spends the household mentioned that no statement or "
-                "feed has shown yet. Count them when asked where money went; "
-                "stale ones deserve a nudge for a fresh Apple Card export."
+                "Spends mentioned that no statement or feed has shown yet, split "
+                "into pinned-down items and rough estimates. The net_total does "
+                "not double-count IF you keep estimates shrunk as itemized detail "
+                "arrives (revise_pending_expense). Count these when asked where "
+                "money went; nudge for a fresh Apple Card export on stale ones."
             ),
         }
     if name == "update_account_balance":

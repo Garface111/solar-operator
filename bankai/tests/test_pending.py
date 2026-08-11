@@ -52,6 +52,56 @@ def test_a_mention_is_stored_negative_and_deduped(session):
     assert session.query(PendingExpense).count() == 1
 
 
+def test_estimates_are_a_first_class_kind_and_not_deduped(session):
+    est, created = pending.note(session, amount=500, description="house setup",
+                                account_hint="Apple Card", kind="estimate")
+    assert created and est.kind == "estimate"
+    # a same-amount estimate is NOT collapsed the way itemized re-mentions are
+    again, created2 = pending.note(session, amount=500, description="more house",
+                                   account_hint="Apple Card", kind="estimate")
+    assert created2 and again.id != est.id
+    session.query  # two estimates coexist
+    assert session.query(PendingExpense).filter_by(kind="estimate").count() == 2
+
+
+def test_revise_shrinks_an_estimate_and_the_picture_does_not_double_count(session):
+    est, _ = pending.note(session, amount=500, description="house setup",
+                          account_hint="Apple Card", kind="estimate")
+    pending.note(session, amount=7, description="sprinkler hose", account_hint="Apple Card")
+    pending.note(session, amount=35, description="brackets", account_hint="Apple Card")
+    # the copilot attributes the $42 of sprinkler items to the envelope and shrinks it
+    pending.revise(session, est.id, amount=458)
+    pic = pending.summary(session)
+    assert pic["itemized_total"] == -42.0
+    assert pic["estimate_total"] == -458.0
+    # net is the honest total: 42 pinned + 458 still-rough = 500, not 542
+    assert pic["net_total"] == -500.0
+
+
+def test_dismissing_an_estimate_closes_it(session):
+    est, _ = pending.note(session, amount=500, description="house", kind="estimate")
+    pending.revise(session, est.id, status="dismissed")
+    assert pending.summary(session)["estimates"] == []
+    assert session.get(PendingExpense, est.id).status == "dismissed"
+
+
+def test_the_import_signals_open_estimates_to_true_up(session):
+    from bankai.connectors import attachments
+    from bankai.messaging import email_thread
+
+    make_card(session)
+    pending.note(session, amount=500, description="house-setup batch",
+                 account_hint="Apple Card", kind="estimate")
+    out = attachments.handle(
+        session, filename="apple-card.csv", data=APPLE_CSV.encode(),
+        sender="Gaurav", subject="Apple Card export",
+    )
+    assert out["imported"] is True
+    assert out.get("open_estimates")  # the import flags the estimate to reconcile
+    described = email_thread._describe_attachments([out])
+    assert "TRUE UP the rough estimates" in described
+
+
 def test_open_items_report_age_and_staleness(session):
     pending.note(session, amount=50, description="old thing",
                  mentioned_on=date(2026, 6, 1))
@@ -125,8 +175,24 @@ def test_note_and_list_via_tools(session):
     }))
     assert dup["noted"] is False and dup["duplicate_of"] == out["pending_id"]
     listed = json.loads(execute_tool(session, "list_pending_expenses", {}))
-    assert len(listed["open"]) == 1
-    assert listed["total_open_amount"] == -840.0
+    assert len(listed["itemized"]) == 1
+    assert listed["net_total"] == -840.0
+
+
+def test_revise_via_tool_reconciles_the_picture(session):
+    est = json.loads(execute_tool(session, "note_pending_expense", {
+        "amount": 500, "description": "house setup", "account": "Apple Card",
+        "kind": "estimate",
+    }))
+    assert est["kind"] == "estimate"
+    execute_tool(session, "note_pending_expense", {
+        "amount": 42, "description": "sprinkler parts", "account": "Apple Card",
+    })
+    revised = json.loads(execute_tool(session, "revise_pending_expense", {
+        "pending_id": est["pending_id"], "amount": 458,
+    }))
+    assert revised["revised"] is True
+    assert revised["picture"]["net_total"] == -500.0  # 42 pinned + 458 rough, no double-count
 
 
 # --- the full circle: mention -> statement import -> confirmed ---

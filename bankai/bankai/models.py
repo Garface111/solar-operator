@@ -227,6 +227,9 @@ class PendingExpense(Base):
     description: Mapped[str] = mapped_column(String(240))
     account_hint: Mapped[str] = mapped_column(String(120), default="")  # e.g. "Apple Card"
     speaker: Mapped[str] = mapped_column(String(60), default="")
+    #: itemized (a specific spend) | estimate (a rough envelope that shrinks as
+    #: itemized detail is attributed to it, and is finalized by the real import)
+    kind: Mapped[str] = mapped_column(String(20), default="itemized", index=True)
     #: open | matched | dismissed
     status: Mapped[str] = mapped_column(String(20), default="open", index=True)
     matched_transaction_id: Mapped[str | None] = mapped_column(String(40), nullable=True)

@@ -213,6 +213,17 @@ def _describe_attachments(results: list[dict]) -> str:
                     f"statement shows {m['actual']} posted {m['posted']}. That "
                     f"mention is settled now — no longer pending."
                 )
+            if r.get("open_estimates"):
+                names = ", ".join(
+                    f"{e['description'][:40]} (~${abs(e['amount']):.0f}, id {e['id']})"
+                    for e in r["open_estimates"]
+                )
+                lines.append(
+                    f"  Real charges just imported, so TRUE UP the rough estimates "
+                    f"still open: {names}. Close (revise_pending_expense "
+                    f"status='dismissed') any whose actual charges are now in, or "
+                    f"shrink it to only what these charges did not cover."
+                )
         elif r.get("needs_account"):
             lines.append(
                 f"- {name}: saved to the vault, but it looks like a statement and "
