@@ -53,7 +53,10 @@ def _post(payload: dict, bearer: str | None = None) -> dict:
     return resp.json()
 
 
-def run(session: Session, system: str, messages: list[dict]) -> str:
+def run(
+    session: Session, system: str, messages: list[dict],
+    *, model: str | None = None, effort: str | None = None,
+) -> str:
     try:
         bearer = get_xai_bearer()
     except RuntimeError as exc:

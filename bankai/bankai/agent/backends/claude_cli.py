@@ -49,7 +49,10 @@ def _transcript(messages: list[dict]) -> str:
     return "\n\n".join(lines)
 
 
-def run(session: Session, system: str, messages: list[dict]) -> str:
+def run(
+    session: Session, system: str, messages: list[dict],
+    *, model: str | None = None, effort: str | None = None,
+) -> str:
     prompt = (
         "Conversation so far:\n\n"
         + _transcript(messages)
@@ -84,10 +87,13 @@ def run(session: Session, system: str, messages: list[dict]) -> str:
         "--max-turns",
         "40",
     ]
-    if config.CLAUDE_CLI_MODEL:
-        cmd += ["--model", config.CLAUDE_CLI_MODEL]
-    if config.CLAUDE_CLI_EFFORT:
-        cmd += ["--effort", config.CLAUDE_CLI_EFFORT]
+    # Per-turn override from the router wins; the fixed config is the fallback.
+    use_model = model or config.CLAUDE_CLI_MODEL
+    use_effort = effort or config.CLAUDE_CLI_EFFORT
+    if use_model:
+        cmd += ["--model", use_model]
+    if use_effort:
+        cmd += ["--effort", use_effort]
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=TIMEOUT_SECONDS, cwd=config.BASE_DIR

@@ -520,14 +520,20 @@ TOOLS: list[dict] = [
             "rather than a message to whoever you happened to write to; their "
             "replies come back to you and continue this same thread. Write it as "
             "a person would: say what you know, what you need, and why it matters "
-            "to them — not a form letter. This reaches only the household; "
-            "anything addressed to an outside company goes through propose_action."
+            "to them — not a form letter. WRITE IN MARKDOWN: it is rendered into "
+            "a clean, styled HTML email, so use ## section headings, **bold**, "
+            "bullet or numbered lists, | pipe tables | for anything tabular (a "
+            "payment calendar, a comparison), and colored callout panels for what "
+            "must not be missed — a callout is a blockquote whose first line is "
+            "[!TIP], [!IMPORTANT], [!WARNING], or [!SUCCESS]. This reaches only "
+            "the household; anything addressed to an outside company goes through "
+            "propose_action."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "subject": {"type": "string"},
-                "body": {"type": "string", "description": "Plain text. No markdown — this is email."},
+                "body": {"type": "string", "description": "Markdown — headings, bold, lists, tables, and [!TIP]/[!IMPORTANT] callouts all render."},
             },
             "required": ["subject", "body"],
             "additionalProperties": False,

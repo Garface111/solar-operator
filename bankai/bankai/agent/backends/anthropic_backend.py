@@ -8,13 +8,17 @@ from ..tools import TOOLS, execute_tool
 from . import MAX_TOOL_ROUNDS
 
 
-def run(session: Session, system: str, messages: list[dict]) -> str:
+def run(
+    session: Session, system: str, messages: list[dict],
+    *, model: str | None = None, effort: str | None = None,
+) -> str:
     import anthropic
 
     client = anthropic.Anthropic()
+    use_model = model or config.ANTHROPIC_MODEL  # router override wins
     for _ in range(MAX_TOOL_ROUNDS):
         response = client.messages.create(
-            model=config.ANTHROPIC_MODEL,
+            model=use_model,
             max_tokens=8000,
             system=system,
             tools=TOOLS,

@@ -436,20 +436,46 @@ def run_turn(session: Session, messages: list[dict], channel: str = "web") -> st
     Consequential replies then get an adversarial second pass (bankai.agent.verify)
     using the SAME backend that produced them — never a re-resolve, so a degraded
     chain is not verified by the brain that just failed. SMS is skipped: a revision
-    is generated without SMS_ADDENDUM and would come back long or in markdown."""
+    is generated without SMS_ADDENDUM and would come back long or in markdown.
+
+    The model and reasoning effort are chosen per turn by bankai.router: a quick
+    lookup runs Sonnet-fast, a real analysis runs Fable-at-max and keeps the
+    verify pass. The routed model/effort flow into the critic and revision too, so
+    verification happens at the same tier that produced the reply."""
+    from .. import router
+
     system = build_system(session, channel)
+    decision = router.choose(list(messages), channel)
+    logging.getLogger("bankai.chat").info(
+        "route: tier=%s model=%s effort=%s verify=%s (%s)",
+        decision.tier, decision.model, decision.effort, decision.verify, decision.reason,
+    )
     errors: list[str] = []
     for name in [b.strip() for b in config.LLM_BACKEND.split(",") if b.strip()]:
         try:
             impl = _backend(name)
-            reply = impl.run(session, system, list(messages))
+
+            def _run(s, sys_, msgs):
+                # Only pass what is set, so an unrouted turn with no fixed model
+                # calls the backend exactly as before (CLI default model).
+                kwargs = {}
+                if decision.model:
+                    kwargs["model"] = decision.model
+                if decision.effort:
+                    kwargs["effort"] = decision.effort
+                return impl.run(s, sys_, msgs, **kwargs)
+
+            reply = _run(session, system, list(messages))
             # A decision to stay out of a conversation has nothing to verify,
             # and handing it to a critic invites it to be argued into speaking.
             if is_silence(reply):
                 return SILENCE
-            if channel != "sms":
+            # Verify only when the tier warrants it (complex/consequential turns):
+            # a quick balance lookup does not need an adversarial second opinion,
+            # and skipping it is most of the speed win.
+            if channel != "sms" and decision.verify:
                 reply, report = verify.verified_turn(
-                    session, list(messages), reply, impl.run
+                    session, list(messages), reply, _run
                 )
                 if report.get("revised"):
                     logging.getLogger("bankai.chat").info(

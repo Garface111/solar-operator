@@ -48,6 +48,19 @@ CLAUDE_CLI_EFFORT = _env("CLAUDE_CLI_EFFORT")
 CLAUDE_CLI_TIMEOUT_SECONDS = int(_env("CLAUDE_CLI_TIMEOUT_SECONDS", "600") or 600)
 CLAUDE_CLI_MODEL = _env("CLAUDE_CLI_MODEL")  # empty = the CLI's default model
 
+# --- Adaptive model routing (bankai/router.py) ---
+# Pick model + reasoning effort per turn so a quick lookup isn't billed a
+# Fable-at-max think. Ford's spec (2026-08-11): complex → Fable max; simple →
+# Opus low; explicit "real quick" → Sonnet. Off = every turn uses the fixed
+# CLAUDE_CLI_MODEL / CLAUDE_CLI_EFFORT above.
+ROUTER_ENABLED = _env("ROUTER_ENABLED", "true").lower() != "false"
+ROUTER_COMPLEX_MODEL = _env("ROUTER_COMPLEX_MODEL", "claude-fable-5")
+ROUTER_COMPLEX_EFFORT = _env("ROUTER_COMPLEX_EFFORT", "max")
+ROUTER_FAST_MODEL = _env("ROUTER_FAST_MODEL", "claude-opus-5")
+ROUTER_FAST_EFFORT = _env("ROUTER_FAST_EFFORT", "low")
+ROUTER_QUICK_MODEL = _env("ROUTER_QUICK_MODEL", "claude-sonnet-5")
+ROUTER_QUICK_EFFORT = _env("ROUTER_QUICK_EFFORT", "low")
+
 # --- Reply verification: a second model pass critiques consequential replies
 # (dollar figures, percentages, recommendations, deadlines) before they are
 # sent, and revises them once if it finds a material problem. Costs one or two

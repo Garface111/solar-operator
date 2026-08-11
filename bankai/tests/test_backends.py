@@ -13,6 +13,16 @@ from bankai.ingest import upsert_account
 CONSEQUENTIAL = "You should move $5,000 into savings."
 
 
+@pytest.fixture(autouse=True)
+def _no_routing(monkeypatch):
+    """These tests exercise the backend chain + verify wiring under the fixed-
+    config contract; model routing has its own suite (test_router). With routing
+    off and no fixed model, run_turn calls the backend exactly as it always did."""
+    monkeypatch.setattr(config, "ROUTER_ENABLED", False)
+    monkeypatch.setattr(config, "CLAUDE_CLI_MODEL", "")
+    monkeypatch.setattr(config, "CLAUDE_CLI_EFFORT", "")
+
+
 def test_dispatch_uses_configured_backend(session, monkeypatch):
     calls = []
     monkeypatch.setattr(config, "LLM_BACKEND", "grok")
