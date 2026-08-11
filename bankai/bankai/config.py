@@ -150,6 +150,11 @@ WHATSAPP_ACCOUNT_OWNER = _env("WHATSAPP_ACCOUNT_OWNER")
 # DMs need no pin: only chats between household members are ever read.
 WHATSAPP_GROUP_JID = _env("WHATSAPP_GROUP_JID")
 WHATSAPP_POLL_SECONDS = int(_env("WHATSAPP_POLL_SECONDS", "10") or 10)
+# Prefix stamped on every message the copilot sends to the group. Because the
+# bridge is paired to a spouse's OWN account, messages appear under their name;
+# this marker keeps the copilot from ever being mistaken for the human whose
+# device it borrows. Honest attribution is the price of speaking on that account.
+WHATSAPP_SEND_PREFIX = _env("WHATSAPP_SEND_PREFIX", "🤖 ")
 # WhatsApp increasingly shows group senders as privacy LIDs (12309...@lid)
 # instead of phone JIDs, so HOUSEHOLD_PHONES alone cannot always identify a
 # spouse. "Ford:123098057695369,Gaurav:456..." — LIDs appear in the copilot's

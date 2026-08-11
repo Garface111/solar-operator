@@ -131,11 +131,17 @@ def send_reply(
     *, reply_text: str, subject: str, message_id: str, references: str,
     recipients: list[str],
 ) -> str:
-    """One reply to the whole household, threaded under the original message."""
+    """One reply to the whole household, threaded under the original message.
+    The copilot's markdown is rendered to a styled HTML email; the raw text
+    rides along as the plaintext alternative."""
+    from .. import emailformat
+
+    subject_line = _reply_subject(subject)
     return email_harvest.send_message(
         to=recipients,
-        subject=_reply_subject(subject),
+        subject=subject_line,
         text=reply_text,
+        html=emailformat.render_email(subject_line, reply_text),
         headers=threading_headers(message_id, references),
     )
 
@@ -172,7 +178,12 @@ def start_thread(session: Session, subject: str, body: str) -> dict:
     )
     session.commit()
 
-    receipt = email_harvest.send_message(to=recipients, subject=subject, text=body)
+    from .. import emailformat
+
+    receipt = email_harvest.send_message(
+        to=recipients, subject=subject, text=body,
+        html=emailformat.render_email(subject, body),
+    )
     return {"sent": True, "to": recipients, "subject": subject, "receipt": receipt}
 
 

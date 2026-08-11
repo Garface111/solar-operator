@@ -66,9 +66,12 @@ def send_from() -> str:
 
 
 def send_message(
-    *, to: list[str], subject: str, text: str, headers: dict[str, str] | None = None
+    *, to: list[str], subject: str, text: str,
+    headers: dict[str, str] | None = None, html: str | None = None,
 ) -> str:
-    """Send one plain-text message, preferring Resend.
+    """Send one message, preferring Resend. Plain text always goes out as the
+    text/plain part; when `html` is given it rides along as a richer text/html
+    alternative (the client shows the HTML, plain text is the fallback).
 
     Resend is the primary transport (same service the other projects use — no app
     password in the send path, better deliverability). `headers` carries the
@@ -80,6 +83,8 @@ def send_message(
     sender = send_from()
     if config.RESEND_API_KEY:
         payload: dict = {"from": sender, "to": to, "subject": subject, "text": text}
+        if html:
+            payload["html"] = html
         if headers:
             payload["headers"] = headers
         resp = httpx.post(
@@ -103,6 +108,8 @@ def send_message(
     for key, value in headers.items():
         message[key] = value
     message.set_content(text)
+    if html:
+        message.add_alternative(html, subtype="html")
     smtp_host = config.IMAP_HOST.replace("imap.", "smtp.", 1)
     with smtplib.SMTP(smtp_host, 587, timeout=30) as smtp:
         smtp.starttls()

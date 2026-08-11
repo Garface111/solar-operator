@@ -96,11 +96,19 @@ def test_household_messages_land_in_the_shared_thread(session, monkeypatch, wire
     speakers = [m.speaker for m in session.query(ChatMessage).all()]
     assert speakers == ["Ford", "copilot"]
     assert session.query(ChatMessage).first().channel == "whatsapp"
-    # the reply is queued for the bridge
+    # the reply is queued for the bridge, stamped with the copilot's marker
     outbox = list((wired / "outbox").glob("*.json"))
     assert len(outbox) == 1
     payload = json.loads(outbox[0].read_text())
-    assert payload == {"to": GROUP, "text": "About $600 this month."}
+    assert payload["to"] == GROUP
+    assert payload["text"] == "🤖 About $600 this month."
+
+
+def test_outbound_is_attributed_and_never_double_stamped(monkeypatch):
+    monkeypatch.setattr(config, "WHATSAPP_SEND_PREFIX", "🤖 ")
+    assert whatsapp_thread._attributed("hello") == "🤖 hello"
+    # a message that already carries the marker is not stamped twice
+    assert whatsapp_thread._attributed("🤖 hello") == "🤖 hello"
 
 
 def test_a_burst_of_messages_is_one_turn_not_five(session, monkeypatch, wired):

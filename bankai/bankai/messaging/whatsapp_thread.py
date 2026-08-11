@@ -192,9 +192,21 @@ def _wanted(message: dict) -> bool:
     ) is not None
 
 
+def _attributed(text: str) -> str:
+    """Stamp the copilot's marker so a message on a spouse's account is never
+    mistaken for the spouse. Idempotent — never double-stamps. Spacing is
+    normalized here because config values are stripped on load."""
+    marker = config.WHATSAPP_SEND_PREFIX.strip()
+    text = (text or "").strip()
+    if marker and not text.startswith(marker):
+        return f"{marker} {text}"
+    return text
+
+
 def send_group_message(group_jid: str, text: str) -> None:
     """Queue one message for the bridge to deliver (atomic rename so the bridge
-    never reads a half-written file)."""
+    never reads a half-written file). The copilot's attribution marker is added
+    here, so every outbound path is stamped."""
     base = data_dir()
     if base is None:
         raise RuntimeError("WHATSAPP_DATA_DIR is not configured")
@@ -204,7 +216,7 @@ def send_group_message(group_jid: str, text: str) -> None:
 
     name = f"msg-{datetime.utcnow().strftime('%Y%m%dT%H%M%S%f')}.json"
     tmp = outbox / (name + ".tmp")
-    tmp.write_text(json.dumps({"to": group_jid, "text": text}))
+    tmp.write_text(json.dumps({"to": group_jid, "text": _attributed(text)}))
     tmp.rename(outbox / name)
 
 
