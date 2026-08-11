@@ -63,12 +63,12 @@ and `.env` live *inside it* (`config.BASE_DIR` is the directory containing
 ```bash
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
-./venv/bin/python -m pytest tests -q     # expect: 473 passed
+./venv/bin/python -m pytest tests -q     # expect: 481 passed
 ```
 
 **Run the tests.** They are pure logic — no network, no API key — and they are
 your only proof the tree arrived intact before you wire in real credentials.
-If the count is lower than 473 you have an older copy of the branch; re-pull.
+If the count is lower than 481 you have an older copy of the branch; re-pull.
 A `ModuleNotFoundError: fpdf` means the venv predates the `fpdf2` requirement —
 re-run the `pip install -r` above rather than hunting for a bug.
 
@@ -131,21 +131,29 @@ supplies the credentials:
 - **SMS thread:** the `TWILIO_*` block. Note Ford's existing Twilio credentials
   were pasted into a chat and **must be rotated before use** — do not deploy the
   old Auth Token or API key secret.
-- **WhatsApp group seat:** `WHATSAPP_ENABLED=true` + `WHATSAPP_DATA_DIR`, plus
-  the Node bridge in `whatsapp-bridge/` (its own systemd unit ships there). The
-  copilot gets its **own** WhatsApp account on its own number — never a person's,
-  since a ban would take their number with it. **Read the pinning note below
-  before enabling.**
+- **WhatsApp:** `WHATSAPP_ENABLED=true` + `WHATSAPP_DATA_DIR`, plus the Node
+  bridge in `whatsapp-bridge/` (its own systemd unit ships there). Two ways to
+  run it, and they have different consequences — see below.
 
-⚠️ **Pin the WhatsApp group.** `WHATSAPP_GROUP_JID` is empty by default, which
-means *any group the copilot has been added to*. Senders are still gated to the
-household, but the reply goes back to whichever group the message arrived in — so
-if Ford or Gaurav writes to the copilot from some **other** group, the copilot
-answers **in that group**, in front of whoever else is in it, with household
-financial detail. Set `WHATSAPP_GROUP_JID` to the family group's JID (it appears
-in the bridge's `status.json` group list once the copilot has been added) and the
-copilot will answer nowhere else. Do this at the same time you enable WhatsApp,
-not after.
+**Which account the bridge is paired to is the decision that matters.**
+
+- *Its own number* — the copilot has a WhatsApp account of its own. Cleanest:
+  it speaks as itself, and a ban costs nothing but that number.
+- *A spouse's number* ("over the shoulder", `WHATSAPP_ACCOUNT_OWNER`) — the
+  bridge borrows a human's session. It reads what that person can see, so treat
+  it as the more invasive option and make sure both spouses know. Set
+  `WHATSAPP_WATCH_ONLY=true` and the copilot **never sends** on that account —
+  enforced in `poll_once`, not merely asked of the model; replies still land in
+  the dashboard thread. If it *is* allowed to speak, every outbound message is
+  stamped with `WHATSAPP_SEND_PREFIX` (default `🤖 `) in `send_group_message`
+  itself, so a message on a spouse's account can't be mistaken for the spouse.
+  Don't remove that marker — honest attribution is the price of that mode.
+
+**Group pinning is fail-closed.** With `WHATSAPP_GROUP_JID` unset the copilot
+watches **no group at all**; it logs each group JID it sees so you can pin the
+right one. Set it to the family group and that is the only group it reads or
+answers in. Direct messages need no pin — only chats between household members
+are ever read.
 
 Sender identity is matched on phone number or privacy LID
 (`WHATSAPP_HOUSEHOLD_LIDS`), **never** on push name — a display name is text
