@@ -125,7 +125,22 @@ def ensure_worktree() -> str:
     """
     path = Path(config.BUILDER_WORKTREE)
     branch = config.BUILDER_BRANCH
-    if not (path / ".git").exists():
+    healthy = (path / ".git").exists()
+    if healthy:
+        # A worktree can exist on disk and still be unusable — most often when
+        # it was created by Windows git, which records its gitdir as a Windows
+        # path Linux git cannot resolve. Prove it works before trusting it.
+        try:
+            _git(str(path), "rev-parse", "--git-dir")
+        except Exception:
+            log.warning("builder: build worktree at %s is broken; recreating", path)
+            healthy = False
+            subprocess.run(["rm", "-rf", str(path)], capture_output=True, timeout=120)
+            subprocess.run(
+                ["git", "worktree", "prune"], cwd=config.BUILDER_SOURCE_REPO,
+                capture_output=True, timeout=120,
+            )
+    if not healthy:
         log.info("builder: creating build worktree at %s", path)
         subprocess.run(
             ["git", "fetch", "origin", branch],
@@ -183,44 +198,95 @@ def run_tests(worktree: str) -> tuple[bool, str]:
     return proc.returncode == 0, summary[:300]
 
 
-def deploy() -> str:
-    """Ship it — in a transient systemd scope, because this call is running
-    inside bankai.service and restarting the service from within its own cgroup
-    would kill the restart mid-flight.
+#: Written at deploy time, outside the deployed tree — the script has to
+#: outlive the process that wrote it.
+_DEPLOY_SCRIPT = Path("/root/bankai-data/selfbuild-deploy.sh")
 
-    The command mirrors the claim-safe restart discipline: stop, release inbound
-    email claims orphaned by the stop, sync, start. An email whose claim is left
-    dangling is never retried, so releasing is not optional."""
-    script = (
-        "set -e; "
-        "systemctl stop bankai; "
-        "/opt/bankai/venv/bin/python -c \""
-        "from bankai.db import session_scope; "
-        "from bankai.connectors import resend_inbound; "
-        "from sqlalchemy import text; "
-        "s=session_scope().__enter__(); "
-        "[resend_inbound.release(s, r[0]) for r in "
-        "s.execute(text(\\\"select resend_id from inbound_emails where outcome='claimed'\\\"))]; "
-        "s.commit()\"; "
-        f"rsync -a --delete --exclude '.env' --exclude 'venv' --exclude '__pycache__' "
-        f"--exclude '.pytest_cache' --exclude 'bankai.db*' --exclude 'documents' "
-        f"--exclude 'reports' {shlex.quote(config.BUILDER_WORKTREE)}/bankai/ /opt/bankai/; "
-        "/opt/bankai/venv/bin/pip install -q -r /opt/bankai/requirements.txt; "
-        "systemctl start bankai"
+_DEPLOY_TEMPLATE = """#!/bin/bash
+# Written by bankai.builder. Deploys a build and records its own outcome.
+# It runs in a transient systemd scope so that stopping bankai.service — which
+# kills the builder thread that launched this — cannot kill the deploy itself.
+set -o pipefail
+ACTION_ID="{action_id}"
+LOG=/root/bankai-data/selfbuild-deploy.log
+exec >>"$LOG" 2>&1
+echo "=== $(date -Is) deploying build for $ACTION_ID ==="
+
+record() {{  # append the deploy outcome to the action the household approved
+  /opt/bankai/venv/bin/python - "$ACTION_ID" "$1" <<'PY'
+import sys
+from bankai.db import session_scope
+from bankai.models import AgentAction, ChatMessage
+action_id, note = sys.argv[1], sys.argv[2]
+with session_scope() as s:
+    a = s.get(AgentAction, action_id)
+    if a is not None:
+        a.result = (a.result or "")[:800] + " | " + note
+        a.status = "executed" if note.startswith("deployed") else "failed"
+    s.add(ChatMessage(channel="web", role="assistant",
+                      speaker="builder (automatic)", content="[builder] " + note))
+PY
+}}
+
+systemctl stop bankai || true
+# An inbound email whose claim is orphaned by the stop is never retried.
+/opt/bankai/venv/bin/python - <<'PY' || true
+from bankai.db import session_scope
+from bankai.connectors import resend_inbound
+from sqlalchemy import text
+with session_scope() as s:
+    for row in s.execute(text("select resend_id from inbound_emails where outcome='claimed'")):
+        resend_inbound.release(s, row[0])
+PY
+
+if ! rsync -a --delete --exclude '.env' --exclude 'venv' --exclude '__pycache__' \
+     --exclude '.pytest_cache' --exclude 'bankai.db*' --exclude 'documents' \
+     --exclude 'reports' {worktree}/bankai/ /opt/bankai/; then
+  systemctl start bankai
+  record "DEPLOY FAILED during file sync — the previous version is running"
+  exit 1
+fi
+/opt/bankai/venv/bin/pip install -q -r /opt/bankai/requirements.txt || true
+
+systemctl start bankai
+sleep 5
+if /opt/bankai/venv/bin/python -c "import urllib.request,sys; \
+sys.exit(0 if b'true' in urllib.request.urlopen('http://127.0.0.1:8300/api/health', timeout=10).read() else 1)"; then
+  record "deployed and healthy — the change is live"
+else
+  record "DEPLOY FAILED — service did not come back healthy; check journalctl -u bankai"
+fi
+"""
+
+
+def deploy(action_id: str) -> str:
+    """Ship it, detached, and let the deploy report its own result.
+
+    This call happens inside bankai.service, and the deploy stops that service —
+    which kills this thread mid-sentence. So nothing after this function can be
+    relied on to run: the script itself records whether the deploy worked, and
+    posts it to the thread. Fire, and do not expect to come back."""
+    _DEPLOY_SCRIPT.parent.mkdir(parents=True, exist_ok=True)
+    _DEPLOY_SCRIPT.write_text(
+        _DEPLOY_TEMPLATE.format(
+            action_id=action_id, worktree=shlex.quote(config.BUILDER_WORKTREE)
+        )
     )
+    _DEPLOY_SCRIPT.chmod(0o700)
     proc = subprocess.run(
         [
-            "systemd-run", "--collect", "--wait",
+            "systemd-run", "--collect",
             f"--unit=bankai-selfbuild-{datetime.utcnow():%Y%m%d%H%M%S}",
-            "/bin/bash", "-lc", script,
+            "/bin/bash", str(_DEPLOY_SCRIPT),
         ],
-        capture_output=True, text=True, timeout=600,
+        capture_output=True, text=True, timeout=60,
     )
     if proc.returncode != 0:
         raise RuntimeError(
-            f"deploy failed (exit {proc.returncode}): {(proc.stderr or proc.stdout)[:300]}"
+            f"could not launch the deploy (exit {proc.returncode}): "
+            f"{(proc.stderr or proc.stdout)[:300]}"
         )
-    return "deployed to /opt/bankai and restarted"
+    return "deploy launched"
 
 
 def _tell_household(text: str) -> None:
@@ -340,31 +406,33 @@ def run_build(action_id: str) -> dict:
             pushed = False
             log.warning("builder: push failed (%s) — commit %s is local only", exc, sha)
 
-        # GATE 3 — deploy.
-        deployed = ""
-        if config.BUILDER_AUTO_DEPLOY:
-            try:
-                deployed = deploy()
-            except Exception as exc:
-                note = (
-                    f"built and committed {sha} (tests {summary}), but the deploy "
-                    f"failed: {exc}. The running install is untouched."
-                )
-                _tell_household(f"[builder] {title}\n\n{note}")
-                return _finish(action_id, "failed", note)
-
+        # Record the outcome BEFORE deploying. The deploy stops the service this
+        # thread runs in, so nothing below the deploy call is guaranteed to
+        # execute — writing the result afterwards would leave every successful
+        # build looking unfinished forever.
         note = (
             f"implemented by {config.BUILDER_MODEL}, committed {sha}"
-            f"{'' if pushed else ' (local only — push failed)'}, "
-            f"tests {summary}"
-            f"{', ' + deployed if deployed else ', not deployed (auto-deploy off)'}"
+            f"{'' if pushed else ' (local only — push failed)'}, tests {summary}"
         )
         _tell_household(
             f"[builder] {title}\n\n{report[:800]}\n\n"
-            f"({len(touched)} files changed, {summary}, commit {sha}"
-            f"{', live now' if deployed else ''}.)"
+            f"({len(touched)} files changed, {summary}, commit {sha}.)"
         )
-        return _finish(action_id, "executed", note)
+        _finish(action_id, "executed", note)
+
+        # GATE 3 — deploy. Detached and self-reporting: it appends its own
+        # result to this action and posts to the thread, because by the time it
+        # finishes, this process is gone.
+        if not config.BUILDER_AUTO_DEPLOY:
+            return {"status": "executed", "note": note + ", not deployed (auto-deploy off)"}
+        try:
+            deploy(action_id)
+        except Exception as exc:
+            return _finish(action_id, "failed", (
+                f"{note}, but the deploy could not be launched: {exc}. "
+                "The running install is untouched."
+            ))
+        return {"status": "executed", "note": note + ", deploy launched"}
     except Exception as exc:  # never leave an approved action stuck in limbo
         log.exception("builder: unexpected failure")
         return _finish(action_id, "failed", f"builder crashed: {str(exc)[:300]}")
@@ -372,9 +440,50 @@ def run_build(action_id: str) -> dict:
         _LOCK.release()
 
 
-def spawn(action_id: str) -> None:
+def spawn(action_id: str) -> str:
     """Fire the build and return immediately — the dashboard click must not
-    wait out a coding session."""
-    threading.Thread(
-        target=run_build, args=(action_id,), name=f"bankai-builder-{action_id}", daemon=True
-    ).start()
+    wait out a coding session.
+
+    Deliberately NOT a thread. The first version ran the build in-process, and
+    every one of them died with SIGTERM: this service is restarted constantly
+    (deploys, the cockpit watchdog), and a restart SIGKILLs the entire cgroup,
+    agent subprocess included. A build that takes ten minutes cannot live inside
+    a service that gets restarted every two. The transient unit outlives us —
+    which also means a build survives the very deploy it triggers."""
+    unit = f"bankai-build-{action_id[-12:]}-{datetime.utcnow():%H%M%S}"
+    proc = subprocess.run(
+        [
+            "systemd-run", "--collect", f"--unit={unit}",
+            "--working-directory=/opt/bankai",
+            "--setenv=PYTHONPATH=/opt/bankai",
+            "/opt/bankai/venv/bin/python", "-m", "bankai.builder", action_id,
+        ],
+        capture_output=True, text=True, timeout=60,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout)[:300]
+        log.error("builder: could not launch %s: %s", unit, detail)
+        _finish(action_id, "failed", f"could not launch the builder: {detail}")
+        return ""
+    log.info("builder: launched %s for %s", unit, action_id)
+    return unit
+
+
+def main() -> None:
+    """Entry point for the transient unit: `python -m bankai.builder <action_id>`."""
+    import sys
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[logging.FileHandler("/root/bankai-data/builder.log"),
+                  logging.StreamHandler()],
+    )
+    if len(sys.argv) < 2:
+        raise SystemExit("usage: python -m bankai.builder <action_id>")
+    result = run_build(sys.argv[1])
+    log.info("builder finished: %s", result)
+
+
+if __name__ == "__main__":
+    main()

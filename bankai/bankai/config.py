@@ -72,9 +72,10 @@ BUILDER_EFFORT = _env("BUILDER_EFFORT", "xhigh")  # best tier for coding work
 # progress, and a shared tree risks entangling their edits into an approved
 # diff). Created on first build from BUILDER_SOURCE_REPO.
 BUILDER_WORKTREE = _env("BUILDER_WORKTREE", "/root/bankai-build")
-BUILDER_SOURCE_REPO = _env(
-    "BUILDER_SOURCE_REPO", "/mnt/c/Users/fordg/solar-operator-bankai"
-)
+# Must be a NATIVE Linux clone. The Windows worktrees under /mnt/c record their
+# gitdir as a Windows path (C:/Users/...), which Linux git cannot resolve at
+# all — every git command against them fails with "not a git repository".
+BUILDER_SOURCE_REPO = _env("BUILDER_SOURCE_REPO", "/root/solar-operator")
 BUILDER_BRANCH = _env("BUILDER_BRANCH", "claude/joint-banking-ai-dashboard-vp8gyq")
 BUILDER_TEST_CMD = _env(
     "BUILDER_TEST_CMD", "/root/bankai-test-venv/bin/python -m pytest tests -q"

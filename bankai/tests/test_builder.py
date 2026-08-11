@@ -96,7 +96,7 @@ def test_out_of_scope_edit_is_refused_and_never_committed(action, monkeypatch):
                         lambda *a, **k: _agent_says("Done! Also updated .env."))
     monkeypatch.setattr(builder, "run_tests",
                         lambda w: pytest.fail("must not reach the test gate"))
-    monkeypatch.setattr(builder, "deploy", lambda: pytest.fail("must not deploy"))
+    monkeypatch.setattr(builder, "deploy", lambda a: pytest.fail("must not deploy"))
 
     out = builder.run_build("act_test_build")
     assert out["status"] == "failed"
@@ -117,7 +117,7 @@ def test_red_suite_blocks_commit_and_deploy_even_if_the_agent_claims_green(
     monkeypatch.setattr(builder.subprocess, "run",
                         lambda *a, **k: _agent_says("All 384 tests pass."))
     monkeypatch.setattr(builder, "run_tests", lambda w: (False, "2 failed, 382 passed"))
-    monkeypatch.setattr(builder, "deploy", lambda: pytest.fail("must not deploy on red"))
+    monkeypatch.setattr(builder, "deploy", lambda a: pytest.fail("must not deploy on red"))
 
     out = builder.run_build("act_test_build")
     assert out["status"] == "failed"
@@ -145,7 +145,7 @@ def test_green_build_commits_deploys_and_tells_the_household(action, monkeypatch
     monkeypatch.setattr(builder.subprocess, "run",
                         lambda *a, **k: _agent_says("Added the transfer flag and two tests."))
     monkeypatch.setattr(builder, "run_tests", lambda w: (True, "386 passed"))
-    monkeypatch.setattr(builder, "deploy", lambda: "deployed to /opt/bankai and restarted")
+    monkeypatch.setattr(builder, "deploy", lambda action_id: "deploy launched")
     monkeypatch.setattr(config, "BUILDER_AUTO_DEPLOY", True)
 
     out = builder.run_build("act_test_build")
@@ -173,15 +173,15 @@ def test_a_failed_deploy_is_reported_not_swallowed(action, monkeypatch):
     monkeypatch.setattr(builder.subprocess, "run", lambda *a, **k: _agent_says("done"))
     monkeypatch.setattr(builder, "run_tests", lambda w: (True, "386 passed"))
 
-    def boom():
-        raise RuntimeError("systemctl start bankai failed")
+    def boom(action_id):
+        raise RuntimeError("systemd-run refused to launch")
 
     monkeypatch.setattr(builder, "deploy", boom)
     monkeypatch.setattr(config, "BUILDER_AUTO_DEPLOY", True)
 
     out = builder.run_build("act_test_build")
     assert out["status"] == "failed"
-    assert "deploy" in out["note"] and "running install is untouched" in out["note"]
+    assert "could not be launched" in out["note"] and "untouched" in out["note"]
 
 
 def test_only_one_build_runs_at_a_time(action, monkeypatch):
@@ -201,3 +201,57 @@ def test_prompt_carries_the_proposal_and_the_hard_boundaries(action):
     assert "Do NOT commit, push, or deploy" in prompt
     assert ".env" in prompt
     assert "read-only against real money" in prompt
+
+
+def test_the_build_runs_outside_this_service(action, monkeypatch):
+    """A build must not be a child of bankai.service: the service is restarted
+    often (deploys, the watchdog), and a restart SIGKILLs its whole cgroup —
+    which is exactly how the first real build died, at exit 143."""
+    seen = {}
+
+    class P:
+        returncode = 0
+        stdout = "Running as unit: bankai-build-x.service"
+        stderr = ""
+
+    monkeypatch.setattr(builder.subprocess, "run",
+                        lambda cmd, **k: seen.update(cmd=cmd) or P())
+    unit = builder.spawn("act_test_build")
+    assert unit, "spawn should return the transient unit name"
+    assert seen["cmd"][0] == "systemd-run"
+    assert "-m" in seen["cmd"] and "bankai.builder" in seen["cmd"]
+    assert seen["cmd"][-1] == "act_test_build"
+
+
+def test_a_launch_failure_is_recorded_not_silent(action, monkeypatch):
+    class P:
+        returncode = 1
+        stdout = ""
+        stderr = "Failed to start transient service unit"
+
+    monkeypatch.setattr(builder.subprocess, "run", lambda cmd, **k: P())
+    assert builder.spawn("act_test_build") == ""
+    with session_scope() as s:
+        row = s.get(AgentAction, "act_test_build")
+    assert row.status == "failed" and "could not launch" in row.result
+
+
+def test_the_deploy_reports_its_own_outcome(action, monkeypatch, tmp_path):
+    """The deploy stops the service the builder may be watching, so it writes
+    its own result rather than relying on a caller that may be gone."""
+    script_path = tmp_path / "deploy.sh"
+    monkeypatch.setattr(builder, "_DEPLOY_SCRIPT", script_path)
+
+    class P:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(builder.subprocess, "run", lambda cmd, **k: P())
+    builder.deploy("act_test_build")
+    written = script_path.read_text()
+    assert "act_test_build" in written
+    assert "systemctl stop bankai" in written and "systemctl start bankai" in written
+    assert "record " in written                      # writes its own outcome
+    assert "api/health" in written                   # and verifies before claiming success
+    assert "outcome='claimed'" in written            # claim-safe restart discipline
