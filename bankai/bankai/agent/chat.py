@@ -425,7 +425,10 @@ def _backend(name: str):
     return impl
 
 
-def run_turn(session: Session, messages: list[dict], channel: str = "web") -> str:
+def run_turn(
+    session: Session, messages: list[dict], channel: str = "web",
+    force_tier: str | None = None,
+) -> str:
     """Run one turn. `messages` are text-only {role, content} and must end with a
     user message. Returns the reply text.
 
@@ -445,7 +448,7 @@ def run_turn(session: Session, messages: list[dict], channel: str = "web") -> st
     from .. import router
 
     system = build_system(session, channel)
-    decision = router.choose(list(messages), channel)
+    decision = router.for_tier(force_tier) if force_tier else router.choose(list(messages), channel)
     logging.getLogger("bankai.chat").info(
         "route: tier=%s model=%s effort=%s verify=%s (%s)",
         decision.tier, decision.model, decision.effort, decision.verify, decision.reason,

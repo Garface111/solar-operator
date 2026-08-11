@@ -414,7 +414,8 @@ def run_checkin_once() -> dict:
         history = chat_thread.build_history(session)
     history.append({"role": "user", "content": CHECKIN_PROMPT})
     with session_scope() as session:
-        reply = agent_chat.run_turn(session, history, channel="web")
+        # A check-in is a deliberate analytical note to the household — Fable-max.
+        reply = agent_chat.run_turn(session, history, channel="web", force_tier="complex")
 
     if agent_chat.is_silence(reply):
         # The prompt forbids silence, but never put words in the copilot's mouth:
@@ -620,7 +621,11 @@ def run_weekly_report_once(now: datetime | None = None) -> dict:
                 "role": "user",
                 "content": WEEKLY_NARRATIVE_PROMPT.format(data=_json.dumps(compact)),
             })
-            narrative = agent_chat.run_turn(session, history, channel="web")
+            # The Saturday report is a complex synthesis — always Fable at max,
+            # never downshifted by the router (Ford's ask 2026-08-11).
+            narrative = agent_chat.run_turn(
+                session, history, channel="web", force_tier="complex"
+            )
         if agent_chat.is_silence(narrative):
             narrative = ""
     except Exception:

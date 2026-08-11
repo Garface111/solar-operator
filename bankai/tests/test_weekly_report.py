@@ -43,6 +43,31 @@ def test_gather_windows_and_excludes_transfers(session):
     assert data["net_worth"]["total"] == 5000.0
 
 
+def test_gather_includes_visualization_data(session):
+    acct = _seed(session)
+    # add a liability so assets vs liabilities has both sides
+    session.add(Account(name="Card", kind="credit", source="manual", balance=-1200.0))
+    session.flush()
+    data = reports.gather_weekly_data(session)
+    assert data["assets_total"] == 5000.0
+    assert data["liabilities_total"] == 1200.0
+    assert "net_worth_history" in data  # list (may be empty without snapshots)
+
+
+def test_render_pdf_draws_charts_from_history(session, tmp_path):
+    _seed(session)
+    data = reports.gather_weekly_data(session)
+    data["net_worth_history"] = [
+        {"date": "2026-06-01", "total": 900_000.0},
+        {"date": "2026-07-01", "total": 1_100_000.0},
+        {"date": "2026-08-01", "total": 1_258_000.0},
+    ]
+    data["assets_total"], data["liabilities_total"] = 2_000_000.0, 740_000.0
+    out = reports.render_pdf(data, "Charts week.", tmp_path / "weekly.pdf")
+    raw = out.read_bytes()
+    assert raw.startswith(b"%PDF") and len(raw) > 1200
+
+
 def test_render_pdf_survives_model_punctuation(tmp_path, session):
     _seed(session)
     data = reports.gather_weekly_data(session)
@@ -104,7 +129,7 @@ def test_run_weekly_report_delivers_even_when_the_printer_is_dead(
     monkeypatch.setattr(reports, "REPORTS_DIR", tmp_path)
     monkeypatch.setattr(
         scheduler.agent_chat, "run_turn",
-        lambda s, history, channel="web": "A fine week; keep the pace.",
+        lambda s, history, channel="web", force_tier=None: "A fine week; keep the pace.",
     )
     from bankai.messaging import email_thread
     monkeypatch.setattr(email_thread, "configured", lambda: False)

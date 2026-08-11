@@ -140,7 +140,7 @@ def test_first_checkin_tick_initializes_without_mailing(session, monkeypatch):
 
     monkeypatch.setattr(
         scheduler.agent_chat, "run_turn",
-        lambda s, history, channel="web": pytest.fail("no turn on the init tick"),
+        lambda s, history, channel="web", force_tier=None: pytest.fail("no turn on the init tick"),
     )
     monkeypatch.setattr(
         email_thread, "start_thread",
@@ -174,7 +174,7 @@ def test_checkin_emails_the_household_when_configured(session, monkeypatch):
     seen = {}
     monkeypatch.setattr(
         scheduler.agent_chat, "run_turn",
-        lambda s, history, channel="web": "Net worth held steady; nothing needs you.",
+        lambda s, history, channel="web", force_tier=None: "Net worth held steady; nothing needs you.",
     )
     monkeypatch.setattr(email_thread, "configured", lambda: True)
     monkeypatch.setattr(
@@ -197,7 +197,7 @@ def test_checkin_falls_back_to_the_thread_while_email_is_dark(session, monkeypat
     _age_checkin_marker(config.CHECKIN_INTERVAL_DAYS)
     monkeypatch.setattr(
         scheduler.agent_chat, "run_turn",
-        lambda s, history, channel="web": "All quiet this week.",
+        lambda s, history, channel="web", force_tier=None: "All quiet this week.",
     )
     monkeypatch.setattr(email_thread, "configured", lambda: False)
     monkeypatch.setattr(
@@ -217,7 +217,7 @@ def test_checkin_prompt_is_never_stored_as_something_they_said(session, monkeypa
     _age_checkin_marker(config.CHECKIN_INTERVAL_DAYS)
     seen = {}
 
-    def fake_turn(s, history, channel="web"):
+    def fake_turn(s, history, channel="web", force_tier=None):
         seen["history"] = history
         return "Checking in: the picture is unchanged."
 
@@ -240,7 +240,7 @@ def test_a_failed_send_leaves_the_marker_so_the_next_tick_retries(session, monke
     _age_checkin_marker(days := config.CHECKIN_INTERVAL_DAYS)
     monkeypatch.setattr(
         scheduler.agent_chat, "run_turn",
-        lambda s, history, channel="web": "A reply that never arrives.",
+        lambda s, history, channel="web", force_tier=None: "A reply that never arrives.",
     )
     monkeypatch.setattr(email_thread, "configured", lambda: True)
 

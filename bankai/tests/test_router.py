@@ -98,6 +98,30 @@ def test_run_turn_routes_model_and_skips_verify_on_fast(session, monkeypatch):
     assert verified["n"] == 0  # fast tier does not verify
 
 
+def test_force_tier_overrides_the_classifier():
+    # a trivial message forced to complex still gets Fable-max + verify
+    d = router.for_tier("complex")
+    assert d.tier == "complex" and d.model == "claude-fable-5" and d.verify is True
+    assert router.for_tier("quick").model == "claude-sonnet-5"
+
+
+def test_run_turn_honors_force_tier_for_the_report(session, monkeypatch):
+    seen = {}
+
+    class Fake:
+        @staticmethod
+        def run(s, sys_, msgs, *, model=None, effort=None):
+            seen["model"], seen["effort"] = model, effort
+            return "The week's synthesis."
+
+    monkeypatch.setattr(agent_chat, "_backend", lambda name: Fake)
+    monkeypatch.setattr(config, "LLM_BACKEND", "fake")
+    monkeypatch.setattr(agent_chat.verify, "verified_turn", lambda *a, **k: ("x", {}))
+    # even a one-word prompt runs Fable-max when the caller forces complex
+    agent_chat.run_turn(session, msg("hi"), channel="web", force_tier="complex")
+    assert seen["model"] == "claude-fable-5" and seen["effort"] == "max"
+
+
 def test_run_turn_verifies_on_complex(session, monkeypatch):
     class Fake:
         @staticmethod

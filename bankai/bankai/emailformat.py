@@ -17,6 +17,8 @@ from __future__ import annotations
 import html
 import re
 
+from . import charts
+
 # --- palette (inlined into every element; email clients ignore <style>) ---
 INK = "#1a2b3c"     # body text
 MUTED = "#6b7a8b"   # secondary text
@@ -120,6 +122,29 @@ def _render_blocks(md: str) -> str:
 
         if not stripped:
             i += 1
+            continue
+
+        # fenced block: ```barchart / ```stats / ```progress render as charts;
+        # any other ``` fence renders as a monospace code block.
+        if stripped.startswith("```"):
+            kind = stripped[3:].strip()
+            body_lines = []
+            i += 1
+            while i < n and not lines[i].strip().startswith("```"):
+                body_lines.append(lines[i])
+                i += 1
+            i += 1  # consume the closing fence
+            chart = charts.render_block(kind, "\n".join(body_lines))
+            if chart is not None:
+                out.append(chart)
+            else:
+                code = html.escape("\n".join(body_lines))
+                out.append(
+                    '<pre style="margin:12px 0;padding:12px 14px;background:#f5f7fa;'
+                    'border:1px solid #e4e9ef;border-radius:8px;overflow-x:auto;'
+                    'font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;'
+                    f'line-height:1.5;color:{INK};">{code}</pre>'
+                )
             continue
 
         # horizontal rule

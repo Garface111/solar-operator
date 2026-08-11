@@ -84,6 +84,20 @@ def _is_complex(text: str) -> bool:
     return bool(_COMPLEX_RE.search(text))
 
 
+def for_tier(tier: str) -> RouteDecision:
+    """A decision for an explicitly named tier — used when a caller KNOWS the
+    work is complex (the Saturday report, a monthly review) and wants Fable-max
+    regardless of how the prompt happens to read."""
+    tier = (tier or "").strip().lower()
+    if tier == "quick":
+        return RouteDecision("quick", config.ROUTER_QUICK_MODEL,
+                             config.ROUTER_QUICK_EFFORT, verify=False, reason="forced quick")
+    if tier == "fast":
+        return RouteDecision("fast", config.ROUTER_FAST_MODEL,
+                             config.ROUTER_FAST_EFFORT, verify=False, reason="forced fast")
+    return _complex("forced complex")
+
+
 def choose(messages: list[dict], channel: str = "web") -> RouteDecision:
     """The model/effort/verify for this turn."""
     if not config.ROUTER_ENABLED:

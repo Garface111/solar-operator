@@ -85,10 +85,19 @@ def gather_weekly_data(session: Session, today: date | None = None) -> dict:
         projection = {}
 
     from . import pending as pending_lib
+    from .intelligence.insights import net_worth_history
+
+    nw = net_worth(session)
+    # Assets vs liabilities split, for the composition bar on the page.
+    assets = round(sum(a["balance"] for a in nw.get("accounts", []) if a["balance"] > 0), 2)
+    liabilities = round(sum(-a["balance"] for a in nw.get("accounts", []) if a["balance"] < 0), 2)
 
     return {
         "date": today.isoformat(),
-        "net_worth": net_worth(session),
+        "net_worth": nw,
+        "assets_total": assets,
+        "liabilities_total": liabilities,
+        "net_worth_history": net_worth_history(session, months=6),
         "this_week": this_week,
         "last_week": last_week,
         "this_month": this_month,
@@ -123,6 +132,128 @@ def _money(value: float | None) -> str:
     return f"{sign}${abs(value):,.0f}"
 
 
+# RGB palette for the printed charts (fpdf draws with primitives, not CSS).
+_GREEN = (15, 107, 87)
+_BLUE = (59, 130, 246)
+_PURPLE = (124, 58, 237)
+_AMBER = (217, 119, 6)
+_RED = (220, 38, 38)
+_TEAL = (8, 145, 178)
+_PINK = (190, 24, 93)
+_INK = (26, 43, 60)
+_MUTED = (107, 122, 139)
+_TRACK = (238, 242, 246)
+_CAT_COLORS = [_GREEN, _BLUE, _PURPLE, _AMBER, _TEAL, _PINK, (101, 163, 13), _RED]
+
+
+def _stat_tiles(pdf, tiles: list[tuple]) -> None:
+    """A row of big-number tiles: (value, label, rgb)."""
+    if not tiles:
+        return
+    n = len(tiles)
+    gap = 3.0
+    w = (pdf.epw - gap * (n - 1)) / n
+    h = 20.0
+    y = pdf.get_y()
+    for i, (val, label, rgb) in enumerate(tiles):
+        x = pdf.l_margin + i * (w + gap)
+        pdf.set_draw_color(228, 233, 239)
+        pdf.set_fill_color(247, 249, 251)
+        pdf.rect(x, y, w, h, "DF")
+        pdf.set_fill_color(*rgb)
+        pdf.rect(x, y, w, 1.6, "F")
+        pdf.set_xy(x + 3, y + 4.5)
+        pdf.set_font("Helvetica", "B", 14)
+        pdf.set_text_color(*_INK)
+        pdf.cell(w - 6, 7, _clean(str(val)))
+        pdf.set_xy(x + 3, y + 12.5)
+        pdf.set_font("Helvetica", "", 7.5)
+        pdf.set_text_color(*_MUTED)
+        pdf.cell(w - 6, 4, _clean(label.upper()))
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_xy(pdf.l_margin, y + h + 4)
+
+
+def _bar_chart(pdf, items: list[tuple], label_w: float = 52.0, colored: bool = False) -> None:
+    """Horizontal bars: (label, value). Magnitude sizes each bar."""
+    if not items:
+        return
+    value_w = 24.0
+    bar_w = pdf.epw - label_w - value_w - 4
+    top = max((abs(v) for _, v in items), default=0.0) or 1.0
+    for i, (label, value) in enumerate(items):
+        y = pdf.get_y()
+        x = pdf.l_margin
+        pdf.set_xy(x, y)
+        pdf.set_font("Helvetica", "", 9)
+        pdf.set_text_color(*_INK)
+        pdf.cell(label_w, 5.5, _clean(str(label)[:26]))
+        pdf.set_fill_color(*_TRACK)
+        pdf.rect(x + label_w, y + 1, bar_w, 3.6, "F")
+        rgb = _CAT_COLORS[i % len(_CAT_COLORS)] if colored else _GREEN
+        pdf.set_fill_color(*rgb)
+        pdf.rect(x + label_w, y + 1, max(0.6, bar_w * abs(value) / top), 3.6, "F")
+        pdf.set_xy(x + label_w + bar_w + 2, y)
+        pdf.set_font("Helvetica", "B", 8)
+        pdf.cell(value_w, 5.5, _clean(_money(value)), align="R")
+        pdf.ln(5.6)
+    pdf.set_text_color(0, 0, 0)
+
+
+def _trend(pdf, series: list[dict]) -> bool:
+    """A mini bar chart of net worth over time. False if too few points."""
+    pts = [(s.get("date", ""), s["total"]) for s in series
+           if isinstance(s.get("total"), (int, float))]
+    if len(pts) < 2:
+        return False
+    pts = pts[-10:]
+    x0, y0, w, h = pdf.l_margin, pdf.get_y(), pdf.epw, 24.0
+    vals = [v for _, v in pts]
+    lo, hi = min(vals), max(vals)
+    rng = (hi - lo) or 1.0
+    n = len(pts)
+    gap = 2.0
+    bw = (w - gap * (n - 1)) / n
+    base = y0 + h
+    for i, (_, v) in enumerate(pts):
+        frac = (v - lo) / rng
+        bh = 3.0 + frac * (h - 3.0)
+        x = x0 + i * (bw + gap)
+        pdf.set_fill_color(*_GREEN)
+        pdf.rect(x, base - bh, bw, bh, "F")
+    pdf.set_font("Helvetica", "", 7)
+    pdf.set_text_color(*_MUTED)
+    pdf.set_xy(x0, base + 1)
+    pdf.cell(w / 2, 4, _clean(f"{pts[0][0]}: {_money(pts[0][1])}"))
+    pdf.set_xy(x0 + w / 2, base + 1)
+    pdf.cell(w / 2, 4, _clean(f"{pts[-1][0]}: {_money(pts[-1][1])}"), align="R")
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_xy(x0, base + 6)
+    return True
+
+
+def _composition(pdf, assets: float, liabilities: float) -> None:
+    """A single stacked bar: assets (green) vs liabilities (red)."""
+    total = (assets or 0) + (liabilities or 0)
+    if total <= 0:
+        return
+    x0, y, w, h = pdf.l_margin, pdf.get_y(), pdf.epw, 8.0
+    aw = w * assets / total
+    pdf.set_fill_color(*_GREEN)
+    pdf.rect(x0, y, aw, h, "F")
+    pdf.set_fill_color(*_RED)
+    pdf.rect(x0 + aw, y, w - aw, h, "F")
+    pdf.set_font("Helvetica", "", 8)
+    pdf.set_text_color(*_GREEN)
+    pdf.set_xy(x0, y + h + 1)
+    pdf.cell(w / 2, 4, _clean(f"Assets {_money(assets)}"))
+    pdf.set_text_color(*_RED)
+    pdf.set_xy(x0 + w / 2, y + h + 1)
+    pdf.cell(w / 2, 4, _clean(f"Liabilities {_money(liabilities)}"), align="R")
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_xy(x0, y + h + 6)
+
+
 def render_pdf(data: dict, narrative: str, path: Path) -> Path:
     """One page, printable, honest: numbers first, the copilot's words after."""
     from fpdf import FPDF
@@ -148,43 +279,44 @@ def render_pdf(data: dict, narrative: str, path: Path) -> Path:
     pdf.ln(3)
 
     nw = data.get("net_worth") or {}
-    heading(f"Net worth: {_money(nw.get('total'))}")
-    pdf.set_font("Helvetica", "", 9)
-    for account in (nw.get("accounts") or [])[:12]:
-        pdf.cell(0, 5, _clean(
-            f"  {account.get('name', '?')}: {_money(account.get('balance'))}"
-        ), new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(2)
-
     tw, lw = data["this_week"], data["last_week"]
     tm, pm = data["this_month"], data["prior_month"]
-    heading("The week and the month")
-    pdf.set_font("Helvetica", "", 10)
-    for line in (
-        f"This week: spent {_money(tw['spend'])}, income {_money(tw['income'])}"
-        f"   (last week: spent {_money(lw['spend'])})",
-        f"Trailing 30 days: spent {_money(tm['spend'])}, income {_money(tm['income'])}"
-        f"   (prior 30: spent {_money(pm['spend'])})",
-    ):
-        pdf.cell(0, 6, _clean(line), new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(2)
+
+    # A row of headline tiles up top.
+    _stat_tiles(pdf, [
+        (_money(nw.get("total")), "Net worth", _GREEN),
+        (_money(-tw["spend"]) if tw["spend"] else "$0", "Spent this week", _AMBER),
+        (_money(-tm["spend"]) if tm["spend"] else "$0", "Spent (30 days)", _BLUE),
+        (_money(tm["income"]), "Income (30 days)", _TEAL),
+    ])
+
+    heading("Net worth")
+    if _trend(pdf, data.get("net_worth_history") or []):
+        pdf.set_font("Helvetica", "I", 8)
+        pdf.set_text_color(*_MUTED)
+        pdf.cell(0, 4, "Net worth over the last six months.", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_text_color(0, 0, 0)
+        pdf.ln(1)
+    _composition(pdf, data.get("assets_total") or 0.0, data.get("liabilities_total") or 0.0)
+    pdf.ln(1)
 
     heading("Where this week's money went")
     categories = list(tw["by_category"].items())[:8]
     if categories:
-        top = max(v for _, v in categories) or 1.0
-        pdf.set_font("Helvetica", "", 9)
-        for cat, amount in categories:
-            y = pdf.get_y()
-            pdf.set_xy(pdf.l_margin, y)
-            pdf.cell(58, 5.5, _clean(f"{cat}: {_money(amount)}"))
-            pdf.set_fill_color(70, 110, 170)
-            pdf.rect(pdf.l_margin + 60, y + 1, max(2.0, 110 * amount / top), 3.5, "F")
-            pdf.ln(5.5)
+        _bar_chart(pdf, [(cat, amount) for cat, amount in categories], colored=True)
     else:
         pdf.set_font("Helvetica", "I", 9)
         pdf.cell(0, 5, "No categorized spending recorded this week.",
                  new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(2)
+
+    heading("This week vs last  -  this month vs prior")
+    _bar_chart(pdf, [
+        ("This week", tw["spend"]),
+        ("Last week", lw["spend"]),
+        ("This month", tm["spend"]),
+        ("Prior month", pm["spend"]),
+    ])
     pdf.ln(2)
 
     heading("If we stay on this track")
