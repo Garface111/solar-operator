@@ -1,0 +1,351 @@
+"""Approved code changes become real code — by an autonomous builder agent.
+
+Ford's decision (2026-08-11): approving a `code_change` action on the dashboard
+should not merely file the idea for a human; it should dispatch an agent that
+implements it. This is that dispatcher.
+
+What runs where, and why it is safe enough to run at all:
+
+- The builder is a headless Claude Code agent (Opus 4.8) working in the
+  DEVELOPMENT WORKTREE. It never touches `/opt/bankai`, the live database, the
+  document vault, or `.env` — it edits source, and nothing it edits is running
+  at the time it edits it.
+- The builder is told not to commit, push, or deploy. It implements and tests;
+  this module then checks the work and decides. That keeps the chain of custody
+  in code that the builder did not write during this run.
+- Three gates stand between an approved idea and production, and all three are
+  enforced HERE rather than trusted from the agent's own report:
+    1. SCOPE — `git diff` must show changes only under the copilot's package
+       and tests (`selfimprove.ALLOWED_PREFIXES`, the same guard the propose
+       path uses). A build that touched a systemd unit, a credential, or
+       another project is refused and left uncommitted for a human.
+    2. TESTS — the full suite is re-run by this module. The agent saying
+       "tests pass" is not evidence; a green run in our own subprocess is.
+    3. DEPLOY — only after 1 and 2. Deployment happens in a transient systemd
+       scope so restarting bankai.service cannot kill the process performing
+       the restart.
+- Only a human dashboard click (behind APP_PASSWORD) reaches this module. The
+  copilot can propose its own changes all day; it cannot approve them.
+
+Honest bootstrap note: this file is itself inside the buildable surface, so a
+build could rewrite these guards — but only for the NEXT run, since the guards
+enforcing any given build are the deployed ones that started it. The protection
+is real but it is one generation deep; a human reading the diff is still the
+last line, which is why every build reports what changed.
+"""
+from __future__ import annotations
+
+import logging
+import re
+import shlex
+import subprocess
+import threading
+from datetime import datetime
+from pathlib import Path
+
+from . import config, selfimprove
+from .db import session_scope
+from .models import AgentAction, ChatMessage
+
+log = logging.getLogger("bankai.builder")
+
+#: One build at a time. The worktree is shared with human sessions and other
+#: agents, so two concurrent builders would interleave edits into one diff.
+_LOCK = threading.Lock()
+
+BUILDER_SPEAKER = "builder (automatic)"
+
+#: Paths a build may touch, relative to the REPO root (the app lives in the
+#: repo's bankai/ subdirectory, so the package is bankai/bankai/).
+_ALLOWED_REPO_PREFIXES = tuple(
+    f"bankai/{prefix}" for prefix in selfimprove.ALLOWED_PREFIXES
+)
+
+
+def build_prompt(action: AgentAction) -> str:
+    """What the builder is told. Specific about the goal, explicit about the
+    boundaries, silent about how to write the code — it is better at that than
+    a prompt is."""
+    return f"""You are implementing an approved change to BankAI, the household finance
+copilot that Ford and Gaurav rely on. The household approved this proposal on
+the dashboard just now, so it is authorized work — implement it properly.
+
+TITLE: {action.title}
+
+RATIONALE (written by the copilot that proposed it):
+{action.rationale}
+
+DETAIL:
+{action.body}
+
+WHERE YOU ARE
+The repository is checked out at {config.BUILDER_WORKTREE}. The application
+lives in the `bankai/` subdirectory: source in `bankai/bankai/`, tests in
+`bankai/tests/`. Read the surrounding code first and match its style — this
+codebase writes comments that explain WHY, and names things in plain language.
+
+HOW TO TEST
+    cd {config.BUILDER_WORKTREE}/bankai && {config.BUILDER_TEST_CMD}
+The suite must be green when you finish. Add tests that would fail without
+your change — a green suite that never exercised the new behavior proves
+nothing.
+
+BOUNDARIES (these are hard)
+- Change files ONLY under `bankai/bankai/` and `bankai/tests/`. Nothing else:
+  not `.env`, not systemd units, not the database, not another project.
+- Do NOT commit, push, or deploy, and do not restart any service. Leave your
+  work in the working tree; the dispatcher verifies it and ships it.
+- Do NOT touch the live database at /root/bankai-data/ or anything in /opt.
+- This app is read-only against real money by construction. No code path may
+  move funds. The test `test_the_agent_has_no_tool_that_writes_source` and the
+  read-only invariants must keep passing.
+- If the proposal is ambiguous, implement the smallest correct reading of it
+  and say plainly what you chose and what you left alone.
+
+WHEN YOU ARE DONE
+Reply with a short report: what you changed, which tests you added, the final
+test result, and anything you deliberately did not do. If you could not make it
+work, say so plainly — an honest failure is far more useful here than a
+half-change that ships."""
+
+
+def _git(worktree: str, *args: str, timeout: int = 120) -> str:
+    proc = subprocess.run(
+        ["git", *args], cwd=worktree, capture_output=True, text=True, timeout=timeout
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)} failed: {(proc.stderr or '')[:300]}")
+    return proc.stdout
+
+
+def changed_files(worktree: str) -> list[str]:
+    """Every path the build touched: modified, staged, and untracked alike.
+    Untracked matters — a new file outside the allowed surface is exactly the
+    thing a scope check exists to catch."""
+    tracked = _git(worktree, "diff", "HEAD", "--name-only")
+    untracked = _git(worktree, "ls-files", "--others", "--exclude-standard")
+    seen = {p.strip() for p in (tracked + "\n" + untracked).splitlines() if p.strip()}
+    return sorted(seen)
+
+
+def out_of_scope(paths: list[str]) -> list[str]:
+    return [p for p in paths if not p.startswith(_ALLOWED_REPO_PREFIXES)]
+
+
+def run_tests(worktree: str) -> tuple[bool, str]:
+    """Re-run the suite ourselves. The agent's claim is not evidence."""
+    proc = subprocess.run(
+        shlex.split(config.BUILDER_TEST_CMD),
+        cwd=str(Path(worktree) / "bankai"),
+        capture_output=True,
+        text=True,
+        timeout=config.BUILDER_TEST_TIMEOUT_SECONDS,
+    )
+    tail = ((proc.stdout or "") + (proc.stderr or "")).strip().splitlines()
+    summary = tail[-1] if tail else "no output"
+    return proc.returncode == 0, summary[:300]
+
+
+def deploy() -> str:
+    """Ship it — in a transient systemd scope, because this call is running
+    inside bankai.service and restarting the service from within its own cgroup
+    would kill the restart mid-flight.
+
+    The command mirrors the claim-safe restart discipline: stop, release inbound
+    email claims orphaned by the stop, sync, start. An email whose claim is left
+    dangling is never retried, so releasing is not optional."""
+    script = (
+        "set -e; "
+        "systemctl stop bankai; "
+        "/opt/bankai/venv/bin/python -c \""
+        "from bankai.db import session_scope; "
+        "from bankai.connectors import resend_inbound; "
+        "from sqlalchemy import text; "
+        "s=session_scope().__enter__(); "
+        "[resend_inbound.release(s, r[0]) for r in "
+        "s.execute(text(\\\"select resend_id from inbound_emails where outcome='claimed'\\\"))]; "
+        "s.commit()\"; "
+        f"rsync -a --delete --exclude '.env' --exclude 'venv' --exclude '__pycache__' "
+        f"--exclude '.pytest_cache' --exclude 'bankai.db*' --exclude 'documents' "
+        f"--exclude 'reports' {shlex.quote(config.BUILDER_WORKTREE)}/bankai/ /opt/bankai/; "
+        "/opt/bankai/venv/bin/pip install -q -r /opt/bankai/requirements.txt; "
+        "systemctl start bankai"
+    )
+    proc = subprocess.run(
+        [
+            "systemd-run", "--collect", "--wait",
+            f"--unit=bankai-selfbuild-{datetime.utcnow():%Y%m%d%H%M%S}",
+            "/bin/bash", "-lc", script,
+        ],
+        capture_output=True, text=True, timeout=600,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"deploy failed (exit {proc.returncode}): {(proc.stderr or proc.stdout)[:300]}"
+        )
+    return "deployed to /opt/bankai and restarted"
+
+
+def _tell_household(text: str) -> None:
+    """A plain thread message — no model call. The household should hear that
+    their software changed from the software itself, not from a log file."""
+    try:
+        with session_scope() as session:
+            session.add(ChatMessage(
+                channel="web", role="assistant",
+                speaker=BUILDER_SPEAKER, content=text,
+            ))
+    except Exception:
+        log.exception("builder: could not post to the thread")
+
+
+def _finish(action_id: str, status: str, note: str) -> dict:
+    with session_scope() as session:
+        action = session.get(AgentAction, action_id)
+        if action is not None:
+            action.status = status
+            action.result = note[:1000]
+            action.executed_at = datetime.utcnow()
+    log.info("builder %s: %s — %s", action_id, status, note[:200])
+    return {"status": status, "note": note}
+
+
+def run_build(action_id: str) -> dict:
+    """The whole pipeline, start to finish. Safe to call in a worker thread."""
+    if not _LOCK.acquire(blocking=False):
+        return _finish(action_id, "proposed",
+                       "another build is already running — approve this again once it finishes")
+    try:
+        with session_scope() as session:
+            action = session.get(AgentAction, action_id)
+            if action is None:
+                return {"status": "error", "note": "action not found"}
+            title, prompt = action.title, build_prompt(action)
+
+        worktree = config.BUILDER_WORKTREE
+        try:
+            baseline = _git(worktree, "rev-parse", "HEAD").strip()
+            dirty = changed_files(worktree)
+        except Exception as exc:
+            return _finish(action_id, "failed", f"worktree unusable: {exc}")
+        if dirty:
+            # Someone else is mid-edit. Building on top would tangle their work
+            # into this diff and ship it under an approval it never had.
+            return _finish(action_id, "proposed", (
+                "the worktree has uncommitted changes from another session "
+                f"({', '.join(dirty[:4])}) — not building over them; approve again when clear"
+            ))
+
+        cmd = [
+            config.CLAUDE_CLI_BIN, "-p", prompt,
+            "--model", config.BUILDER_MODEL,
+            "--effort", config.BUILDER_EFFORT,
+            "--add-dir", worktree,
+            "--permission-mode", "acceptEdits",
+            "--max-turns", str(config.BUILDER_MAX_TURNS),
+            "--output-format", "json",
+        ]
+        log.info("builder: starting %s on %s", config.BUILDER_MODEL, title)
+        try:
+            proc = subprocess.run(
+                cmd, cwd=worktree, capture_output=True, text=True,
+                timeout=config.BUILDER_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            return _finish(action_id, "failed", (
+                f"the builder ran past {config.BUILDER_TIMEOUT_SECONDS}s and was stopped; "
+                "any partial edits were left in the worktree for a human"
+            ))
+        if proc.returncode != 0:
+            return _finish(action_id, "failed",
+                           f"builder exited {proc.returncode}: {(proc.stderr or '')[:200]}")
+
+        report = ""
+        try:
+            import json as _json
+            report = (_json.loads(proc.stdout).get("result") or "").strip()
+        except Exception:
+            report = (proc.stdout or "")[-600:]
+
+        # GATE 1 — scope. Checked against git, not against what the agent says.
+        touched = changed_files(worktree)
+        if not touched:
+            return _finish(action_id, "failed",
+                           f"the builder changed nothing. It reported: {report[:400]}")
+        stray = out_of_scope(touched)
+        if stray:
+            return _finish(action_id, "failed", (
+                f"REFUSED — the build touched files outside the copilot's own source: "
+                f"{', '.join(stray[:5])}. Nothing was committed or deployed; the "
+                "changes are in the worktree for a human to review."
+            ))
+
+        # GATE 2 — tests, run by us.
+        green, summary = run_tests(worktree)
+        if not green:
+            return _finish(action_id, "failed", (
+                f"the change was written but the suite is red ({summary}). Nothing "
+                "deployed; the work is in the worktree. Builder's report: "
+                f"{report[:300]}"
+            ))
+
+        # Commit exactly what passed the gates — never `git add -A` in a tree
+        # shared with other sessions.
+        _git(worktree, "add", *touched)
+        message = (
+            f"{title}\n\n"
+            f"Implemented by an automatic builder ({config.BUILDER_MODEL}) after the "
+            f"household approved action {action_id} on the dashboard.\n\n"
+            f"Builder's report:\n{report[:1500]}\n\n"
+            f"Gates passed: scope ({len(touched)} files, all under bankai/), "
+            f"tests ({summary}).\n\n"
+            "Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
+        )
+        _git(worktree, "commit", "-m", message)
+        sha = _git(worktree, "rev-parse", "--short", "HEAD").strip()
+        pushed = True
+        try:
+            branch = _git(worktree, "rev-parse", "--abbrev-ref", "HEAD").strip()
+            _git(worktree, "push", "origin", branch, timeout=180)
+        except Exception as exc:
+            pushed = False
+            log.warning("builder: push failed (%s) — commit %s is local only", exc, sha)
+
+        # GATE 3 — deploy.
+        deployed = ""
+        if config.BUILDER_AUTO_DEPLOY:
+            try:
+                deployed = deploy()
+            except Exception as exc:
+                note = (
+                    f"built and committed {sha} (tests {summary}), but the deploy "
+                    f"failed: {exc}. The running install is untouched."
+                )
+                _tell_household(f"[builder] {title}\n\n{note}")
+                return _finish(action_id, "failed", note)
+
+        note = (
+            f"implemented by {config.BUILDER_MODEL}, committed {sha}"
+            f"{'' if pushed else ' (local only — push failed)'}, "
+            f"tests {summary}"
+            f"{', ' + deployed if deployed else ', not deployed (auto-deploy off)'}"
+        )
+        _tell_household(
+            f"[builder] {title}\n\n{report[:800]}\n\n"
+            f"({len(touched)} files changed, {summary}, commit {sha}"
+            f"{', live now' if deployed else ''}.)"
+        )
+        return _finish(action_id, "executed", note)
+    except Exception as exc:  # never leave an approved action stuck in limbo
+        log.exception("builder: unexpected failure")
+        return _finish(action_id, "failed", f"builder crashed: {str(exc)[:300]}")
+    finally:
+        _LOCK.release()
+
+
+def spawn(action_id: str) -> None:
+    """Fire the build and return immediately — the dashboard click must not
+    wait out a coding session."""
+    threading.Thread(
+        target=run_build, args=(action_id,), name=f"bankai-builder-{action_id}", daemon=True
+    ).start()

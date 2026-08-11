@@ -29,11 +29,22 @@ DATABASE_URL = _env("DATABASE_URL") or f"sqlite:///{BASE_DIR / 'bankai.db'}"
 ANTHROPIC_MODEL = _env("ANTHROPIC_MODEL", "claude-opus-5")
 
 # --- LLM backend: anthropic (API key) | claude-cli (Claude subscription via
-# headless `claude -p`) | grok (xAI / Grok Build prepaid credits via OIDC or key) ---
-# Comma-separated fallback chain is supported, e.g. "claude-cli,grok".
+# headless `claude -p`) | kimi (Moonshot / Kimi K3, OpenAI-compatible metered) |
+# grok (xAI / Grok Build prepaid credits via OIDC or key) ---
+# Comma-separated fallback chain is supported, e.g. "claude-cli,kimi": backends
+# are tried in order and the first success wins, so when the Claude subscription
+# runs out the chat degrades to Kimi K3 instead of dying.
 LLM_BACKEND = _env("LLM_BACKEND", "anthropic")
 XAI_API_KEY = _env("XAI_API_KEY")  # classic console key; optional if Grok Build OIDC is live
 GROK_MODEL = _env("GROK_MODEL", "grok-4")
+
+# --- Kimi / Moonshot backend (Kimi K3 — strongest open-weights model) ---
+# OpenAI-compatible metered API billed against the Moonshot prepaid balance.
+# Endpoint/model are configurable so the same backend can point at the Kimi
+# Coding subscription (api.kimi.com/coding) or OpenRouter without a code change.
+KIMI_API_KEY = _env("KIMI_API_KEY") or _env("MOONSHOT_API_KEY")
+KIMI_BASE_URL = _env("KIMI_BASE_URL", "https://api.moonshot.ai/v1")
+KIMI_MODEL = _env("KIMI_MODEL", "kimi-k3")
 # Prefer Grok Build OIDC (prepaid team) over a possibly-capped console API key.
 # bankai.xai_auth reads ~/.grok/auth.json and falls back to Hermes ~/.hermes/auth.json.
 XAI_PREFER_GROK_BUILD_OIDC = _env("XAI_PREFER_GROK_BUILD_OIDC", "1")
@@ -47,6 +58,23 @@ CLAUDE_CLI_EFFORT = _env("CLAUDE_CLI_EFFORT")
 # brain doing tool-heavy turns.
 CLAUDE_CLI_TIMEOUT_SECONDS = int(_env("CLAUDE_CLI_TIMEOUT_SECONDS", "600") or 600)
 CLAUDE_CLI_MODEL = _env("CLAUDE_CLI_MODEL")  # empty = the CLI's default model
+
+# --- Automatic builder (bankai/builder.py) ---
+# Ford's decision 2026-08-11: approving a code_change action on the dashboard
+# dispatches an agent that implements it, rather than filing it for a human.
+# The builder edits the WORKTREE only; scope + tests + deploy gates live in
+# builder.py and are enforced there, not trusted from the agent's report.
+BUILDER_ENABLED = _env("BUILDER_ENABLED", "true").lower() != "false"
+BUILDER_MODEL = _env("BUILDER_MODEL", "claude-opus-4-8")
+BUILDER_EFFORT = _env("BUILDER_EFFORT", "xhigh")  # best tier for coding work
+BUILDER_WORKTREE = _env("BUILDER_WORKTREE", "/mnt/c/Users/fordg/solar-operator-bankai")
+BUILDER_TEST_CMD = _env(
+    "BUILDER_TEST_CMD", "/root/bankai-test-venv/bin/python -m pytest tests -q"
+)
+BUILDER_TIMEOUT_SECONDS = int(_env("BUILDER_TIMEOUT_SECONDS", "3600") or 3600)
+BUILDER_TEST_TIMEOUT_SECONDS = int(_env("BUILDER_TEST_TIMEOUT_SECONDS", "900") or 900)
+BUILDER_MAX_TURNS = int(_env("BUILDER_MAX_TURNS", "120") or 120)
+BUILDER_AUTO_DEPLOY = _env("BUILDER_AUTO_DEPLOY", "true").lower() != "false"
 
 # --- Adaptive model routing (bankai/router.py) ---
 # Pick model + reasoning effort per turn so a quick lookup isn't billed a

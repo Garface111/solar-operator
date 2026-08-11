@@ -785,10 +785,29 @@ def execute_agent_action(action_id: str, _: str = Depends(require_auth)):
             if action.kind == "email_support":
                 receipt = email_harvest.send_email(action.to_email, action.subject, action.body)
             elif action.kind == "code_change":
-                # Deliberately not executable: approving a self-modification marks
-                # it accepted for a developer to implement and review. Nothing in
-                # this process rewrites the code running the household's finances.
-                receipt = "accepted for implementation — no code was changed automatically"
+                # Ford's decision (2026-08-11): approving a code change dispatches
+                # an agent that implements it. The click stays the authorization —
+                # only a human behind APP_PASSWORD reaches this line, and the
+                # copilot cannot approve its own proposals. The build itself runs
+                # against the worktree behind scope/test/deploy gates in
+                # builder.py; this endpoint only starts it and returns.
+                if not config.BUILDER_ENABLED:
+                    receipt = "accepted for implementation — automatic builder is off"
+                else:
+                    from . import builder
+
+                    builder.spawn(action_id)
+                    # Left `proposed` on purpose: the builder writes the real
+                    # outcome (executed / failed) when it finishes, so the
+                    # dashboard never shows "done" for work still in flight.
+                    return {
+                        "status": "building",
+                        "result": (
+                            f"an {config.BUILDER_MODEL} agent is implementing this now — "
+                            "it will report back in the thread when the tests and "
+                            "deploy finish"
+                        ),
+                    }
             else:
                 raise RuntimeError(f"no executor for kind {action.kind!r}")
             action.status = "executed"
