@@ -515,6 +515,39 @@ async def _life_review_loop() -> None:
         await asyncio.sleep(6 * 3600)
 
 
+def run_proposal_evaluations_once() -> dict:
+    """Evaluate any un-tested code proposals in the sandbox. Only ever executes
+    agent-authored tests inside the verified jail; a no-op until one is
+    configured (proposals then simply wait for a trusted reviewer)."""
+    from . import selfimprove_sandbox
+    from .models import CodeProposal
+
+    if not (config.SELFIMPROVE_EVAL_ENABLED and selfimprove_sandbox.configured()):
+        return {"status": "no_sandbox"}
+    evaluated = 0
+    with session_scope() as session:
+        pending = list(session.execute(
+            select(CodeProposal).where(CodeProposal.status == "proposed")
+        ).scalars())
+        ids = [p.id for p in pending]
+    for pid in ids:
+        with session_scope() as session:
+            selfimprove_sandbox.evaluate(session, pid)
+        evaluated += 1
+    return {"status": "ok", "evaluated": evaluated}
+
+
+async def _selfimprove_loop() -> None:
+    while True:
+        try:
+            result = await asyncio.to_thread(run_proposal_evaluations_once)
+            if result.get("evaluated"):
+                log.info("proposal evaluation: %s", result)
+        except Exception:
+            log.exception("self-improve eval loop error")
+        await asyncio.sleep(120)
+
+
 WEEKLY_REPORT_MARKER_TITLE = "Last weekly report"
 
 WEEKLY_NARRATIVE_PROMPT = (
@@ -671,5 +704,6 @@ def start_background_tasks() -> list[asyncio.Task]:
         asyncio.create_task(_tending_loop(), name="bankai-tending"),
         asyncio.create_task(_checkin_loop(), name="bankai-checkin"),
         asyncio.create_task(_life_review_loop(), name="bankai-life-review"),
+        asyncio.create_task(_selfimprove_loop(), name="bankai-selfimprove"),
         asyncio.create_task(_weekly_report_loop(), name="bankai-weekly-report"),
     ]

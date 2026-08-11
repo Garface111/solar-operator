@@ -779,6 +779,78 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "read_source",
+        "description": (
+            "Read your OWN source code so you can improve it. Path is repo-"
+            "relative and limited to your package and tests (bankai/… or "
+            "tests/…); secrets, the database, and the vault are out of scope "
+            "by design and refused. Use list_source first to see what exists. "
+            "This is how you actually understand yourself before proposing a "
+            "change — read the file you mean to edit, don't guess its contents."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string", "description": "e.g. bankai/pending.py"}},
+            "required": ["path"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "list_source",
+        "description": "List your own source files under a package subdir (default 'bankai'). Read-only, in-scope paths only.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"subdir": {"type": "string", "description": "e.g. 'bankai' or 'bankai/connectors' or 'tests'"}},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "propose_patch",
+        "description": (
+            "Propose a REAL change to your own code — the full new contents of "
+            "each file you want to change, not a description. This is how you "
+            "improve yourself: read the relevant source with read_source, write "
+            "the corrected/extended files, and submit them with the tests that "
+            "prove the change. Your proposal is recorded and diffed for review; "
+            "its tests run in an isolated sandbox; and a human ships it. You "
+            "cannot deploy yourself — that gate is deliberate and it protects "
+            "everyone, so propose freely and let Ford merge. ALWAYS include or "
+            "update a test under tests/ that would fail without your change; a "
+            "patch without a test proving it is far less likely to be shipped. "
+            "Only bankai/… and tests/… paths are accepted."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Short imperative, e.g. 'Flag duplicate recurring charges'"},
+                "rationale": {"type": "string", "description": "What is wrong or missing, and why this change is right"},
+                "files": {
+                    "type": "object",
+                    "description": "Map of repo-relative path -> the FULL new file contents",
+                    "additionalProperties": {"type": "string"},
+                },
+                "test_paths": {"type": "string", "description": "Tests that prove it, e.g. 'tests/test_recurring.py'"},
+            },
+            "required": ["title", "rationale", "files"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "list_code_proposals",
+        "description": (
+            "Your open self-improvement proposals with status (proposed / "
+            "awaiting_sandbox / passed / failed) and the tail of any test "
+            "output. Check before proposing something you already proposed, and "
+            "to see whether a proposal's tests passed in the sandbox. "
+            "include_closed=true adds shipped/rejected ones."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"include_closed": {"type": "boolean"}},
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "record_life_fact",
         "description": (
             "Add one inference to your LIFE MODEL of this household — the "
@@ -1507,6 +1579,51 @@ def _dispatch(session: Session, name: str, args: dict):
             account_name=(args.get("account_name") or "").strip(),
             account_identifier=(args.get("account_identifier") or "").strip(),
         )
+    if name == "read_source":
+        from .. import selfimprove
+
+        try:
+            return selfimprove.read_source((args.get("path") or "").strip())
+        except selfimprove.PathRefused as exc:
+            return {"error": str(exc)}
+    if name == "list_source":
+        from .. import selfimprove
+
+        return selfimprove.list_source((args.get("subdir") or "bankai").strip())
+    if name == "propose_patch":
+        from .. import selfimprove
+
+        files = args.get("files")
+        if not isinstance(files, dict) or not files:
+            return {"error": "files must be a non-empty object of path -> contents"}
+        try:
+            row = selfimprove.record_proposal(
+                session,
+                title=(args.get("title") or "").strip(),
+                rationale=(args.get("rationale") or "").strip(),
+                files={str(k): v for k, v in files.items()},
+                test_paths=(args.get("test_paths") or "").strip(),
+            )
+        except (selfimprove.PathRefused, ValueError) as exc:
+            return {"error": str(exc)}
+        return {
+            "proposed": True,
+            "proposal_id": row.id,
+            "status": row.status,
+            "files": sorted(selfimprove.files_of(row)),
+            "diff_preview": (row.diff or "")[:1500],
+            "note": (
+                "Recorded and diffed. Its tests run in the sandbox (or await a "
+                "trusted reviewer); a human ships it. You cannot deploy it "
+                "yourself — surface it to Ford so he can review and merge."
+            ),
+        }
+    if name == "list_code_proposals":
+        from .. import selfimprove
+
+        return {"proposals": selfimprove.as_dicts(
+            session, include_closed=bool(args.get("include_closed"))
+        )}
     if name == "record_life_fact":
         from .. import lifemodel
 

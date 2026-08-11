@@ -120,6 +120,37 @@ class CategoryRule(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class CodeProposal(Base):
+    """A concrete, reviewable change the copilot proposes to its OWN code.
+
+    This is the self-improvement loop's memory. Unlike a prose suggestion, a
+    proposal carries the actual new file contents, so it can be diffed, tested
+    in an isolated sandbox, and shipped with one human approval — or rejected —
+    without anyone rewriting it by hand.
+
+    The boundary that makes this safe lives OUTSIDE this row: proposed code is
+    DATA until a trusted party ships it. It is tested only in a credential-free,
+    network-cut sandbox (agent-authored tests are still code), and merged only
+    by a human. The copilot can propose anything; it cannot deploy itself."""
+
+    __tablename__ = "code_proposals"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _uid("cp"))
+    title: Mapped[str] = mapped_column(String(200))
+    rationale: Mapped[str] = mapped_column(Text, default="")
+    #: JSON {repo_relative_path: full_new_file_contents}
+    files_json: Mapped[str] = mapped_column(Text, default="{}")
+    #: which tests prove it, e.g. "tests/test_pending.py" (space/comma separated)
+    test_paths: Mapped[str] = mapped_column(String(400), default="")
+    #: proposed | awaiting_sandbox | passed | failed | shipped | rejected
+    status: Mapped[str] = mapped_column(String(20), default="proposed", index=True)
+    diff: Mapped[str] = mapped_column(Text, default="")
+    test_output: Mapped[str] = mapped_column(Text, default="")
+    proposed_by: Mapped[str] = mapped_column(String(60), default="copilot")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    evaluated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class LifeFact(Base):
     """One inference in the copilot's model of the household's LIFE — the
     reality generator's memory. Transactions are a diary written in merchants

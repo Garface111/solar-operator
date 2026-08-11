@@ -156,6 +156,19 @@ WHATSAPP_POLL_SECONDS = int(_env("WHATSAPP_POLL_SECONDS", "10") or 10)
 # log the first time each person writes.
 WHATSAPP_HOUSEHOLD_LIDS = _env("WHATSAPP_HOUSEHOLD_LIDS")
 
+# --- Self-improvement sandbox (bankai/selfimprove_sandbox.py) ---
+# Agent-authored tests are code; they run ONLY inside a network-cut,
+# unprivileged jail, never against the live tree. All three must be set (and
+# verify_sandbox() must pass) before proposals auto-evaluate; unset = proposals
+# are recorded and diffed but tests await a trusted reviewer.
+# SELFIMPROVE_SANDBOX is the command PREFIX, e.g.
+#   "unshare --net --fork -- setpriv --reuid bnkeval --regid bnkeval --clear-groups --"
+SELFIMPROVE_SANDBOX = _env("SELFIMPROVE_SANDBOX")
+SELFIMPROVE_SANDBOX_USER = _env("SELFIMPROVE_SANDBOX_USER")  # chown target for run dirs
+SELFIMPROVE_REPO_DIR = _env("SELFIMPROVE_REPO_DIR")  # trusted base checkout, ext4
+SELFIMPROVE_VENV_PYTHON = _env("SELFIMPROVE_VENV_PYTHON")  # python readable by the jail user
+SELFIMPROVE_EVAL_ENABLED = _env("SELFIMPROVE_EVAL_ENABLED", "true").lower() != "false"
+
 SYNC_INTERVAL_MINUTES = int(_env("SYNC_INTERVAL_MINUTES", "360") or 360)
 # Wake the copilot for a self-directed look whenever a sync brings new
 # transactions in from the banks. Silence is the expected outcome; it speaks
