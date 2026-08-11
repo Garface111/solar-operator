@@ -276,6 +276,14 @@ LOG=/root/bankai-data/selfbuild-deploy.log
 exec >>"$LOG" 2>&1
 echo "=== $(date -Is) deploying build for $ACTION_ID ==="
 
+# systemd-run starts this in / with an empty environment, so `import bankai`
+# fails unless we say where it lives. Without these two lines the shell half of
+# the deploy still works and the Python half silently does not: the first
+# deploy shipped correctly but skipped its email-claim release and never
+# reported itself, which looked like success from the outside.
+cd /opt/bankai || exit 1
+export PYTHONPATH=/opt/bankai
+
 record() {{  # append the deploy outcome to the action the household approved
   /opt/bankai/venv/bin/python - "$ACTION_ID" "$1" <<'PY'
 import sys

@@ -253,6 +253,10 @@ def test_the_deploy_reports_its_own_outcome(action, monkeypatch, tmp_path):
     assert "act_test_build" in written
     assert "systemctl stop bankai" in written and "systemctl start bankai" in written
     assert "record " in written                      # writes its own outcome
+    # systemd-run gives an empty env in /; without these the Python half of the
+    # deploy silently no-ops (it did, on the first successful build).
+    assert "cd /opt/bankai" in written
+    assert "PYTHONPATH=/opt/bankai" in written
     assert "api/health" in written                   # and verifies before claiming success
     assert "outcome='claimed'" in written            # claim-safe restart discipline
 
