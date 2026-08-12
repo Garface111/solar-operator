@@ -2348,6 +2348,11 @@ class GlobalRatePatch(BaseModel):
     # Discount model: the operator's global default net rate + discount.
     default_net_rate_per_kwh: Optional[float] = None
     default_discount_pct: Optional[float] = None
+    # Fleet-wide incentive adder for "tariff + adder" contracts, with an optional
+    # end date. Sits alongside the master rate so an operator whose deal has both
+    # halves can't set only the tariff and quietly under-bill by the adder.
+    default_net_rate_adder_per_kwh: Optional[float] = None
+    default_net_rate_adder_until: Optional[str] = None
 
 
 # ── Long-sweep executor ──────────────────────────────────────────────────────
@@ -2728,12 +2733,18 @@ def get_global_rate(authorization: Optional[str] = Header(default=None)):
     t = tenant_from_session(authorization)
     net = getattr(t, "default_net_rate_per_kwh", None)
     disc = getattr(t, "default_discount_pct", None)
+    add = getattr(t, "default_net_rate_adder_per_kwh", None)
 
     if net is not None and net > 0:
         eff_src = "global"
+        # The effective master rate is tariff + adder — quoting the tariff alone to a
+        # "tariff + adder" operator would understate what their offtakers are billed.
+        eff_net = float(net) + float(add or 0)
+        _bits = f"${float(net):.5f}/kWh"
+        if add:
+            _bits += f" + ${float(add):.5f}/kWh incentive"
         eff_note = ("Master rate is set — offtakers without a custom rate all use "
-                    f"${float(net):.5f}/kWh (minus discount).")
-        eff_net = float(net)
+                    f"{_bits} (minus discount).")
     else:
         # No single fleet number when blank — each offtaker prices off their bill.
         eff_src = "per_offtaker_bill"
@@ -2747,6 +2758,11 @@ def get_global_rate(authorization: Optional[str] = Header(default=None)):
         "default_billing_rate_per_kwh": getattr(t, "default_billing_rate_per_kwh", None),
         # discount model + master rate (null = per-offtaker bill rates)
         "default_net_rate_per_kwh": net,
+        # Fleet-wide incentive adder ($/kWh) for tariff + adder contracts, and its
+        # optional end date (adders are usually term-limited).
+        "default_net_rate_adder_per_kwh": add,
+        "default_net_rate_adder_until": (
+            au.isoformat() if (au := getattr(t, "default_net_rate_adder_until", None)) else None),
         "default_discount_pct": disc,
         "effective_net_rate_per_kwh": eff_net,
         "effective_net_rate_source": eff_src,
@@ -2774,9 +2790,17 @@ def set_global_rate(body: GlobalRatePatch,
             tt.default_net_rate_per_kwh = _validate_rate(body.default_net_rate_per_kwh)
         if "default_discount_pct" in body.model_fields_set:
             tt.default_discount_pct = _validate_discount(body.default_discount_pct)
+        if "default_net_rate_adder_per_kwh" in body.model_fields_set:
+            tt.default_net_rate_adder_per_kwh = _validate_rate(body.default_net_rate_adder_per_kwh)
+        if "default_net_rate_adder_until" in body.model_fields_set:
+            tt.default_net_rate_adder_until = _parse_adder_until(body.default_net_rate_adder_until)
         db.commit()
         return {"ok": True,
                 "default_net_rate_per_kwh": tt.default_net_rate_per_kwh,
+                "default_net_rate_adder_per_kwh": tt.default_net_rate_adder_per_kwh,
+                "default_net_rate_adder_until": (
+                    tt.default_net_rate_adder_until.isoformat()
+                    if tt.default_net_rate_adder_until else None),
                 "default_discount_pct": tt.default_discount_pct,
                 "default_billing_rate_per_kwh": tt.default_billing_rate_per_kwh}
 

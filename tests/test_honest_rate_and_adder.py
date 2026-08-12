@@ -206,6 +206,46 @@ def test_master_rate_alone_also_counts_as_confirmed():
     assert "Unconfirmed rate" not in " ".join(m.warnings)
 
 
+# ── 3b. the master (fleet) rate carries an adder too ──────────────────────────
+
+def test_global_rate_endpoint_round_trips_the_adder(client):
+    """The master-rate control must accept BOTH halves of a tariff+adder price.
+    If it took only the tariff, an operator who set 0.18398 there would quietly
+    UNDER-bill by the 4-cent adder — the same silent-wrong-price bug inverted."""
+    from api.account import mint_session_for_tenant
+    tid, _, _ = _seed()
+    auth = f"Bearer {mint_session_for_tenant(tid)}"
+
+    r = client.put("/v1/array-operator/billing/global-rate",
+                   json={"default_net_rate_per_kwh": CONTRACT_TARIFF,
+                         "default_net_rate_adder_per_kwh": CONTRACT_ADDER,
+                         "default_net_rate_adder_until": "2029-12-31"},
+                   headers={"Authorization": auth})
+    assert r.status_code == 200, r.text
+
+    r = client.get("/v1/array-operator/billing/global-rate",
+                   headers={"Authorization": auth})
+    b = r.json()
+    assert abs(b["default_net_rate_per_kwh"] - CONTRACT_TARIFF) < 1e-9
+    assert abs(b["default_net_rate_adder_per_kwh"] - CONTRACT_ADDER) < 1e-9
+    assert b["default_net_rate_adder_until"] == "2029-12-31"
+    # The quoted effective rate is the ALL-IN price, not the bare tariff.
+    assert abs(b["effective_net_rate_per_kwh"] - 0.22398) < 1e-9
+    assert "incentive" in (b["effective_net_rate_note"] or "")
+
+
+def test_bad_adder_expiry_is_rejected_not_silently_dropped(client):
+    """A malformed date must 400 — silently discarding it would drop an adder the
+    operator meant to keep."""
+    from api.account import mint_session_for_tenant
+    tid, _, _ = _seed()
+    auth = f"Bearer {mint_session_for_tenant(tid)}"
+    r = client.put("/v1/array-operator/billing/global-rate",
+                   json={"default_net_rate_adder_until": "next tuesday"},
+                   headers={"Authorization": auth})
+    assert r.status_code == 400
+
+
 # ── 4. the unattended-send hold ───────────────────────────────────────────────
 
 def test_scheduler_holds_auto_send_on_an_unconfirmed_rate():
