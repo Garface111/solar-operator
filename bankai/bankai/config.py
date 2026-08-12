@@ -59,6 +59,22 @@ CLAUDE_CLI_EFFORT = _env("CLAUDE_CLI_EFFORT")
 CLAUDE_CLI_TIMEOUT_SECONDS = int(_env("CLAUDE_CLI_TIMEOUT_SECONDS", "600") or 600)
 CLAUDE_CLI_MODEL = _env("CLAUDE_CLI_MODEL")  # empty = the CLI's default model
 
+# --- Live web access for the copilot ---
+# Ford's call, 2026-08-12: the copilot needs the open web to value assets and
+# check real figures, so WebSearch/WebFetch are granted. This reverses an
+# earlier deliberate removal, and the reason for that removal still stands and
+# is worth knowing: a turn's context holds the household's whole financial
+# picture, third-party text (harvested attachments, document PDFs) can carry
+# prompt injection, and a headless CLI runs allowed tools with no human gate —
+# so web egress is a real exfiltration channel, not a theoretical one. What
+# changed is not the risk but who decided to accept it.
+# Mitigations that come with it: every turn granted web access is written to the
+# security log (so the channel is auditable rather than silent), and
+# WEB_ALLOWED_DOMAINS can narrow fetches to a list when you want research
+# without open egress. Empty = unrestricted, which is what Ford asked for.
+WEB_ACCESS = _env("WEB_ACCESS", "true").lower() != "false"
+WEB_ALLOWED_DOMAINS = [d.strip() for d in _env("WEB_ALLOWED_DOMAINS").split(",") if d.strip()]
+
 # --- Automatic builder (bankai/builder.py) ---
 # Ford's decision 2026-08-11: approving a code_change action on the dashboard
 # dispatches an agent that implements it, rather than filing it for a human.

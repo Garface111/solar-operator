@@ -23,6 +23,48 @@ from ... import config
 # it, and timing out just burns the whole turn. Configurable for both roles.
 TIMEOUT_SECONDS = config.CLAUDE_CLI_TIMEOUT_SECONDS
 
+#: Local tools every turn gets. Web tools are appended only when granted.
+_BASE_TOOLS = "mcp__bankai__*,Read"
+
+
+def _allowed_tools() -> str:
+    if not config.WEB_ACCESS:
+        return _BASE_TOOLS
+    return _BASE_TOOLS + ",WebSearch,WebFetch"
+
+
+def _log_web_access() -> None:
+    """Record that a turn ran with live web egress.
+
+    Granting the copilot the open web while its context holds the household's
+    entire financial picture is a real risk knowingly accepted, not a
+    non-event. Writing it down is what keeps the channel auditable rather than
+    silent — if data ever does leave, there is a trail showing which turns
+    could have sent it.
+    """
+    if not config.WEB_ACCESS:
+        return
+    try:
+        from ...db import session_scope
+        from ...security import sentinel
+
+        with session_scope() as audit:
+            sentinel.record_event(
+                audit,
+                kind="web_access_turn",
+                severity="info",
+                actor="copilot",
+                summary="turn ran with WebSearch/WebFetch granted",
+                detail={"allowed_domains": config.WEB_ALLOWED_DOMAINS or "unrestricted"},
+            )
+    except Exception:
+        # A broken alarm must not break the thing it guards.
+        import logging
+
+        logging.getLogger("bankai.security").info(
+            "web_access_turn (sentinel unavailable): WebSearch/WebFetch granted"
+        )
+
 
 def _mcp_config() -> str:
     return json.dumps(
@@ -72,14 +114,15 @@ def run(
         # Read lets it open vault images (pasted screenshots) at the path
         # read_document hands back — an MCP tool can only return text.
         #
-        # WebSearch/WebFetch are deliberately NOT granted: this turn's prompt
-        # carries untrusted third-party text (inbound email bodies, extracted
-        # document text), and a headless CLI auto-runs allowed tools with no
-        # human gate — so web egress here is a silent exfiltration channel for
-        # the household's crown-jewel data under prompt injection. The copilot's
-        # job is the local financial/legal record; if live web research is ever
-        # wanted back, scope it to a domain allowlist rather than granting bare.
-        "mcp__bankai__*,Read",
+        # WebSearch/WebFetch: granted when config.WEB_ACCESS is on (Ford's call,
+        # 2026-08-12 — he wants the copilot able to value assets against the
+        # real market instead of guessing a number into the balance sheet).
+        # The earlier reasoning for withholding them was sound and still is: the
+        # prompt carries untrusted third-party text and the headless CLI runs
+        # allowed tools with no human gate, so this is a genuine egress channel.
+        # It is now an AUDITED one — _log_web_access records every turn that
+        # carries it — and WEB_ALLOWED_DOMAINS can narrow it without code.
+        _allowed_tools(),
         # 15 was too few for real work: reading two statement PDFs paged at 30k
         # chars each, annotating both, and creating an account exhausted the
         # budget before it could say what it had done — the work landed and the
@@ -94,6 +137,7 @@ def run(
         cmd += ["--model", use_model]
     if use_effort:
         cmd += ["--effort", use_effort]
+    _log_web_access()
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=TIMEOUT_SECONDS, cwd=config.BASE_DIR

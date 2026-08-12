@@ -307,8 +307,14 @@ def test_claude_cli_command_and_parse(session, monkeypatch):
     cmd = captured["cmd"]
     assert cmd[0] == config.CLAUDE_CLI_BIN and cmd[1] == "-p"
     assert "--append-system-prompt" in cmd and "SYSTEM" in cmd
-    # Read is allowed for vault images; WebSearch/WebFetch removed (exfil channel)
-    assert "--allowedTools" in cmd and "mcp__bankai__*,Read" in cmd
+    # Read is allowed for vault images. Web tools were once withheld here as an
+    # exfiltration channel; Ford reversed that on 2026-08-12 so the copilot can
+    # value assets against the real market. The local tools must always be
+    # present — whether the web ones are is WEB_ACCESS's business, covered by
+    # its own tests below.
+    assert "--allowedTools" in cmd
+    granted = cmd[cmd.index("--allowedTools") + 1]
+    assert "mcp__bankai__*" in granted and "Read" in granted
     mcp_cfg = json.loads(cmd[cmd.index("--mcp-config") + 1])
     assert "bankai" in mcp_cfg["mcpServers"]
     assert "[Ford] net worth?" in cmd[2]
@@ -471,3 +477,55 @@ def test_claude_cli_omits_effort_flag_when_unset(session, monkeypatch):
     claude_cli.run(session, "system", [{"role": "user", "content": "hi"}])
     assert "--model" not in seen["cmd"]
     assert "--effort" not in seen["cmd"]
+
+
+# --- live web access (Ford's call, 2026-08-12) ------------------------------
+
+def test_web_tools_are_granted_when_web_access_is_on(monkeypatch):
+    from bankai.agent.backends import claude_cli
+
+    monkeypatch.setattr(config, "WEB_ACCESS", True)
+    tools = claude_cli._allowed_tools()
+    assert "WebSearch" in tools and "WebFetch" in tools
+    assert "mcp__bankai__*" in tools and "Read" in tools
+
+
+def test_web_tools_can_be_withdrawn_without_a_code_change(monkeypatch):
+    """The earlier reasoning for withholding the web still stands; make sure
+    turning it back off is one env var, not an edit."""
+    from bankai.agent.backends import claude_cli
+
+    monkeypatch.setattr(config, "WEB_ACCESS", False)
+    tools = claude_cli._allowed_tools()
+    assert "WebSearch" not in tools and "WebFetch" not in tools
+    assert "mcp__bankai__*" in tools
+
+
+def test_every_web_enabled_turn_is_written_to_the_security_log(monkeypatch):
+    """Granting the open web to a context holding the household's whole
+    financial picture is an accepted risk, not a non-event — it must leave a
+    trail showing which turns could have sent data out."""
+    from bankai.agent.backends import claude_cli
+    from bankai.security import sentinel
+
+    monkeypatch.setattr(config, "WEB_ACCESS", True)
+    seen = {}
+    monkeypatch.setattr(
+        sentinel, "record_event",
+        lambda session, **kw: seen.update(kw),
+    )
+    claude_cli._log_web_access()
+    assert seen.get("kind") == "web_access_turn"
+    assert seen.get("actor") == "copilot"
+
+
+def test_no_security_event_when_web_access_is_off(monkeypatch):
+    from bankai.agent.backends import claude_cli
+    from bankai.security import sentinel
+
+    monkeypatch.setattr(config, "WEB_ACCESS", False)
+    monkeypatch.setattr(
+        sentinel, "record_event",
+        lambda *a, **k: pytest.fail("must not log a web turn when web is off"),
+    )
+    claude_cli._log_web_access()
