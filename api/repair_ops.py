@@ -3029,6 +3029,29 @@ def reconcile(db, tenant: Tenant, tree: Optional[dict] = None) -> dict:
             continue
         info = live.get(int(ticket.inverter_id))
         if info is None:
+            # Absent from the fleet tree, for one of two very different reasons:
+            #   * TRANSIENT — a vendor/connection hiccup dropped the array from
+            #     this build. The outage is still real; leave the ticket alone.
+            #   * RETIRED — the Inverter row is soft-deleted or gone, e.g. the
+            #     device was reclassified as a data logger and pruned.
+            # Only the retired case may close a ticket, so a tree glitch can
+            # never silently cancel a genuine outage.
+            #
+            # Londonderry 186's Chint FlexOM loggers (0000e7be1902c000 /
+            # 000053571e02ca00 / 00005cad1f022a00) were pruned on 2026-08-10,
+            # but their tickets stayed open and IMMORTAL: no live status could
+            # ever clear them, while escalate_stale_repairs still picked them up
+            # and emailed the owner on day 7 about a "dead inverter" that is not
+            # an inverter and no longer exists (AO-TICKET-84, Bruce, 2026-08-12).
+            if _inverter_is_retired(db, tenant.id, ticket.inverter_id):
+                ticket.status = "cancelled"
+                ticket.cancelled_at = now()
+                ticket.next_checkin_at = None
+                note = "[auto] cancelled — device retired from the fleet (not an inverter)"
+                ticket.tech_note = (
+                    (ticket.tech_note + "\n" + note) if ticket.tech_note else note
+                )
+                closed += 1
             continue
         st = info["status"]
         if st == "ok":
@@ -3137,6 +3160,23 @@ def reconcile(db, tenant: Tenant, tree: Optional[dict] = None) -> dict:
     return {"opened": opened, "closed": closed, "tree": tree}
 
 
+def _inverter_is_retired(db, tenant_id: str, inverter_id: int | None) -> bool:
+    """True when this ticket's inverter is no longer a live unit in the fleet —
+    the row is soft-deleted, gone, or belongs to another tenant.
+
+    Deliberately a DB lookup, not "missing from the fleet tree": a tree can drop
+    an array transiently (vendor timeout, connection error) and we must never
+    close or silence a real outage on that basis. Only an actually-retired row
+    counts.
+    """
+    if not inverter_id:
+        return False
+    iv = db.get(Inverter, int(inverter_id))
+    if iv is None or iv.tenant_id != tenant_id:
+        return True
+    return iv.deleted_at is not None
+
+
 # ── autonomous escalation: week-long-down → email the owner for action ────────
 ESCALATE_DAYS = float(os.getenv("EA_ESCALATE_DAYS", "7") or 7)
 
@@ -3186,6 +3226,22 @@ def escalate_stale_repairs(db, tenant: Tenant) -> int:
 
     sent = 0
     for ticket in stale:
+        # CHOKEPOINT: never email the owner about a device that is no longer a
+        # live inverter. reconcile cancels these, but it returns early when the
+        # tenant has repair_auto_open off — so without this guard the ticket
+        # stays immortal and mails out on day 7 anyway. This is the layer that
+        # actually sends, so it gets the last word. Cancel here too, so the case
+        # is closed even for tenants reconcile never reaches.
+        if _inverter_is_retired(db, tenant.id, ticket.inverter_id):
+            ticket.status = "cancelled"
+            ticket.cancelled_at = now()
+            ticket.next_checkin_at = None
+            note = "[auto] cancelled — device retired from the fleet (not an inverter)"
+            ticket.tech_note = (
+                (ticket.tech_note + "\n" + note) if ticket.tech_note else note
+            )
+            db.commit()
+            continue
         contact = get_contact(db, tenant.id, ticket.contact_id) if ticket.contact_id else None
         days_down = max(ESCALATE_DAYS, (now() - ticket.opened_at).days) if ticket.opened_at else int(ESCALATE_DAYS)
         ev = ticket.evidence or {}
