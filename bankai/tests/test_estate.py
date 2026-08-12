@@ -47,12 +47,22 @@ def test_matching_looks_at_summary_and_content_not_just_title(session):
 def test_a_full_folder_does_not_falsely_satisfy_an_item(session):
     # eight estate-category docs, none of which is a guardianship designation
     for i in range(8):
-        _doc(session, f"estate misc {i}", category="estate", summary="beneficiary letter")
+        _doc(session, f"estate misc {i}", category="estate",
+             summary="primary beneficiary designation update")
     status = estate.checklist_status(session)
     by_key = {i["key"]: i for i in status["items"]}
     assert by_key["guardianship"]["present"] is False  # category alone proves nothing
-    # but 'beneficiary' in the summary does satisfy the beneficiaries item
+    # but a real keyword in the summary does satisfy the beneficiaries item
     assert by_key["beneficiaries"]["present"] is True
+
+
+def test_body_text_only_matches_inside_the_expected_category(session):
+    # a TAX return whose text mentions 'trust' must NOT pass for the trust agreement
+    _doc(session, "Federal tax return 2025", category="tax",
+         content="Grantor trust income reported on Schedule E, revocable trust distributions")
+    status = estate.checklist_status(session)
+    by_key = {i["key"]: i for i in status["items"]}
+    assert by_key["trust_agreement"]["present"] is False  # wrong category, no false match
 
 
 def test_the_tool_round_trips(session):

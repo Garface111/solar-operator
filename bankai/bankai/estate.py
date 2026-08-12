@@ -26,82 +26,106 @@ from .models import Document
 CHECKLIST = [
     {"key": "guardianship", "priority": "urgent",
      "label": "Guardianship designation for your child",
-     "keywords": ["guardian", "guardianship", "nomination of guardian"],
+     "keywords": ["guardianship", "guardian of the", "nomination of guardian",
+                  "appointment of guardian", "designate a guardian"],
+     "categories": ("estate",),
      "why": "With a child arriving, this names who would raise them if something "
             "happened to you both — the single most important document a new parent "
             "tends to lack, and it should be in place before the birth."},
     {"key": "will", "priority": "urgent",
      "label": "Will / last will & testament (each spouse)",
      "keywords": ["last will", "testament", "will and testament", "pour-over will"],
+     "categories": ("estate",),
      "why": "Directs your assets and is often where guardianship is legally named. "
             "Without one, the state decides both."},
     {"key": "life_insurance", "priority": "high",
      "label": "Life insurance policy (each spouse)",
      "keywords": ["life insurance", "term life", "whole life", "term policy"],
+     "categories": ("insurance",),
      "why": "Income protection for a household running on one paycheck plus trust "
             "draws, with a child on the way."},
     {"key": "trust_agreement", "priority": "high",
      "label": "Trust agreement — the governing document",
      "keywords": ["trust agreement", "declaration of trust", "trust under agreement",
                   "revocable trust", "irrevocable trust", "grantor trust"],
+     "categories": ("estate",),
      "why": "It governs your ~$1.09M in the two trust accounts. You hold the "
             "accounts; I've never seen the document that controls them."},
     {"key": "healthcare_directive", "priority": "high",
      "label": "Healthcare directive / medical POA (each spouse)",
      "keywords": ["healthcare directive", "advance directive", "medical power of attorney",
-                  "healthcare proxy", "living will", "advance health"],
+                  "healthcare proxy", "advance health"],
+     "categories": ("estate",),
      "why": "Names who makes medical decisions if you cannot — one for each of you."},
     {"key": "financial_poa", "priority": "high",
      "label": "Durable financial power of attorney (each spouse)",
      "keywords": ["power of attorney", "durable poa", "financial power of attorney"],
+     "categories": ("estate",),
      "why": "Lets your spouse manage money and sign for you if you're incapacitated."},
     {"key": "beneficiaries", "priority": "high",
      "label": "Beneficiary designations (retirement + life)",
-     "keywords": ["beneficiary", "beneficiary designation", "designated beneficiary"],
+     "keywords": ["beneficiary designation", "designated beneficiary", "primary beneficiary"],
+     "categories": ("estate", "financial"),
      "why": "These override your will — with a child coming, they need a review."},
     {"key": "surrogacy_agreement", "priority": "high",
      "label": "Surrogacy agency contract & payment schedule",
      "keywords": ["surrogacy", "gestational carrier", "miracle surrogacy", "surrogate"],
+     "categories": ("contract", "estate", "other"),
      "why": "Your biggest financial project, and I track its payments blind — the "
             "contract would let me build a real paid-vs-remaining ledger."},
     {"key": "deed", "priority": "normal",
      "label": "Recorded grant deed for the home",
      "keywords": ["grant deed", "warranty deed", "recorded deed", "quitclaim"],
+     "categories": ("home", "other"),
      "why": "Proof of ownership and how title is held, which shapes how it transfers."},
     {"key": "title_insurance", "priority": "normal",
      "label": "Title insurance policy",
      "keywords": ["title insurance", "owner's title policy", "owners title"],
+     "categories": ("home", "insurance", "other"),
      "why": "Protects your ownership against defects in the title."},
     {"key": "homeowners", "priority": "normal",
      "label": "Homeowners insurance policy (coverage terms)",
-     "keywords": ["homeowners", "dwelling policy", "ho-3", "home insurance", "hazard insurance"],
+     "keywords": ["homeowners", "dwelling policy", "ho-3", "home insurance"],
+     "categories": ("insurance",),
      "why": "The actual coverage terms, not just that Chase escrows the premium."},
     {"key": "umbrella", "priority": "normal",
      "label": "Umbrella liability policy",
      "keywords": ["umbrella policy", "personal liability umbrella", "excess liability"],
+     "categories": ("insurance",),
      "why": "Cheap liability protection that matters more once you have real assets "
             "and a child."},
     {"key": "marriage_cert", "priority": "normal",
      "label": "Marriage certificate",
      "keywords": ["marriage certificate", "certificate of marriage"],
+     "categories": ("other", "estate"),
      "why": "Needed for spousal legal, benefit, and estate matters."},
 ]
 
 _PRIORITY_ORDER = {"urgent": 0, "high": 1, "normal": 2}
 
 
-def _haystack(doc: Document) -> str:
-    return " ".join([
-        doc.title or "", doc.summary or "", (doc.content_text or "")[:4000],
-    ]).lower()
-
-
 def _find(item: dict, docs: list[Document]) -> Document | None:
+    """Two-tier so a full folder never falsely satisfies a life-or-death item:
+
+    STRONG — the keyword appears in the document's title or the copilot's own
+    summary (human/agent-authored labels, reliable). Category doesn't matter.
+
+    WEAK — the keyword appears only in the extracted body text, which is noisy
+    (a tax return's text says 'trust', a mortgage statement says 'insurance'),
+    so it counts ONLY when the document's category is one the item expects. That
+    is what stops a tax return from passing for the trust agreement.
+    """
     kws = [k.lower() for k in item["keywords"]]
-    for doc in docs:
-        hay = _haystack(doc)
-        if any(k in hay for k in kws):
+    cats = item.get("categories", ())
+    for doc in docs:  # strong pass
+        label = ((doc.title or "") + " " + (doc.summary or "")).lower()
+        if any(k in label for k in kws):
             return doc
+    for doc in docs:  # weak pass, category-gated
+        if cats and doc.category in cats:
+            body = (doc.content_text or "")[:4000].lower()
+            if any(k in body for k in kws):
+                return doc
     return None
 
 
