@@ -256,6 +256,16 @@ payment, an appraisal. Do that instead of caveating the same stale figure foreve
 old value, the new value, and your source. Bank-synced accounts are not editable: the
 institution is the truth there, and a feed that looks wrong is something to report, not patch.
 
+Never state a merchant, an amount, a date, or a transaction id that did not come back in a
+tool result during THIS turn. Not one you remember, not one that fits the pattern, not one
+that sounds like the sort of charge that would be there. If you have not looked it up, look
+it up; if you looked and it is not there, say it is not there. When they push back on a
+figure, re-run the query before defending it — the answer to "are you sure?" is a fresh
+tool call, never a more detailed version of the same claim. A confident invented charge
+destroys the value of every true thing you have ever told them, and it can do real damage
+between two people: you once reported a dating-app subscription to a married household that
+had never had one. Say "I don't have that" as easily as you say a number.
+
 Decide, do not poll. You have judgment and you are trusted to use it. If an action is
 REVERSIBLE and stays inside your own workspace — moving or cancelling a watchpoint you
 planted, annotating a document, correcting a balance from a statement, adding an account no
@@ -486,6 +496,47 @@ def _backend(name: str):
     return impl
 
 
+def _grounded(session: Session, reply: str, messages: list[dict], run) -> str:
+    """Refuse to hand over figures the household's own data does not contain.
+
+    One correction round, then the truth. Re-asking is worth it because the
+    usual cause is a careless paraphrase the model will fix once it is shown
+    the specific string; but a second failure means it cannot ground the claim,
+    and at that point saying so is the only honest move left."""
+    from .. import grounding
+
+    log = logging.getLogger("bankai.chat")
+    problems = grounding.check_reply(session, reply)
+    if not problems:
+        return reply
+
+    log.warning(
+        "grounding: unverifiable figures in reply: %s",
+        ", ".join(f"{p.kind}:{p.text}" for p in problems[:6]),
+    )
+    try:
+        corrected = run(
+            session,
+            build_system(session, "web"),
+            messages + [{"role": "user", "content": grounding.correction_prompt(problems)}],
+        )
+    except Exception:
+        log.exception("grounding: correction turn failed")
+        return grounding.refusal_message(problems)
+
+    if is_silence(corrected):
+        return grounding.refusal_message(problems)
+    still = grounding.check_reply(session, corrected)
+    if still:
+        log.error(
+            "grounding: STILL unverifiable after correction — refusing: %s",
+            ", ".join(f"{p.kind}:{p.text}" for p in still[:6]),
+        )
+        return grounding.refusal_message(still)
+    log.info("grounding: reply corrected and now reconciles with the data")
+    return corrected
+
+
 def run_turn(
     session: Session, messages: list[dict], channel: str = "web",
     force_tier: str | None = None,
@@ -545,7 +596,13 @@ def run_turn(
                     logging.getLogger("bankai.chat").info(
                         "reply revised by verifier: %s", report.get("problems")
                     )
-            return reply
+            # The grounding gate runs on EVERY turn, whatever the router decided
+            # and whichever brain answered. The invented Tinder charge went out
+            # on a turn the router called "simple" (verify off) while the Claude
+            # subscription was exhausted and a fallback brain was answering — so
+            # a guard that depends on the tier, or on a model checking itself,
+            # is exactly the guard that was not there.
+            return _grounded(session, reply, list(messages), _run)
         except Exception as exc:
             errors.append(f"{name}: {exc}")
             logging.getLogger("bankai.chat").warning(
