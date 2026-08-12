@@ -506,7 +506,9 @@ def _grounded(session: Session, reply: str, messages: list[dict], run) -> str:
     from .. import grounding
 
     log = logging.getLogger("bankai.chat")
-    problems = grounding.check_reply(session, reply)
+    # The conversation is part of the evidence: a figure the household just gave
+    # us (logging an expense, quoting a bill) is grounded in them saying it.
+    problems = grounding.check_reply(session, reply, messages)
     if not problems:
         return reply
 
@@ -526,7 +528,7 @@ def _grounded(session: Session, reply: str, messages: list[dict], run) -> str:
 
     if is_silence(corrected):
         return grounding.refusal_message(problems)
-    still = grounding.check_reply(session, corrected)
+    still = grounding.check_reply(session, corrected, messages)
     if still:
         log.error(
             "grounding: STILL unverifiable after correction — refusing: %s",

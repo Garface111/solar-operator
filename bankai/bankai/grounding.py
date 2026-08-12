@@ -58,10 +58,26 @@ _DERIVED_CONTEXT = re.compile(
 )
 
 
+#: How the copilot writes a merchant it is quoting from the ledger: in quotes,
+#: in bold, or both — exactly as the invented Tinder line was written. Free
+#: prose is deliberately not scanned; the goal is to catch a name presented as
+#: if read off a statement, not every proper noun in a sentence.
+_QUOTED = re.compile(r'"([^"\n]{3,60})"|\*\*([^*\n]{3,60})\*\*')
+
+#: Words that appear inside quoted spans without being merchants.
+_NOT_A_MERCHANT = {
+    "the", "and", "for", "with", "from", "your", "you", "this", "that", "week",
+    "month", "year", "monthly", "weekly", "annual", "yes", "no", "none", "total",
+    "net", "worth", "balance", "card", "account", "payment", "charge", "charges",
+    "transfer", "income", "spend", "spending", "subscription", "subscriptions",
+    "unknown", "pending", "gold", "plus", "premium", "basic", "plan",
+}
+
+
 @dataclass
 class Unverified:
     """One claim that could not be found in the household's own data."""
-    kind: str            # "amount" | "transaction_id"
+    kind: str            # "amount" | "transaction_id" | "merchant"
     text: str            # what the copilot wrote
     context: str         # the sentence it sat in, for the correction prompt
 
@@ -88,15 +104,37 @@ def _sentences(text: str) -> list[str]:
     return parts
 
 
-def check_reply(session: Session, reply: str) -> list[Unverified]:
+def _household_figures(messages: list[dict] | None) -> set[str]:
+    """Every amount the household themselves put in the conversation.
+
+    THE most important exemption in this module. Ford says "$147.42 on water
+    bill" to log a new expense; the copilot has to be able to say the number
+    back to him. It is not in the ledger yet — he is the source of it. Refusing
+    his own figure is not caution, it is a broken assistant, and the first
+    version of this gate did exactly that to him twice in a row.
+    """
+    said: set[str] = set()
+    for m in messages or []:
+        if m.get("role") != "user":
+            continue
+        for raw in _AMOUNT.findall(m.get("content") or ""):
+            said.add(raw.replace(",", ""))
+    return said
+
+
+def check_reply(
+    session: Session, reply: str, messages: list[dict] | None = None
+) -> list[Unverified]:
     """Return every stated figure that has no counterpart in the data.
 
-    Deliberately permissive about derived numbers and strict about quoted ones:
-    the failure being guarded against is "a charge you never made", not "a total
-    I added up"."""
+    Deliberately permissive about derived numbers and about anything the
+    household just said, and strict about figures presented as read from their
+    ledger: the failure being guarded against is "a charge you never made", not
+    "a total I added up" and not "the number you just gave me"."""
     problems: list[Unverified] = []
     if not reply:
         return problems
+    from_household = _household_figures(messages)
 
     for sentence in _sentences(reply):
         for raw_id in _TXN_ID.findall(sentence):
@@ -112,6 +150,10 @@ def check_reply(session: Session, reply: str) -> list[Unverified]:
                 continue
             # Round figures ($100, $1,000) are nearly always illustrative.
             if amount == 0 or (amount >= 100 and amount % 50 == 0):
+                continue
+            # The household just said this number — repeating it back is not a
+            # claim about the ledger, it is listening.
+            if raw.replace(",", "") in from_household:
                 continue
             if not _amount_exists(session, amount):
                 problems.append(Unverified("amount", f"${raw}", sentence[:200]))

@@ -136,3 +136,36 @@ def test_the_gate_runs_regardless_of_router_tier(session, ledger, monkeypatch):
     )
     out = agent_chat.run_turn(session, [{"role": "user", "content": "any subscriptions?"}])
     assert "Tinder" not in out
+
+
+# --- the false positive that broke logging ---------------------------------
+# Within an hour of shipping, the gate refused Ford twice while he was LOGGING
+# a new expense over WhatsApp ("$147.42 on water bill"). The number was not in
+# the ledger because he was the one supplying it. A guard that blocks the
+# household's own figures is not caution, it is a broken assistant.
+
+def test_a_figure_the_household_just_gave_us_is_grounded(session, ledger):
+    convo = [{"role": "user", "content": "$147.42 on water bill"}]
+    reply = "Logged $147.42 for the water bill."
+    assert grounding.check_reply(session, reply, convo) == []
+
+
+def test_still_blocked_when_nobody_said_it(session, ledger):
+    """Same figure, no one mentioned it — back to being a fabrication."""
+    assert grounding.check_reply(session, "You paid $147.42 for water.", []) != []
+
+
+def test_the_household_figure_survives_the_whole_turn(session, ledger):
+    def never(*a, **k):
+        pytest.fail("logging an expense must not trigger a correction round")
+
+    convo = [{"role": "user", "content": "no I'm logging it — $147.42 on water bill"}]
+    out = agent_chat._grounded(session, "Logged $147.42 for water.", convo, never)
+    assert "$147.42" in out
+
+
+def test_a_fabrication_alongside_a_household_figure_is_still_caught(session, ledger):
+    convo = [{"role": "user", "content": "$147.42 on water bill"}]
+    reply = "Logged $147.42 for water. I also see a $12.50 Tinder charge."
+    problems = grounding.check_reply(session, reply, convo)
+    assert [p.text for p in problems] == ["$12.50"]
