@@ -59,6 +59,16 @@ CLAUDE_CLI_EFFORT = _env("CLAUDE_CLI_EFFORT")
 CLAUDE_CLI_TIMEOUT_SECONDS = int(_env("CLAUDE_CLI_TIMEOUT_SECONDS", "600") or 600)
 CLAUDE_CLI_MODEL = _env("CLAUDE_CLI_MODEL")  # empty = the CLI's default model
 
+# --- Grok CLI fallback backend (bankai/agent/backends/grok_cli.py) ---
+# Runs the copilot through headless `grok -p` (xAI's Grok Build CLI) as a
+# fallback brain. Must be signed in (`grok login --device-code`) or carry an
+# XAI_API_KEY, and the bankai MCP server must be registered once
+# (scripts/register-grok-mcp.sh). Until then the backend raises cleanly and the
+# chain falls through to the next brain.
+GROK_CLI_BIN = _env("GROK_CLI_BIN", "grok")
+GROK_CLI_MODEL = _env("GROK_CLI_MODEL")  # empty -> GROK_MODEL -> grok-4
+GROK_CLI_TIMEOUT_SECONDS = int(_env("GROK_CLI_TIMEOUT_SECONDS", "900") or 900)
+
 # --- Live web access for the copilot ---
 # Ford's call, 2026-08-12: the copilot needs the open web to value assets and
 # check real figures, so WebSearch/WebFetch are granted. This reverses an

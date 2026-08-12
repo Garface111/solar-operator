@@ -475,6 +475,8 @@ def _backend(name: str):
         from .backends import grok_backend as impl
     elif name == "claude-cli":
         from .backends import claude_cli as impl
+    elif name in ("grok-cli", "grok_cli"):
+        from .backends import grok_cli as impl
     elif name == "anthropic":
         from .backends import anthropic_backend as impl
     elif name in ("kimi", "moonshot"):
