@@ -630,6 +630,54 @@ def _utility_bill_period_kwh(
     return round(float(bill.kwh_generated), 1), ps, pe, label
 
 
+def _stale_bill_warning(db, utility_account_id, *, today=None) -> Optional[str]:
+    """Warn when this account's newest utility bill is overdue for a refresh.
+
+    Self-calibrated to the account's OWN billing rhythm: it measures the gap
+    between the two most recent bills and only fires when the newest one is
+    materially older than that — so it catches a STALLED pull (a broken utility
+    login) without nagging an account that simply bills infrequently. With fewer
+    than two bills it can't tell "slow" from "stalled", so it stays silent.
+
+    Ford, 2026-08-12 (Glover / VEC): after the VEC login broke, Glover kept
+    drafting its JUNE invoice for weeks as if it were current — same amount, no
+    signal — because June was genuinely the newest bill we had. Silently billing a
+    stale period as current is the "fail loudly on stale data" defect. Returns the
+    warning text, or None when the newest bill is fresh / cadence unknown."""
+    if utility_account_id is None:
+        return None
+    from ..models import Bill
+    from datetime import date as _date
+    ends = db.execute(
+        select(Bill.period_end)
+        .where(Bill.account_id == utility_account_id,
+               Bill.period_end.isnot(None),
+               Bill.kwh_generated.isnot(None))
+        .order_by(Bill.period_end.desc()).limit(2)
+    ).scalars().all()
+    if len(ends) < 2:
+        return None
+    newest = ends[0].date() if hasattr(ends[0], "date") else ends[0]
+    prev = ends[1].date() if hasattr(ends[1], "date") else ends[1]
+    gap = (newest - prev).days
+    if gap <= 0:
+        return None
+    today = today or _date.today()
+    try:
+        age = (today - newest).days
+    except TypeError:
+        return None
+    # Overdue = older than ~1.5 of its own cycles AND at least 40 days, so a
+    # normal slightly-late statement never trips it.
+    if age <= max(gap, 30) * 1.5 or age <= 40:
+        return None
+    return (f"Heads up: this offtaker's newest utility bill ended {newest.isoformat()} "
+            f"({age} days ago), and this account normally bills about every {gap} days — "
+            f"so a newer bill looks overdue and the utility login may need reconnecting. "
+            f"The invoice below is for that older period; nothing is billed for the "
+            f"missing one.")
+
+
 def _utility_bill_credit(
     db, utility_account_id: int, target_label: Optional[str] = None
 ) -> tuple[Optional[float], Optional[float], Optional[float],
@@ -1142,6 +1190,18 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
         if not pct:
             warnings.append("No allocation % set for this offtaker.")
             pct = 0.0
+        # Stale-bill guard (Ford 2026-08-12, Glover): if this is a real invoice but
+        # the newest bill is overdue for this account's own rhythm, say so — don't
+        # keep drafting last month as if it were current. Own short-lived session so
+        # it never depends on the shadowed `db` above.
+        if array_kwh is not None:
+            try:
+                with SessionLocal() as _dbst:
+                    _sw = _stale_bill_warning(_dbst, getattr(sub, "utility_account_id", None))
+                if _sw:
+                    warnings.append(_sw)
+            except Exception:  # noqa: BLE001 — a heads-up must never break a draft
+                pass
         # ── Billing basis: THE OFFTAKER'S OWN BILL GOVERNS (Ford 2026-07-10) ────
         # REVERSAL of the 2026-07-01 real_math-wins rule. The sub-client's own
         # utility bill IS GMP's allocation of the net-meter group — its excess,

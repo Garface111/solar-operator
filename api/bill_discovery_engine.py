@@ -524,8 +524,9 @@ def activate_adapter_and_start_capture(
                 action = _upsert_bill(db, tenant_id, ua, m)
                 if action == "created":
                     created += 1
-                else:
+                elif action == "updated":
                     updated += 1
+                # "skipped" → a content-free partial we declined to store.
             except Exception as e:
                 log.warning("activate upsert bill failed: %s", e)
 

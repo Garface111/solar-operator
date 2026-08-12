@@ -4480,12 +4480,20 @@ async def _read_template_upload(file: UploadFile):
 
 
 def _template_dict(tpl) -> dict:
+    # CAN this stored template actually produce an invoice? Only two things render:
+    # token-HTML, or an .xlsx via pixel repro. A stored PDF/Word/image satisfies
+    # has_template but can never render — reporting only has_template is what let a
+    # dead upload look installed (Paul/HCT, 2026-08-12). The UI reads `renderable`
+    # to say "saved, but your invoices still use the standard format".
+    _fb = getattr(tpl, "file_bytes", None)
+    _is_xlsx = bool(_fb) and bytes(_fb[:4]) == b"PK\x03\x04"
     return {
         "has_template": tpl is not None and (tpl.file_bytes is not None or bool(tpl.html)),
         "filename": getattr(tpl, "filename", None),
         "content_type": getattr(tpl, "content_type", None),
         "enabled": bool(getattr(tpl, "enabled", False)),
         "has_html": bool(getattr(tpl, "html", None)),
+        "renderable": bool(getattr(tpl, "html", None)) or _is_xlsx,
         "updated_at": tpl.updated_at.isoformat() if tpl and tpl.updated_at else None,
     }
 
@@ -4586,47 +4594,12 @@ async def upload_invoice_template(file: UploadFile = File(...),
         if tpl is None:
             tpl = OfftakerInvoiceTemplate(tenant_id=t.id)
             db.add(tpl)
-        tpl.filename = name[:300]
-        tpl.content_type = file.content_type or "application/octet-stream"
-        tpl.file_bytes = data
-        lname = name.lower()
-        is_excel = (lname.endswith((".xlsx", ".xls", ".xlsm"))
-                    or data[:4] == _MAGIC_XLSX[:4] or data[:4] == _MAGIC_XLS)
-        if lname.endswith((".html", ".htm")):
-            try:
-                tpl.html = data.decode("utf-8", "replace")
-            except Exception:
-                pass
-        elif is_excel:
-            # Find the invoice sheet anywhere in the workbook and seed editable
-            # token-HTML from it (Stage-1; rendering stays opt-in). Never fatal —
-            # a failed extract just leaves the editor on the default template.
-            try:
-                from .matcher import excel_to_template_html
-                sheet, html = excel_to_template_html(data)
-                if html:
-                    tpl.html = html
-                    logger.info("invoice template: seeded HTML from Excel sheet %r", sheet)
-            except Exception as e:  # noqa: BLE001
-                logger.warning("invoice template Excel extract failed: %s", e)
-        # A freshly uploaded template is used by DEFAULT — uploading IS the opt-in,
-        # so the operator doesn't have to separately flip it on (they switch to the
-        # standard format with the slider). Only when it's actually renderable
-        # (xlsx pixel repro, or seeded token-HTML); otherwise leave it off.
-        # BUT (#11): an .xlsx exported without cached formula values (Google Sheets /
-        # LibreOffice) reads blank, so auto-enabling it would email a blank Amount
-        # Due. In that case DON'T enable (turn it off if it was on) and warn — the
-        # operator opens+saves it in Excel, or uses the token editor.
-        warning = None
-        if is_excel and _xlsx_formula_values_missing(data):
-            tpl.enabled = False
-            warning = ("We stored your template but couldn't read its computed values — "
-                       "it looks like it was exported without cached formula results "
-                       "(e.g. from Google Sheets). Open it in Excel and Save once, then "
-                       "re-upload, or use the token editor. It is NOT set as your live "
-                       "invoice format yet, so nothing sends blank.")
-        elif is_excel or tpl.html:
-            tpl.enabled = True
+        # Seed + enable + warn is ONE shared implementation (_seed_template_from_bytes).
+        # This path used to carry its own copy and the per-offtaker route carried a
+        # second, worse one; they drifted, and the per-offtaker copy is the one that
+        # silently swallowed Paul's PDF upload — stored, disabled, {"ok": true}, no
+        # explanation. Keep them sharing so a fix to one is a fix to both.
+        warning = _seed_template_from_bytes(tpl, data, name, file.content_type)
         tpl.updated_at = datetime.utcnow()
         db.commit()
         db.refresh(tpl)
@@ -4777,16 +4750,30 @@ def _owned_sub(db, t, sub_id: int):
     return sub
 
 
-def _seed_template_from_bytes(tpl, data: bytes, name: str, content_type):
-    """Store an uploaded template's file + seed editable token-HTML (HTML verbatim;
-    Excel → its invoice sheet's HTML). Mirrors the tenant upload path; never fatal."""
+def _seed_template_from_bytes(tpl, data: bytes, name: str, content_type) -> Optional[str]:
+    """Store an uploaded template's file, seed editable token-HTML (HTML verbatim;
+    Excel → its invoice sheet's HTML), decide whether it can actually be USED, and
+    return a plain-English warning when it can't. Shared by the tenant-wide and
+    per-offtaker upload routes so the two can't drift. Never fatal.
+
+    Ford, 2026-08-12 (Paul/HCT): "I tried to upload a new template but did not get a
+    different result (quite possibly user error on my part)." It was not user error.
+    He uploaded a PDF, which we stored, left disabled, and reported {"ok": true} for.
+    An invoice can only be rendered from token-HTML or from an .xlsx (pixel repro) —
+    a flat PDF can never render by either path, so that upload was incapable of doing
+    anything from the moment it was accepted, and we said nothing. Silence about an
+    upload that cannot work is the same failure as billing a rate nobody entered:
+    the system knew, and the operator didn't.
+
+    Returns None when the template is good and now live, else the reason."""
     tpl.filename = name[:300]
     tpl.content_type = content_type or "application/octet-stream"
     tpl.file_bytes = data
     lname = name.lower()
     is_excel = (lname.endswith((".xlsx", ".xls", ".xlsm"))
                 or data[:4] == _MAGIC_XLSX[:4] or data[:4] == _MAGIC_XLS)
-    if lname.endswith((".html", ".htm")):
+    is_html = lname.endswith((".html", ".htm"))
+    if is_html:
         try:
             tpl.html = data.decode("utf-8", "replace")
         except Exception:  # noqa: BLE001
@@ -4798,7 +4785,35 @@ def _seed_template_from_bytes(tpl, data: bytes, name: str, content_type):
             if html:
                 tpl.html = html
         except Exception:  # noqa: BLE001
-            logger.warning("per-offtaker template: Excel HTML seed failed", exc_info=True)
+            logger.warning("template: Excel HTML seed failed", exc_info=True)
+
+    # ── can this actually render? ─────────────────────────────────────────────
+    if not is_excel and not is_html:
+        # PDF / Word / image / anything else. Keep the file (operators do use it as a
+        # reference in the file library) but never pretend it is their invoice format.
+        tpl.enabled = False
+        kind = "PDF" if (lname.endswith(".pdf") or data[:4] == b"%PDF") else "file type"
+        return (f"We saved “{name}”, but invoices can't be built from a {kind}. "
+                f"We need the spreadsheet or web version — upload the .xlsx (or .html) "
+                f"your invoice is made from and we'll match its layout. Your invoices "
+                f"are unchanged in the meantime.")
+    if is_excel and _xlsx_formula_values_missing(data):
+        # An .xlsx exported without cached formula results (Google Sheets/LibreOffice)
+        # reads blank; auto-enabling it would email a blank Amount Due.
+        tpl.enabled = False
+        return ("We stored your template but couldn't read its computed values — it "
+                "looks like it was exported without cached formula results (e.g. from "
+                "Google Sheets). Open it in Excel and Save once, then re-upload, or use "
+                "the token editor. It is NOT set as your live invoice format yet, so "
+                "nothing sends blank.")
+    if is_excel or tpl.html:
+        # Uploading IS the opt-in — the operator shouldn't have to find a second switch.
+        tpl.enabled = True
+        return None
+    tpl.enabled = False
+    return (f"We saved “{name}”, but couldn't read an invoice layout out of it, so your "
+            f"invoices still use the standard format. Try re-saving it as .xlsx, or edit "
+            f"the layout directly in the template editor.")
 
 
 @router.get("/subscriptions/{sub_id}/invoice-template")
@@ -4835,10 +4850,14 @@ async def upload_sub_invoice_template(sub_id: int, file: UploadFile = File(...),
         if tpl is None:
             tpl = OfftakerSubscriptionTemplate(subscription_id=sub_id, tenant_id=t.id)
             db.add(tpl)
-        _seed_template_from_bytes(tpl, data, name, file.content_type)
+        warning = _seed_template_from_bytes(tpl, data, name, file.content_type)
+        tpl.updated_at = datetime.utcnow()
         db.commit()
         db.refresh(tpl)
-        return {"ok": True, "template": _template_dict(tpl)}
+        out = {"ok": True, "template": _template_dict(tpl)}
+        if warning:
+            out["warning"] = warning
+        return out
 
 
 @router.put("/subscriptions/{sub_id}/invoice-template")

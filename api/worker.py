@@ -89,6 +89,34 @@ def _upsert_bill(db, tenant_id: str, account: UtilityAccount,
                 Bill.period_end == metrics["period_end"],
             ).order_by(Bill.id.desc())
         ).scalars().first()
+    else:
+        # NO period parsed (a 'partial' bill). The period_end match above can NEVER
+        # find this bill — `period_end = NULL` is never true in SQL — so without an
+        # alternate key every partial pull appended a brand-new empty row. Glover's
+        # VEC account grew one duplicate junk row per month that way (Ford,
+        # 2026-08-12). Match the SAME statement by document number, else its bill
+        # date, so a re-pull UPDATES the row we already have (the None-guard below
+        # keeps a good row's real values). If nothing matches AND this row carries
+        # no usable content — no period, no energy, no document, no PDF — it can
+        # only pollute, so we decline to store it at all.
+        doc = metrics.get("document_number")
+        bdate = metrics.get("bill_date")
+        if doc:
+            existing = db.execute(
+                select(Bill).where(
+                    Bill.account_id == account.id,
+                    Bill.document_number == doc,
+                ).order_by(Bill.id.desc())
+            ).scalars().first()
+        if existing is None and bdate:
+            existing = db.execute(
+                select(Bill).where(
+                    Bill.account_id == account.id,
+                    Bill.bill_date == bdate,
+                ).order_by(Bill.id.desc())
+            ).scalars().first()
+        if existing is None and not metrics.get("kwh_generated") and not pdf_bytes and not doc:
+            return "skipped"
 
     # Full energy-record fields — present on the JSON path (the sponge), absent
     # on the legacy PDF path (.get → None, columns nullable). raw_json is the
@@ -107,6 +135,25 @@ def _upsert_bill(db, tenant_id: str, account: UtilityAccount,
     )
 
     if existing:
+        # A period-less 'partial' re-pull must NEVER downgrade a good row. Now that
+        # a partial matches its parsed sibling by document/bill_date (above), it
+        # reaches this update path — and blindly assigning would erase the real
+        # kWh/period with the partial's nulls, which is worse than the duplicate it
+        # replaced. So when the incoming is partial and the existing row is already
+        # a clean parse, only refresh the freshness stamp and backfill a PDF we
+        # newly have; leave every data field alone. (Ford, 2026-08-12.)
+        _incoming_partial = (metrics.get("parse_status") != "parsed"
+                             or not metrics.get("period_end"))
+        _existing_good = (existing.parse_status == "parsed"
+                          and existing.period_end is not None)
+        if _incoming_partial and _existing_good:
+            existing.pulled_at = now()
+            if pdf_bytes and not existing.pdf_bytes:
+                existing.pdf_bytes = pdf_bytes
+                existing.pdf_content_type = pdf_content_type or "application/pdf"
+            if source_path and not existing.pdf_path:
+                existing.pdf_path = source_path
+            return "updated"
         existing.kwh_generated = metrics["kwh_generated"]
         existing.billing_days  = metrics["billing_days"]
         existing.period_start  = metrics["period_start"]
@@ -162,8 +209,9 @@ def _pull_via_json(db, tenant_id: str, account: UtilityAccount,
         action = _upsert_bill(db, tenant_id, account, metrics, source_path=None)
         if action == "created":
             created += 1
-        else:
+        elif action == "updated":
             updated += 1
+        # "skipped" → a content-free partial we declined to store; counted nowhere.
     # Metrics: every period from the utility's bill history API (full sponge).
     # PDFs: aggressively backfill missing statement PDFs for as many periods as
     # the portal exposes via /transactions (not just the current bill). Cap per
