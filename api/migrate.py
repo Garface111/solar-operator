@@ -1069,6 +1069,24 @@ def main():
             ))
             print("  + billing_report_subscriptions.array_id")
 
+        # 2026-08-12 RATE ADDER (Colleen/HCT). A real deal is often "tariff +
+        # incentive adder" (0.18398 + 0.04), and the invoice engine already
+        # computes net/incentive/solar value from that pair — but there was
+        # nowhere to ENTER an adder, so tariff+adder operators could not express
+        # their contract and silently ran on a bill-derived rate instead.
+        # `_until` because adders are time-limited (HCT's lapses in 2029) and an
+        # adder that outlives its term is the same quiet mis-bill in reverse.
+        # All nullable → existing rows and every non-adder operator are unchanged.
+        for _tbl, _col, _type in (
+            ("billing_report_subscriptions", "net_rate_adder_per_kwh", "DOUBLE PRECISION"),
+            ("billing_report_subscriptions", "net_rate_adder_until", "DATE"),
+            ("tenants", "default_net_rate_adder_per_kwh", "DOUBLE PRECISION"),
+            ("tenants", "default_net_rate_adder_until", "DATE"),
+        ):
+            if not column_exists(conn, _tbl, _col):
+                conn.execute(text(f"ALTER TABLE {_tbl} ADD COLUMN {_col} {_type}"))
+                print(f"  + {_tbl}.{_col}")
+
         # 2026-07-01 Anna/Bruce bill-accuracy check: the offtaker's GMP allocation
         # SHARE of the array's group-excess (0..1), distinct from allocation_pct
         # (the billing multiplier). Used by reconcile's allocation cross-check.

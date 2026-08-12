@@ -266,6 +266,12 @@ class Tenant(Base):
     # backward-compat; new pricing reads the discount model.)
     default_discount_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
     default_net_rate_per_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Fleet-wide rate ADDER / incentive, mirroring the per-offtaker pair on
+    # BillingReportSubscription (see the long note there). An adder usually belongs
+    # to the ARRAY's net-metering deal, so most operators set it once here rather
+    # than on every offtaker. Per-offtaker values win. NULL = no adder.
+    default_net_rate_adder_per_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
+    default_net_rate_adder_until: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     # ── Email customization (V2, June 2026) ──────────────────────────────
     # Let the tenant (a NEPOOL stamping agent) control how reports go out
@@ -1754,6 +1760,28 @@ class BillingReportSubscription(Base):
     #   net_rate_per_kwh  — $/kWh the discount applies to; null → global → VT default
     discount_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
     net_rate_per_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # RATE ADDER / incentive ($/kWh, Aug 2026 — Colleen/HCT). A real solar deal is
+    # often "tariff + adder", not one number: HCT's offtakers are priced at
+    # 0.18398 tariff + 0.04 incentive = 0.22398, and Colleen's own invoice prints
+    # those as SEPARATE lines ("Net Rate" / "Incentive Rate"). The engine already
+    # models this — compute_invoice(kwh, tariff, adder, …) computes net_value,
+    # incentive_value and solar_value from the pair — but delivery hard-fed adder=0
+    # and there was nowhere to enter one, so a tariff+adder operator could not
+    # express their real price at all. That gap is what let HCT run for months on
+    # an INVENTED rate (the GMP bill's credit) instead of their contract.
+    #
+    # net_rate_adder_until: adders are routinely time-limited (Colleen's note:
+    # "4 cent adder is 10 years only - 2019-2029"). With no expiry the adder would
+    # silently keep billing after it lapses — the same class of quiet mis-bill this
+    # whole change exists to end. NULL = no expiry. The adder applies to periods
+    # ENDING on or before this date.
+    #
+    # The adder is only ever applied on top of an OPERATOR-ENTERED rate. It is
+    # never added to a utility-bill-derived rate: a bill's credit rate is already
+    # all-in, so stacking an adder on it would double-count.
+    net_rate_adder_per_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
+    net_rate_adder_until: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     # Dormant hook (Paul's reporting build): the utility's GMP invoice PDF, fed
     # later by the GMP-detection backend. When present, delivery attaches it

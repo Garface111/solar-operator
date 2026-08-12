@@ -201,14 +201,17 @@ def resolve_discount_pricing(sub, *, period_end=None, region=None,
     sub_flat = getattr(sub, "rate_per_kwh", None)   # legacy flat $/kWh override
 
     g_net = g_disc = g_flat = None
+    g_add = g_add_until = None
     net_note = None
 
     def _resolve_with(db, tenant, array_fields, rate_memo):
-        nonlocal g_net, g_disc, g_flat, net_note
+        nonlocal g_net, g_disc, g_flat, net_note, g_add, g_add_until
         if tenant:
             g_net = getattr(tenant, "default_net_rate_per_kwh", None)
             g_disc = getattr(tenant, "default_discount_pct", None)
             g_flat = getattr(tenant, "default_billing_rate_per_kwh", None)
+            g_add = getattr(tenant, "default_net_rate_adder_per_kwh", None)
+            g_add_until = getattr(tenant, "default_net_rate_adder_until", None)
 
         # Best-effort derive the array's utility/region/age for the auto lookup
         # when the caller didn't supply them.
@@ -281,6 +284,32 @@ def resolve_discount_pricing(sub, *, period_end=None, region=None,
     else:
         discount, discount_source = DEFAULT_DISCOUNT, "default"
 
+    # ── adder / incentive ($/kWh) ──
+    # Per-offtaker wins over the fleet default. Time-limited by design: an adder
+    # whose term has lapsed contributes 0 rather than quietly over-billing (HCT's
+    # 4-cent adder runs 2019-2029). Compared against the period END — the period
+    # is billed at the rate in force when it closed.
+    _sub_add = getattr(sub, "net_rate_adder_per_kwh", None)
+    _sub_until = getattr(sub, "net_rate_adder_until", None)
+    if _sub_add is not None and _sub_add > 0:
+        adder, adder_source, adder_until = float(_sub_add), "customer", _sub_until
+    elif g_add is not None and g_add > 0:
+        adder, adder_source, adder_until = float(g_add), "global", g_add_until
+    else:
+        adder, adder_source, adder_until = 0.0, "none", None
+
+    adder_note = None
+    if adder > 0 and adder_until is not None and period_end is not None:
+        _pe = period_end.date() if hasattr(period_end, "date") else period_end
+        _au = adder_until.date() if hasattr(adder_until, "date") else adder_until
+        try:
+            if _pe > _au:
+                adder, adder_source = 0.0, "expired"
+                adder_note = (f"the ${float(_sub_add or g_add):.5f}/kWh incentive adder "
+                              f"ended {_au.isoformat()} — not applied to this period")
+        except TypeError:
+            pass  # unorderable types → leave the adder as entered (fail-open)
+
     effective_rate = round(net_rate * (1 - discount), 6)
     return {
         "net_rate": net_rate,
@@ -289,6 +318,13 @@ def resolve_discount_pricing(sub, *, period_end=None, region=None,
         "net_source": net_source,
         "discount_source": discount_source,
         "net_rate_note": net_note,
+        # The incentive adder ($/kWh) and where it came from. Callers must only
+        # ADD this to an OPERATOR-ENTERED net rate — a utility bill's credit rate
+        # is already all-in, so stacking an adder on it would double-count.
+        "adder": adder,
+        "adder_source": adder_source,
+        "adder_note": adder_note,
+        "tenant_adder": (float(g_add) if g_add is not None and g_add > 0 else None),
         # Tenant master override (None when blank). Bill-bound pricing uses this
         # so a filled master rate wins over each offtaker's sub-account bill rate,
         # while a blank master leaves each offtaker on their own bill's credit rate.
@@ -424,6 +460,19 @@ _SMARTHUB_HONEST_RATE_SOURCES = frozenset(
     {"customer", "global", "legacy_flat_customer", "legacy_flat_global"}
 )
 
+# The same question asked of ANY offtaker, GMP included: did a human state this
+# price, or did we infer it? These are the sources that mean "an operator typed
+# this" — per-offtaker override, fleet master rate, or either legacy flat rate.
+# Everything else (gmp_bill_credit, gmp_credit_reference, auto_schedule*,
+# vt_default) is us INFERRING, which is a fine default but never a confirmed
+# price: it draws a warning and blocks unattended auto-send (see build_manual_match
+# and scheduler._auto_send_should_hold). Same set as SmartHub's — kept as its own
+# name because the two guards answer to different rules (VEC hard-blocks the send;
+# GMP only blocks the UNATTENDED one) and should be free to diverge.
+_OPERATOR_ENTERED_RATE_SOURCES = frozenset(
+    {"customer", "global", "legacy_flat_customer", "legacy_flat_global"}
+)
+
 
 def _build_smarthub_offtaker_match(sub, operator, warnings) -> BillingMatch:
     """VEC/SmartHub offtaker: price the offtaker's allocation_pct of the array's
@@ -487,8 +536,14 @@ def _build_smarthub_offtaker_match(sub, operator, warnings) -> BillingMatch:
     discount = pricing["discount_pct"]
     billing_rate = 1.0 - discount
 
+    # The incentive adder rides only on a rate the operator entered — which on this
+    # VEC/SmartHub path is the only kind that gets here at all (rate_ok gates it).
+    sh_adder = float(pricing.get("adder") or 0.0) if rate_ok else 0.0
+    if pricing.get("adder_note") and rate_ok:
+        warnings.append(pricing["adder_note"])
+
     customer_kwh = round((array_kwh or 0.0) * pct, 2)
-    computed = compute_invoice(customer_kwh, net_rate, 0.0,
+    computed = compute_invoice(customer_kwh, net_rate, sh_adder,
                                billing_rate, "percent_of_array", None)
     computed["invoice_number"] = end.strftime("%Y-%m") if end else label
     computed["period_start"] = start.isoformat() if start else None
@@ -502,13 +557,19 @@ def _build_smarthub_offtaker_match(sub, operator, warnings) -> BillingMatch:
     computed["solar_credit_usd"] = None
     computed["net_rate_per_kwh"] = round(net_rate, 6)
     computed["discount_pct"] = round(discount, 6)
-    computed["effective_rate_per_kwh"] = round(net_rate * billing_rate, 6)
+    computed["effective_rate_per_kwh"] = round((net_rate + sh_adder) * billing_rate, 6)
+    computed["adder_per_kwh"] = round(sh_adder, 6)
+    computed["adder_source"] = pricing.get("adder_source") if sh_adder else "none"
+    computed["adder_note"] = pricing.get("adder_note")
+    # VEC already hard-requires an operator rate, so a billable VEC invoice is
+    # operator-entered by construction.
+    computed["rate_is_operator_entered"] = bool(rate_ok)
     computed["net_rate_source"] = pricing["net_source"] if rate_ok else "needs_rate"
     computed["net_rate_note"] = (
         "the net-metering credit rate you entered (" + PROV
         + " bills don't publish one)") if rate_ok else None
     computed["discount_source"] = pricing["discount_source"]
-    computed["rate_per_kwh"] = round(net_rate * billing_rate, 6)
+    computed["rate_per_kwh"] = round((net_rate + sh_adder) * billing_rate, 6)
     computed["rate_source"] = pricing["discount_source"]
     # HONEST provenance — measured generation, NOT a utility bill.
     computed["kwh_source"] = gen_src or "smarthub_generation"
@@ -518,7 +579,7 @@ def _build_smarthub_offtaker_match(sub, operator, warnings) -> BillingMatch:
     period = Period(
         month=label, start=start, end=end,
         array_kwh=(array_kwh or 0.0), customer_kwh=customer_kwh,
-        tariff=net_rate, adder=0.0,
+        tariff=net_rate, adder=sh_adder,
     )
     return BillingMatch(
         matched=True, confidence=1.0, source="manual", data_sheet=None,
@@ -1168,6 +1229,37 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
             net_note = ("the quarter's blended EXCESS + SOLCRED net-metering credit"
                         if _blend else
                         "this offtaker's utility bill EXCESS + SOLCRED credit rate")
+
+        # ── HONEST RATE (Ford, 2026-08-12 — the HCT/Colleen mis-bill) ───────────
+        # Did a human actually state this price, or did we infer it from the bill?
+        # HCT ran for months at the GMP bill's 0.23298 credit rate while their real
+        # contract was 0.18398 + 0.04 = 0.22398 — a silent +4.02% overcharge on
+        # every invoice, because all three override levels were blank and pricing
+        # simply fell through to the bill. Inferring a rate is a REASONABLE default
+        # (GMP publishes a real credit rate, and for many operators that IS the
+        # deal) — but it must never be mistaken for a confirmed price. So:
+        #   • we still compute and draft it (nothing is blocked for review), and
+        #   • we mark it unconfirmed, warn with the exact figure and its origin, and
+        #   • scheduler._auto_send_should_hold refuses to fire it UNATTENDED.
+        # Entering the rate IS the confirmation — no separate ack to store, and the
+        # act of confirming is the same act that fixes a wrong one.
+        # Mirrors _SMARTHUB_HONEST_RATE_SOURCES, which has enforced exactly this for
+        # VEC since 2026-07 (VEC bills publish no rate, so there it's a hard block).
+        rate_is_operator_entered = net_source in _OPERATOR_ENTERED_RATE_SOURCES
+        if not rate_is_operator_entered and (net_rate or 0) > 0:
+            warnings.append(
+                f"Unconfirmed rate: this invoice prices at ${net_rate:.5f}/kWh taken "
+                f"from {'a comparable month' if net_source == 'gmp_credit_reference' else 'the utility bill'}"
+                f", not from a rate you entered. If your contract says something else "
+                f"(a tariff plus an incentive adder, for example), set it on this "
+                f"offtaker — or as your master rate — so we bill your price, not the "
+                f"bill's. Automatic sending is held until then.")
+
+        # The incentive ADDER rides on top of an operator-entered rate only: a
+        # bill-derived credit rate is already all-in, so adding to it double-counts.
+        adder = float(pricing.get("adder") or 0.0) if rate_is_operator_entered else 0.0
+        if pricing.get("adder_note") and rate_is_operator_entered:
+            warnings.append(pricing["adder_note"])
         # The DEFAULT rate this offtaker would price at with NO per-offtaker override:
         # master (if set) else this offtaker's own bill/reference rate. Surfaced so the
         # offtaker editor can show "default: $X — from their utility bill" vs master.
@@ -1192,12 +1284,15 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
             default_net_rate = None
             default_net_source = None
             default_net_note = None
+        # tariff + adder, the pair compute_invoice has always modelled (net_value /
+        # incentive_value / solar_value) and delivery used to hard-feed 0 into.
+        # `adder` is already forced to 0 above unless the rate was operator-entered.
         period = Period(
             month=label, start=start, end=end,
             array_kwh=(_base_kwh or 0.0), customer_kwh=customer_kwh,
-            tariff=net_rate, adder=0.0,
+            tariff=net_rate, adder=adder,
         )
-        computed = compute_invoice(customer_kwh, net_rate, 0.0,
+        computed = compute_invoice(customer_kwh, net_rate, adder,
                                    billing_rate, "percent_of_array", None)
         computed["invoice_number"] = (label if (_quarterly and label)
                                       else (end.strftime("%Y-%m") if end else label))
@@ -1213,9 +1308,21 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
         computed["solar_credit_usd"] = credit_usd
         computed["net_rate_per_kwh"] = round(net_rate, 6)
         computed["discount_pct"] = round(discount, 6)
-        computed["effective_rate_per_kwh"] = round(net_rate * billing_rate, 6)
+        # All-in per-kWh the offtaker actually pays: (tariff + adder) × billing rate.
+        # adder is 0 unless the rate was operator-entered, so this is unchanged for
+        # every offtaker that doesn't use one.
+        computed["effective_rate_per_kwh"] = round((net_rate + adder) * billing_rate, 6)
         computed["net_rate_source"] = net_source
         computed["net_rate_note"] = net_note
+        # Incentive adder ($/kWh) — surfaced so the invoice can print it on its own
+        # line the way Colleen's sheet does ("Net Rate" / "Incentive Rate").
+        computed["adder_per_kwh"] = round(adder, 6)
+        computed["adder_source"] = pricing.get("adder_source") if adder else (
+            "expired" if pricing.get("adder_source") == "expired" else "none")
+        computed["adder_note"] = pricing.get("adder_note")
+        # Did a human state this price? Drives the unconfirmed-rate warning above and
+        # the unattended-send hold in scheduler._auto_send_should_hold.
+        computed["rate_is_operator_entered"] = rate_is_operator_entered
         # The bill-derived DEFAULT (what the rate is WITHOUT a per-customer
         # override) + its honest source — so the editable rate field can show it
         # as the default beneath an override, and never mislabels a banked
@@ -1225,7 +1332,7 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
         computed["default_net_rate_source"] = default_net_source
         computed["default_net_rate_note"] = default_net_note
         computed["discount_source"] = pricing["discount_source"]
-        computed["rate_per_kwh"] = round(net_rate * billing_rate, 6)
+        computed["rate_per_kwh"] = round((net_rate + adder) * billing_rate, 6)
         computed["rate_source"] = pricing["discount_source"]
         computed["kwh_source"] = kwh_source           # always 'utility_bill' here
         # has_data flag the empty-skip path checks (None = nothing billable).

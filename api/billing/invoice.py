@@ -125,6 +125,22 @@ def _rate_str(x: Optional[float]) -> str:
     return f"${('%.5f' % (x or 0)).rstrip('0').rstrip('.')}/kWh"
 
 
+def _rate_str_composed(tariff: Optional[float], adder: Optional[float]) -> str:
+    """The rate, showing its composition when the operator prices as tariff + an
+    incentive adder: '$0.22398/kWh ($0.18398 + $0.04 incentive)'.
+
+    Colleen's own invoice prints the tariff and the incentive on separate lines, and
+    an offtaker who has always seen them apart shouldn't suddenly get one merged
+    number with no way to check it. Kept to a single cell so the fixed-row invoice
+    layout is untouched. No adder → the plain rate, exactly as before."""
+    total = (tariff or 0) + (adder or 0)
+    if not adder:
+        return _rate_str(total)
+    _t = ('%.5f' % (tariff or 0)).rstrip('0').rstrip('.')
+    _a = ('%.5f' % adder).rstrip('0').rstrip('.')
+    return f"{_rate_str(total)} (${_t} + ${_a} incentive)"
+
+
 # Honest, customer-facing provenance line for the production figure. kwh_source is
 # one of gmp_api | daily_csv | utility_bill | bill_prorate (or '+'-joined across
 # arrays for a multi-array offtaker). We name the WEAKEST source present so an
@@ -218,7 +234,7 @@ def render_invoice_xlsx(match: BillingMatch, out_path: pathlib.Path,
     put("B15", "Your share of the generation (kWh):" if _gmpc else "Your share of production (kWh):")
     put("C15", round(inv["kwh"], 0), align=right)
     put("B16", "Solar credit rate:")
-    put("C16", _rate_str(rate), align=right)
+    put("C16", _rate_str_composed(inv.get("tariff"), inv.get("adder")), align=right)
     put("B17", "Your contractual payment share:"); put("C17", _pct(inv["billing_rate"]), align=right)
     put("B18", "Solar credit value due:"); put("C18", _money(inv["amount_owed"]), align=right)
     # One note line at B19 (the layout reserves a single row before Amount Owed).
@@ -422,7 +438,7 @@ def render_invoice_pdf(match: BillingMatch, out_path: pathlib.Path,
     _shr_lbl = "Your share of the generation" if _gmpc else "Your share of production"
     rows = [
         [_shr_lbl, f"{inv['kwh']:,.0f} kWh"],
-        ["Solar credit rate", _rate_str(rate)],
+        ["Solar credit rate", _rate_str_composed(inv.get("tariff"), inv.get("adder"))],
         ["Your contractual payment share", _pct(inv["billing_rate"])],
         ["Solar credit value due", _money(inv["amount_owed"])],
     ]

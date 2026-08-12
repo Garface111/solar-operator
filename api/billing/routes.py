@@ -109,6 +109,9 @@ def _sub_dict(s: BillingReportSubscription, pricing_ctx=None) -> dict:
         "rate_per_kwh": getattr(s, "rate_per_kwh", None),
         "discount_pct": getattr(s, "discount_pct", None),
         "net_rate_per_kwh": getattr(s, "net_rate_per_kwh", None),
+        "net_rate_adder_per_kwh": getattr(s, "net_rate_adder_per_kwh", None),
+        "net_rate_adder_until": (
+            d.isoformat() if (d := getattr(s, "net_rate_adder_until", None)) else None),
         # The pricing actually applied (auto-resolved net rate + discount, with
         # provenance) so the card can SHOW the auto rate instead of a blank box.
         **_resolved_pricing_fields(s, pricing_ctx),
@@ -614,6 +617,25 @@ def _validate_discount(pct):
     if not (0 <= d < 1):
         raise HTTPException(400, "discount_pct must be a fraction in [0, 1) — e.g. 0.10 for 10% off")
     return d
+
+
+def _parse_adder_until(value):
+    """Parse the optional incentive-adder expiry (ISO 'YYYY-MM-DD'). None/'' clears
+    it, meaning the adder has no end date. Kept separate from the rate validators
+    because a bad date here would silently drop an adder the operator meant to
+    keep — so we reject it loudly instead of coercing."""
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value
+    s = str(value).strip()
+    if not s:
+        return None
+    try:
+        return date.fromisoformat(s[:10])
+    except ValueError:
+        raise HTTPException(
+            400, "net_rate_adder_until must be a date as YYYY-MM-DD (or null for no expiry)")
 
 
 def _validate_array_share(pct):
@@ -1256,6 +1278,11 @@ class SubscriptionPatch(BaseModel):
     # (falls back to the operator global, then the 10%/VT default).
     discount_pct: Optional[float] = None
     net_rate_per_kwh: Optional[float] = None
+    # Incentive ADDER ($/kWh) layered on the net rate — "tariff + adder" pricing
+    # (HCT: 0.18398 + 0.04). Optional expiry (ISO date) because adders are usually
+    # term-limited; past it the adder stops applying instead of over-billing.
+    net_rate_adder_per_kwh: Optional[float] = None
+    net_rate_adder_until: Optional[str] = None
     # Per-customer 'auto-attach the captured GMP bill PDF' toggle.
     auto_attach_gmp: Optional[bool] = None
     # Sequential invoice numbering: the operator's starting invoice number. Setting
@@ -1374,6 +1401,10 @@ def patch_subscription(sub_id: int, body: SubscriptionPatch,
             sub.discount_pct = _validate_discount(body.discount_pct)
         if "net_rate_per_kwh" in body.model_fields_set:
             sub.net_rate_per_kwh = _validate_rate(body.net_rate_per_kwh)
+        if "net_rate_adder_per_kwh" in body.model_fields_set:
+            sub.net_rate_adder_per_kwh = _validate_rate(body.net_rate_adder_per_kwh)
+        if "net_rate_adder_until" in body.model_fields_set:
+            sub.net_rate_adder_until = _parse_adder_until(body.net_rate_adder_until)
         if body.auto_attach_gmp is not None:
             sub.auto_attach_gmp = body.auto_attach_gmp
         if "invoice_number_start" in body.model_fields_set:
@@ -3613,6 +3644,14 @@ def _rate_meta_from_ci(ci: Optional[dict]) -> dict:
         "default_net_rate_note": ci.get("default_net_rate_note"),
         "resolved_net_rate_per_kwh": ci.get("net_rate_per_kwh"),
         "resolved_net_rate_source": ci.get("net_rate_source"),
+        # Incentive adder actually applied ($/kWh) + whether a human ever stated
+        # this price. rate_is_operator_entered False → the figure was inferred from
+        # the utility bill; the card shows the "confirm your rate" prompt and the
+        # scheduler holds any unattended send.
+        "adder_per_kwh": ci.get("adder_per_kwh"),
+        "adder_source": ci.get("adder_source"),
+        "adder_note": ci.get("adder_note"),
+        "rate_is_operator_entered": ci.get("rate_is_operator_entered"),
         # Billing-basis provenance (Ford 2026-07-10: the own bill governs; the
         # entered share is the audit's expectation). derived_share_pct is the %
         # "pulled from the bill" — own-bill excess ÷ the group's host pool — so
@@ -3704,6 +3743,17 @@ def _draft_dict(d: ReportDraft, sub=None, gmp_auto_status=None, operator_name=No
         # override won) — lets the editor confirm an override is in force.
         "resolved_net_rate_per_kwh": rate_meta.get("resolved_net_rate_per_kwh"),
         "resolved_net_rate_source": rate_meta.get("resolved_net_rate_source"),
+        # "tariff + adder" pricing (Ford 2026-08-12): the incentive actually applied,
+        # and whether a HUMAN ever stated this price. rate_is_operator_entered False
+        # → the rate was inferred from the utility bill; the editor shows the confirm
+        # prompt and the scheduler holds unattended sends until a rate is entered.
+        "net_rate_adder_per_kwh": (getattr(sub, "net_rate_adder_per_kwh", None) if sub else None),
+        "net_rate_adder_until": (
+            au.isoformat() if sub and (au := getattr(sub, "net_rate_adder_until", None)) else None),
+        "adder_per_kwh": rate_meta.get("adder_per_kwh"),
+        "adder_source": rate_meta.get("adder_source"),
+        "adder_note": rate_meta.get("adder_note"),
+        "rate_is_operator_entered": rate_meta.get("rate_is_operator_entered"),
         # Billing-basis provenance (single-draft payloads only, like the rate
         # meta): which figure billed + the bill-DERIVED group share, so the UI
         # renders pool × derived-share = billed and frames the entered share as

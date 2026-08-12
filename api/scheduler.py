@@ -473,6 +473,40 @@ def deliver_quarterly_reports():
     return _deliver_clients_with_frequency("quarterly")
 
 
+def _unconfirmed_rate_should_hold(db, sub) -> bool:
+    """True when this offtaker's invoice would price at a rate NOBODY ENTERED.
+
+    Ford, 2026-08-12 (the HCT/Colleen mis-bill): every rate override was blank, so
+    pricing fell through to the bound GMP bill's own credit rate — 0.23298 against
+    a real contract of 0.18398 + 0.04 = 0.22398. Every invoice ran +4.02% high for
+    months and nothing said a word, because an inferred rate looked exactly like a
+    confirmed one.
+
+    Inferring is a reasonable DEFAULT (GMP publishes a real credit rate, and for
+    plenty of operators that genuinely is the deal) — so this does not block the
+    draft, the preview, or a human "Approve & send". It blocks only the UNATTENDED
+    send, where no one is looking. Entering the rate is the confirmation and lifts
+    the hold on the next run; there is no separate acknowledgement to chase.
+
+    Fail-OPEN, like its sibling below: any error means don't hold. Blast radius when
+    it shipped was 1 live auto-send offtaker (23 others are approval-mode and
+    unaffected)."""
+    try:
+        from .billing.delivery import build_manual_match
+        if getattr(sub, "source_workbook", None):
+            return False          # workbook subs price from the operator's own sheet
+        match = build_manual_match(sub)
+        ci = (match.computed_invoice or {}) if match else {}
+        if not ci:
+            return False
+        # Only hold something that would actually bill money at an unconfirmed rate.
+        if ci.get("rate_is_operator_entered") is not False:
+            return False
+        return bool((ci.get("net_rate_per_kwh") or 0) > 0)
+    except Exception:  # noqa: BLE001 — a safety check must never break the run
+        return False
+
+
 def _auto_send_should_hold(db, sub) -> bool:
     """True when an offtaker's invoice carries a GENUINE "doesn't match GMP"
     allocation flag — the same reconcile signal the operator sees in the pipeline.
@@ -593,6 +627,17 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
                             "auto-send HELD for sub %s — invoice doesn't match GMP's bill "
                             "(allocation mismatch); awaiting operator review", sid)
                         continue
+                    # SAFETY (Ford 2026-08-12): never auto-FIRE at a rate no human
+                    # entered. An inferred bill rate is fine to draft and fine to
+                    # send by hand — it is not fine to mail unattended under the
+                    # operator's name. See _unconfirmed_rate_should_hold.
+                    if _unconfirmed_rate_should_hold(db, sub):
+                        held.append(sid)
+                        logger.info(
+                            "auto-send HELD for sub %s — rate was inferred from the "
+                            "utility bill, not entered by the operator; set a rate to "
+                            "release", sid)
+                        continue
                     result = deliver_subscription(
                         db, sub, tenant,
                         triggered_by=f"sched-billing-{cadence}")
@@ -627,7 +672,8 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
         send_internal_alert(
             f"Array Operator billing — partial failures ({cadence})",
             f"Sent OK: {sent}\nDrafted: {drafted}\nSkipped (benign): {skipped}\n"
-            f"Held (doesn't match GMP — review): {held}\nFailed: {failed}",
+            f"Held (doesn't match GMP, or rate not operator-entered — review): {held}\n"
+            f"Failed: {failed}",
         )
     return {"cadence": cadence, "trueup_only": trueup_only,
             "sent": sent, "drafted": drafted, "failed": failed,
