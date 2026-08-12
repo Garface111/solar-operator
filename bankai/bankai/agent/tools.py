@@ -269,6 +269,40 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "debt_optimizer",
+        "description": (
+            "Build a card-debt paydown plan. Given a monthly budget for the "
+            "cards, it models three futures on the household's REAL balances and "
+            "APRs: avalanche (highest APR first — least total interest), snowball "
+            "(smallest balance first — momentum), and minimums-only (the cost of "
+            "drift). Returns each one's months-to-debt-free, total interest, and "
+            "payoff order, plus the interest saved versus minimums. Use it when "
+            "debt, paydown, 'which card first', or a balance transfer comes up. "
+            "CARDS WITHOUT A REAL APR ON FILE are modeled at a flagged estimate "
+            "and listed in needs_real_apr — tell the household which APRs to get "
+            "for an exact plan (or record them with set_account_terms first). "
+            "monthly_budget is the total dollars/month for these cards; if it is "
+            "below the combined minimums the plan says so. Mortgage is excluded "
+            "unless include_mortgage is true. For a balance-transfer offer, pass "
+            "the transfer_* fields to model the fee, the promo window, and the "
+            "net savings versus staying put."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "monthly_budget": {"type": "number", "description": "Total $/month available for the cards (minimums + extra)"},
+                "include_mortgage": {"type": "boolean", "description": "Include the mortgage (default false)"},
+                "transfer_card": {"type": "string", "description": "Balance-transfer scenario: which card's balance to move"},
+                "transfer_promo_apr": {"type": "number", "description": "The promo APR, e.g. 0 for a 0% offer"},
+                "transfer_promo_months": {"type": "integer", "description": "How many months the promo lasts"},
+                "transfer_fee_pct": {"type": "number", "description": "Transfer fee percent, e.g. 3"},
+                "transfer_monthly_payment": {"type": "number", "description": "Monthly payment you'd make on the transferred balance"},
+            },
+            "required": ["monthly_budget"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "set_watchpoint",
         "description": (
             "Plant a flag for your future self: something to RECONSIDER later, not a "
@@ -1375,6 +1409,33 @@ def _dispatch(session: Session, name: str, args: dict):
             seed=HORIZON_SEED,
             simulations=500,
         )
+    if name == "debt_optimizer":
+        from ..intelligence import debt as debt_lib
+
+        try:
+            budget = float(args["monthly_budget"])
+        except (TypeError, ValueError):
+            return {"error": "monthly_budget must be a number"}
+        result = debt_lib.optimize(
+            session, monthly_budget=budget,
+            include_mortgage=bool(args.get("include_mortgage")),
+        )
+        if "error" in result:
+            return result
+        if args.get("transfer_card"):
+            try:
+                result["balance_transfer"] = debt_lib.balance_transfer(
+                    session,
+                    account_name=str(args["transfer_card"]),
+                    promo_apr=float(args.get("transfer_promo_apr") or 0.0),
+                    promo_months=int(args.get("transfer_promo_months") or 12),
+                    fee_pct=float(args.get("transfer_fee_pct") or 0.0),
+                    monthly_payment=float(
+                        args.get("transfer_monthly_payment") or budget),
+                )
+            except (TypeError, ValueError) as exc:
+                result["balance_transfer_error"] = str(exc)
+        return result
     if name == "set_watchpoint":
         watchpoint = watchpoints.create_watchpoint(
             session,
