@@ -58,6 +58,10 @@ CLAUDE_CLI_EFFORT = _env("CLAUDE_CLI_EFFORT")
 # brain doing tool-heavy turns.
 CLAUDE_CLI_TIMEOUT_SECONDS = int(_env("CLAUDE_CLI_TIMEOUT_SECONDS", "600") or 600)
 CLAUDE_CLI_MODEL = _env("CLAUDE_CLI_MODEL")  # empty = the CLI's default model
+# When the routed Claude model is out of credits / usage-limited, retry on these
+# other Claude models (in order) BEFORE dropping off Claude to grok/kimi — Opus
+# is a stronger brain than the external fallbacks and may still have credit.
+CLAUDE_MODEL_FALLBACKS = _env("CLAUDE_MODEL_FALLBACKS", "claude-opus-5,claude-sonnet-5")
 
 # --- Grok CLI fallback backend (bankai/agent/backends/grok_cli.py) ---
 # Runs the copilot through headless `grok -p` (xAI's Grok Build CLI) as a

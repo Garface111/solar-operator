@@ -10,6 +10,8 @@ the machine running BankAI (`claude` on PATH, or CLAUDE_CLI_BIN).
 from __future__ import annotations
 
 import json
+import logging
+import re
 import subprocess
 import sys
 
@@ -17,11 +19,38 @@ from sqlalchemy.orm import Session
 
 from ... import config
 
+log = logging.getLogger("bankai.claude_cli")
+
 # 120 was tuned for fallback duty behind grok — short enough that a hung CLI
 # doesn't brick the chain. As the PRIMARY brain a real tool-using turn (MCP
 # server startup + several tool calls + a verify pass) legitimately runs past
 # it, and timing out just burns the whole turn. Configurable for both roles.
 TIMEOUT_SECONDS = config.CLAUDE_CLI_TIMEOUT_SECONDS
+
+# A credit/usage/capacity failure for ONE model — the cue to try another Claude
+# model rather than abandon Claude. Distinct from "not logged in" (whole CLI
+# dead) or a bad model id, which no other model would fix.
+_USAGE_ERROR = re.compile(
+    r"usage limit|rate.?limit|out of credit|credits?|quota|exceeded|"
+    r"too many requests|\b429\b|limit reached|upgrade your plan|overloaded|"
+    r"at capacity|insufficient",
+    re.IGNORECASE,
+)
+
+
+def _is_usage_error(detail: str) -> bool:
+    return bool(_USAGE_ERROR.search(detail or ""))
+
+
+def _model_chain(routed: str | None) -> list[str | None]:
+    """The routed model first, then the configured Claude fallbacks — so a
+    Fable-out-of-credits turn drops to Opus, then Sonnet, before leaving Claude."""
+    primary = routed or config.CLAUDE_CLI_MODEL or None
+    chain: list[str | None] = [primary]
+    for m in (x.strip() for x in config.CLAUDE_MODEL_FALLBACKS.split(",")):
+        if m and m != primary:
+            chain.append(m)
+    return chain
 
 #: Local tools every turn gets. Web tools are appended only when granted.
 _BASE_TOOLS = "mcp__bankai__*,Read"
@@ -100,7 +129,7 @@ def run(
         + _transcript(messages)
         + "\n\nReply to the last user message. Output only the reply text."
     )
-    cmd = [
+    base_cmd = [
         config.CLAUDE_CLI_BIN,
         "-p",
         prompt,
@@ -130,40 +159,65 @@ def run(
         "--max-turns",
         "40",
     ]
-    # Per-turn override from the router wins; the fixed config is the fallback.
-    use_model = model or config.CLAUDE_CLI_MODEL
     use_effort = effort or config.CLAUDE_CLI_EFFORT
-    if use_model:
-        cmd += ["--model", use_model]
-    if use_effort:
-        cmd += ["--effort", use_effort]
     _log_web_access()
-    try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=TIMEOUT_SECONDS, cwd=config.BASE_DIR
-        )
-    except FileNotFoundError:
-        raise RuntimeError(
-            f"LLM_BACKEND=claude-cli but '{config.CLAUDE_CLI_BIN}' was not found. "
-            "Install Claude Code and log in, or set CLAUDE_CLI_BIN."
-        )
-    if proc.returncode != 0:
-        detail = (proc.stderr or "") + (proc.stdout or "")
-        if "not logged in" in detail.lower() or "/login" in detail:
-            raise RuntimeError(
-                "the Claude CLI on this machine is not logged in — run "
-                f"`{config.CLAUDE_CLI_BIN}` once and type /login to connect the "
-                "Claude subscription"
+
+    # Try the routed model, then the Claude fallbacks — but ONLY step to the next
+    # model on a credit/usage error. Any other failure means trying Opus would
+    # fail the same way, so it propagates and the outer chain (grok/kimi) takes it.
+    chain = _model_chain(model)
+    usage_errors: list[str] = []
+    for i, use_model in enumerate(chain):
+        cmd = list(base_cmd)
+        if use_model:
+            cmd += ["--model", use_model]
+        if use_effort:
+            cmd += ["--effort", use_effort]
+        try:
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True,
+                timeout=TIMEOUT_SECONDS, cwd=config.BASE_DIR,
             )
-        raise RuntimeError(f"claude CLI failed (exit {proc.returncode}): {detail[:500]}")
-    data = json.loads(proc.stdout)
-    reply = (data.get("result") or "").strip()
-    if reply:
-        return reply
-    # An empty result does NOT mean nothing happened — tool calls in this turn
-    # may well have changed the data. Saying so is the difference between the
-    # household re-doing work and simply asking what was done.
-    return (
-        "I ran out of steps before I could write my answer. Anything I changed "
-        "along the way is saved — ask me what I just did and I'll report it."
+        except FileNotFoundError:
+            raise RuntimeError(
+                f"LLM_BACKEND=claude-cli but '{config.CLAUDE_CLI_BIN}' was not found. "
+                "Install Claude Code and log in, or set CLAUDE_CLI_BIN."
+            )
+        if proc.returncode != 0:
+            detail = (proc.stderr or "") + (proc.stdout or "")
+            if "not logged in" in detail.lower() or "/login" in detail:
+                raise RuntimeError(
+                    "the Claude CLI on this machine is not logged in — run "
+                    f"`{config.CLAUDE_CLI_BIN}` once and type /login to connect the "
+                    "Claude subscription"
+                )
+            # Out of credits on THIS model? Fall to the next Claude model; when
+            # even the last one is credit-limited, break to the outer chain.
+            if _is_usage_error(detail):
+                usage_errors.append(f"{use_model or 'default'}: {detail[:160]}")
+                if i < len(chain) - 1:
+                    log.warning(
+                        "claude model %r is out of credits/usage — falling to %r",
+                        use_model or "(default)", chain[i + 1] or "(default)",
+                    )
+                    continue
+                break  # every Claude model exhausted
+            raise RuntimeError(f"claude CLI failed (exit {proc.returncode}): {detail[:500]}")
+        data = json.loads(proc.stdout)
+        reply = (data.get("result") or "").strip()
+        if reply:
+            if usage_errors:
+                log.info("claude answered on fallback model %r after %d credit skip(s)",
+                         use_model or "(default)", len(usage_errors))
+            return reply
+        # An empty result does NOT mean nothing happened — tool calls in this turn
+        # may well have changed the data. Saying so is the difference between the
+        # household re-doing work and simply asking what was done.
+        return (
+            "I ran out of steps before I could write my answer. Anything I changed "
+            "along the way is saved — ask me what I just did and I'll report it."
+        )
+    # Every Claude model is credit-limited — let the outer chain reach for grok/kimi.
+    raise RuntimeError(
+        "all Claude models are out of credits/usage: " + " | ".join(usage_errors)
     )
