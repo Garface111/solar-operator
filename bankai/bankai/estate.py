@@ -104,60 +104,72 @@ CHECKLIST = [
 _PRIORITY_ORDER = {"urgent": 0, "high": 1, "normal": 2}
 
 
-def _find(item: dict, docs: list[Document]) -> Document | None:
-    """Two-tier so a full folder never falsely satisfies a life-or-death item:
+def _find(item: dict, docs: list[Document]) -> tuple[Document | None, str]:
+    """Three states, because a false 'present' on a life-or-death document is the
+    dangerous failure — a summary that mentions 'guardianship' is not the same as
+    a guardianship designation existing.
 
-    STRONG — the keyword appears in the document's title or the copilot's own
-    summary (human/agent-authored labels, reliable). Category doesn't matter.
-
-    WEAK — the keyword appears only in the extracted body text, which is noisy
-    (a tax return's text says 'trust', a mortgage statement says 'insurance'),
-    so it counts ONLY when the document's category is one the item expects. That
-    is what stops a tax return from passing for the trust agreement.
+    CONFIRMED — the keyword is in the document TITLE. Titles are named for what
+        the document IS, so this is a real match.
+    POSSIBLE — the keyword appears only in the copilot's summary, or in the body
+        text within an expected category. A candidate to READ and verify, not a
+        confirmation: a tax return's summary mentions the trust, the surrogacy
+        contract's mentions guardianship, but neither IS that document.
+    MISSING — nothing matched.
     """
     kws = [k.lower() for k in item["keywords"]]
     cats = item.get("categories", ())
-    for doc in docs:  # strong pass
-        label = ((doc.title or "") + " " + (doc.summary or "")).lower()
-        if any(k in label for k in kws):
-            return doc
-    for doc in docs:  # weak pass, category-gated
+    for doc in docs:  # confirmed: title
+        if any(k in (doc.title or "").lower() for k in kws):
+            return doc, "confirmed"
+    for doc in docs:  # possible: the copilot's own summary
+        if any(k in (doc.summary or "").lower() for k in kws):
+            return doc, "possible"
+    for doc in docs:  # possible: body text, category-gated
         if cats and doc.category in cats:
-            body = (doc.content_text or "")[:4000].lower()
-            if any(k in body for k in kws):
-                return doc
-    return None
+            if any(k in (doc.content_text or "")[:4000].lower() for k in kws):
+                return doc, "possible"
+    return None, "missing"
 
 
 def checklist_status(session: Session) -> dict:
-    """What the household should have vs. what the vault holds."""
+    """What the household should have vs. what the vault holds — confirmed on
+    file, candidates to verify, and outright gaps."""
     docs = list(session.execute(select(Document)).scalars())
     items = []
     for item in CHECKLIST:
-        match = _find(item, docs)
+        match, state = _find(item, docs)
         items.append({
             "key": item["key"],
             "label": item["label"],
             "priority": item["priority"],
             "why": item["why"],
-            "present": match is not None,
+            "status": state,  # confirmed | possible | missing
             "document": {"id": match.id, "title": match.title} if match else None,
         })
-    present = [i for i in items if i["present"]]
-    missing = [i for i in items if not i["present"]]
-    missing.sort(key=lambda i: _PRIORITY_ORDER.get(i["priority"], 3))
+    on_file = [i for i in items if i["status"] == "confirmed"]
+    to_verify = [i for i in items if i["status"] == "possible"]
+    missing = [i for i in items if i["status"] == "missing"]
+    # what needs the household's attention = missing AND unverified candidates,
+    # urgent first — a candidate is not a real match until read.
+    needs_action = sorted(
+        missing + to_verify, key=lambda i: _PRIORITY_ORDER.get(i["priority"], 3)
+    )
     return {
         "items": items,
-        "present_count": len(present),
+        "on_file": [{"label": i["label"], "document": i["document"]} for i in on_file],
+        "to_verify": [{"label": i["label"], "document": i["document"], "priority": i["priority"]} for i in to_verify],
+        "missing": [{"label": i["label"], "priority": i["priority"], "why": i["why"]} for i in missing],
+        "confirmed_count": len(on_file),
         "total": len(items),
-        "completeness_pct": round(100 * len(present) / len(items)) if items else 0,
-        "missing": missing,
-        "top_missing": missing[:3],
+        "completeness_pct": round(100 * len(on_file) / len(items)) if items else 0,
+        "top_action": needs_action[:3],
         "note": (
-            "Present means a document matched by keyword — verify a match is really "
-            "the right document (titles can be cryptic). Raise the top missing item "
-            "gently, one at a time; guardianship and a will are the urgent pair now "
-            "that a child is coming, and anything legal should be reviewed by a "
-            "licensed attorney."
+            "confirmed = the document title says so; possible = a candidate whose "
+            "title does NOT confirm it (only a summary or body mention) — READ it "
+            "and confirm before trusting it, because a tax return mentioning a "
+            "trust is not the trust agreement. Raise the top needed item gently, "
+            "one at a time; guardianship and a will are the urgent pair now that a "
+            "child is coming, and anything legal wants a licensed attorney."
         ),
     }
