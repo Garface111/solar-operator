@@ -63,12 +63,12 @@ and `.env` live *inside it* (`config.BASE_DIR` is the directory containing
 ```bash
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
-./venv/bin/python -m pytest tests -q     # expect: 516 passed
+./venv/bin/python -m pytest tests -q     # expect: 545 passed
 ```
 
 **Run the tests.** They are pure logic — no network, no API key — and they are
 your only proof the tree arrived intact before you wire in real credentials.
-If the count is lower than 516 you have an older copy of the branch; re-pull.
+If the count is lower than 545 you have an older copy of the branch; re-pull.
 A `ModuleNotFoundError: fpdf` means the venv predates the `fpdf2` requirement —
 re-run the `pip install -r` above rather than hunting for a bug.
 
@@ -583,3 +583,48 @@ is to call `verified_turn` whenever the tier is complex **or** the reply contain
 money/percentages/recommendations, so the content trigger keeps its say. Setting
 `ROUTER_ENABLED=false` restores the previous behavior wholesale at the cost of
 the speed win.
+
+---
+
+## 13. Approved changes now build themselves — what actually gates that
+
+Ford's decision (2026-08-11): approving a `code_change` on the dashboard no
+longer just files the idea, it dispatches a headless agent that implements it,
+runs the tests, and deploys. `BUILDER_ENABLED=false` turns this off and the
+approve click goes back to filing the proposal.
+
+**The authorization is the human click**, behind `APP_PASSWORD`. The copilot can
+propose its own changes freely; it cannot approve them, and no agent tool reaches
+the builder (`test_the_agent_has_no_tool_that_writes_source` still passes).
+
+Three gates stand between an approved idea and production, and all three are
+enforced in `builder.py` rather than trusted from the building agent's own
+report — which is the right design, since an agent's "tests pass" is a claim, not
+evidence:
+
+1. **Scope.** `changed_files()` collects modified, staged **and untracked**
+   paths, and `out_of_scope()` refuses anything outside `bankai/` and `tests/`.
+   Including untracked files matters — a brand-new file outside the surface is
+   exactly what a scope check exists to catch.
+2. **Tests.** The suite is re-run in this module's own subprocess, with a
+   scrubbed environment (`_ENV_KEEP` passes only `PATH`, `HOME`, locale, `TERM`,
+   `USER`, `SHELL`). That scrub is a fix for a real defect found the same day:
+   the build gate had been running tests against the household's **live
+   credentials**.
+3. **Deploy.** Only after 1 and 2, and in a transient systemd scope so that
+   restarting `bankai.service` cannot kill the process doing the restarting.
+
+Builds run in a **separate detached worktree on ext4**, never `/opt/bankai`, so
+the builder never edits code that is running, never entangles a human's
+in-progress edits, and never sees the live DB, vault, or `.env`. One build at a
+time, under a lock.
+
+**The property to keep in view.** `builder.py` is itself inside the buildable
+surface, so a build could rewrite these guards — but only for the *next* run,
+because the guards enforcing any given build are the ones already deployed when
+it started. The protection is real and it is exactly one generation deep. That
+makes the human reading the reported diff the actual last line of defense, not a
+formality. If you are the agent operating this: **read what each build changed
+before approving the next one**, and if a build's diff touches `builder.py`,
+`selfimprove.py`, or `security/`, treat that as the moment to stop and get Ford's
+eyes on it.
