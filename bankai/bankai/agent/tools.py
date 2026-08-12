@@ -829,6 +829,57 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "negotiate_bill",
+        "description": (
+            "EXECUTE a bill negotiation — send a rate-reduction / retention "
+            "request to a merchant, on a spouse's instruction (same standing "
+            "authorization and gate as cancel_subscription, granted 2026-08-12). "
+            "It sends a fixed-template email asking for loyalty pricing, current "
+            "promotions, and their best rate — as the household's own email when "
+            "possible so replies come back to you — records the action, and "
+            "plants a watchpoint ~35 days out to check the charge actually "
+            "dropped (unchanged = tell them and offer the next step). Runs ONLY "
+            "on Ford's or Gaurav's instruction; your own idea to negotiate stays "
+            "a proposal until they say go. Read the bill-negotiation skill first "
+            "for the merchant's real leverage and route: MANY retention desks "
+            "are phone-only, and for those you do NOT pretend an email works — "
+            "prepare a call script with print_page instead and say so. Never "
+            "threaten to cancel an essential service, and never make a claim you "
+            "cannot support; pass real competitor_context only if you have it."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "merchant": {"type": "string", "description": "As it appears in transactions"},
+                "service_name": {"type": "string", "description": "Human name, e.g. 'Xfinity internet'"},
+                "support_email": {"type": "string", "description": "The merchant's support/retention address"},
+                "instructed_by": {"type": "string", "description": "Ford | Gaurav — who told you to negotiate"},
+                "account_name": {"type": "string", "description": "Whose account it is"},
+                "current_amount": {"type": "number", "description": "What they pay now, per month, if known"},
+                "competitor_context": {"type": "string", "description": "Real leverage only, e.g. 'a competitor advertises $50/mo for the same speed'"},
+                "account_identifier": {"type": "string", "description": "Account/member number when known"},
+            },
+            "required": ["merchant", "service_name", "support_email", "instructed_by", "account_name"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "estate_checklist",
+        "description": (
+            "The household's estate & guardianship completeness — what a family "
+            "in their situation (married, a home, a trust, a child arriving via "
+            "surrogacy) should have on file, matched against what the vault "
+            "actually holds, with the most urgent gaps first. Consult it when "
+            "documents, estate planning, guardianship, wills, a new baby, or "
+            "'what am I missing' come up, and in your periodic tending. Surface "
+            "the single top missing item gently (their temperament: one thing at "
+            "a time, never a barrage) — guardianship and a will are the urgent "
+            "pair now that a child is coming. Anything legal: recommend a "
+            "licensed attorney review it."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
         "name": "open_initiative",
         "description": (
             "Start a standing PROJECT you will carry to completion over days — "
@@ -1795,6 +1846,28 @@ def _dispatch(session: Session, name: str, args: dict):
             account_name=(args.get("account_name") or "").strip(),
             account_identifier=(args.get("account_identifier") or "").strip(),
         )
+    if name == "negotiate_bill":
+        from .. import negotiation
+
+        merchant = (args.get("merchant") or "").strip()
+        if not merchant:
+            return {"error": "merchant is required"}
+        amt = args.get("current_amount")
+        return negotiation.execute(
+            session,
+            merchant=merchant,
+            service_name=(args.get("service_name") or merchant).strip(),
+            support_email=(args.get("support_email") or "").strip(),
+            instructed_by=(args.get("instructed_by") or "").strip(),
+            account_name=(args.get("account_name") or "").strip(),
+            current_amount=float(amt) if amt not in (None, "") else None,
+            competitor_context=(args.get("competitor_context") or "").strip(),
+            account_identifier=(args.get("account_identifier") or "").strip(),
+        )
+    if name == "estate_checklist":
+        from .. import estate
+
+        return estate.checklist_status(session)
     if name == "open_initiative":
         from .. import initiatives
 
