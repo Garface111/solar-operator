@@ -75,3 +75,33 @@ def test_portal_layout_cannot_side_scroll_on_a_phone():
     assert "overflow-x:auto" in html
     # iOS zooms the page when a focused input is under 16px.
     assert "font-size:16px" in html
+
+
+def test_scrollbars_are_styled_not_default():
+    """Ford's note: the default bars are 'really ugly and the wrong color'.
+    They are a bright square slab on a dark panel, and no amount of other
+    polish survives them sitting down the side of every list."""
+    from bankai import config
+
+    html = (config.BASE_DIR / "bankai" / "static" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    assert "::-webkit-scrollbar-thumb" in html          # Chrome/Safari/Edge
+    assert "scrollbar-color" in html                    # Firefox
+    assert "background-clip:content-box" in html        # slim thumb, not welded to the edge
+    assert "::-webkit-scrollbar-corner" in html         # the grey square where the two bars meet
+
+
+def test_the_interface_is_rendered_with_care():
+    """A handful of details that separate 'styled' from 'made': crisp text on a
+    dark ground, money that doesn't jitter as digits change, and motion that
+    stops when the OS asks for stillness."""
+    from bankai import config
+
+    html = (config.BASE_DIR / "bankai" / "static" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    assert "-webkit-font-smoothing:antialiased" in html
+    assert "font-variant-numeric:tabular-nums" in html
+    assert "prefers-reduced-motion" in html
+    assert "transition:none !important" in html
