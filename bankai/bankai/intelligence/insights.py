@@ -50,14 +50,21 @@ def spending_summary(session: Session, since: date, until: date) -> dict:
     }
 
 
+def _valued_accounts(session: Session) -> list[Account]:
+    """Every account that carries a usable balance — the exact set net worth sums,
+    and the exact set the daily snapshot must stamp. Feed and manual alike: a manual
+    property or mortgage counts no differently from a synced checking account, and
+    none is excluded for having been last edited long ago. net_worth() and
+    snapshot_net_worth() both go through here so the live total and the daily
+    snapshot can never diverge on *which* accounts they include."""
+    return [a for a in session.execute(select(Account)).scalars() if a.balance is not None]
+
+
 def net_worth(session: Session) -> dict:
-    accounts = session.execute(select(Account)).scalars().all()
     total = 0.0
     per_account = []
-    for account in accounts:
+    for account in _valued_accounts(session):
         bal = account.balance
-        if bal is None:
-            continue
         total += bal
         per_account.append(
             {
@@ -73,15 +80,97 @@ def net_worth(session: Session) -> dict:
     return {"total": round(total, 2), "accounts": per_account}
 
 
+def snapshot_net_worth(session: Session, on: date | None = None) -> dict:
+    """Stamp today's balance snapshot for EVERY valued account at once, so the daily
+    net-worth history is built from the same account set — at the same current
+    balances — that net_worth()/get_accounts report.
+
+    Snapshots are otherwise written per-account only when that one account changes, so
+    a day's history row would only ever sum the accounts that happened to move that
+    day. Manual accounts (property, mortgage, Apple Card) change rarely, so they
+    dropped out of almost every day and the total sagged by their whole value. This
+    walks the full set in one pass and upserts today's row for each account, so the
+    day is complete and single-basis.
+
+    Re-running the same day re-stamps in place (no duplicate row): if a manual account
+    was corrected an hour ago, calling this again brings the whole day's snapshot back
+    into agreement with the accounts instead of leaving a mixed-basis row. Returns
+    {"date", "total"} where total == net_worth()["total"] to the cent."""
+    on = on or date.today()
+    total = 0.0
+    for account in _valued_accounts(session):
+        total += account.balance
+        existing = session.execute(
+            select(BalanceSnapshot).where(
+                BalanceSnapshot.account_id == account.id, BalanceSnapshot.date == on
+            )
+        ).scalar_one_or_none()
+        if existing:
+            existing.balance = account.balance
+        else:
+            session.add(
+                BalanceSnapshot(account_id=account.id, date=on, balance=account.balance)
+            )
+    session.flush()
+    return {"date": on.isoformat(), "total": round(total, 2)}
+
+
 def net_worth_history(session: Session, months: int = 6) -> list[dict]:
+    """Daily net-worth series, reconstructed so every day reflects the SAME account
+    set net_worth() sums — each account carried forward at its most recent balance on
+    or before that date. A naive ``sum(snapshots where date == D)`` only ever counted
+    the accounts snapshotted *on* D, so a rarely-touched manual account (a property, a
+    mortgage) silently dropped out on every day it wasn't edited and the total sagged
+    by its whole value. Carrying forward the last known balance repairs that from the
+    sparse snapshots we already have, without inventing rows.
+
+    A point also carries ``basis_change`` when an account first entered tracking since
+    the previous point (a new property, a first mortgage). That is a real discontinuity
+    in *what is being measured*, not organic wealth change, so a chart can annotate the
+    step instead of drawing it as a $250k cliff. An account contributes nothing before
+    its first snapshot — a value is never projected back to before it was tracked."""
     since = date.today() - timedelta(days=months * 31)
+    # Full history, oldest first: carrying a balance forward into the window needs the
+    # last snapshot from *before* the window too (a property valued months ago and
+    # never since still counts today).
     rows = session.execute(
-        select(BalanceSnapshot.date, func.sum(BalanceSnapshot.balance))
-        .where(BalanceSnapshot.date >= since)
-        .group_by(BalanceSnapshot.date)
+        select(BalanceSnapshot.account_id, BalanceSnapshot.date, BalanceSnapshot.balance)
         .order_by(BalanceSnapshot.date)
     ).all()
-    return [{"date": d.isoformat(), "total": round(total or 0.0, 2)} for d, total in rows]
+    if not rows:
+        return []
+
+    names = {
+        a.id: (a.name, a.kind)
+        for a in session.execute(select(Account.id, Account.name, Account.kind)).all()
+    }
+    by_date: dict[date, dict[str, float]] = {}
+    for account_id, d, balance in rows:
+        by_date.setdefault(d, {})[account_id] = balance
+
+    out: list[dict] = []
+    carried: dict[str, float] = {}  # account_id -> most recent balance seen so far
+    prev_emitted_ids: set[str] | None = None
+    for d in sorted(by_date):
+        carried.update(by_date[d])
+        if d < since:
+            continue  # fold its balances into the carry, but don't emit a pre-window point
+        entered = [aid for aid in carried if prev_emitted_ids is not None and aid not in prev_emitted_ids]
+        point = {"date": d.isoformat(), "total": round(sum(carried.values()), 2)}
+        if entered:
+            point["basis_change"] = {
+                "entered": [
+                    {"account_id": aid, "name": names.get(aid, (aid, ""))[0],
+                     "kind": names.get(aid, ("", ""))[1], "balance": round(carried[aid], 2)}
+                    for aid in entered
+                ],
+                # The slice of the step that is a basis change, not real movement — a
+                # chart can subtract it to keep the line continuous, or label it.
+                "amount": round(sum(carried[aid] for aid in entered), 2),
+            }
+        out.append(point)
+        prev_emitted_ids = set(carried)
+    return out
 
 
 def upcoming_bills(session: Session, days: int = 30) -> list[dict]:

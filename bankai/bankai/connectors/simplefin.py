@@ -159,6 +159,12 @@ def _sync_one(access_url: str, lookback_days: int = 90) -> dict:
             if added_ids:
                 from .. import pending
                 matched = len(pending.reconcile(session, added_ids))
+            # Feed balances just moved. Re-stamp today's snapshot for the WHOLE
+            # account set (including manual accounts this sync never touched), so the
+            # day's net-worth history row stays in agreement with get_accounts instead
+            # of dropping every un-synced manual account out of the total.
+            from ..intelligence.insights import snapshot_net_worth
+            snapshot_net_worth(session)
             session.add(
                 SyncLog(
                     source="simplefin",
