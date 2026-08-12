@@ -282,8 +282,10 @@ TOOLS: list[dict] = [
             "and listed in needs_real_apr — tell the household which APRs to get "
             "for an exact plan (or record them with set_account_terms first). "
             "monthly_budget is the total dollars/month for these cards; if it is "
-            "below the combined minimums the plan says so. Mortgage is excluded "
-            "unless include_mortgage is true. For a balance-transfer offer, pass "
+            "below the combined minimums the plan says so. CARDS ONLY by default "
+            "— an auto/personal loan needs include_loans, the mortgage needs "
+            "include_mortgage (both are cheap fixed-term debt you keep on "
+            "schedule, not paydown targets). For a balance-transfer offer, pass "
             "the transfer_* fields to model the fee, the promo window, and the "
             "net savings versus staying put."
         ),
@@ -291,6 +293,7 @@ TOOLS: list[dict] = [
             "type": "object",
             "properties": {
                 "monthly_budget": {"type": "number", "description": "Total $/month available for the cards (minimums + extra)"},
+                "include_loans": {"type": "boolean", "description": "Also include installment loans like an auto/personal loan (default false — cards only)"},
                 "include_mortgage": {"type": "boolean", "description": "Include the mortgage (default false)"},
                 "transfer_card": {"type": "string", "description": "Balance-transfer scenario: which card's balance to move"},
                 "transfer_promo_apr": {"type": "number", "description": "The promo APR, e.g. 0 for a 0% offer"},
@@ -1418,6 +1421,7 @@ def _dispatch(session: Session, name: str, args: dict):
             return {"error": "monthly_budget must be a number"}
         result = debt_lib.optimize(
             session, monthly_budget=budget,
+            include_loans=bool(args.get("include_loans")),
             include_mortgage=bool(args.get("include_mortgage")),
         )
         if "error" in result:

@@ -33,7 +33,11 @@ MIN_FLOOR = 25.0        # a card minimum rarely drops below this
 MIN_PCT = 0.02          # ...or ~2% of the balance, whichever is larger
 MONTH_CAP = 600         # 50 years: a safety stop for an infeasible budget
 
-DEBT_KINDS = ("credit", "loan")  # mortgage is a different animal; opt-in only
+# Revolving CARD debt is what this optimizer is for — high APR, no fixed term,
+# the stuff worth attacking. Installment loans (auto, personal) and the mortgage
+# are cheaper fixed-term debt you keep on schedule, so they are opt-in only and
+# never swamp the card plan by default.
+DEBT_KINDS = ("credit",)
 
 
 @dataclass
@@ -62,10 +66,16 @@ def _effective_min(balance: float) -> float:
     return min(balance, max(MIN_FLOOR, balance * MIN_PCT))
 
 
-def snapshot(session: Session, include_mortgage: bool = False) -> list[Debt]:
+def snapshot(session: Session, include_loans: bool = False,
+             include_mortgage: bool = False) -> list[Debt]:
     """Every interest-bearing debt with balance, APR, and minimum — flagged
-    where a figure had to be estimated."""
-    kinds = DEBT_KINDS + (("mortgage",) if include_mortgage else ())
+    where a figure had to be estimated. Cards only by default; installment loans
+    and the mortgage are opt-in."""
+    kinds = DEBT_KINDS
+    if include_loans:
+        kinds = kinds + ("loan",)
+    if include_mortgage:
+        kinds = kinds + ("mortgage",)
     terms = terms_by_account(session)
     debts: list[Debt] = []
     for account in session.execute(select(Account)).scalars():
@@ -181,9 +191,9 @@ def _plan_dict(p: PlanResult) -> dict:
 
 
 def optimize(session: Session, *, monthly_budget: float,
-             include_mortgage: bool = False) -> dict:
+             include_loans: bool = False, include_mortgage: bool = False) -> dict:
     """Compare avalanche, snowball, and minimums-only for a monthly budget."""
-    debts = snapshot(session, include_mortgage)
+    debts = snapshot(session, include_loans=include_loans, include_mortgage=include_mortgage)
     if not debts:
         return {"error": "no interest-bearing debts on file"}
     total_owed = round(sum(d.owed for d in debts), 2)
