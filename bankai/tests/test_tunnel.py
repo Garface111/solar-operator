@@ -54,3 +54,24 @@ def test_announce_falls_back_to_the_thread_when_email_is_dark(session, monkeypat
     with session_scope() as s:
         said = [m.content for m in s.query(ChatMessage).all()]
     assert any("d.trycloudflare.com" in c for c in said)
+
+
+# --- the portal on a phone -------------------------------------------------
+# Reached over the tunnel, the dashboard is a phone page now. These pin the two
+# CSS facts that were actually broken/needed, so a later restyle can't quietly
+# bring the sideways scroll back.
+
+def test_portal_layout_cannot_side_scroll_on_a_phone():
+    from bankai import config
+
+    html = (config.BASE_DIR / "bankai" / "static" / "index.html").read_text(
+        encoding="utf-8"
+    )
+    # A bare `1fr` track is floored at min-content, so the widest table pushed
+    # the column past the viewport (measured: 103px of overflow at 375px).
+    assert "grid-template-columns:minmax(0,1fr)" in html
+    assert "@media (max-width: 720px)" in html
+    # Wide tables scroll inside themselves instead of dragging the page along.
+    assert "overflow-x:auto" in html
+    # iOS zooms the page when a focused input is under 16px.
+    assert "font-size:16px" in html

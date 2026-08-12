@@ -15,7 +15,11 @@
   header h1 { font-size:17px; margin:0; letter-spacing:.02em; }
   main { display:grid; grid-template-columns: 1fr 500px; gap:18px; padding:18px 22px;
          max-width:1400px; margin:0 auto; }
-  @media (max-width: 1080px) { main { grid-template-columns:1fr; } }
+  /* minmax(0,…), not 1fr: a bare 1fr track is min-content-floored, so the
+     widest transaction table stretched the column past the screen and the whole
+     page scrolled sideways on a phone (103px over, at 375px). */
+  @media (max-width: 1080px) { main { grid-template-columns:minmax(0,1fr); } }
+
   /* Focus mode: the conversation takes the room, the ledger steps aside. */
   body.chatfocus main > div:first-child { display:none; }
   body.chatfocus main { grid-template-columns:minmax(0,900px); justify-content:center; }
@@ -144,6 +148,31 @@
   .wc.soon { border-left-color:var(--accent); }
   .wc.imminent { border-left-color:var(--bad); }
   .wc.imminent .when { color:var(--bad); }
+  /* --- Phone -------------------------------------------------------------
+     Last in the sheet on purpose: several rules here override earlier ID-level
+     styles (#chatinput's font, for one), and equal specificity is settled by
+     order. Verified at 375px through the tunnel, not assumed. */
+  @media (max-width: 720px) {
+    main { padding:12px; gap:12px; }
+    header { padding:12px 14px; }
+    section { min-width:0; }
+    /* Let a wide table scroll inside itself rather than dragging the whole page
+       sideways — the ledger stays readable and the layout stays put. */
+    table { display:block; width:100%; overflow-x:auto; -webkit-overflow-scrolling:touch; }
+    /* iOS Safari zooms the page when a focused input is under 16px. */
+    #chatinput, input, select, textarea, button { font-size:16px; }
+    /* The composer must wrap, or Send lands off the right edge of the screen —
+       it did, by 34px, which put the one control you actually need out of
+       reach on a phone. */
+    .composerbar { flex-wrap:wrap; gap:6px; }
+    .composerbar .spacer { display:none; }
+    #composerhint { flex-basis:100%; order:10; font-size:11px; }
+    #composer button[type="submit"] { margin-left:auto; }
+    /* Thumbs, not cursors. */
+    button, .iconbtn { min-height:40px; }
+    #chatlog { max-height:52vh; }
+    .turn { max-width:100%; }
+  }
 </style>
 </head>
 <body>
