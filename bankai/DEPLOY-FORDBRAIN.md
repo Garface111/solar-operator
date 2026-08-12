@@ -63,12 +63,12 @@ and `.env` live *inside it* (`config.BASE_DIR` is the directory containing
 ```bash
 python3 -m venv venv
 ./venv/bin/pip install -r requirements.txt
-./venv/bin/python -m pytest tests -q     # expect: 545 passed
+./venv/bin/python -m pytest tests -q     # expect: 550 passed
 ```
 
 **Run the tests.** They are pure logic — no network, no API key — and they are
 your only proof the tree arrived intact before you wire in real credentials.
-If the count is lower than 545 you have an older copy of the branch; re-pull.
+If the count is lower than 550 you have an older copy of the branch; re-pull.
 A `ModuleNotFoundError: fpdf` means the venv predates the `fpdf2` requirement —
 re-run the `pip install -r` above rather than hunting for a bug.
 
@@ -320,6 +320,8 @@ Three things about that unit file are deliberate:
    after it 401s, which reads like a broken password rather than a missing
    scheme. Terminate TLS at the proxy and the problem disappears. Do not "fix"
    it by removing `Secure`.
+
+   **For phone access, prefer the tunnel over opening the bind** — see §14.
 2. **`Restart=always`.** This is what "permanently" means in practice — it comes
    back from a crash, and `enable` brings it back from a reboot.
 3. **No `EnvironmentFile`.** `config.py` loads `.env` itself via `python-dotenv`
@@ -628,3 +630,43 @@ formality. If you are the agent operating this: **read what each build changed
 before approving the next one**, and if a build's diff touches `builder.py`,
 `selfimprove.py`, or `security/`, treat that as the moment to stop and get Ford's
 eyes on it.
+
+---
+
+## 14. Phone access via Cloudflare tunnel — and what it changes
+
+`bankai/tunnel.py` supports reaching the portal from a phone through a
+Cloudflare tunnel instead of by opening the bind. That is the right shape:
+Cloudflare terminates TLS, **nothing new listens on the network**, and the
+origin stays on `127.0.0.1`. Two consequences follow that you should know before
+switching it on.
+
+**Sentinel will not alarm on this.** Its binding check looks for a listener on
+a non-loopback address (§5c); a tunnel creates none. So unlike a `0.0.0.0` bind,
+this exposure is invisible to the posture audit — which is fine, but it means
+the audit is not the thing telling you whether the portal is public. Only your
+own knowledge of whether `cloudflared` is running does that.
+
+**The password becomes the whole perimeter.** The module's own docstring says
+this plainly and it is worth repeating: the tunnel URL is unguessable but it is
+not a secret, so `APP_PASSWORD` is what stands between the internet and the
+household's entire financial life. On loopback a mediocre password was survivable.
+Here it is not. Before enabling a tunnel:
+
+- make `APP_PASSWORD` long and random — this is the one credential that matters;
+- confirm the login throttle and the `HttpOnly`/`Secure`/`SameSite` cookie are
+  intact (both landed in the hardening pass, §4/§5) — they are load-bearing now
+  in a way they were not before;
+- tell Ford, in plain words, that the portal is reachable from the internet.
+  That is his call to make knowingly, not a detail to bury in a status line.
+
+**The free "quick tunnel" hostname changes on every restart**, which is why the
+module watches for the change and emails the household the new link — a phone
+bookmark would otherwise rot silently. `announce()` sends through
+`email_thread.start_thread()`, so it goes to `HOUSEHOLD_EMAILS` and nowhere else,
+same as every other outbound path. A stable hostname needs
+`cloudflared tunnel login` in a browser, which no agent can do; if Ford wants
+bookmarks that last, that is the step to ask him for.
+
+Nothing starts a tunnel automatically — the app neither launches nor supervises
+`cloudflared`. If you set one up, it is a separate unit and a deliberate act.
