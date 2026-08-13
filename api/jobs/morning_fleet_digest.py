@@ -39,6 +39,7 @@ from ..db import SessionLocal
 from ..models import (
     Array,
     DailyGeneration,
+    Inverter,
     InverterAlertState,
     Tenant,
     UtilityAccount,
@@ -108,8 +109,8 @@ def _local_today_iso() -> str:
         return datetime.now(timezone.utc).date().isoformat()
 
 
-def _last_full_day_point(col: dict) -> dict | None:
-    """The array's most recent COMPLETE-day vendor daily point ({date, kwh}).
+def _last_full_day_from(pts: list) -> dict | None:
+    """The most recent COMPLETE-day point ({date, kwh}) of a daily series.
 
     CRITICAL: the digest sends in the MORNING, when TODAY's kWh is still
     accumulating — a partial, near-live figure that reads like an instantaneous
@@ -128,7 +129,6 @@ def _last_full_day_point(col: dict) -> dict | None:
     let the health verdict flag it.
     """
     today = _local_today_iso()
-    pts = _vendor_daily(col)
     complete: list[dict] = []                       # oldest → newest, excl. today
     for pt in pts:
         if pt.get("kwh") is None or str(pt.get("date")) == today:
@@ -156,6 +156,69 @@ def _last_full_day_point(col: dict) -> dict | None:
             i -= 1
         return complete[i]
     return complete[-1]
+
+
+def _last_full_day_point(col: dict) -> dict | None:
+    """The array's most recent COMPLETE-day VENDOR (inverter-telemetry) point —
+    the health surfaces' series. Output surfaces use _output_point instead."""
+    return _last_full_day_from(_vendor_daily(col))
+
+
+def _utility_daily(col: dict) -> list:
+    """The array's UTILITY-METER daily series (GMP interval API / SmartHub
+    usage — never bill_prorate), ascending [{date, kwh}]: the settled "what the
+    meter recorded" stream. Present on vendor arrays via the tree's daily_split
+    and on the digest-built utility-only columns (attach_utility_columns)."""
+    split = col.get("daily_split") or {}
+    return list(split.get("utility") or [])
+
+
+def _output_point(col: dict) -> dict | None:
+    """What the owner means by "what did it make yesterday": the array's last
+    COMPLETE day from the freshest stream we hold. The utility meter wins ties —
+    it is the settled, official record (Paul: "the GMP/VEC data can give you
+    yesterday's output") — while inverter telemetry covers arrays with no
+    utility feed and days the meter hasn't settled yet. Utility points carry a
+    provenance chip ("GMP meter") so a metered figure is never mistaken for
+    inverter telemetry. Health/flag logic never reads this — an inverter's
+    sickness cannot be diagnosed from a site meter."""
+    v = _last_full_day_from(_vendor_daily(col))
+    u = _last_full_day_from(_utility_daily(col))
+    if u and (not v or str(u.get("date")) >= str(v.get("date"))):
+        provs = [str(p).upper() for p in (col.get("utility_providers") or []) if p]
+        u = dict(u)
+        u["stream"] = "utility"
+        u["chip"] = f"{provs[0]} meter" if provs else "utility meter"
+        return u
+    if v:
+        v = dict(v)
+        v["stream"] = "vendor"
+        v["chip"] = None
+        return v
+    return None
+
+
+def _iso_minus_days(iso: str, n: int) -> str:
+    try:
+        return (datetime.strptime(str(iso), "%Y-%m-%d")
+                - timedelta(days=n)).date().isoformat()
+    except (ValueError, TypeError):
+        return str(iso)
+
+
+def _point_is_current(pt: dict | None, yiso: str) -> bool:
+    """Whether an output point counts as CURRENT for staleness math. Vendor
+    telemetry should cover through yesterday; a utility meter settles about a
+    day later (GMP interval data for a day typically lands the following
+    morning), so a metered figure one day behind is the feed working NORMALLY,
+    not a stale array. A meter further behind than that is genuinely stale
+    (a dead VEC login stays flagged)."""
+    if not pt or not pt.get("date"):
+        return False
+    d = str(pt["date"])
+    if pt.get("stream") == "utility":
+        return d >= _iso_minus_days(yiso, 1)
+    return d >= yiso
 
 
 def _recent_kwh(col: dict) -> float | None:
@@ -192,6 +255,13 @@ def _vendor_columns(tree: dict) -> list[dict]:
     return [c for c in tree.get("columns", []) if int(c.get("inverter_count") or 0) > 0]
 
 
+def _output_columns(tree: dict) -> list[dict]:
+    """Arrays the OUTPUT surfaces cover: every vendor (inverter) array plus the
+    digest-built utility-only columns (attach_utility_columns, per-tenant
+    opt-in). Health surfaces keep _vendor_columns — the split is the point."""
+    return _vendor_columns(tree) + list(tree.get("utility_columns") or [])
+
+
 def _array_has_flag(col: dict) -> bool:
     """True when this array contains at least one non-'ok' inverter."""
     return any((inv.get("status") or "ok") != "ok" for inv in col.get("inverters", []))
@@ -222,13 +292,14 @@ def _flagged_inverters(cols: list[dict]) -> list[dict]:
 
 
 def _ranked_arrays(cols: list[dict]) -> list[dict]:
-    """Arrays that have a real recent kWh reading, sorted best → worst by it.
-    Arrays with no data are excluded (we never rank on an invented number)."""
+    """Arrays that have a real recent OUTPUT reading (vendor telemetry or the
+    utility meter — see _output_point), sorted best → worst by it. Arrays with
+    no data are excluded (we never rank on an invented number)."""
     scored = []
     for col in cols:
-        kwh = _recent_kwh(col)
-        if kwh is not None:
-            scored.append({"col": col, "kwh": kwh})
+        pt = _output_point(col)
+        if pt is not None:
+            scored.append({"col": col, "kwh": float(pt["kwh"]), "point": pt})
     scored.sort(key=lambda x: x["kwh"], reverse=True)
     return scored
 
@@ -254,8 +325,7 @@ def _fleet_all_stale(cols: list[dict]) -> bool:
         return False
     yiso = _yesterday_iso()
     for c in cols:
-        d = _recent_day(c)
-        if d and d >= yiso:
+        if _point_is_current(_output_point(c), yiso):
             return False   # at least one array is current — digest is real
     return True
 
@@ -267,16 +337,16 @@ def _fleet_reference_day(cols: list[dict]) -> tuple[str | None, str | None, bool
     owner's browser runs a capture, so a fleet can be days behind; we label it with
     its REAL latest day and flag staleness (latest full day older than yesterday)
     so the header never claims a day the data isn't from."""
-    days = [d for d in (_recent_day(c) for c in cols) if d]
-    if not days:
+    pts = [p for p in (_output_point(c) for c in cols) if p and p.get("date")]
+    if not pts:
         return None, None, False
-    iso = max(days)
+    iso = max(str(p["date"]) for p in pts)
     # Stale if ANY array is behind yesterday — a mixed fleet (fresh SolarEdge +
     # extension-captured Fronius/SMA that report only on browser capture) must not
     # let the fresh arrays MASK the stale ones. The header shows the freshest day;
     # the note + per-array dates surface which arrays are behind.
     yiso = _yesterday_iso()
-    is_stale = any(d < yiso for d in days)
+    is_stale = any(not _point_is_current(p, yiso) for p in pts)
     try:
         label = datetime.strptime(str(iso), "%Y-%m-%d").strftime("%A, %B %-d, %Y")
     except (ValueError, TypeError):
@@ -301,10 +371,16 @@ def _stale_fix_hint(cols: list[dict]) -> str:
     wrong for a fleet with no browser-capture vendor in it at all (a pure
     SolarEdge/Enphase cloud-API fleet has no extension in its data path)."""
     yiso = _yesterday_iso()
-    stale_sources = {
-        _col_data_source(c) for c in cols
-        if (_recent_day(c) or "") < yiso
-    }
+    stale_sources: set = set()
+    for c in cols:
+        pt = _output_point(c)
+        if _point_is_current(pt, yiso):
+            continue
+        if pt is not None and pt.get("stream") == "utility":
+            # A metered feed that stopped advancing = the utility login died.
+            stale_sources.add("utility_meter")
+        else:
+            stale_sources.add(_col_data_source(c))
     needs_extension = "extension_pull" in stale_sources
     needs_login = "utility_meter" in stale_sources
     if needs_extension and needs_login:
@@ -769,6 +845,95 @@ def _array_visibility(db, col: dict) -> dict:
     return vis
 
 
+def attach_utility_columns(db, tenant, tree: dict) -> None:
+    """Attach utility-account providers to vendor columns (for the provenance
+    chip) and — per-tenant OPT-IN — digest-only OUTPUT columns for metered,
+    zero-inverter arrays.
+
+    The fleet tree deliberately EXCLUDES pure utility-meter arrays (Bruce:
+    "only show vendor data here" — for his fleet those rows are GMP customer
+    credit accounts, pure noise in an inverter view). But a fleet like HCT has
+    real generating sites metered by GMP/VEC with no inverter feed we hold, so
+    that exclusion made the digest structurally silent about their output
+    (Paul: "could the system look to the VEC records to provide the previous
+    day's output…"). tenants.digest_include_utility_arrays is exactly the
+    choice Paul asked for; default off, so every other fleet's digest stays
+    byte-identical.
+
+    Utility columns join the OUTPUT surfaces only (rankings, per-array table,
+    reference-day math) — never inverter-health counts, flags, or the subject's
+    attention number: a site meter can say what an array MADE, not which
+    inverter is sick."""
+    tree.setdefault("utility_columns", [])
+    try:
+        rows = db.execute(
+            select(Array.id, Array.name, UtilityAccount.provider)
+            .join(UtilityAccount, UtilityAccount.array_id == Array.id)
+            .where(
+                Array.tenant_id == tenant.id,
+                Array.deleted_at.is_(None),
+                UtilityAccount.deleted_at.is_(None),
+                UtilityAccount.enabled.is_(True),
+            )
+        ).all()
+    except Exception:                                # pragma: no cover - defensive
+        log.exception("utility columns: account lookup failed")
+        return
+    provs: dict[int, tuple[str, set]] = {}
+    for aid, name, prov in rows:
+        entry = provs.setdefault(aid, (name, set()))
+        if prov:
+            entry[1].add(str(prov))
+    if not provs:
+        return
+
+    # Providers onto the vendor columns the tree already carries — fleet-wide
+    # (no flag): it only labels the number's origin when the utility stream is
+    # the freshest one (e.g. Danville while its Fronius capture is down).
+    for col in tree.get("columns", []) or []:
+        aid = col.get("array_id")
+        if aid in provs:
+            col["utility_providers"] = sorted(provs[aid][1])
+
+    if not bool(getattr(tenant, "digest_include_utility_arrays", False)):
+        return
+    from ..inverter_fleet import _array_daily_split
+    try:
+        with_inverters = {
+            r[0] for r in db.execute(
+                select(Inverter.array_id).where(
+                    Inverter.array_id.in_(list(provs)),
+                    Inverter.deleted_at.is_(None),
+                )
+            ).all()
+        }
+    except Exception:                                # pragma: no cover - defensive
+        log.exception("utility columns: inverter lookup failed")
+        return
+    out = []
+    for aid, (name, pset) in sorted(provs.items()):
+        if aid in with_inverters:
+            continue           # a vendor array already carries its own column
+        try:
+            split = _array_daily_split(db, aid)
+        except Exception:                            # pragma: no cover - defensive
+            log.exception("utility columns: daily split failed for %s", aid)
+            continue
+        if not (split.get("utility") or []):
+            continue           # no real metered days — nothing honest to show
+        out.append({
+            "array_id": aid,
+            "array_name": name,
+            "inverter_count": 0,
+            "inverters": [],
+            "alert": {"level": "ok", "count": 0},
+            "daily": [],
+            "daily_split": {"vendor": [], "utility": split["utility"]},
+            "utility_providers": sorted(pset),
+        })
+    tree["utility_columns"] = out
+
+
 def enrich_tree(db, tenant, tree: dict) -> dict:
     """Attach visibility + cause facts to the tree, IN PLACE, once.
 
@@ -964,6 +1129,9 @@ def build_digest_html(tenant, tree: dict, personal_note: str | None = None) -> s
     # VENDOR (inverter) arrays only — drop GMP-only utility-bill arrays so the
     # counts + list match what the owner sees in their inverter sandbox.
     cols = _vendor_columns(tree)
+    # OUTPUT surfaces (rankings, per-array table, reference day) also cover the
+    # attached utility-metered columns; health stays vendor-only.
+    out_cols = _output_columns(tree)
 
     # HYBRID personal note (Energy Agent's voice), above the structured visuals.
     note_html = ""
@@ -984,7 +1152,7 @@ def build_digest_html(tenant, tree: dict, personal_note: str | None = None) -> s
             f'<div style="font-size:14.5px;line-height:1.5;color:{BODY};">{_note_esc}</div>'
             '</td></tr></table>'
         )
-    arrays_total = len(cols)
+    arrays_total = len(out_cols)
     inverters_total = sum(int(c.get("inverter_count") or 0) for c in cols)
     # SINGLE source of the attention count: the 14-day peer/comm verdicts UNION the
     # same-day laggards (look-back-one-day) — so the hero %, banner, subject and
@@ -998,12 +1166,12 @@ def build_digest_html(tenant, tree: dict, personal_note: str | None = None) -> s
     # 'yesterday'): extension-captured vendors report only when the owner's browser
     # runs a capture, so a fleet can be days behind. We label it with its real latest
     # full day and flag staleness so the header never claims a day the data isn't from.
-    data_iso, data_label, stale = _fleet_reference_day(cols)
+    data_iso, data_label, stale = _fleet_reference_day(out_cols)
     date_line = f"Full-day summary &middot; {data_label}" if data_label else "Full-day summary"
     stale_html = (
         f'<div style="color:{FAINT};font-size:12px;margin-top:3px;line-height:1.4;">'
         f'Some arrays haven&rsquo;t reported a full day recently (see their dates below) — '
-        f'{_html.escape(_stale_fix_hint(cols))} to refresh their readings.</div>'
+        f'{_html.escape(_stale_fix_hint(out_cols))} to refresh their readings.</div>'
         if stale else ""
     )
 
@@ -1134,20 +1302,26 @@ def build_digest_html(tenant, tree: dict, personal_note: str | None = None) -> s
             )
         highlights_label = "Inverters needing attention"
     else:
-        ranked = _ranked_arrays(cols)
+        ranked = _ranked_arrays(out_cols)
         if ranked:
             best = ranked[0]
             highlight_rows.append(
                 f'<li style="margin:6px 0;color:{BLUE_DEEP};">'
                 f'<b>Top producer:</b> {_html.escape(best["col"].get("array_name", "Array"))}'
-                f' — {_fmt_kwh(best["kwh"])} on its last full day.</li>'
+                f' — {_fmt_kwh(best["kwh"])} on its last full day'
+                + (f' ({_html.escape(str(best["point"]["chip"]))})'
+                   if best.get("point", {}).get("chip") else '')
+                + '.</li>'
             )
             if len(ranked) > 1:
                 worst_a = ranked[-1]
                 highlight_rows.append(
                     f'<li style="margin:6px 0;color:{BODY};">'
                     f'<b>Lowest producer:</b> {_html.escape(worst_a["col"].get("array_name", "Array"))}'
-                    f' — {_fmt_kwh(worst_a["kwh"])} on its last full day.</li>'
+                    f' — {_fmt_kwh(worst_a["kwh"])} on its last full day'
+                    + (f' ({_html.escape(str(worst_a["point"]["chip"]))})'
+                       if worst_a.get("point", {}).get("chip") else '')
+                    + '.</li>'
                 )
         else:
             highlight_rows.append(
@@ -1194,7 +1368,7 @@ def build_digest_html(tenant, tree: dict, personal_note: str | None = None) -> s
     # On an attention day, show ONLY the arrays that hold a flagged inverter (the
     # ones the flagged list points at) — not the whole fleet. All-healthy days
     # show every vendor array. Either way: vendor arrays only.
-    table_cols = [c for c in cols if _array_has_flag(c)] if attention > 0 else cols
+    table_cols = [c for c in cols if _array_has_flag(c)] if attention > 0 else out_cols
     table_label = "Arrays needing attention" if attention > 0 else "Your arrays"
     arr_rows: list[str] = []
     for col in table_cols:
@@ -1202,24 +1376,32 @@ def build_digest_html(tenant, tree: dict, personal_note: str | None = None) -> s
         level = alert.get("level", "ok")
         dot = _LEVEL_COLOR.get(level, FAINT)
         state = _LEVEL_LABEL.get(level, "Healthy")
-        kwh = _recent_kwh(col)
-        day = _recent_day(col)
-        if kwh is None:
+        pt = _output_point(col)
+        if pt is None:
             output = "no full-day reading yet"
         else:
-            output = _fmt_kwh(kwh)
-            if day:
-                output += f' <span style="color:{FAINT};">({_html.escape(str(day))})</span>'
+            output = _fmt_kwh(float(pt["kwh"]))
+            meta = " · ".join(x for x in (str(pt.get("date") or ""),
+                                          str(pt.get("chip") or "")) if x)
+            if meta:
+                output += f' <span style="color:{FAINT};">({_html.escape(meta)})</span>'
         name = _html.escape(col.get("array_name", "Array"))
         invs = col.get("inverter_count", 0)
+        if invs:
+            sub = f'{invs} inverter{"s" if invs != 1 else ""} · {state}'
+        else:
+            # A metered, zero-inverter array: its row is about OUTPUT, not
+            # inverter health — say what meters it instead of "0 inverters".
+            provs = ", ".join(p.upper() for p in (col.get("utility_providers") or []))
+            sub = f'Utility-metered · {provs}' if provs else 'Utility-metered'
+            dot = BLUE
         arr_rows.append(
             '<tr>'
             f'<td style="padding:11px 14px;border-bottom:1px solid {LINE2};">'
             f'<span style="display:inline-block;width:9px;height:9px;border-radius:50%;'
             f'background:{dot};margin-right:9px;"></span>'
             f'<b style="color:{INK};">{name}</b>'
-            f'<div style="color:{FAINT};font-size:12px;margin-left:18px;margin-top:2px;">{invs} inverter'
-            f'{"s" if invs != 1 else ""} · {state}</div></td>'
+            f'<div style="color:{FAINT};font-size:12px;margin-left:18px;margin-top:2px;">{sub}</div></td>'
             f'<td style="padding:11px 14px;border-bottom:1px solid {LINE2};text-align:right;'
             f'color:{BODY};font-size:14px;white-space:nowrap;">{output}</td>'
             '</tr>'
@@ -1230,7 +1412,12 @@ def build_digest_html(tenant, tree: dict, personal_note: str | None = None) -> s
             f'<div style="font-size:12px;color:{FAINT};margin:0 0 3px;text-transform:uppercase;'
             f'letter-spacing:.6px;font-weight:700;">{table_label}</div>'
             f'<div style="font-size:11.5px;color:{FAINT};margin:0 0 9px;">'
-            f'Output shown is each array&rsquo;s total production on its last full day.</div>'
+            f'Output shown is each array&rsquo;s total production on its last full day.'
+            + (' &ldquo;&hellip;meter&rdquo; figures are the utility&rsquo;s settled '
+               'readings, which land about a day behind live telemetry.'
+               if any((_output_point(c) or {}).get("chip") for c in table_cols)
+               else '')
+            + '</div>'
             f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" bgcolor="{CARD}" '
             f'style="border-collapse:collapse;border:1px solid {LINE2};border-radius:12px;'
             f'overflow:hidden;margin:0 0 22px;">'
@@ -1300,9 +1487,10 @@ def build_digest_text(tenant, tree: dict, personal_note: str | None = None) -> s
     """A short plain-text fallback for the digest (mirrors the HTML's substance).
     Honest about missing data; never invents kWh."""
     fleet = _fleet_name(tenant)
-    # Vendor (inverter) arrays only — mirrors the HTML.
+    # Health from vendor (inverter) arrays; output surfaces — mirrors the HTML.
     cols = _vendor_columns(tree)
-    data_iso, data_label, stale = _fleet_reference_day(cols)
+    out_cols = _output_columns(tree)
+    data_iso, data_label, stale = _fleet_reference_day(out_cols)
     flagged = _all_flagged(cols)
     attention = len(flagged)
 
@@ -1332,7 +1520,7 @@ def build_digest_text(tenant, tree: dict, personal_note: str | None = None) -> s
     lines += [
         "",
         f"Fleet health: {health_pct}% ({inv_total - flagged_n} of {inv_total} inverters produced normally)",
-        f"Arrays: {len(cols)}   Inverters: {inv_total}   Need attention: {attention}",
+        f"Arrays: {len(out_cols)}   Inverters: {inv_total}   Need attention: {attention}",
         "",
     ]
     if conn_items:
@@ -1354,11 +1542,20 @@ def build_digest_text(tenant, tree: dict, personal_note: str | None = None) -> s
                          f"to see all {len(flagged)}.")
     else:
         lines.append("Arrays (total production on their last full day):")
-        for col in cols:
+        for col in out_cols:
             alert = col.get("alert", {}) or {}
-            state = _LEVEL_LABEL.get(alert.get("level", "ok"), "Healthy")
-            kwh = _recent_kwh(col)
-            out = (_fmt_kwh(kwh) if kwh is not None else "no full-day reading yet")
+            invs = int(col.get("inverter_count") or 0)
+            state = (_LEVEL_LABEL.get(alert.get("level", "ok"), "Healthy")
+                     if invs else "Utility-metered")
+            pt = _output_point(col)
+            if pt is None:
+                out = "no full-day reading yet"
+            else:
+                out = _fmt_kwh(float(pt["kwh"]))
+                extra = " · ".join(x for x in (str(pt.get("date") or ""),
+                                               str(pt.get("chip") or "")) if x)
+                if extra:
+                    out += f" ({extra})"
             lines.append(f"  - {col.get('array_name', 'Array')}: {state}, {out}")
     lines += ["", "Open Array Operator: https://arrayoperator.com"]
     return "\n".join(lines)
@@ -1380,9 +1577,10 @@ def build_note_facts(db, tenant, tree: dict) -> dict:
     outage classifier. The model is never asked to supply a fact it wasn't given.
     """
     cols = _vendor_columns(tree)
+    out_cols = _output_columns(tree)
     flagged = _all_flagged(cols)
-    ranked = _ranked_arrays(cols)
-    _, date_label, stale = _fleet_reference_day(cols)
+    ranked = _ranked_arrays(out_cols)
+    _, date_label, stale = _fleet_reference_day(out_cols)
 
     def _flag_fact(f: dict) -> dict:
         vis = f.get("visibility") or {}
@@ -1500,17 +1698,22 @@ def send_digest_for_tenant(db, tenant: Tenant) -> bool:
     # never produces a false "needs attention" digest (Bruce's noon-prior-day fix).
     tree = inverter_fleet.build_fleet_tree(db, tenant, stable_verdicts=True)
     cols = tree.get("columns", [])
+    # Utility-metered output columns + provider chips must exist BEFORE the
+    # freshness hold below: a fleet alive only through its utility meters is
+    # real data, not an all-stale fleet.
+    attach_utility_columns(db, tenant, tree)
+    all_cols = cols + list(tree.get("utility_columns") or [])
 
     # ── Freshness hold (Ford, 2026-07-04: never send a report on stale data) ──
     # When EVERY array is behind, the digest would be a report about days ago
     # dressed up as today. Hold it: send ONE plain "digest held — data
     # connection needs attention" note, then stay silent until data resumes.
-    if _fleet_all_stale(cols):
+    if _fleet_all_stale(all_cols):
         if getattr(tenant, "digest_hold_notified_at", None) is not None:
             log.info("morning_digest: tenant %s still stale — digest held silently", tenant.id)
             return False
         _, last_label, _ = _fleet_reference_day(cols)
-        sent = _send_hold_notice(tenant, to, last_label, cols=cols)
+        sent = _send_hold_notice(tenant, to, last_label, cols=all_cols)
         if sent:
             tenant.digest_hold_notified_at = datetime.utcnow()
             db.commit()

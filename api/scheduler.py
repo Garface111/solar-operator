@@ -2003,6 +2003,18 @@ def start():
         id="gmp_daily_backfill", replace_existing=True,
         max_instances=1, coalesce=True,
     )
+    # Second top-up at 11:35 UTC (~7:35am ET), just ahead of the 12:00 morning
+    # digest: GMP interval data for YESTERDAY usually has not settled at the
+    # 05:00 run (partial day, trimmed by the digest as incomplete), so without
+    # this the digest utility figures sit a day older than they need to. The
+    # job is incremental (walks only missing recent days), so the second run is
+    # cheap.
+    scheduler.add_job(
+        _run_gmp_daily_backfill,
+        CronTrigger(hour=11, minute=35),
+        id="gmp_daily_backfill_predigest", replace_existing=True,
+        max_instances=1, coalesce=True,
+    )
     # Daily at 05:30 UTC: Bill→daily transform. Converts captured GMP bills'
     # generation into bill_prorate DailyGeneration rows so parsed bills SHOW in
     # Trends + merge with inverter data. Runs AFTER the 05:00 GMP daily-interval

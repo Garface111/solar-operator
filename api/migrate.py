@@ -585,6 +585,8 @@ def main():
             # Fold instant inverter alerts into the morning digest (fewer emails).
             ("inverter_alerts_via_digest",
              "ALTER TABLE tenants ADD COLUMN inverter_alerts_via_digest BOOLEAN NOT NULL DEFAULT FALSE"),
+            ("digest_include_utility_arrays",
+             "ALTER TABLE tenants ADD COLUMN digest_include_utility_arrays BOOLEAN NOT NULL DEFAULT FALSE"),
         ]
         for col, sql in inverter_alert_cols:
             if not column_exists(conn, "tenants", col):

@@ -343,6 +343,13 @@ class Tenant(Base):
     # who prefer one daily summary over real-time pages.
     inverter_alerts_via_digest: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="false", nullable=False)
+    # When True, the morning digest also shows OUTPUT rows for utility-metered
+    # arrays with no inverter feed (GMP/VEC settled daily readings). Opt-in per
+    # tenant because fleets differ structurally: for HCT those arrays ARE the
+    # fleet (Paul asked for exactly this choice); for GMCS the equivalent rows
+    # are customer credit accounts - pure noise (Bruce: only show vendor data).
+    digest_include_utility_arrays: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false", nullable=False)
     # No-upfront-payment: set the moment the ~3-day "trial ending, no card on
     # file" reminder is sent, so the scheduler fires it exactly once regardless
     # of tick cadence (replaces the fragile 1-day rolling window). NULL = not
