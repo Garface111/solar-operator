@@ -174,9 +174,18 @@ Output the corrected reply text and nothing else."""
 #: turned real balances into "I need to stop myself here" emails. Never ship it.
 _REFUSAL_RE = re.compile(
     r"stop myself|cannot find (?:in|it in) your data|can't state|cannot state|"
-    r"could not rewrite|unable to (?:verify|support) (?:these|those|the) (?:figures|numbers)",
+    r"could not rewrite|unable to (?:verify|support) (?:these|those|the) (?:figures|numbers)|"
+    r"couldn'?t verify (?:part of|these|those)|not sending it",
     re.IGNORECASE,
 )
+
+
+def looks_like_refusal(text: str) -> bool:
+    """The canned figure-refusal pattern, wherever it appears. Used on DRAFTS
+    too: once refusals landed in the stored thread, models began imitating
+    their own past refusals — the poison spreads through history, so the door
+    has to be shut at generation, not just at revision."""
+    return bool(_REFUSAL_RE.search(text or ""))
 
 
 def revision_is_refusal(original: str, revised: str) -> bool:

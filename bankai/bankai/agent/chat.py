@@ -583,6 +583,29 @@ def run_turn(
                 return impl.run(s, sys_, msgs, **kwargs)
 
             reply = _run(session, system, list(messages))
+            # Refusal-template imitation guard: the thread once carried canned
+            # "I need to stop myself" refusals, and fallback brains copy their
+            # own history — a draft in that shape is an artifact, never an
+            # answer (the grounding gate below owns the legitimate-refusal
+            # case, in its own words). One corrective retry, then let the next
+            # backend take the turn.
+            if verify.looks_like_refusal(reply):
+                logging.getLogger("bankai.chat").warning(
+                    "draft is refusal-shaped (history imitation) — retrying with correction"
+                )
+                reply = _run(session, system, list(messages) + [{
+                    "role": "user",
+                    "content": (
+                        "(correction: that draft was an error-template imitation, not "
+                        "an answer. Answer the question directly — use your tools, "
+                        "state the figures they return. Never write 'I need to stop "
+                        "myself' or refuse to state figures you just looked up.)"
+                    ),
+                }])
+                if verify.looks_like_refusal(reply):
+                    raise RuntimeError(
+                        "backend produced only refusal-template output twice"
+                    )
             # A decision to stay out of a conversation has nothing to verify,
             # and handing it to a critic invites it to be argued into speaking.
             if is_silence(reply):

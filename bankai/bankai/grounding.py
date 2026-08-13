@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .models import Transaction
+from .models import Account, BalanceSnapshot, PendingExpense, Transaction
 
 #: "$12.50", "−$1,234.56", "-$9.99". Currency is the anchor: an unattached
 #: number is usually arithmetic (a total, a projection), and those are the
@@ -83,16 +83,47 @@ class Unverified:
 
 
 def _amount_exists(session: Session, amount: float) -> bool:
-    """Does any transaction carry this magnitude? Sign is ignored: the copilot
-    writes outflows as −$12.50 while the ledger stores them negative, and a
-    refund is the same figure the other way."""
-    hit = session.execute(
-        select(func.count(Transaction.id)).where(
-            func.abs(Transaction.amount) >= amount - 0.005,
-            func.abs(Transaction.amount) <= amount + 0.005,
-        )
-    ).scalar_one()
-    return bool(hit)
+    """Does this magnitude exist ANYWHERE a real figure legitimately lives?
+
+    The first version checked transactions only — and the copilot's most common
+    figures are not transaction rows: a checking BALANCE ($561.57) lives on the
+    account, a chat-logged Zyns run ($8.81) in pending_expenses, a statement
+    minimum in account_terms, last month's net worth in balance_snapshots. Each
+    of those, quoted truthfully, failed the lookup, took the two-strike path,
+    and shipped the canned refusal — which is how a fabrication guard became a
+    machine for refusing the truth. Sign is ignored throughout: outflows are
+    written −$12.50 but stored negative, refunds the other way."""
+    lo, hi = amount - 0.005, amount + 0.005
+
+    def _hits(col_count, where) -> bool:
+        return bool(session.execute(select(col_count).where(*where)).scalar_one())
+
+    if _hits(func.count(Transaction.id), (
+            func.abs(Transaction.amount) >= lo, func.abs(Transaction.amount) <= hi)):
+        return True
+    if _hits(func.count(Account.id), (
+            func.abs(Account.balance) >= lo, func.abs(Account.balance) <= hi)):
+        return True
+    if _hits(func.count(PendingExpense.id), (
+            func.abs(PendingExpense.amount) >= lo, func.abs(PendingExpense.amount) <= hi)):
+        return True
+    if _hits(func.count(BalanceSnapshot.id), (
+            func.abs(BalanceSnapshot.balance) >= lo, func.abs(BalanceSnapshot.balance) <= hi)):
+        return True
+    try:
+        from .accounts_terms import AccountTerms
+
+        if _hits(func.count(AccountTerms.id), (
+                func.abs(AccountTerms.statement_balance) >= lo,
+                func.abs(AccountTerms.statement_balance) <= hi)):
+            return True
+        if _hits(func.count(AccountTerms.id), (
+                func.abs(AccountTerms.minimum_payment) >= lo,
+                func.abs(AccountTerms.minimum_payment) <= hi)):
+            return True
+    except Exception:
+        pass  # terms table absent in a minimal test schema — never block on it
+    return False
 
 
 def _sentences(text: str) -> list[str]:
@@ -105,18 +136,23 @@ def _sentences(text: str) -> list[str]:
 
 
 def _household_figures(messages: list[dict] | None) -> set[str]:
-    """Every amount the household themselves put in the conversation.
+    """Every amount already present in the visible conversation — from EITHER
+    side of it.
 
-    THE most important exemption in this module. Ford says "$147.42 on water
-    bill" to log a new expense; the copilot has to be able to say the number
-    back to him. It is not in the ledger yet — he is the source of it. Refusing
-    his own figure is not caution, it is a broken assistant, and the first
-    version of this gate did exactly that to him twice in a row.
-    """
+    User side: Ford says "$147.42 on water bill" to log a new expense; the
+    copilot has to be able to say the number back to him. He is the source.
+
+    Assistant side (the continuity exemption): every assistant message in the
+    history passed THIS gate when it was first sent, so a figure the copilot
+    already stated — the ~$9,989 sheet redemption it has cited for days — is
+    established conversation state, not a fresh claim. Without this, any figure
+    whose source is a tool result rather than a table row (the planning sheet,
+    a computed total) failed the lookup again on every subsequent mention, and
+    long threads decayed into refusals. A fresh fabrication appears in neither
+    the data nor the prior conversation, so the Tinder-class lie is still
+    caught the first time it is told."""
     said: set[str] = set()
     for m in messages or []:
-        if m.get("role") != "user":
-            continue
         for raw in _AMOUNT.findall(m.get("content") or ""):
             said.add(raw.replace(",", ""))
     return said
@@ -182,12 +218,16 @@ def correction_prompt(problems: list[Unverified]) -> str:
 
 def refusal_message(problems: list[Unverified]) -> str:
     """Last resort: the copilot could not produce a grounded answer twice, so
-    the household gets the truth about that instead of a plausible number."""
-    listed = ", ".join(dict.fromkeys(p.text for p in problems[:6]))
+    the household gets the truth about that instead of a plausible number.
+
+    Deliberately short, and it does NOT list the figures. The first version
+    quoted them ("figures I cannot find: $561.57, $9,989 …"), which put a
+    perfectly-shaped refusal template — complete with real numbers — into the
+    stored thread; fallback brains then imitated it verbatim on healthy turns,
+    and the guard's own error message became the epidemic. An error should be
+    a dead end for a language model, not an example."""
     return (
-        "I need to stop myself here. I was about to state figures that I cannot "
-        f"find in your data ({listed}), and I could not rewrite the answer without "
-        "them. Rather than give you a number that sounds right, I am telling you "
-        "that I do not have it. Ask me again and I will look it up properly, or "
-        "ask me to show the transaction rows behind whatever I claim."
+        "I couldn't verify part of that answer against your records, so I'm not "
+        "sending it. Ask me for the specific number you need and I'll look it up "
+        "directly and show my source."
     )

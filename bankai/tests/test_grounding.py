@@ -107,7 +107,10 @@ def test_a_second_fabrication_is_refused_not_sent(session, ledger):
 
     out = agent_chat._grounded(session, THE_LIE, [], run)
     assert "Tinder" not in out
-    assert "cannot find" in out and "$12.50" in out
+    # the refusal must NOT echo the fabricated figure: quoting figures in the
+    # error template is what fallback brains learned to imitate (2026-08-13
+    # refusal spiral) — the refusal is short, figure-free, and offers a lookup
+    assert "couldn't verify" in out and "$12.50" not in out
 
 
 def test_a_dead_backend_during_correction_still_refuses(session, ledger):
@@ -115,7 +118,8 @@ def test_a_dead_backend_during_correction_still_refuses(session, ledger):
         raise RuntimeError("backend down")
 
     out = agent_chat._grounded(session, THE_LIE, [], boom)
-    assert "I need to stop myself here" in out
+    assert "couldn't verify" in out
+    assert "stop myself" not in out  # the viral template is retired
 
 
 def test_the_gate_runs_regardless_of_router_tier(session, ledger, monkeypatch):
