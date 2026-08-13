@@ -85,3 +85,30 @@ def test_fronius_no_redirect_is_a_silent_resume_not_a_login_failure():
                      auth_url=None)
     assert _login(page) == "sso-resumed"
     assert page.filled == {}, "a silent resume must not type the password"
+
+
+# ── the human-only interstitial (Terms of Use wall) ─────────────────────────
+
+class _Page:
+    def __init__(self, url):
+        self.url = url
+
+
+def _reason(url):
+    return asyncio.run(FroniusVendor().login_block_reason(_Page(url)))
+
+
+def test_terms_wall_is_named_not_a_mystery():
+    """Live 2026-08-13 (Ford + Paul screen-share): a CORRECT password lands on
+    /Account/UserConfirmation — Fronius updated Terms of Use, an agree-box only
+    the owner may click. That parked every fresh login as "submitted, not
+    authenticated". The vendor names the wall so the operator gets a one-click
+    instruction; we never auto-accept legal terms on the owner's behalf."""
+    r = _reason("https://www.solarweb.com/Account/UserConfirmation?returnUrl=x")
+    assert r is not None and "Terms" in r and "solarweb.com" in r
+
+
+def test_ordinary_pages_report_no_block():
+    assert _reason("https://www.solarweb.com/PvSystems") is None
+    assert _reason(
+        "https://login.fronius.com/authenticationendpoint/login.do") is None

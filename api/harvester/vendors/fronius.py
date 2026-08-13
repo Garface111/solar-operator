@@ -39,6 +39,25 @@ class FroniusVendor:
         # session the IdP still trusts.
         return BASE + "/Account/ExternalLogin"
 
+    async def login_block_reason(self, page) -> str | None:
+        """A successful password login can still be parked on an interstitial
+        only the account OWNER may click through. Live 2026-08-13 (Ford + Paul,
+        screen-share): Fronius rolled out updated Terms of Use ~Aug 6 and every
+        account gets /Account/UserConfirmation with an agree-checkbox before
+        Solar.web works again — which is why warm sessions died fleet-wide that
+        week and fresh logins read "submitted, not authenticated". We
+        deliberately NEVER auto-accept legal terms on the owner behalf; we name
+        the wall so the failure is a one-click instruction, not a mystery."""
+        try:
+            url = page.url or ""
+        except Exception:
+            return None
+        if "/Account/UserConfirmation" in url:
+            return ("Fronius is asking this login to accept its updated Terms "
+                    "of Use - sign in once at solarweb.com, tick the agree box "
+                    "and press Confirm; capture resumes on the next cycle")
+        return None
+
     async def is_logged_in(self, page) -> bool:
         try:
             # max_redirects=0 is essential: a logged-OUT session 302s this probe to

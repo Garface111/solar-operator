@@ -262,16 +262,28 @@ class BrowserFarm:
                         break
                     await asyncio.sleep(2)
                 if not _logged:
+                    # Ask the vendor whether a HUMAN-ONLY interstitial is in the
+                    # way (Fronius ToS wall, 2026-08) — the password may be fine.
+                    block = None
+                    try:
+                        hook = getattr(vendor, "login_block_reason", None)
+                        if hook is not None:
+                            block = await hook(page)
+                    except Exception:
+                        block = None
                     shot = await self._screenshot(page, tenant_id, provider, "login")
                     storage_state = await context.storage_state()
                     self._persist(tenant_id, provider, username_lc,
                                   storage_state=storage_state, ok=False,
                                   status="login_failed", started_at=started,
                                   fresh=fresh, rows=0,
-                                  error=f"login outcome={outcome}, not authenticated",
+                                  error=(f"login outcome={outcome}, not authenticated"
+                                         + (f" - {block}" if block else "")),
                                   shot=shot, login_failed_fresh=fresh)
                     return HarvestOutcome(provider, username_lc, "login_failed",
-                                          fresh=fresh, detail=outcome)
+                                          fresh=fresh,
+                                          detail=(f"{outcome} - {block}" if block
+                                                  else outcome))
 
             result = await vendor.scrape(page, context, creds)
             storage_state = await context.storage_state()
