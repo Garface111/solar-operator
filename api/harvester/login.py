@@ -92,6 +92,11 @@ _INVERTER_KEYS = ("fronius", "sma", "chint")
 # already logs in reliably (Chint, GMP, SmartHub) keeps the tight generic path.
 SSO_AUTH_HOSTS: dict[str, tuple[str, ...]] = {
     "sma": ("login.sma.energy",),
+    # Solar.web moved auth to Fronius own IdP (WSO2 on login.fronius.com,
+    # observed live 2026-08-13). vendors/fronius.login_url now enters at
+    # /Account/ExternalLogin, which 302s straight to that origin; wait for it
+    # with the SSO budget instead of declaring "no-form" on solarweb.com.
+    "fronius": ("login.fronius.com",),
 }
 # How long to wait for the portal to bounce us to its identity provider.
 SSO_REDIRECT_TIMEOUT_MS = 25000

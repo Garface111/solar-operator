@@ -30,7 +30,14 @@ class FroniusVendor:
     provider = "fronius"
 
     async def login_url(self, creds) -> str:
-        return BASE + "/"
+        # Straight to the OAuth handoff. The "/" landing now fronts a Cookiebot
+        # consent wall and its Login button is an SPA bounce to a separate IdP
+        # (login.fronius.com, observed live 2026-08-13) — polling for a form on
+        # the landing is what produced the "login outcome=no-form" failures.
+        # ExternalLogin 302s a logged-out session directly to the WSO2 form
+        # (whose fields the fronius HINTS already match) and silently re-auths a
+        # session the IdP still trusts.
+        return BASE + "/Account/ExternalLogin"
 
     async def is_logged_in(self, page) -> bool:
         try:

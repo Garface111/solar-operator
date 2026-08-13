@@ -107,11 +107,14 @@ def test_on_auth_origin_matches_only_the_identity_provider():
     assert not on_auth_origin("https://ennexos.sunnyportal.com/dashboard", hosts)
 
 
-def test_only_sma_opts_into_the_sso_wait():
+def test_only_true_sso_portals_opt_into_the_sso_wait():
     """Chint/GMP/SmartHub are healthy on the tight generic path — don't loosen
-    the poller for every vendor to fix one."""
-    for p in ("chint", "gmp", "vec", "fronius", "cmp", "eversource"):
+    the poller for every vendor to fix one. (Fronius joined the SSO set
+    2026-08-13 when Solar.web moved auth to login.fronius.com — see
+    test_harvester_fronius_sso_login.)"""
+    for p in ("chint", "gmp", "vec", "cmp", "eversource"):
         assert SSO_AUTH_HOSTS.get(hint_key_for(p)) is None
+    assert set(SSO_AUTH_HOSTS) == {"sma", "fronius"}
 
 
 # ── behavior ────────────────────────────────────────────────────────────────

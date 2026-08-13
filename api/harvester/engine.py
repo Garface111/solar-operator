@@ -128,7 +128,8 @@ class BrowserFarm:
 
     @staticmethod
     def _persist(tenant_id, provider, username_lc, *, storage_state, ok, status,
-                 started_at, fresh, rows, error, shot):
+                 started_at, fresh, rows, error, shot,
+                 login_failed_fresh: bool = False):
         """Persist session_state + health + audit row. Short session, one commit.
 
         Never load ``secret_enc`` — persist does not need the password, and
@@ -149,6 +150,18 @@ class BrowserFarm:
             cred = db.execute(q).scalar_one_or_none()
             if cred is None:
                 return
+            if login_failed_fresh and (cred.harvest_fails or 0) >= 1:
+                # Second consecutive fresh-login failure: this jar cookies just
+                # failed to authenticate twice running, so the persisted session
+                # state is at best dead weight and at worst the POISON behind a
+                # "no-form, not authenticated" loop (a half-dead SSO cookie the
+                # portal will neither honor nor replace with a login form -
+                # the Fronius failure shape, prod 2026-08). Drop it so the next
+                # attempt starts from a clean jar instead of re-pickling the
+                # same broken state forever.
+                cred.session_state_enc = None
+                cred.session_state_at = None
+                storage_state = None
             if storage_state is not None:
                 credentials.save_session_state(db, cred, storage_state)
             credentials.record_health(
@@ -256,7 +269,7 @@ class BrowserFarm:
                                   status="login_failed", started_at=started,
                                   fresh=fresh, rows=0,
                                   error=f"login outcome={outcome}, not authenticated",
-                                  shot=shot)
+                                  shot=shot, login_failed_fresh=fresh)
                     return HarvestOutcome(provider, username_lc, "login_failed",
                                           fresh=fresh, detail=outcome)
 
