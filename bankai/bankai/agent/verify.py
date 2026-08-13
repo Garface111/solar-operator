@@ -159,10 +159,41 @@ question. A verification pass found specific problems with it.
 Fix ONLY the identified problems. Keep everything else — the structure, the tone, the
 correct figures, the parts that were not flagged — exactly as it was. Do not add new
 analysis, do not expand the scope, do not apologize or mention that a revision happened.
-If a number cannot be supported by the data in the conversation, remove it or say plainly
-that the data does not support it rather than substituting another guess.
+
+CRITICAL: the original reply was drafted WITH live tools over the household's real
+database; its dollar figures are presumed grounded in tool results you cannot see. Never
+delete figures wholesale and NEVER turn the reply into a refusal ("I can't state these
+numbers", "I need to stop myself") — a revision that refuses is worse than the original,
+and it will be discarded. If a listed problem is about arithmetic or internal consistency,
+correct the arithmetic. If you truly cannot fix a specific flagged number, drop that ONE
+claim and keep the rest of the reply intact.
 
 Output the corrected reply text and nothing else."""
+
+#: A "revision" that swapped the answer for a refusal — the exact failure that
+#: turned real balances into "I need to stop myself here" emails. Never ship it.
+_REFUSAL_RE = re.compile(
+    r"stop myself|cannot find (?:in|it in) your data|can't state|cannot state|"
+    r"could not rewrite|unable to (?:verify|support) (?:these|those|the) (?:figures|numbers)",
+    re.IGNORECASE,
+)
+
+
+def revision_is_refusal(original: str, revised: str) -> bool:
+    """True when the revision abandoned the answer instead of fixing it.
+
+    Two signals, either sufficient: refusal language; or the numbers vanished —
+    the original carried several dollar figures and the revision kept almost
+    none while shrinking drastically (a real fix edits figures, not deletes the
+    answer around them)."""
+    if _REFUSAL_RE.search(revised or ""):
+        return True
+    orig_nums = set(_MONEY_RE.findall(original or ""))
+    if len(orig_nums) >= 2:
+        kept = set(_MONEY_RE.findall(revised or ""))
+        if len(kept) == 0 and len(revised) < 0.5 * len(original):
+            return True
+    return False
 
 
 def _render_history(messages: list[dict]) -> str:
@@ -385,6 +416,16 @@ def verified_turn(
         revised = _revise(session, messages, reply, report["problems"], run_backend)
         if revised is None:
             report["reason"] = "revision_failed"
+            return reply, report
+
+        # The load-bearing guard: a revision that became a refusal (or deleted
+        # the numbers instead of fixing them) never ships — the original was
+        # written by the model that actually held the tools.
+        if revision_is_refusal(reply, revised):
+            log.warning(
+                "revision turned into a refusal — keeping the original reply"
+            )
+            report["reason"] = "revision_rejected_refusal"
             return reply, report
 
         report["revised"] = True

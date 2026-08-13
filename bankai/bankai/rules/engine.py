@@ -49,10 +49,38 @@ def _record(
 
 
 def _reminder(session: Session, rule: Rule, now: datetime):
+    """Monthly (day_of_month), weekly (weekday), or DAILY at a local time
+    ({"daily": true, "hour": 8, "minute": 0, "timezone": "America/Los_Angeles"}).
+
+    The daily shape is what the copilot naturally writes when the household asks
+    for "a morning report at 8" — it used to be silently never-due, which is how
+    the 8am spend summary sat enabled for two days without firing once. `now` is
+    naive UTC everywhere in this engine, so it is pinned to UTC and converted to
+    the rule's timezone; the dedupe key is the LOCAL date, so the rule fires on
+    the first evaluation at-or-after the local time, once per local day."""
     params = rule.params or {}
     today = now.date()
     day_of_month = params.get("day_of_month")
     weekday = params.get("weekday")
+
+    if params.get("daily"):
+        from zoneinfo import ZoneInfo
+
+        try:
+            tz = ZoneInfo(str(params.get("timezone") or "UTC"))
+        except Exception:
+            tz = ZoneInfo("UTC")
+        local = now.replace(tzinfo=ZoneInfo("UTC")).astimezone(tz)
+        hour = int(params.get("hour") or 0)
+        minute = int(params.get("minute") or 0)
+        if (local.hour, local.minute) >= (hour, minute):
+            yield (
+                f"daily|{local.date().isoformat()}",
+                f"Reminder: {rule.name}",
+                rule.message or rule.name,
+            )
+        return
+
     due = (day_of_month is not None and today.day == int(day_of_month)) or (
         weekday is not None and today.weekday() == int(weekday)
     )
