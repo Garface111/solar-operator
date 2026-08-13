@@ -6,6 +6,7 @@ which manage reminders only. Nothing here can touch a bank.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict
 from datetime import date, datetime, timedelta
 
@@ -1358,10 +1359,43 @@ def _send_to_printer(pdf_path, title: str) -> dict:
         }
 
 
+_FIGURE_IN_OUTPUT = re.compile(r"-?\d[\d,]*\.?\d*")
+
+
+def _record_tool_figures(session: Session, payload: str) -> None:
+    """Log every numeric figure this tool just returned, so the grounding gate
+    can recognize computed values (a month-spend total, a sheet figure) as
+    ground truth. Failure here must never break the tool call itself."""
+    try:
+        from datetime import timedelta as _td
+
+        from ..models import ToolFigure
+
+        seen: set[float] = set()
+        for raw in _FIGURE_IN_OUTPUT.findall(payload or "")[:600]:
+            try:
+                value = round(abs(float(raw.replace(",", ""))), 2)
+            except ValueError:
+                continue
+            if 0 < value < 1e9:
+                seen.add(value)
+        for value in list(seen)[:400]:
+            session.add(ToolFigure(figure=value))
+        # rolling scratchpad: anything older than 2h is no longer "this turn"
+        session.query(ToolFigure).filter(
+            ToolFigure.created_at < datetime.utcnow() - _td(hours=2)
+        ).delete(synchronize_session=False)
+        session.flush()
+    except Exception:  # noqa: BLE001 — recording is best-effort by design
+        pass
+
+
 def execute_tool(session: Session, name: str, tool_input: dict) -> str:
     try:
         result = _dispatch(session, name, tool_input or {})
-        return json.dumps(result, default=str)
+        payload = json.dumps(result, default=str)
+        _record_tool_figures(session, payload)
+        return payload
     except Exception as exc:
         return json.dumps({"error": str(exc)})
 

@@ -221,6 +221,24 @@ class LifeFact(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
+class ToolFigure(Base):
+    """Every numeric figure a tool returned recently — the grounding gate's
+    answer to computed values.
+
+    A month-spend total or a planning-sheet redemption exists in no table row;
+    it is the OUTPUT of a tool. The gate's rule becomes fully mechanical with
+    this ledger: a figure is grounded iff it exists in the data OR a tool just
+    computed it. A fabricated figure satisfies neither — no tool ever returned
+    the invented $12.50 — so the fabrication guard loses no teeth. Rows are
+    pruned aggressively; this is a rolling scratchpad, not a record."""
+
+    __tablename__ = "tool_figures"
+
+    id: Mapped[str] = mapped_column(String(40), primary_key=True, default=lambda: _uid("tf"))
+    figure: Mapped[float] = mapped_column(Float, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+
+
 class PendingExpense(Base):
     """A spend the household MENTIONED that no data source has shown yet.
 

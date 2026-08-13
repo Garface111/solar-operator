@@ -36,7 +36,9 @@ from dataclasses import dataclass
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from .models import Account, BalanceSnapshot, PendingExpense, Transaction
+from datetime import datetime, timedelta
+
+from .models import Account, BalanceSnapshot, PendingExpense, ToolFigure, Transaction
 
 #: "$12.50", "−$1,234.56", "-$9.99". Currency is the anchor: an unattached
 #: number is usually arithmetic (a total, a projection), and those are the
@@ -109,6 +111,14 @@ def _amount_exists(session: Session, amount: float) -> bool:
         return True
     if _hits(func.count(BalanceSnapshot.id), (
             func.abs(BalanceSnapshot.balance) >= lo, func.abs(BalanceSnapshot.balance) <= hi)):
+        return True
+    # Figures a tool computed within the last two hours are ground truth for
+    # this turn: a month-spend total or a sheet redemption exists in no table
+    # row, but the tool that produced it logged it. No tool ever returned a
+    # fabricated figure, so this loosens nothing for the Tinder-class lie.
+    if _hits(func.count(ToolFigure.id), (
+            ToolFigure.figure >= lo, ToolFigure.figure <= hi,
+            ToolFigure.created_at >= datetime.utcnow() - timedelta(hours=2))):
         return True
     try:
         from .accounts_terms import AccountTerms

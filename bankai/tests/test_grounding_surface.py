@@ -59,6 +59,52 @@ def test_conversation_continuity_exempts_previously_stated_figures(session):
     assert problems == []
 
 
+def test_a_tool_computed_aggregate_is_ground_truth(session):
+    """The last live failure: $1,078.37 (a spending_summary total) exists in no
+    table — it is the OUTPUT of a tool. execute_tool records returned figures;
+    the gate accepts them for the turn."""
+    from bankai.agent.tools import _record_tool_figures
+
+    _seed(session)
+    _record_tool_figures(session, '{"spend": 1078.37, "income": 9989.0}')
+    assert grounding.check_reply(
+        session, "You spent a painful $1,078.37 this window against $9,989 in.") == []
+
+
+def test_a_fabricated_figure_is_still_caught_with_the_ledger_active(session):
+    from bankai.agent.tools import _record_tool_figures
+
+    _seed(session)
+    _record_tool_figures(session, '{"spend": 1078.37}')
+    # no tool ever returned 12.50 — the Tinder-class lie stays caught
+    problems = grounding.check_reply(session, 'A $12.50 charge at "Tinder Gold" posted.')
+    assert any(p.text == "$12.50" for p in problems)
+
+
+def test_stale_tool_figures_expire(session):
+    from datetime import datetime, timedelta
+    from bankai.models import ToolFigure
+
+    _seed(session)
+    session.add(ToolFigure(figure=444.44,
+                           created_at=datetime.utcnow() - timedelta(hours=3)))
+    session.flush()
+    problems = grounding.check_reply(session, "That mystery charge was $444.44.")
+    assert any(p.text == "$444.44" for p in problems)  # 3h-old figure no longer vouches
+
+
+def test_execute_tool_records_its_figures(session):
+    import json as _json
+    from bankai.agent.tools import execute_tool
+    from bankai.models import ToolFigure
+
+    _seed(session)
+    out = _json.loads(execute_tool(session, "get_accounts", {}))
+    assert out["total"] is not None
+    figures = {f.figure for f in session.query(ToolFigure).all()}
+    assert round(abs(561.57), 2) in figures  # the balance it returned is logged
+
+
 def test_the_refusal_message_no_longer_lists_figures():
     msg = grounding.refusal_message(
         [grounding.Unverified("amount", "$561.57", "ctx")])
