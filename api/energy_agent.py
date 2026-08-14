@@ -6365,6 +6365,28 @@ def _propose_site_improvement_tool(db, tenant: Tenant, args: dict) -> dict:
         except Exception:
             shot = None
 
+    # Literal repeat of something already in the pipeline (the proactive mind
+    # re-files its standing themes every ~6h) → track the existing row instead
+    # of minting another build ticket. See feature_suggestions.find_open_duplicate.
+    try:
+        from .feature_suggestions import find_open_duplicate
+        _dup = find_open_duplicate(db, tenant.id, text)
+    except Exception:
+        _dup = None
+    if _dup is not None:
+        return {
+            "ok": True,
+            "suggestion_id": _dup.id,
+            "status": _dup.status,
+            "deduped": True,
+            "pipeline": "feature_suggestion_judge",
+            "message": (
+                f"An identical improvement is already in the pipeline as #{_dup.id} "
+                f"(status: {_dup.status}) — tracking that one instead of filing a copy."
+            ),
+            "status_url": f"/v1/feature-suggestion/{_dup.id}/status",
+        }
+
     try:
         from .feature_suggestions import FeatureSuggestion
         fs = FeatureSuggestion(
@@ -6713,6 +6735,15 @@ def _request_capability_tool(db, tenant: Tenant, args: dict) -> dict:
         f"Title: {title}\nWhat it should do: {desc}\nWhy / who asked: {why}\nTenant: {tenant.id}"
     )
     req_id = None
+    try:
+        from .feature_suggestions import find_open_duplicate
+        _dup = find_open_duplicate(db, tenant.id, brief)
+    except Exception:
+        _dup = None
+    if _dup is not None:
+        return {"ok": True, "request_id": _dup.id, "deduped": True,
+                "note": (f"an identical capability request is already queued "
+                         f"as #{_dup.id} (status: {_dup.status})")}
     try:
         from .feature_suggestions import FeatureSuggestion
         fs = FeatureSuggestion(

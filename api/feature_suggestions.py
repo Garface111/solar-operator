@@ -18,7 +18,7 @@ import base64 as _b64
 import hmac
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Header, HTTPException, Query
 from fastapi.responses import JSONResponse, Response
@@ -319,6 +319,45 @@ def _parse_screenshot(raw: str | None) -> str | None:
     return None
 
 
+def _normalized_suggestion(t: str) -> str:
+    return re.sub(r"\s+", " ", (t or "").strip().lower())[:4000]
+
+
+def find_open_duplicate(db, tenant_id, text):
+    """The proactive mind re-files its standing themes on a timer — the same
+    text every ~6h. Each copy used to mint its own row, and before the Aug-9
+    pause its own AUTO build: five near-identical restyles shipped in ONE
+    morning (#159–163). A repeat of an OPEN row (new/building), or of one
+    reviewed in the last 7 days, now resolves to the EXISTING row — the widget
+    just watches that row's journey. A human re-ask with fresh wording still
+    files normally; only literal repeats collapse."""
+    norm = _normalized_suggestion(text)
+    if not norm:
+        return None
+    from sqlalchemy import and_, or_
+    week_ago = datetime.utcnow() - timedelta(days=7)
+    try:
+        rows = (
+            db.query(FeatureSuggestion)
+            .filter(FeatureSuggestion.tenant_id == tenant_id)
+            .filter(or_(
+                FeatureSuggestion.status.in_(("new", "building")),
+                and_(FeatureSuggestion.status == "reviewed",
+                     FeatureSuggestion.reviewed_at.isnot(None),
+                     FeatureSuggestion.reviewed_at >= week_ago),
+            ))
+            .order_by(FeatureSuggestion.id.desc())
+            .limit(50)
+            .all()
+        )
+    except Exception:
+        return None
+    for r in rows:
+        if _normalized_suggestion(r.text) == norm:
+            return r
+    return None
+
+
 @router.post("/v1/feature-suggestion")
 def submit_suggestion(body: SuggestionIn, authorization: str | None = Header(default=None)):
     """Public capture for Improve / wish pipeline. Always returns ok+id on success."""
@@ -355,6 +394,10 @@ def submit_suggestion(body: SuggestionIn, authorization: str | None = Header(def
 
     with SessionLocal() as db:
         ensure_feature_suggestion_columns(db)
+        dup = find_open_duplicate(db, tenant_id, text)
+        if dup is not None:
+            return {"ok": True, "id": dup.id, "status": dup.status,
+                    "deduped": True}
         fs = FeatureSuggestion(
             text=text,
             email=email,
@@ -368,7 +411,18 @@ def submit_suggestion(body: SuggestionIn, authorization: str | None = Header(def
         db.refresh(fs)
         sid = fs.id
 
-    status_out = "new"
+    # The 2026-08 Sovereign removal amputated this function's tail — the
+    # endpoint returned None, the Improve widget got null instead of {ok, id},
+    # and the per-suggestion heads-up stopped. Restored.
+    try:
+        send_internal_alert(
+            subject=f"AO feature suggestion #{sid}",
+            body=(f"Tenant: {tenant_id or 'anonymous'}\nEmail: {email or '-'}\n\n"
+                  f"{text}\n" + ("\n[Includes screenshot]\n" if shot else "")),
+        )
+    except Exception:
+        pass
+    return {"ok": True, "id": sid, "status": "new"}
 
 
 @router.get("/v1/feature-suggestion/{sid}/status")

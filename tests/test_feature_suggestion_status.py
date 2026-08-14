@@ -16,7 +16,12 @@ def test_public_status_exposes_only_the_status(client, monkeypatch):
     sid = _mk(client)
     r = client.get(f"/v1/feature-suggestion/{sid}/status")
     assert r.status_code == 200
-    assert r.json() == {"status": "new"}          # exactly one key, nothing else
+    j = r.json()
+    # Status + the widget's copy + the id the caller already knew — never
+    # agent transcripts or reviewer internals.
+    assert j["status"] == "new" and j["id"] == sid
+    assert set(j) <= {"status", "detail", "id"}
+    assert "claude" not in (j.get("detail") or "").lower()
     assert client.get("/v1/feature-suggestion/99999999/status").status_code == 404
 
 
@@ -28,7 +33,7 @@ def test_lifecycle_building_then_shipped(client, monkeypatch):
     assert r.status_code == 403
     r = client.post(f"/admin/feature-suggestions/{sid}/status?key=k", json={"status": "building"})
     assert r.status_code == 200
-    assert client.get(f"/v1/feature-suggestion/{sid}/status").json() == {"status": "building"}
+    assert client.get(f"/v1/feature-suggestion/{sid}/status").json()["status"] == "building"
     # bogus statuses never enter the lifecycle
     r = client.post(f"/admin/feature-suggestions/{sid}/status?key=k", json={"status": "hacked"})
     assert r.status_code == 400
@@ -36,7 +41,7 @@ def test_lifecycle_building_then_shipped(client, monkeypatch):
     r = client.post(f"/admin/feature-suggestions/{sid}/review?key=k",
                     json={"review": "auto-shipped", "status": "shipped"})
     assert r.status_code == 200
-    assert client.get(f"/v1/feature-suggestion/{sid}/status").json() == {"status": "shipped"}
+    assert client.get(f"/v1/feature-suggestion/{sid}/status").json()["status"] == "shipped"
 
 
 def test_review_post_rejects_off_enum_status(client, monkeypatch):
@@ -46,4 +51,4 @@ def test_review_post_rejects_off_enum_status(client, monkeypatch):
                     json={"review": "ok", "status": "totally-bogus"})
     assert r.status_code == 200                    # review lands…
     # …but the status degrades to the safe default instead of a free-text write
-    assert client.get(f"/v1/feature-suggestion/{sid}/status").json() == {"status": "reviewed"}
+    assert client.get(f"/v1/feature-suggestion/{sid}/status").json()["status"] == "reviewed"
