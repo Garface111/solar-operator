@@ -27,8 +27,16 @@ while true; do
   [ -f "$REPO/.fs_review_disabled" ] && { sleep 60; continue; }
   # Blocks up to ~25s; returns the instant a 'new' suggestion exists.
   RESP="$(curl -s --max-time 35 "$BASE/admin/feature-suggestions/wait?timeout=25&key=$ADMIN_API_KEY" 2>/dev/null || true)"
+  # The /wait payload is {"suggestions":[{id,...},...]} (older builds sent
+  # {"suggestion_id": N}) — accept both. A shape drift here silently BLINDS the
+  # watcher: /wait kept answering with a full list while this parser looked for
+  # a key that no longer existed, which is how #181 sat at 'new' overnight on
+  # 2026-08-13 even with the watcher loop healthy.
   HIT="$(printf '%s' "$RESP" | python3 -c 'import sys,json
-try: print(json.load(sys.stdin).get("suggestion_id") or "")
+try:
+ d=json.load(sys.stdin)
+ s=(d.get("suggestions") or [])
+ print((s[0].get("id") if s else d.get("suggestion_id")) or "")
 except Exception: print("")' 2>/dev/null)"
   if [ -n "$HIT" ]; then
     echo "fs_watch: suggestion #$HIT landed — firing pipeline ($(date))"
