@@ -107,6 +107,8 @@ def sync(lookback_days: int = 90) -> dict:
         "added": sum(r.get("added", 0) for r in results),
         "skipped": sum(r.get("skipped", 0) for r in results),
         "pending_matched": sum(r.get("pending_matched", 0) for r in results),
+        "stale_feeds": [s for r in results for s in r.get("stale_feeds", [])],
+        "provider_errors": [e for r in results for e in r.get("provider_errors", [])],
         "failures": [r.get("detail") for r in failed],
     }
 
@@ -114,12 +116,28 @@ def sync(lookback_days: int = 90) -> dict:
 def _sync_one(access_url: str, lookback_days: int = 90) -> dict:
     added = skipped = accounts_seen = 0
     added_ids: list[str] = []
+    stale_feeds: list[dict] = []
     try:
         data = fetch(access_url, lookback_days)
+        # SimpleFIN reports upstream connection trouble in `errors` — dropping
+        # it is how a dead bank login stays invisible for days.
+        provider_errors = [str(e) for e in (data.get("errors") or [])]
+        now_ts = datetime.now(timezone.utc).timestamp()
         with session_scope() as session:
             for acct in data.get("accounts", []):
                 accounts_seen += 1
                 balance_date = acct.get("balance-date")
+                # The provider's own timestamp is the freshness truth: if THEY
+                # are serving a days-old snapshot, the upstream bank connection
+                # has stopped, however healthy this fetch looks.
+                if balance_date:
+                    days_stale = (now_ts - float(balance_date)) / 86400.0
+                    if days_stale > config.STALE_FEED_DAYS:
+                        stale_feeds.append({
+                            "account": acct.get("name") or "Unnamed account",
+                            "institution": (acct.get("org") or {}).get("name", ""),
+                            "days_stale": round(days_stale, 1),
+                        })
                 account = upsert_account(
                     session,
                     source="simplefin",
@@ -165,15 +183,23 @@ def _sync_one(access_url: str, lookback_days: int = 90) -> dict:
             # of dropping every un-synced manual account out of the total.
             from ..intelligence.insights import snapshot_net_worth
             snapshot_net_worth(session)
+            stale_note = (
+                " STALE:" + ",".join(s["account"] for s in stale_feeds)
+            ) if stale_feeds else ""
+            err_note = (" provider_errors=" + "; ".join(provider_errors)[:200]) if provider_errors else ""
             session.add(
                 SyncLog(
                     source="simplefin",
                     status="ok",
-                    detail=f"accounts={accounts_seen} added={added} skipped={skipped} pending_matched={matched}",
+                    detail=(
+                        f"accounts={accounts_seen} added={added} skipped={skipped} "
+                        f"pending_matched={matched}{stale_note}{err_note}"
+                    ),
                 )
             )
         return {"status": "ok", "accounts": accounts_seen, "added": added,
-                "skipped": skipped, "pending_matched": matched}
+                "skipped": skipped, "pending_matched": matched,
+                "stale_feeds": stale_feeds, "provider_errors": provider_errors}
     except Exception as exc:  # log the failure, never crash the scheduler
         detail = _redact(str(exc))[:2000]
         with session_scope() as session:

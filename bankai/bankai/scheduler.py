@@ -131,11 +131,88 @@ def run_sync_wake_once(sync_result: dict) -> dict:
     return {"status": "spoke", "added": added, "said": reply[:200]}
 
 
+STALE_FEED_MARKER = "Stale feed alerts sent"
+
+
+def alert_stale_feeds_once(result: dict) -> dict:
+    """Tell the household when a bank feed has stopped updating upstream —
+    once per stale episode, not every six hours.
+
+    Gaurav's checking sat nine days stale before anyone noticed, because the
+    sync 'succeeded' every time (it faithfully stored the provider's old
+    snapshot) and SimpleFIN raised no error. The marker note carries which
+    accounts have already been announced; an account leaving the stale set
+    clears its entry so a future relapse alerts again."""
+    import json as _json
+
+    stale = result.get("stale_feeds") or []
+    with session_scope() as session:
+        note = session.execute(
+            select(MemoryNote).where(MemoryNote.title == STALE_FEED_MARKER)
+        ).scalar_one_or_none()
+        already: dict = {}
+        if note is not None:
+            try:
+                already = _json.loads(note.content or "{}")
+            except ValueError:
+                already = {}
+        current = {s["account"]: s for s in stale}
+        new = [current[k] for k in current if k not in already]
+        # recovered accounts leave the marker so a relapse re-alerts
+        kept = {k: already[k] for k in already if k in current}
+        for s in new:
+            kept[s["account"]] = date.today().isoformat()
+        content = _json.dumps(kept)
+        if note is None:
+            session.add(MemoryNote(title=STALE_FEED_MARKER, content=content))
+        else:
+            note.content = content
+        if not new:
+            return {"status": "quiet", "stale": len(stale)}
+
+    lines = "\n".join(
+        f"- {s['account']}" + (f" ({s['institution']})" if s.get("institution") else "")
+        + f" — no fresh data for {s['days_stale']:.0f} days"
+        for s in new
+    )
+    body = (
+        "One of your bank feeds has stopped updating upstream:\n\n"
+        f"{lines}\n\n"
+        "BankAI is still syncing fine — the provider itself is serving old data, "
+        "which almost always means the bank connection needs to be re-authenticated "
+        "at SimpleFIN.\n\n"
+        "> [!IMPORTANT]\n"
+        "> The fix takes ~2 minutes: sign in at bridge.simplefin.org, find the "
+        "affected bank connection, and reconnect it (the bank will likely ask for "
+        "a fresh MFA code). Only the account owner can do this — I can't touch "
+        "bank logins, by design.\n\n"
+        "Until then, figures from this account are frozen at their last good date, "
+        "and I'll say so whenever I quote them. I'll keep watching and won't nag "
+        "again unless another feed goes stale."
+    )
+    from .messaging import email_thread
+
+    with session_scope() as session:
+        if email_thread.configured():
+            email_thread.start_thread(
+                session, "A bank feed needs re-authentication", body)
+            return {"status": "emailed", "new": [s["account"] for s in new]}
+        session.add(ChatMessage(
+            channel="web", role="assistant", speaker="copilot", content=body))
+    return {"status": "posted", "new": [s["account"] for s in new]}
+
+
 async def _sync_loop() -> None:
     while True:
         if config.SIMPLEFIN_ACCESS_URLS:
             result = await asyncio.to_thread(simplefin.sync)
             log.info("simplefin sync: %s", result)
+            try:
+                alerted = await asyncio.to_thread(alert_stale_feeds_once, result)
+                if alerted["status"] != "quiet" or result.get("stale_feeds"):
+                    log.warning("stale feeds: %s", alerted)
+            except Exception:
+                log.exception("stale feed alert error")
             try:
                 wake = await asyncio.to_thread(run_sync_wake_once, result)
                 if wake["status"] != "skip":

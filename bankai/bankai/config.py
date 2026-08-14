@@ -254,6 +254,12 @@ SELFIMPROVE_REPO_DIR = _env("SELFIMPROVE_REPO_DIR")  # trusted base checkout, ex
 SELFIMPROVE_VENV_PYTHON = _env("SELFIMPROVE_VENV_PYTHON")  # python readable by the jail user
 SELFIMPROVE_EVAL_ENABLED = _env("SELFIMPROVE_EVAL_ENABLED", "true").lower() != "false"
 
+# A live-feed account whose PROVIDER-side balance-date is older than this many
+# days is a broken upstream connection (bank re-auth needed at SimpleFIN) —
+# flagged by the sync and announced to the household once per episode. Gaurav's
+# checking sat 9 days stale with zero errors anywhere before this existed.
+STALE_FEED_DAYS = int(_env("STALE_FEED_DAYS", "3") or 3)
+
 SYNC_INTERVAL_MINUTES = int(_env("SYNC_INTERVAL_MINUTES", "360") or 360)
 # Wake the copilot for a self-directed look whenever a sync brings new
 # transactions in from the banks. Silence is the expected outcome; it speaks
