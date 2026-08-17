@@ -154,6 +154,94 @@ def household_recipients() -> list[str]:
     return sorted(set(household_emails().values()))
 
 
+#: Documents whose text carries a bare SSN. Not a block — these are their own
+#: records going to their own inboxes — but the copilot must be able to say so
+#: before anyone forwards the mail onward to an attorney or a lender.
+_SSN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
+
+
+def collect_documents(session: Session, document_ids: list[str]) -> tuple[list[dict], list[dict]]:
+    """Load vault files for sending. Returns (attachments, notes).
+
+    A document whose original is missing from disk is REPORTED, never silently
+    skipped — a packet that is quietly short one file is worse than one that
+    says which file it could not include.
+    """
+    from .. import vault
+    from ..models import Document
+
+    attachments: list[dict] = []
+    notes: list[dict] = []
+    for doc_id in document_ids:
+        doc = session.get(Document, doc_id)
+        if doc is None:
+            notes.append({"document_id": doc_id, "problem": "no such document"})
+            continue
+        path = vault.stored_path(doc)
+        if path is None or not path.exists():
+            notes.append({"document_id": doc_id, "title": doc.title,
+                          "problem": "original file is missing from disk"})
+            continue
+        data = path.read_bytes()
+        attachments.append({
+            "filename": doc.filename or f"{doc.title}.pdf",
+            "data": data,
+            "document_id": doc.id,
+            "title": doc.title,
+            "bytes": len(data),
+            "has_ssn": bool(_SSN.search(doc.content_text or "")),
+        })
+    return attachments, notes
+
+
+def send_documents(
+    session: Session, subject: str, body: str, document_ids: list[str]
+) -> dict:
+    """Email vault documents to the household, as real attachments."""
+    recipients = household_recipients()
+    if not recipients:
+        raise RuntimeError("HOUSEHOLD_EMAILS is not configured — nobody to write to")
+
+    attachments, notes = collect_documents(session, document_ids)
+    if not attachments:
+        return {"sent": False, "problems": notes,
+                "note": "nothing could be attached — say so plainly"}
+
+    sensitive = [a["title"] for a in attachments if a["has_ssn"]]
+    total = sum(a["bytes"] for a in attachments)
+
+    session.add(
+        ChatMessage(
+            channel="email", role="assistant", speaker="copilot",
+            content=(
+                f"[email to the household — {subject}]\n"
+                f"[attached: {', '.join(a['filename'] for a in attachments)}]\n\n{body}"
+            ),
+        )
+    )
+    session.commit()
+
+    receipt = email_harvest.send_message(
+        to=recipients, subject=subject, text=body,
+        attachments=[{"filename": a["filename"], "data": a["data"]} for a in attachments],
+    )
+    return {
+        "sent": True,
+        "to": recipients,
+        "attached": [{"title": a["title"], "filename": a["filename"], "bytes": a["bytes"]}
+                     for a in attachments],
+        "total_bytes": total,
+        "problems": notes,
+        "contains_ssn": sensitive,
+        "warn_before_forwarding": (
+            f"These carry a Social Security number in plain text: {', '.join(sensitive)}. "
+            "Tell them not to forward this mail to an attorney, lender or anyone else "
+            "without using that party's secure portal."
+        ) if sensitive else None,
+        "receipt": receipt,
+    }
+
+
 def start_thread(session: Session, subject: str, body: str) -> dict:
     """Open a new email thread addressed to the whole household.
 

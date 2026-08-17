@@ -549,6 +549,34 @@ TOOLS: list[dict] = [
         "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
     },
     {
+        "name": "email_household_documents",
+        "description": (
+            "Email vault documents to BOTH spouses as real attachments — the "
+            "actual files, not a list of ids. Use it whenever they need the "
+            "documents themselves: a packet for an attorney, a lender's request, "
+            "anything they must forward or print. Give the document_ids from "
+            "list_documents. If a file is missing from disk or the total is too "
+            "large you are told which, and you must say so rather than implying a "
+            "complete packet went out. You are also told which attachments carry a "
+            "Social Security number in plain text — pass that warning on, because "
+            "the household forwarding this mail onward is the real risk."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "subject": {"type": "string"},
+                "body": {"type": "string", "description": "Plain text. No markdown."},
+                "document_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "From list_documents",
+                },
+            },
+            "required": ["subject", "body", "document_ids"],
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "email_household",
         "description": (
             "Start an email thread with BOTH spouses — use it when something is "
@@ -1648,6 +1676,17 @@ def _dispatch(session: Session, name: str, args: dict):
         if not sheets.configured():
             return {"error": "SHEETS_ID is not set in .env — no planning sheet linked"}
         return sheets.reconcile(session)
+    if name == "email_household_documents":
+        from ..messaging import email_thread
+
+        if not email_thread.configured():
+            return {"error": "the email channel is not configured"}
+        ids = args.get("document_ids") or []
+        if not ids:
+            return {"error": "no document_ids given"}
+        return email_thread.send_documents(
+            session, args["subject"], args["body"], ids
+        )
     if name == "email_household":
         from ..messaging import email_thread
 

@@ -14,9 +14,11 @@ delete, or mark mail.
 """
 from __future__ import annotations
 
+import base64
 import email
 import email.policy
 import imaplib
+import mimetypes
 import re
 import smtplib
 from email.message import EmailMessage
@@ -65,28 +67,54 @@ def send_from() -> str:
     return config.EMAIL_FROM or config.GMAIL_ADDRESS or config.NOTIFY_FROM
 
 
+#: Resend accepts 40MB per message. Stopping well short leaves room for base64
+#: expansion (~33%) and for a provider that silently truncates rather than errors.
+MAX_ATTACHMENT_TOTAL_BYTES = 18 * 1024 * 1024
+
+
 def send_message(
     *, to: list[str], subject: str, text: str,
     headers: dict[str, str] | None = None, html: str | None = None,
+    attachments: list[dict] | None = None,
 ) -> str:
-    """Send one message, preferring Resend. Plain text always goes out as the
-    text/plain part; when `html` is given it rides along as a richer text/html
-    alternative (the client shows the HTML, plain text is the fallback).
+    """Send one message, with files when given.
 
-    Resend is the primary transport (same service the other projects use — no app
-    password in the send path, better deliverability). `headers` carries the
-    threading headers so a reply stays inside the household's existing Gmail
-    conversation; Resend passes custom headers through. SMTP with the Gmail app
-    password is the fallback when no Resend key is configured.
+    Resend is the primary transport (no app password in the send path, better
+    deliverability); SMTP with the Gmail app password is the fallback. Plain text
+    always goes out as the text/plain part; `html` rides along as a richer
+    alternative. `headers` carries the threading headers so a reply stays inside
+    the household's existing Gmail conversation.
+
+    `attachments` are {"filename": str, "data": bytes}. A message that would
+    exceed the size ceiling is REFUSED rather than trimmed — quietly dropping a
+    file from a packet someone is about to send to their attorney is worse than
+    making them pick.
     """
     headers = {k: v for k, v in (headers or {}).items() if v}
     sender = send_from()
+    files = attachments or []
+    total = sum(len(f["data"]) for f in files)
+    if total > MAX_ATTACHMENT_TOTAL_BYTES:
+        raise RuntimeError(
+            f"attachments total {total / 1_048_576:.1f} MB, over the "
+            f"{MAX_ATTACHMENT_TOTAL_BYTES / 1_048_576:.0f} MB limit — send them "
+            "in more than one email rather than dropping any"
+        )
+
     if config.RESEND_API_KEY:
         payload: dict = {"from": sender, "to": to, "subject": subject, "text": text}
         if html:
             payload["html"] = html
         if headers:
             payload["headers"] = headers
+        if files:
+            payload["attachments"] = [
+                {
+                    "filename": f["filename"],
+                    "content": base64.b64encode(f["data"]).decode(),
+                }
+                for f in files
+            ]
         resp = httpx.post(
             RESEND_URL,
             headers={"Authorization": f"Bearer {config.RESEND_API_KEY}"},
@@ -110,6 +138,13 @@ def send_message(
     message.set_content(text)
     if html:
         message.add_alternative(html, subtype="html")
+    for f in files:
+        guessed, _ = mimetypes.guess_type(f["filename"])
+        main, _, sub = (guessed or "application/octet-stream").partition("/")
+        message.add_attachment(
+            f["data"], maintype=main, subtype=sub or "octet-stream",
+            filename=f["filename"],
+        )
     smtp_host = config.IMAP_HOST.replace("imap.", "smtp.", 1)
     with smtplib.SMTP(smtp_host, 587, timeout=30) as smtp:
         smtp.starttls()
