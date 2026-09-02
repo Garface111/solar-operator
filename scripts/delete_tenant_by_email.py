@@ -1,4 +1,7 @@
-"""Delete tenants matching an email pattern (case-insensitive substring).
+"""DEPRECATED: use scripts/hard_delete_tenant.py (walks the live FK graph; this one
+hard-codes 7 tables and leaves ~40 others orphaned).
+
+Delete tenants matching an email pattern (case-insensitive substring).
 
 Usage: railway ssh "cd /app && python -m scripts.delete_tenant_by_email <pattern>"
 Example: python -m scripts.delete_tenant_by_email ford.genereaux
