@@ -190,3 +190,59 @@ def test_cli_error_raises_so_the_chain_falls_through(monkeypatch):
     monkeypatch.setattr(claude_cli.subprocess, "run", lambda *a, **k: P())
     with pytest.raises(RuntimeError, match="claude-cli failed"):
         claude_cli.call([{"role": "user", "content": "hi"}], [])
+
+
+# ── credential isolation ────────────────────────────────────────────────────
+# Production 2026-09-18: the CLI prefers ANTHROPIC_API_KEY over the OAuth token,
+# so an inherited env made every "subscription" call bill the metered account --
+# which was out of credits. The CLI answered "Credit balance is too low" and the
+# breaker tripped on a subscription that was perfectly healthy.
+def test_metered_anthropic_credentials_never_reach_the_cli(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-dead")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "nope")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://example.invalid")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test")
+    env = claude_cli._child_env()
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "ANTHROPIC_AUTH_TOKEN" not in env
+    assert "ANTHROPIC_BASE_URL" not in env
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat01-test"
+
+
+def test_child_env_puts_local_bin_on_path(monkeypatch):
+    monkeypatch.setenv("PATH", "/usr/bin")
+    assert ".local/bin" in claude_cli._child_env()["PATH"]
+
+
+def test_the_call_actually_passes_the_scrubbed_env(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-api03-dead")
+    seen = {}
+
+    class P:
+        returncode = 0
+        stdout = json.dumps({"result": '{"content":"ok","tool_calls":[]}'})
+        stderr = ""
+
+    def fake_run(cmd, **kw):
+        seen["env"] = kw.get("env")
+        return P()
+
+    monkeypatch.setattr(claude_cli.subprocess, "run", fake_run)
+    claude_cli.call([{"role": "user", "content": "hi"}], [])
+    assert seen["env"] is not None
+    assert "ANTHROPIC_API_KEY" not in seen["env"]
+
+
+def test_bin_falls_back_to_local_bin_when_not_on_path(monkeypatch, tmp_path):
+    monkeypatch.delenv("EA_CLAUDE_CLI_BIN", raising=False)
+    monkeypatch.setattr(claude_cli.shutil, "which", lambda _n: None)
+    home = tmp_path / "home"
+    (home / ".local" / "bin").mkdir(parents=True)
+    (home / ".local" / "bin" / "claude").write_text("stub")
+    monkeypatch.setattr(claude_cli.os.path, "expanduser", lambda _p: str(home))
+    assert claude_cli._bin().endswith(".local/bin/claude")
+
+
+def test_explicit_bin_env_wins(monkeypatch):
+    monkeypatch.setenv("EA_CLAUDE_CLI_BIN", "/opt/claude")
+    assert claude_cli._bin() == "/opt/claude"

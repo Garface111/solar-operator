@@ -38,6 +38,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -92,7 +93,50 @@ Rules:
 
 
 def _bin() -> str:
-    return (os.getenv("EA_CLAUDE_CLI_BIN") or "claude").strip()
+    """Resolve the CLI. The native installer drops it in ~/.local/bin, which is
+    NOT on the PATH uvicorn inherits under Railpack (verified in production
+    2026-09-18: PATH is /app/.venv/bin:/mise/shims:/usr/... and nothing else),
+    so a bare "claude" is not findable even when the binary is right there."""
+    explicit = (os.getenv("EA_CLAUDE_CLI_BIN") or "").strip()
+    if explicit:
+        return explicit
+    found = shutil.which("claude")
+    if found:
+        return found
+    home = os.path.expanduser("~")
+    for cand in (os.path.join(home, ".local", "bin", "claude"),
+                 "/root/.local/bin/claude"):
+        if os.path.exists(cand):
+            return cand
+    return "claude"
+
+
+# The CLI prefers ANTHROPIC_API_KEY over CLAUDE_CODE_OAUTH_TOKEN when both are
+# present. This service sets ANTHROPIC_API_KEY for _call_anthropic, so an
+# inherited environment made every subscription call bill the METERED account
+# instead -- which is out of credits, so the CLI answered "Credit balance is too
+# low" and the breaker tripped on a subscription that was perfectly healthy.
+# (Found in production 2026-09-18; the isolated `env -i` bench test passed only
+# because it had never inherited the key.) Strip the metered credentials so the
+# subscription token is the ONLY one on the table.
+_STRIP_FROM_CHILD = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+)
+
+
+def _child_env() -> dict:
+    env = {k: v for k, v in os.environ.items() if k not in _STRIP_FROM_CHILD}
+    if not env.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        # Nothing to authenticate with; say so plainly rather than let the CLI
+        # wander into an interactive login prompt inside a container.
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = ""
+    home = os.path.expanduser("~")
+    local_bin = os.path.join(home, ".local", "bin")
+    if local_bin not in (env.get("PATH") or ""):
+        env["PATH"] = local_bin + os.pathsep + (env.get("PATH") or "")
+    return env
 
 
 def enabled() -> bool:
@@ -346,6 +390,7 @@ def _run_once(system: str, prompt: str, model: str | None, timeout: float) -> tu
             stdin=(subprocess.DEVNULL if prompt_on_argv else None),
             timeout=timeout,
             cwd="/tmp",  # never let the harness sit in the product's source tree
+            env=_child_env(),
         )
 
     try:
@@ -365,6 +410,10 @@ def _run_once(system: str, prompt: str, model: str | None, timeout: float) -> tu
     low = detail.lower()
     if "not logged in" in low or "/login" in low or "invalid api key" in low:
         return "", "claude CLI not authenticated (set CLAUDE_CODE_OAUTH_TOKEN)"
+    if "credit balance" in low and not os.getenv("CLAUDE_CODE_OAUTH_TOKEN"):
+        # Be explicit: this is the metered account answering, not the seat.
+        return "", ("claude CLI billed a metered Anthropic account (no "
+                    "CLAUDE_CODE_OAUTH_TOKEN set) and it is out of credits")
     data = None
     try:
         data = json.loads(proc.stdout)
