@@ -388,6 +388,28 @@ def main():
                 "ALTER TABLE billing_report_subscriptions "
                 "ADD COLUMN last_sent_amount_usd DOUBLE PRECISION"))
             print("  + billing_report_subscriptions.last_sent_amount_usd")
+        # 2026-09 monthly offtaker report: the kWh sibling of the $ field above,
+        # so the report states what was invoiced rather than recomputing it.
+        # 2026-09 monthly offtaker report: per-tenant schedule settings.
+        if not column_exists(conn, "tenants", "offtaker_report_enabled"):
+            conn.execute(text(
+                "ALTER TABLE tenants ADD COLUMN offtaker_report_enabled "
+                "BOOLEAN DEFAULT TRUE NOT NULL"))
+            print("  + tenants.offtaker_report_enabled")
+        if not column_exists(conn, "tenants", "offtaker_report_lag_days"):
+            conn.execute(text(
+                "ALTER TABLE tenants ADD COLUMN offtaker_report_lag_days "
+                "INTEGER DEFAULT 15 NOT NULL"))
+            print("  + tenants.offtaker_report_lag_days")
+        if not column_exists(conn, "tenants", "offtaker_report_recipient"):
+            conn.execute(text(
+                "ALTER TABLE tenants ADD COLUMN offtaker_report_recipient VARCHAR(400)"))
+            print("  + tenants.offtaker_report_recipient")
+        if not column_exists(conn, "billing_report_subscriptions", "last_sent_customer_kwh"):
+            conn.execute(text(
+                "ALTER TABLE billing_report_subscriptions "
+                "ADD COLUMN last_sent_customer_kwh DOUBLE PRECISION"))
+            print("  + billing_report_subscriptions.last_sent_customer_kwh")
 
         # 2026-06 W2-6: per-client email delivery health (Resend webhook).
         delivery_health_cols = [

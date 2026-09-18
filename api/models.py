@@ -158,6 +158,18 @@ class Tenant(Base):
     # billing runs skip this tenant entirely (no auto sends, no auto drafts).
     # Manual sends + draft approvals still work — pause stops the machine,
     # not the operator.
+    # ── Monthly offtaker billing summary (Ford, Sep 2026) ───────────────
+    # One spreadsheet per period covering every offtaker — see
+    # billing/monthly_report.py. Sends `lag_days` after the LAST invoice of the
+    # period went out, not on a calendar day.
+    offtaker_report_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, server_default="true", nullable=False)
+    offtaker_report_lag_days: Mapped[int] = mapped_column(
+        Integer, default=15, server_default="15", nullable=False)
+    # Where the summary goes; NULL = the tenant's contact_email.
+    offtaker_report_recipient: Mapped[str | None] = mapped_column(
+        String(400), nullable=True)
+
     sending_paused: Mapped[bool] = mapped_column(Boolean, default=False,
                                                  server_default="false")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
@@ -1890,6 +1902,12 @@ class BillingReportSubscription(Base):
     # exactly-once guard) — powers the send-pipeline dashboard's delivered-$
     # roll-up without a per-sub invoice rebuild (~60s at 800 offtakers).
     last_sent_amount_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # The offtaker's billed kWh for that same send. Snapshotted for the monthly
+    # offtaker report so it reports what was ACTUALLY invoiced rather than
+    # recomputing generation months later off bills that may since have been
+    # re-captured, corrected, or re-allocated (same reasoning as the _usd field
+    # above: never rebuilt per-sub at read time).
+    last_sent_customer_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
     # "Come review your next bill" dedup (Jun 2026, Ford's GMP-update trigger).
     # The latest GMP-bill PERIOD label (YYYY-MM of the bill's period_end) for
     # which api/jobs/new_bill_review already emailed the operator a "your next
@@ -1985,6 +2003,53 @@ class OfftakerPayment(Base):
 
     __table_args__ = (
         Index("ix_offtaker_pay_sub_period", "subscription_id", "period_key"),
+    )
+
+
+class OfftakerMonthlyReport(Base):
+    """One month's OFFTAKER BILLING SUMMARY for the whole book (Ford, Sep 2026).
+
+    Norwich Technologies' ask: once a cycle's invoices have all gone out, send
+    the operator one spreadsheet covering every offtaker — who they are, what
+    was generated, what was billed, and whether they have paid — so nobody has
+    to assemble the state of 250 relationships by hand.
+
+    Fires `lag_days` after the LAST invoice of the period was sent rather than
+    on a fixed calendar day, because "all the emails are out" is the event that
+    makes the report meaningful. One row per (tenant, period_key) — the unique
+    index IS the exactly-once guard, so a scheduler retry can never mail a
+    second copy of the same period.
+
+    The rendered workbook is stored so the archive re-serves the exact bytes the
+    operator was emailed. Regenerating it later would disagree with itself once
+    a late payment lands, and the record of what we SAID must not move.
+    """
+    __tablename__ = "offtaker_monthly_reports"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(32), ForeignKey("tenants.id"), index=True, nullable=False)
+    # YYYY-MM of the billing period the report covers.
+    period_key: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    # The send that anchored the lag clock (max last_sent_at across the period).
+    anchor_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    recipient: Mapped[str | None] = mapped_column(String(400), nullable=True)
+    # scheduled | manual — a preview run must be distinguishable from the real one.
+    trigger: Mapped[str] = mapped_column(
+        String(16), default="scheduled", server_default="scheduled", nullable=False)
+    offtaker_count: Mapped[int] = mapped_column(Integer, default=0)
+    paid_count: Mapped[int] = mapped_column(Integer, default=0)
+    total_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_billed_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    total_collected_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    filename: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    xlsx_bytes: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+    __table_args__ = (
+        Index("ix_offtaker_monthly_tenant_period", "tenant_id", "period_key",
+              unique=True),
     )
 
 

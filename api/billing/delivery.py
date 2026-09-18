@@ -2528,6 +2528,16 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
                                         if result.get("amount_owed") is not None else None)
         except (TypeError, ValueError):
             sub.last_sent_amount_usd = None
+        # kWh of the invoice just sent — the sibling of the dollars above. The
+        # monthly offtaker summary reports what was INVOICED; recomputing
+        # generation weeks later can disagree once a bill is re-captured or an
+        # allocation is edited, and a report is a record, not an estimate.
+        try:
+            _ci_kwh = (_ci or {}).get("kwh")
+            sub.last_sent_customer_kwh = (float(_ci_kwh)
+                                          if _ci_kwh is not None else None)
+        except (TypeError, ValueError):
+            sub.last_sent_customer_kwh = None
         # Record the period just sent so the exactly-once guard (#5) can block a
         # duplicate send of the same billing period (late bill / ops re-run).
         if cur_period_key:
