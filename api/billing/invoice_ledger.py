@@ -75,6 +75,11 @@ def _status_label(status: str) -> str:
         "paid": "Paid",
         "failed": "Failed",
         "expired": "Expired",
+        # Added when direct charges introduced the status (Sep 2026). Without
+        # it a refund printed the raw lowercase "refunded" in a Paid? column,
+        # which reads as a payment state rather than a reversal — and the two
+        # are materially different to whoever is chasing the money.
+        "refunded": "Refunded",
     }.get(s, status or "—")
 
 
