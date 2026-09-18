@@ -663,6 +663,14 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
                                 sid, result.get("error"))
             except Exception as e:  # noqa: BLE001
                 failed.append(sid)
+                # One bad subscription must not poison the shared session: after
+                # a flush/commit error every later db.get() on this Session
+                # raises PendingRollbackError, so the REST of the book would
+                # "fail" too — each firing its own alert.
+                try:
+                    db.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
                 send_internal_alert(
                     f"Array Operator billing delivery failed ({cadence})",
                     f"Subscription: {sid}\nError: {e}",

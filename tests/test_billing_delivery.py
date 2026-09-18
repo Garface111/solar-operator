@@ -512,8 +512,13 @@ def test_manual_offtaker_with_unlinked_account_heals_the_link(client):
 def test_manual_offtaker_never_relinks_an_account_bound_elsewhere(client):
     """Companion guard to the self-heal: an account EXPLICITLY linked to array Y
     stays linked to Y even when an offtaker is created naming array X with that
-    account — the account's own binding wins (it also becomes the sub's
-    array_id, matching how delivery resolves the bill)."""
+    account — the account's own binding is never overwritten.
+
+    The SUB keeps the array the operator NAMED (X): since the sub-meter routing
+    of 2026-07-07 an explicit array_id from the master+sub picker names the
+    net-meter GROUP the offtaker is billed against (group_array_id in
+    _create_manual_subscription) while the bill itself still comes from the
+    bound account. This test used to pin the pre-routing behaviour."""
     from api.models import UtilityAccount
     tid, auth = _make_tenant()
     aid_x = _make_array_with_generation(tid)
@@ -532,9 +537,11 @@ def test_manual_offtaker_never_relinks_an_account_bound_elsewhere(client):
                        array_id=aid_x, utility_account_id=str(acct_id),
                        allocation_pct="0.5", client_email="norelink@example.test")
     assert r.status_code == 200, r.text
-    assert r.json()["subscription"]["array_id"] == aid_y
+    sub = r.json()["subscription"]
+    assert sub["array_id"] == aid_x                  # the named group wins
+    assert sub["utility_account_id"] == acct_id      # billed from the bound account
     with SessionLocal() as db:
-        assert db.get(UtilityAccount, acct_id).array_id == aid_y
+        assert db.get(UtilityAccount, acct_id).array_id == aid_y   # never re-linked
 
 
 def test_patch_subscription_with_utility_account_id_succeeds(client):
@@ -664,7 +671,12 @@ def test_offtaker_email_is_white_labeled_to_the_operator(client, monkeypatch):
     assert sub_id in scheduler.deliver_billing_reports("monthly")["sent"]
     # No Array Operator branding anywhere the offtaker sees:
     assert "Array Operator" not in cap["html"]
-    assert "arrayoperator.com" not in cap["html"]
+    # The sky-hero skin's background IMAGE is served from arrayoperator.com; an
+    # asset url is not branding the offtaker sees. Everything else that names
+    # the platform (wordmark, links, footer) must be gone.
+    import re as _re
+    _visible = _re.sub(r"https?://arrayoperator\.com/img/[^\s'\")]+", "", cap["html"])
+    assert "arrayoperator.com" not in _visible
     assert "admin@solaroperator.org" not in cap["html"]
     assert "Array Operator" not in cap["text"]
     # White-labeled to the operator + replies routed to them:

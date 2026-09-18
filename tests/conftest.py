@@ -40,3 +40,22 @@ def client():
     session fixture above."""
     from api.app import app
     return TestClient(app)
+
+
+# ── outbound-email DNS preflight: never touch the network in tests ───────────
+# api.email_archive.domain_accepts_mail does a live DNS-over-HTTPS MX lookup and
+# BLOCKS a send to a proven-dead domain (NXDOMAIN / null MX). Test recipients
+# live on reserved TLDs (.test / .example) that are NXDOMAIN by design, so every
+# unpatched _send_via_resend in the suite would be refused — and a unit test
+# must not depend on dns.google being reachable anyway. Fail open here; the
+# preflight's own behaviour is covered where it is exercised deliberately.
+@pytest.fixture(autouse=True)
+def _no_dns_email_preflight(monkeypatch):
+    try:
+        from api import email_archive as _ea
+    except Exception:  # noqa: BLE001
+        yield
+        return
+    monkeypatch.setattr(_ea, "domain_accepts_mail",
+                        lambda _dom: (True, "test: preflight disabled"))
+    yield
