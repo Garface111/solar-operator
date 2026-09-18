@@ -469,7 +469,10 @@ def _mint_checkout_session(*, tenant, row, customer_email: Optional[str],
         # A pinned method the charging account cannot take yet (e.g. ACH before
         # its capability is active) must not cost the offtaker the pay button:
         # fall back to Stripe's automatic methods for that account.
-        if create_kwargs.get("payment_method_types") and "payment_method" in str(e).lower():
+        _msg = str(e).lower()
+        if create_kwargs.get("payment_method_types") and (
+                getattr(e, "param", None) == "payment_method_types"
+                or "payment_method" in _msg or "payment method" in _msg):
             logger.warning("Checkout rejected pinned payment methods %s on %s (%s) — "
                            "retrying with automatic methods", pmt, acct, e)
             create_kwargs.pop("payment_method_types", None)
