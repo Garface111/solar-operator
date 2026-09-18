@@ -22,6 +22,7 @@ from datetime import timedelta
 
 from ..db import SessionLocal
 from ..models import Tenant, UtilityAccount, Array, Bill, DailyGeneration, InverterAlertState
+from ..email_archive import is_placeholder_recipient
 from ..notify import send_internal_alert
 
 log = logging.getLogger(__name__)
@@ -75,6 +76,16 @@ def scan_stale_gmp_captures(stale_days: int = STALE_DAYS) -> dict:
         for tid in tids:
             t = db.get(Tenant, tid)
             if not t or not t.active:
+                continue
+            # Seeded demo tenants are stale by construction — nobody runs the
+            # extension for a fixture. Two of the three findings in the
+            # 2026-09-07 alert were demo@solaroperator.org (144d) and
+            # demo-realistic@energyagent-demo.com (67d), which buried the one
+            # real owner in the same list. The stated risk here is "offtaker
+            # invoices built from frozen data"; a demo tenant invoices nobody.
+            if getattr(t, "is_demo", False):
+                continue
+            if is_placeholder_recipient(getattr(t, "contact_email", "") or ""):
                 continue
             f = tenant_gmp_freshness(db, tid)
             if f is None:

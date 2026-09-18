@@ -20,11 +20,12 @@ from api.jobs.gmp_freshness_watchdog import (
     _REALERT_DAYS)
 
 
-def _mk(*, days_ago, active=True):
+def _mk(*, days_ago, active=True, is_demo=False, email=None):
     tid = "ten_fresh_" + secrets.token_hex(3)
     with SessionLocal() as db:
         db.add(Tenant(id=tid, tenant_key=secrets.token_hex(8), name="F",
-                      contact_email=f"{tid}@e.com", active=active, product="array_operator"))
+                      contact_email=email or f"{tid}@e.com", active=active,
+                      is_demo=is_demo, product="array_operator"))
         db.flush()
         a = Array(tenant_id=tid, name="A" + secrets.token_hex(2))
         db.add(a); db.flush()
@@ -112,3 +113,22 @@ def test_watchdog_alerts_once_then_dedups_daily_then_clears_on_recovery(monkeypa
     out4 = run_gmp_freshness_watchdog(stale_days=7)
     assert tid not in out4["alerted"]
     assert _state() is None
+
+
+def test_scan_skips_demo_and_scrubbed_tenants():
+    """A fixture tenant is stale by construction and invoices nobody.
+
+    The 2026-09-07 alert named three stale tenants; two were seeds
+    (demo@solaroperator.org at 144 days, demo-realistic@energyagent-demo.com at
+    67), which buried the one real owner in the list. The stated risk here is
+    offtaker invoices built from frozen data — a demo tenant has no offtakers.
+    """
+    real = _mk(days_ago=30)
+    demo = _mk(days_ago=200, is_demo=True)
+    scrubbed = _mk(days_ago=200, email='deleted+ten_60309c3a@invalid.local')
+
+    res = scan_stale_gmp_captures(stale_days=7)
+    flagged = {r['tenant_id'] for r in res['stale']}
+    assert real in flagged, 'a real stale owner must still be flagged'
+    assert demo not in flagged
+    assert scrubbed not in flagged
