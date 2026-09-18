@@ -331,3 +331,34 @@ def test_webhook_dispatch_knows_the_lifecycle_events():
     for ev in ("checkout.session.expired", "checkout.session.async_payment_succeeded",
                "checkout.session.async_payment_failed", "charge.refunded"):
         assert f'"{ev}":' in src
+
+
+def test_pinned_methods_fall_back_to_automatic_when_the_account_rejects_them(monkeypatch):
+    """ACH pinned by env but the connected account's ACH capability is not
+    active yet: Stripe rejects the pin, we retry without it — the offtaker
+    still gets a working Pay button instead of no button at all."""
+    import stripe as _stripe
+    monkeypatch.setenv("AO_OFFTAKER_PAYMENT_METHODS", "us_bank_account,card")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_fake")
+    t = _tenant()
+    sid = _sub(t.id)
+    calls: list = []
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        if "payment_method_types" in kwargs:
+            raise _stripe.error.InvalidRequestError(
+                "The payment method type provided: us_bank_account is invalid.",
+                "payment_method_types")
+        return _Sess(id="cs_fb_1", url="https://checkout.stripe.com/c/pay/cs_fb_1",
+                     payment_intent=None)
+
+    with patch("api.billing.payments.stripe.checkout.Session.create", side_effect=create):
+        with SessionLocal() as db:
+            res = pay.create_offtaker_payment(
+                db, tenant=db.get(Tenant, t.id),
+                sub=db.get(BillingReportSubscription, sid), match=_FakeMatch(amount=100.0))
+    assert res["ok"], res
+    assert len(calls) == 2
+    assert calls[0]["payment_method_types"] == ["us_bank_account", "card"]
+    assert "payment_method_types" not in calls[1]

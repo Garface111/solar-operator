@@ -440,7 +440,7 @@ def _mint_checkout_session(*, tenant, row, customer_email: Optional[str],
     pmt = payment_method_types()
     if pmt:
         extra["payment_method_types"] = pmt
-    session = stripe.checkout.Session.create(
+    create_kwargs = dict(
         mode="payment",
         success_url=success_url + "&session_id={CHECKOUT_SESSION_ID}",
         cancel_url=cancel_url,
@@ -463,6 +463,19 @@ def _mint_checkout_session(*, tenant, row, customer_email: Optional[str],
         expires_at=expires_at,
         **extra,
     )
+    try:
+        session = stripe.checkout.Session.create(**create_kwargs)
+    except stripe.error.InvalidRequestError as e:
+        # A pinned method the charging account cannot take yet (e.g. ACH before
+        # its capability is active) must not cost the offtaker the pay button:
+        # fall back to Stripe's automatic methods for that account.
+        if create_kwargs.get("payment_method_types") and "payment_method" in str(e).lower():
+            logger.warning("Checkout rejected pinned payment methods %s on %s (%s) — "
+                           "retrying with automatic methods", pmt, acct, e)
+            create_kwargs.pop("payment_method_types", None)
+            session = stripe.checkout.Session.create(**create_kwargs)
+        else:
+            raise
     sess_id = session["id"] if isinstance(session, dict) else session.id
     url = session["url"] if isinstance(session, dict) else session.url
     pi = session.get("payment_intent") if isinstance(session, dict) else getattr(session, "payment_intent", None)
