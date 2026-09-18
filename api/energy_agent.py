@@ -9484,6 +9484,78 @@ def _alert_primary_llm_down(provider: str, err: str) -> None:
         log.error("primary-LLM-down alert email failed: %s", e)
 
 
+ESCALATE_TOOL = "escalate_to_ford"
+
+# A tool's own output is NEVER the owner's voice. The agent loop appends tool
+# results (role="tool") and its own steering checkpoints (role="user", prefixed
+# with _STEER_MARK) onto the same message list the model sees, so anything that
+# wants "what the owner actually said" has to walk past both. Reading
+# ``messages[-1]`` blindly is what turned one brainless turn into four
+# escalations on 2026-09-18, each carrying the PREVIOUS escalation's JSON
+# result as the owner's words.
+_STEER_MARK = "[system checkpoint]"
+
+
+def _last_user_text(messages: list[dict] | None) -> str:
+    """The most recent thing the OWNER said in this turn, or "".
+
+    Skips tool results, assistant turns, the system prompt and the loop's own
+    injected steering checkpoints. Multimodal user content (a list of parts) is
+    flattened to its text — an attached image is not words.
+    """
+    for m in reversed(messages or []):
+        if not isinstance(m, dict) or m.get("role") != "user":
+            continue
+        if m.get("tool_call_id") or m.get("name"):
+            # A tool result wearing a user role (OpenAI legacy shape). Not the owner.
+            continue
+        raw = m.get("content")
+        if isinstance(raw, list):
+            text = " ".join(
+                str(p.get("text") or "")
+                for p in raw
+                if isinstance(p, dict) and p.get("type") == "text"
+            ).strip()
+        else:
+            text = str(raw or "").strip()
+        if not text or text.startswith(_STEER_MARK):
+            continue
+        return text
+    return ""
+
+
+def _already_escalated(messages: list[dict] | None) -> bool:
+    """True once this turn has already asked for an escalation."""
+    for m in messages or []:
+        if not isinstance(m, dict) or m.get("role") != "assistant":
+            continue
+        for tc in m.get("tool_calls") or []:
+            fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
+            if fn.get("name") == ESCALATE_TOOL:
+                return True
+    return False
+
+
+_OFFLINE_SUMMARY = "Energy Agent LLM keys missing (XAI/ANTHROPIC)"
+_OFFLINE_ESCALATE_EVERY_S = int(
+    os.getenv("EA_OFFLINE_ESCALATE_EVERY_S", "21600") or 21600
+)
+_offline_escalate_at: dict[str, float] = {}
+
+
+def _offline_escalation_due(summary: str) -> bool:
+    """Throttle the no-brain escalation exactly the way
+    ``_alert_primary_llm_down`` throttles its alert (per-summary, default 6h).
+    "No LLM keys" is a server-wide condition, not a per-owner one: the
+    hundredth identical escalation tells Ford nothing the first did not, and
+    buries the ones that do."""
+    now = time.time()
+    if now - _offline_escalate_at.get(summary, 0.0) < _OFFLINE_ESCALATE_EVERY_S:
+        return False
+    _offline_escalate_at[summary] = now
+    return True
+
+
 def _call_llm(
     messages: list[dict],
     *,
@@ -9533,32 +9605,45 @@ def _call_llm(
             continue
     if last_err:
         log.warning("all LLMs failed, last=%s", last_err)
-    # Offline stub — no LLM keys
-    return {
-        "message": {
-            "role": "assistant",
-            "content": (
-                "I'm Energy Agent, but my reasoning keys aren't configured yet "
-                "(set XAI_API_KEY or ANTHROPIC_API_KEY on the server). "
-                "I can still take structured commands once tools are wired. "
-                "Please escalate this setup gap to Ford."
-            ),
-            "tool_calls": [{
-                "id": "esc_setup",
-                "type": "function",
-                "function": {
-                    "name": "escalate_to_ford",
-                    "arguments": json.dumps({
-                        "summary": "Energy Agent LLM keys missing (XAI/ANTHROPIC)",
-                        "user_said": messages[-1].get("content", "") if messages else "",
-                        "quietly": True,
-                    }),
-                },
-            }],
-        },
-        "usage": {},
-        "provider": "stub",
+    # Offline stub — no LLM keys.
+    #
+    # This is emitted from INSIDE the tool loop, so an unconditional tool_call
+    # here is a perpetual-motion machine: the loop runs the escalation, appends
+    # the result, calls back in, gets the identical stub, escalates again. One
+    # live turn on 2026-09-18 fired four escalations that way and then died on
+    # the round ceiling. So the stub speaks once and thereafter just answers —
+    # at most one escalation per turn, and at most one per throttle window
+    # across turns.
+    escalate = not _already_escalated(messages) and _offline_escalation_due(
+        _OFFLINE_SUMMARY
+    )
+    msg: dict[str, Any] = {
+        "role": "assistant",
+        "content": (
+            "I'm Energy Agent, but my reasoning keys aren't configured yet "
+            "(set XAI_API_KEY or ANTHROPIC_API_KEY on the server). "
+            "I can still take structured commands once tools are wired. "
+            + ("I've flagged this setup gap to Ford."
+               if escalate else
+               "Ford has already been told about this gap.")
+        ),
     }
+    if escalate:
+        msg["tool_calls"] = [{
+            "id": "esc_setup",
+            "type": "function",
+            "function": {
+                "name": ESCALATE_TOOL,
+                "arguments": json.dumps({
+                    "summary": _OFFLINE_SUMMARY,
+                    # NEVER messages[-1]: by the time a second round reaches
+                    # here, that is a tool result, not the owner.
+                    "user_said": _last_user_text(messages),
+                    "quietly": True,
+                }),
+            },
+        }]
+    return {"message": msg, "usage": {}, "provider": "stub"}
 
 
 def _usage_cost(usage: dict) -> float:
@@ -10668,6 +10753,10 @@ def _agent_turn(
 
     _round = 0
     _call_counts: dict = {}
+    _escalated_this_turn = False
+    # Everything a tool has said back to the model this turn. A tool's output is
+    # not the owner's voice and must never be quoted as such.
+    _tool_result_texts: set[str] = set()
     _unbounded = MAX_TOOL_ROUNDS <= 0
     while _unbounded or _round < MAX_TOOL_ROUNDS:
         _round += 1
@@ -10720,7 +10809,34 @@ def _agent_turn(
                         on_event({"type": "thinking", "text": phrase, "tool": tname})
                     except Exception:
                         pass
-            out = _run_tool(tname, targs, tenant, session, db, user_text=user_text, mode=_turn_mode)
+            if tname == ESCALATE_TOOL and _escalated_this_turn:
+                # One escalation per turn, full stop. A model that escalates
+                # twice is not telling Ford twice as much — and the loop's
+                # stuck-guard can't catch it, because each call carries
+                # different args (the last one often the PREVIOUS escalation's
+                # own result). Answer the model honestly instead of re-filing.
+                out = {
+                    "ok": True,
+                    "escalated": False,
+                    "deduped": True,
+                    "note": (
+                        "Already escalated once on this turn — Ford has it. "
+                        "Do not escalate again; answer the owner."
+                    ),
+                }
+            else:
+                if tname == ESCALATE_TOOL:
+                    _escalated_this_turn = True
+                    # The owner's words, never a tool's. A model handed its own
+                    # output will hand it straight back — that is literally how
+                    # the 2026-09-18 storm read, each escalation quoting the
+                    # previous escalation's JSON as the owner. If user_said is
+                    # blank, or is one of THIS turn's tool results, say what the
+                    # owner actually said instead.
+                    _said = str(targs.get("user_said") or "").strip()
+                    if not _said or _said in _tool_result_texts:
+                        targs["user_said"] = user_text[:500]
+                out = _run_tool(tname, targs, tenant, session, db, user_text=user_text, mode=_turn_mode)
             tool_trace.append({"name": tname, "args": targs, "result": out})
 
             if isinstance(out, dict) and out.get("status") == "pending_confirm":
@@ -10749,10 +10865,15 @@ def _agent_turn(
                     pending = None
                     session.pending_json = None
 
+            # What the model is about to read back. Kept so that a later
+            # tool call cannot launder it into "what the owner said" — see the
+            # escalate_to_ford guard above.
+            _result_text = json.dumps(out)[:8000]
+            _tool_result_texts.add(_result_text.strip())
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.get("id") or tname,
-                "content": json.dumps(out)[:8000],
+                "content": _result_text,
             })
         # Long-chain steering — the cheap fix for thrash that a bigger ceiling
         # cannot buy. The stuck-loop guard below only catches the SAME call
@@ -10763,7 +10884,7 @@ def _agent_turn(
             messages.append({
                 "role": "user",
                 "content": (
-                    f"[system checkpoint] You are {_round} tool rounds into this single "
+                    f"{_STEER_MARK} You are {_round} tool rounds into this single "
                     f"turn. Tools tried so far: {', '.join(_tried) or 'none'}.\n"
                     "If you already have what you need, ANSWER NOW — do not keep "
                     "gathering.\n"
@@ -10845,10 +10966,13 @@ def _agent_turn(
     if any(
         isinstance(t.get("result"), dict) and t["result"].get("error")
         for t in tool_trace
-    ) and not any(t.get("name") == "escalate_to_ford" for t in tool_trace):
+    ) and not _escalated_this_turn and not any(
+        t.get("name") == ESCALATE_TOOL for t in tool_trace
+    ):
         try:
+            _escalated_this_turn = True
             _run_tool(
-                "escalate_to_ford",
+                ESCALATE_TOOL,
                 {
                     "summary": f"Tool error during session: {user_text[:120]}",
                     "user_said": user_text[:500],
