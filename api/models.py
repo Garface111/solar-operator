@@ -184,6 +184,13 @@ class Tenant(Base):
         String(64), nullable=True, index=True)
     stripe_connect_charges_enabled: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="false", nullable=False)
+    # Offtaker pay-link CHARGE MODEL override (Sep 2026, Ford): "direct" — the
+    # Checkout Session and charge live on this operator's connected account,
+    # so the OPERATOR pays Stripe's processing fee (card 2.9%+30¢, ACH 0.8%
+    # capped $5) and the platform keeps only its application fee; "destination"
+    # — legacy: charge on the platform, funds transferred, the PLATFORM eats
+    # Stripe's fee. NULL → AO_OFFTAKER_CHARGE_MODEL env (default "direct").
+    offtaker_charge_model: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     # Customer prefs (controlled via /account portal)
     report_frequency: Mapped[str] = mapped_column(String(16), default="quarterly")
@@ -1963,6 +1970,10 @@ class OfftakerPayment(Base):
         String(48), nullable=True, unique=True, index=True)
     # When the CURRENT Checkout Session lapses (naive UTC); stale → re-mint.
     checkout_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # The Stripe account the Session/charge lives on: the operator's connected
+    # account for DIRECT charges; NULL = the platform (legacy destination
+    # charges). Every later Stripe call about this row must address it.
+    stripe_account_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # open | paid | expired | failed | refunded
     status: Mapped[str] = mapped_column(
         String(16), default="open", server_default="open", nullable=False, index=True)

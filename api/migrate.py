@@ -1501,6 +1501,11 @@ def main():
             ))
             added.append("stripe_connect_charges_enabled")
             print("  + tenants.stripe_connect_charges_enabled")
+        # 2026-09 direct charges: per-tenant charge-model override (NULL = env).
+        if not column_exists(conn, "tenants", "offtaker_charge_model"):
+            conn.execute(text(
+                "ALTER TABLE tenants ADD COLUMN offtaker_charge_model VARCHAR(16)"))
+            print("  + tenants.offtaker_charge_model")
         for idx_sql in [
             "CREATE INDEX IF NOT EXISTS ix_tenants_stripe_connect_account_id "
             "ON tenants (stripe_connect_account_id)",
@@ -1525,6 +1530,12 @@ def main():
             conn.execute(text(
                 "ALTER TABLE offtaker_payments ADD COLUMN checkout_expires_at TIMESTAMP"))
             print("  + offtaker_payments.checkout_expires_at")
+        # 2026-09 direct charges: which Stripe account the Session lives on
+        # (NULL = platform, i.e. a legacy destination-charge row).
+        if not column_exists(conn, "offtaker_payments", "stripe_account_id"):
+            conn.execute(text(
+                "ALTER TABLE offtaker_payments ADD COLUMN stripe_account_id VARCHAR(64)"))
+            print("  + offtaker_payments.stripe_account_id")
         try:
             conn.execute(text(
                 "CREATE UNIQUE INDEX IF NOT EXISTS ix_offtaker_payments_pay_token "

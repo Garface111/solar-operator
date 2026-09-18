@@ -159,7 +159,10 @@ def test_create_payment_mints_checkout_and_persists(monkeypatch):
         # Assert destination charge shape.
         pi = kwargs["payment_intent_data"]
         assert pi["application_fee_amount"] == 50  # 0.5% of $100
-        assert pi["transfer_data"]["destination"] == t.stripe_connect_account_id
+        # Direct charge (default since Sep 2026): the Session lives on the
+        # operator's account, so THEY pay Stripe's processing fee.
+        assert kwargs["stripe_account"] == t.stripe_connect_account_id
+        assert "transfer_data" not in pi
         assert kwargs["metadata"]["kind"] == "offtaker_invoice"
         assert kwargs["mode"] == "payment"
         # Stripe rejects expires_at >= 24h — regression guard for the

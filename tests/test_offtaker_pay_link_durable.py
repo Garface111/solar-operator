@@ -162,7 +162,9 @@ def test_click_with_stale_open_session_expires_the_old_one_first(client, monkeyp
                   side_effect=_fake_create(calls)):
         r = client.get(_PAY + token, follow_redirects=False)
     assert r.status_code == 303
-    expire.assert_called_once_with("cs_test_1")   # never two live links per invoice
+    expire.assert_called_once()                    # never two live links per invoice
+    assert expire.call_args.args[0] == "cs_test_1"
+    assert expire.call_args.kwargs.get("stripe_account") == t.stripe_connect_account_id
 
 
 def test_click_on_paid_row_shows_receipt_page_not_stripe(client):
@@ -259,6 +261,68 @@ def test_async_failed_marks_unpaid_and_full_refund_flips_paid():
                              "amount_refunded": 10_000})
         assert full["refunded"] is True
         assert db.get(OfftakerPayment, rid2).status == "refunded"
+
+
+# ─── charge model: the OPERATOR pays Stripe's fee ───────────────────────────
+
+def test_direct_charges_are_the_default_and_live_on_the_operator_account(monkeypatch):
+    monkeypatch.delenv("AO_OFFTAKER_CHARGE_MODEL", raising=False)
+    calls: list = []
+    t, sid, res = _mint(monkeypatch, calls)
+    kw = calls[0]
+    assert kw["stripe_account"] == t.stripe_connect_account_id     # Stripe-Account header
+    assert "transfer_data" not in kw["payment_intent_data"]        # no platform charge
+    assert kw["payment_intent_data"]["application_fee_amount"] == 50
+    assert "payment_method_types" not in kw                        # Dashboard decides (ACH on)
+    with SessionLocal() as db:
+        assert db.get(OfftakerPayment, res["payment_id"]).stripe_account_id == \
+            t.stripe_connect_account_id
+
+
+def test_destination_model_is_still_available_by_env_and_per_tenant(monkeypatch):
+    monkeypatch.setenv("AO_OFFTAKER_CHARGE_MODEL", "destination")
+    calls: list = []
+    t, sid, res = _mint(monkeypatch, calls)
+    kw = calls[0]
+    assert "stripe_account" not in kw
+    assert kw["payment_intent_data"]["transfer_data"]["destination"] == t.stripe_connect_account_id
+    with SessionLocal() as db:
+        assert db.get(OfftakerPayment, res["payment_id"]).stripe_account_id is None
+    # A per-tenant override beats the env, and junk falls back to direct.
+    t2 = _tenant(offtaker_charge_model="direct")
+    t3 = _tenant(offtaker_charge_model="banana")
+    monkeypatch.delenv("AO_OFFTAKER_CHARGE_MODEL", raising=False)
+    with SessionLocal() as db:
+        assert pay.charge_model_for(db.get(Tenant, t2.id)) == "direct"
+        assert pay.charge_model_for(db.get(Tenant, t3.id)) == "direct"
+
+
+def test_payment_method_pin_is_env_driven(monkeypatch):
+    monkeypatch.setenv("AO_OFFTAKER_PAYMENT_METHODS", "us_bank_account, card")
+    calls: list = []
+    _mint(monkeypatch, calls)
+    assert calls[0]["payment_method_types"] == ["us_bank_account", "card"]
+
+
+def test_click_addresses_the_account_the_session_lives_on(client, monkeypatch):
+    calls: list = []
+    t, sid, res = _mint(monkeypatch, calls)
+    token = res["pay_url"].rsplit("/", 1)[-1]
+    retrieve = MagicMock(return_value=_Sess(
+        id="cs_test_1", status="open", payment_status="unpaid",
+        url="https://checkout.stripe.com/c/pay/cs_test_1"))
+    with patch("api.billing.payments.stripe.checkout.Session.retrieve", retrieve):
+        r = client.get(_PAY + token, follow_redirects=False)
+    assert r.status_code == 303
+    retrieve.assert_called_once_with("cs_test_1", stripe_account=t.stripe_connect_account_id)
+
+
+def test_connect_account_requests_ach_and_webhook_accepts_connect_secret():
+    src = open(pay.__file__, encoding="utf-8").read()
+    assert '"us_bank_account_ach_payments": {"requested": True}' in src
+    from api import stripe_webhook as wh
+    assert hasattr(wh, "STRIPE_CONNECT_WEBHOOK_SECRET")
+    assert callable(wh._construct_signed_event)
 
 
 def test_webhook_dispatch_knows_the_lifecycle_events():

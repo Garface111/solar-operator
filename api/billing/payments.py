@@ -32,6 +32,49 @@ CHECKOUT_REFRESH_GRACE_SECONDS = 15 * 60
 # same-origin /v1 proxy (see array-operator public/_redirects).
 PAY_PATH = "/v1/array-operator/billing/pay/"
 
+# CHARGE MODEL (Sep 2026, Ford). Who pays Stripe's processing fee:
+#   "direct"      — the Checkout Session and charge live ON the operator's
+#                   connected account. The OPERATOR pays Stripe's fee (card
+#                   2.9% + 30¢, ACH debit 0.8% capped at $5), the platform
+#                   receives only its application fee, the offtaker's card
+#                   statement carries the OPERATOR's name, and the money never
+#                   crosses the platform balance ("we never hold your money").
+#   "destination" — legacy: charge on the platform, funds transferred to the
+#                   operator. The PLATFORM eats Stripe's fee against a 0.5%
+#                   application fee — a loss on every card payment.
+# Resolution: Tenant.offtaker_charge_model → AO_OFFTAKER_CHARGE_MODEL → direct.
+DEFAULT_CHARGE_MODEL = "direct"
+CHARGE_MODELS = ("direct", "destination")
+
+
+def charge_model_for(tenant) -> str:
+    v = (getattr(tenant, "offtaker_charge_model", None) or "").strip().lower()
+    if v not in CHARGE_MODELS:
+        v = (os.getenv("AO_OFFTAKER_CHARGE_MODEL", DEFAULT_CHARGE_MODEL) or "").strip().lower()
+    return v if v in CHARGE_MODELS else DEFAULT_CHARGE_MODEL
+
+
+def _stripe_kw(row) -> dict:
+    """Request kwargs addressing the account a row's Session lives on: the
+    operator's connected account for a direct charge, nothing (the platform)
+    for a legacy destination-charge row. Retrieve/expire/refund of a direct
+    charge's objects FAIL without it — they do not exist on the platform."""
+    acct = getattr(row, "stripe_account_id", None)
+    return {"stripe_account": acct} if acct else {}
+
+
+def payment_method_types() -> Optional[list[str]]:
+    """Optional pin of Checkout's payment methods, e.g.
+    AO_OFFTAKER_PAYMENT_METHODS="us_bank_account,card". Unset → Stripe's
+    automatic methods for the CHARGING account (for direct charges: what is
+    enabled for connected accounts under Dashboard → Settings → Connect →
+    Payment methods, which is where ACH gets switched on)."""
+    raw = (os.getenv("AO_OFFTAKER_PAYMENT_METHODS", "") or "").strip()
+    if not raw:
+        return None
+    items = [p.strip() for p in raw.split(",") if p.strip()]
+    return items or None
+
 # Platform fee: basis points of the invoice total (50 = 0.5%). "Scrape a tiny
 # bit" — env-driven so Ford can retune without a code push. Min floor optional.
 DEFAULT_FEE_BPS = 50
@@ -210,6 +253,9 @@ def create_or_get_connect_account(db, tenant) -> dict:
             capabilities={
                 "card_payments": {"requested": True},
                 "transfers": {"requested": True},
+                # ACH debit on the operator's own account (direct charges):
+                # 0.8% capped at $5 instead of 2.9% + 30¢ for a card.
+                "us_bank_account_ach_payments": {"requested": True},
             },
             business_type="individual",  # solar array owners; can be upgraded
             metadata={
@@ -376,6 +422,24 @@ def _mint_checkout_session(*, tenant, row, customer_email: Optional[str],
     # NOT datetime.utcnow().timestamp() — the latter treats naive UTC as local
     # time and can land >24h out on non-UTC hosts.
     expires_at = int(time.time()) + CHECKOUT_TTL_SECONDS
+    model = charge_model_for(tenant)
+    acct = tenant.stripe_connect_account_id
+    pi_data: dict = {
+        "application_fee_amount": int(row.fee_cents or 0),
+        "metadata": meta,
+        "description": f"Solar credit · {cust} · {inv_no}"[:500],
+    }
+    extra: dict = {}
+    if model == "direct":
+        # The Session is created ON the operator's account (Stripe-Account
+        # header). Stripe debits its processing fee from THEIR balance and
+        # transfers application_fee_amount to the platform.
+        extra["stripe_account"] = acct
+    else:
+        pi_data["transfer_data"] = {"destination": acct}
+    pmt = payment_method_types()
+    if pmt:
+        extra["payment_method_types"] = pmt
     session = stripe.checkout.Session.create(
         mode="payment",
         success_url=success_url + "&session_id={CHECKOUT_SESSION_ID}",
@@ -394,16 +458,10 @@ def _mint_checkout_session(*, tenant, row, customer_email: Optional[str],
                 },
             },
         }],
-        payment_intent_data={
-            "application_fee_amount": int(row.fee_cents or 0),
-            "transfer_data": {
-                "destination": tenant.stripe_connect_account_id,
-            },
-            "metadata": meta,
-            "description": f"Solar credit · {cust} · {inv_no}"[:500],
-        },
+        payment_intent_data=pi_data,
         metadata=meta,
         expires_at=expires_at,
+        **extra,
     )
     sess_id = session["id"] if isinstance(session, dict) else session.id
     url = session["url"] if isinstance(session, dict) else session.url
@@ -412,7 +470,9 @@ def _mint_checkout_session(*, tenant, row, customer_email: Optional[str],
         pi = pi.get("id")
     return {"id": sess_id, "url": url,
             "payment_intent": pi if isinstance(pi, str) else None,
-            "expires_at": expires_at}
+            "expires_at": expires_at,
+            "charge_model": model,
+            "account": acct if model == "direct" else None}
 
 
 def create_offtaker_payment(db, *, tenant, sub, match,
@@ -525,6 +585,7 @@ def create_offtaker_payment(db, *, tenant, sub, match,
         row.stripe_checkout_session_id = minted["id"]
         row.stripe_payment_intent_id = minted["payment_intent"]
         row.checkout_expires_at = datetime.utcfromtimestamp(minted["expires_at"])
+        row.stripe_account_id = minted["account"]
         row.pay_url = durable_pay_url(tenant, row.pay_token)
         db.commit()
         # Keep the offtaker's default invoice ledger current (open row).
@@ -701,7 +762,7 @@ def resolve_pay_link(db, token: str) -> dict:
     if (row.status == "open" and sid and exp
             and (exp - now).total_seconds() > CHECKOUT_REFRESH_GRACE_SECONDS):
         try:
-            sess = stripe.checkout.Session.retrieve(sid)
+            sess = stripe.checkout.Session.retrieve(sid, **_stripe_kw(row))
             sd = sess.to_dict() if hasattr(sess, "to_dict") else dict(sess)
             if sd.get("status") == "open" and sd.get("url"):
                 return {"action": "redirect", "url": sd["url"], **base}
@@ -717,7 +778,7 @@ def resolve_pay_link(db, token: str) -> dict:
     # Stale / expired / failed / unreadable → a fresh Session on the same row.
     if sid and row.status == "open":
         try:
-            stripe.checkout.Session.expire(sid)   # never two live links per invoice
+            stripe.checkout.Session.expire(sid, **_stripe_kw(row))  # never two live links
         except Exception:  # noqa: BLE001
             pass
     sub = db.get(BillingReportSubscription, row.subscription_id)
@@ -735,6 +796,7 @@ def resolve_pay_link(db, token: str) -> dict:
     row.stripe_checkout_session_id = minted["id"]
     row.stripe_payment_intent_id = minted["payment_intent"]
     row.checkout_expires_at = datetime.utcfromtimestamp(minted["expires_at"])
+    row.stripe_account_id = minted["account"]   # a re-mint may change charge model
     row.status = "open"
     row.error = None
     db.commit()

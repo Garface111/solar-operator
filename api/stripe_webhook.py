@@ -43,6 +43,27 @@ logger = logging.getLogger(__name__)
 
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
+# Events from CONNECTED accounts — direct-charge offtaker payments (Checkout
+# completed / expired / async, charge.refunded) and account.updated — arrive
+# only on a Connect endpoint ("listen to events on connected accounts"), which
+# has its OWN signing secret. Both endpoints point at this handler.
+STRIPE_CONNECT_WEBHOOK_SECRET = os.getenv("STRIPE_CONNECT_WEBHOOK_SECRET", "")
+
+
+def _construct_signed_event(payload: bytes, sig: str | None):
+    """Verify against the account endpoint's secret, then the Connect
+    endpoint's. A connected-account event signed with the Connect secret used
+    to be rejected as "Invalid signature" and silently lost."""
+    tried = [s for s in (STRIPE_WEBHOOK_SECRET, STRIPE_CONNECT_WEBHOOK_SECRET) if s]
+    last: Exception | None = None
+    for secret in tried:
+        try:
+            return stripe.Webhook.construct_event(payload, sig, secret)
+        except stripe.error.SignatureVerificationError as e:
+            last = e
+    if last is not None:
+        raise last
+    raise stripe.error.SignatureVerificationError("no webhook secret configured", sig or "")
 # True when running on Railway (prod). Used to FAIL CLOSED if the signing secret
 # is unset — never accept unsigned billing events in production.
 _ON_RAILWAY = bool(
@@ -684,9 +705,7 @@ async def stripe_webhook(request: Request, stripe_signature: str | None = Header
             raise HTTPException(400, f"Invalid payload: {e}")
     else:
         try:
-            event = stripe.Webhook.construct_event(
-                payload, stripe_signature, STRIPE_WEBHOOK_SECRET
-            )
+            event = _construct_signed_event(payload, stripe_signature)
         except stripe.error.SignatureVerificationError as e:
             logger.warning("webhook: signature verification failed: %s", e)
             raise HTTPException(400, "Invalid signature")

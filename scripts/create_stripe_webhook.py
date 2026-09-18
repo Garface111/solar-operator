@@ -73,7 +73,42 @@ def create_or_update():
         print(f"  STRIPE_WEBHOOK_SECRET={e.secret}")
 
 
+# ── Connect endpoint (connected-account events) ────────────────────────────
+# Offtaker pay links are DIRECT charges (Sep 2026): the Checkout Session and
+# charge live on the operator's connected account, so their events are only
+# delivered to an endpoint created with connect=True — which has its own
+# signing secret. Same handler url, distinguished by a query flag so the two
+# endpoints can be told apart in the Dashboard and in list_all().
+CONNECT_URL = URL + "?connect=1"
+CONNECT_EVENTS = [
+    "checkout.session.completed",
+    "checkout.session.expired",
+    "checkout.session.async_payment_succeeded",
+    "checkout.session.async_payment_failed",
+    "charge.refunded",
+    "account.updated",
+]
+
+
+def create_or_update_connect():
+    endpoints = stripe.WebhookEndpoint.list(limit=100).data
+    existing = [e for e in endpoints if e.url == CONNECT_URL]
+    if existing:
+        e = existing[0]
+        stripe.WebhookEndpoint.modify(e.id, enabled_events=CONNECT_EVENTS)
+        print(f"connect endpoint {e.id}: updated event list to {len(CONNECT_EVENTS)} events")
+    else:
+        e = stripe.WebhookEndpoint.create(
+            url=CONNECT_URL, enabled_events=CONNECT_EVENTS, connect=True,
+            description="Array Operator — connected-account events (offtaker pay links)")
+        print(f"connect endpoint created: {e.id}")
+        print()
+        print("Set on Railway:")
+        print(f"  STRIPE_CONNECT_WEBHOOK_SECRET={e.secret}")
+
+
 if "--list" in sys.argv:
     list_all()
 else:
     create_or_update()
+    create_or_update_connect()
