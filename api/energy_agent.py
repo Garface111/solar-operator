@@ -89,6 +89,13 @@ try:
     MAX_TOOL_ROUNDS = int(os.getenv("EA_MAX_TOOL_ROUNDS", "100") or 100)
 except (TypeError, ValueError):
     MAX_TOOL_ROUNDS = 100
+# Rounds at which we interrupt a long chain to steer it. A high ceiling buys room
+# to think; it does not by itself produce thinking. The failure we actually saw in
+# prod was not "ran out of rounds mid-plan" — it was the agent spending 100 rounds
+# reaching for a capability it did not have (roster removal), then emitting a canned
+# "I paused to stay safe" that told the owner nothing. Steering converts silent
+# thrash into either a finished answer or an honest "I can't do that".
+_STEER_ROUNDS = frozenset({12, 25, 45, 70})
 FORD_ESCALATE_TO = os.getenv("FORD_ALERT_EMAIL", "")  # notify uses default if empty
 
 PERSONA = """You are Energy Agent — the tenant's operating intelligence inside Array Operator.
@@ -275,6 +282,13 @@ CRITICAL — O&M ROSTER HUNGER (Repairs / any O&M question):
     6. Forbidden closes: "Done." / "Got it." / "OK." with no next question when roster is incomplete.
     7. Explain WHY you want it in one breath: so you can draft and send outreach the moment
        an inverter faults — without them babysitting.
+  REMOVING SOMEONE: "delete Rex" / "take him off" / "he's not our tech anymore" /
+    "stop using them" = remove_service_contact. It is a real tool — use it. Do NOT
+    reach for upsert_service_contact(active=false), do NOT go hunting through other
+    tools, and NEVER tell the owner you can't remove a contact. Removal unassigns
+    their arrays and stops outreach on their open cases (which come back needing a
+    tech); say that in one line after you do it. If the name is ambiguous, say which
+    matches you found and ask which one.
   TRUSTED FOLLOW-UPS: the first email to any contact is always Approve & send. Once the
   owner approves ONE send to a contact, follow-ups to that contact go out automatically on
   the check-in cadence — mention this the first time it arms. If the owner says stop
@@ -1525,6 +1539,40 @@ TOOL_DEFS = [
                     "reason": {"type": "string"},
                 },
                 "required": ["name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remove_service_contact",
+            "description": (
+                "REMOVE a person from the O&M/repair roster — this is the tool for "
+                "'delete Rex', 'take Rex off', 'get rid of him', 'he's not our tech "
+                "anymore', 'stop using this contact', 'fire them', 'remove them from "
+                "the repairs tab'. Do NOT try to accomplish removal with "
+                "upsert_service_contact(active=false) and do NOT hunt for another way: "
+                "THIS is the way. Call list_service_contacts first if you don't have "
+                "the contact_id. Removing them also unassigns their arrays and stops "
+                "all scheduled outreach on their open tickets, which are handed back "
+                "as needing a tech; the email history on each case is kept. "
+                "needs_confirm=false when the owner plainly told you to remove them."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "contact_id": {"type": "integer"},
+                    "name": {
+                        "type": "string",
+                        "description": (
+                            "Use when you don't have the id — matched against the "
+                            "roster (case-insensitive, first/full name)."
+                        ),
+                    },
+                    "needs_confirm": {"type": "boolean", "default": True},
+                    "reason": {"type": "string"},
+                },
+                "required": [],
             },
         },
     },
@@ -6593,6 +6641,7 @@ SKILL_REGISTRY: dict[str, dict] = {
                                      "list_email_copy_overrides"}},
     "repairs": {"label": "Repair coordination", "default_on": True,
                 "tools": {"repair_ops_overview", "list_service_contacts", "upsert_service_contact",
+                          "remove_service_contact",
                           "assign_service_contact", "open_repair_ticket", "update_repair_ticket",
                           "draft_repair_checkin", "send_repair_checkin", "log_repair_note",
                           "log_repair_phone_note", "list_repair_tickets", "search_repair_tickets",
@@ -7681,6 +7730,67 @@ def _run_tool(
             return {"ok": True, "contact": ro.serialize_contact(c)}
         except ValueError as e:
             return {"ok": False, "error": str(e)}
+
+    if name == "remove_service_contact":
+        from . import repair_ops as ro
+        contact_id = args.get("contact_id")
+        want = (args.get("name") or "").strip()
+        roster = ro.list_contacts(db, tid, include_inactive=True)
+        if not contact_id and want:
+            low = want.lower()
+            hits = [c for c in roster if (c.name or "").strip().lower() == low]
+            if not hits:
+                hits = [
+                    c for c in roster
+                    if low in (c.name or "").lower()
+                    or (c.name or "").lower().split()[:1] == [low]
+                ]
+            if len(hits) == 1:
+                contact_id = hits[0].id
+            elif len(hits) > 1:
+                return {
+                    "ok": False,
+                    "error": f"more than one contact matches '{want}'",
+                    "candidates": [
+                        {"contact_id": c.id, "name": c.name, "email": c.email}
+                        for c in hits
+                    ],
+                }
+        if not contact_id:
+            return {
+                "ok": False,
+                "error": (
+                    f"no roster contact matches '{want}'" if want
+                    else "contact_id or name required"
+                ),
+                "roster": [
+                    {"contact_id": c.id, "name": c.name, "email": c.email}
+                    for c in roster
+                ],
+            }
+        target = ro.get_contact(db, tid, contact_id)
+        if target is None:
+            return {"ok": False, "error": "contact not found"}
+        needs = bool(args.get("needs_confirm", True))
+        if needs and _user_clearly_directed(user_text, {"name": target.name}):
+            needs = False
+        if needs:
+            return {
+                "status": "pending_confirm",
+                "pending": {"tool": name, "args": {"contact_id": contact_id}},
+                "message": (
+                    args.get("reason")
+                    or f"Remove {target.name} from the repair roster"
+                ) + " — this also unassigns their arrays and stops outreach on their "
+                    "open cases. Confirm to remove.",
+                "needs_confirm": True,
+            }
+        try:
+            summary = ro.soft_delete_contact(db, tid, contact_id)
+            db.commit()
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": True, "applied": True, "removed": summary}
 
     if name == "assign_service_contact":
         from . import repair_ops as ro
@@ -10631,6 +10741,28 @@ def _agent_turn(
                 "tool_call_id": tc.get("id") or tname,
                 "content": json.dumps(out)[:8000],
             })
+        # Long-chain steering — the cheap fix for thrash that a bigger ceiling
+        # cannot buy. The stuck-loop guard below only catches the SAME call
+        # repeated; an agent trying 60 DIFFERENT tools looking for one that does
+        # what was asked sails straight past it into the ceiling.
+        if _round in _STEER_ROUNDS:
+            _tried = sorted({t.get("name") for t in tool_trace if t.get("name")})
+            messages.append({
+                "role": "user",
+                "content": (
+                    f"[system checkpoint] You are {_round} tool rounds into this single "
+                    f"turn. Tools tried so far: {', '.join(_tried) or 'none'}.\n"
+                    "If you already have what you need, ANSWER NOW — do not keep "
+                    "gathering.\n"
+                    "If you have been looking for a tool that does what the owner asked "
+                    "and none of the ones you tried fit, STOP looking. You do not have "
+                    "that capability. Say so plainly in one sentence, say what you CAN "
+                    "do instead, and offer request_capability. Trying more adjacent "
+                    "tools will not make the missing one appear, and silently running "
+                    "out of rounds is the worst outcome for the owner."
+                ),
+            })
+
         # Stuck-loop guard: the same exact tool+args many times is spinning, not
         # progress — the ONLY early stop besides the budget (never a thrift cap).
         if max(_call_counts.values(), default=0) >= 8:
@@ -10641,9 +10773,20 @@ def _agent_turn(
     else:
         # Reached only when bounded and the (high) ceiling is exhausted — real work
         # never gets here; a safety backstop, not a hand-off of the agent's job.
+        _tried = sorted({t.get("name") for t in tool_trace if t.get("name")})
+        log.warning(
+            "EA turn hit the round ceiling (%d) tenant=%s tools_tried=%s",
+            MAX_TOOL_ROUNDS, getattr(tenant, "id", "?"), _tried,
+        )
+        # Say what actually happened. "I paused to stay safe" reads like a policy
+        # stop and hides the real event: the turn ran out of steps without landing,
+        # which almost always means the thing asked for has no tool behind it.
         final_text = final_text or (
-            "That turned into an unusually long chain of steps and I paused to stay safe. "
-            "Here's what I have so far — want me to keep going?")
+            f"I ran {MAX_TOOL_ROUNDS} steps on this without landing it, which usually "
+            "means what you asked for doesn't have a tool behind it yet rather than "
+            "that it's a hard problem. Here's what I got to — tell me what you want "
+            "done and I'll either do it a different way or file it as a capability "
+            "I'm missing.")
 
     if not final_text:
         final_text = (msg.get("content") or "").strip() or (

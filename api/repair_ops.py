@@ -664,14 +664,71 @@ def upsert_contact(
     return c
 
 
-def soft_delete_contact(db, tenant_id: str, contact_id: int) -> None:
+def soft_delete_contact(db, tenant_id: str, contact_id: int) -> dict:
+    """Take a contact off the roster AND stand down everything aimed at them.
+
+    Flipping `active`/`deleted_at` alone left the person half-removed: the roster
+    stopped listing them while their array assignments survived and their open
+    tickets kept a live `next_checkin_at`. The sweep then re-resolved the contact
+    to None and `build_checkin_draft` fell through to the owner's own address —
+    so "take this tech off" quietly became the OWNER receiving "Hello there,
+    following up on the open repair" on the check-in cadence, forever.
+
+    Removal now means removed: no assignments, no scheduled outreach, and the
+    open cases are handed back as tech-less so the normal "who should I call"
+    path picks them up. Per-case history survives on the RepairCheckIn rows and
+    in the ticket note, so nothing about what was already sent is lost.
+
+    Returns what was stood down, so the caller can state it instead of guessing.
+    """
     c = get_contact(db, tenant_id, contact_id)
     if c is None:
         raise ValueError("contact not found")
+
+    name = c.name or f"contact #{contact_id}"
+
+    # 1. Drop every array assignment — they no longer cover any site.
+    assigns = db.execute(
+        select(ArrayServiceAssignment).where(
+            ArrayServiceAssignment.tenant_id == tenant_id,
+            ArrayServiceAssignment.contact_id == contact_id,
+        )
+    ).scalars().all()
+    for row in assigns:
+        db.delete(row)
+
+    # 2. Stand down live outreach on their open tickets.
+    open_tickets = db.execute(
+        select(RepairTicket).where(
+            RepairTicket.tenant_id == tenant_id,
+            RepairTicket.contact_id == contact_id,
+            RepairTicket.status.in_(ACTIVE_TICKET_STATUSES),
+        )
+    ).scalars().all()
+    for t in open_tickets:
+        t.next_checkin_at = None
+        t.contact_id = None
+        # We are no longer waiting on anyone; say so rather than showing a
+        # "waiting on the repair team" card with nobody behind it.
+        if t.status == "waiting_reply":
+            t.status = "open"
+        note = (
+            f"[auto] {name} removed from the roster — outreach stopped. "
+            f"This case has no tech; assign one to resume."
+        )
+        t.tech_note = (t.tech_note + "\n" + note) if t.tech_note else note
+
     c.active = False
     c.deleted_at = now()
     c.is_default = False
     db.flush()
+
+    return {
+        "contact_id": contact_id,
+        "name": name,
+        "arrays_unassigned": len(assigns),
+        "tickets_stood_down": [t.id for t in open_tickets],
+    }
 
 
 def assign_array_contact(
@@ -948,6 +1005,13 @@ def send_checkin(
     prior = _prior_successful_outbound(db, ticket.id)
     # Sequence from real sends, not a possibly-stale counter
     seq = prior + 1
+
+    # Auto path must never fire at a case with no tech — the draft builder would
+    # address the letter to the OWNER as if they were the repair crew.
+    if via == "auto" and contact is None and not force:
+        ticket.next_checkin_at = None
+        db.flush()
+        raise ValueError("auto check-in skipped: no service contact on this ticket")
 
     # Auto path must never re-send the opening letter
     if via == "auto" and prior == 0 and not force:
@@ -3179,6 +3243,15 @@ def _inverter_is_retired(db, tenant_id: str, inverter_id: int | None) -> bool:
 
 # ── autonomous escalation: week-long-down → email the owner for action ────────
 ESCALATE_DAYS = float(os.getenv("EA_ESCALATE_DAYS", "7") or 7)
+# How many unanswered AUTO follow-ups a single ticket may fire before the agent
+# stops nagging and hands the case back to the owner. Observed in prod: one
+# ticket reached "check-in #23" to the same tech — past a point, re-sending is
+# not diligence, it is a machine that cannot take a hint. Approve & send and
+# explicit agent sends are NOT capped; this bounds only the unattended loop.
+try:
+    MAX_AUTO_CHECKINS = int(os.getenv("EA_MAX_AUTO_CHECKINS", "8") or 8)
+except (TypeError, ValueError):
+    MAX_AUTO_CHECKINS = 8
 
 
 def _ticket_loss_usd_month(ticket: RepairTicket) -> float | None:
@@ -3411,6 +3484,13 @@ def process_due(db, tenant: Tenant) -> int:
     sent = 0
     for ticket in due:
         contact = get_contact(db, tenant.id, ticket.contact_id) if ticket.contact_id else None
+        # No tech on this case (never assigned, or removed from the roster) —
+        # there is nobody to follow up WITH. Without this, the draft builder
+        # falls back to the owner's own address and the owner starts receiving
+        # "Hello there, following up on the open repair" addressed to a tech.
+        if contact is None:
+            ticket.next_checkin_at = None
+            continue
         if effective_checkin_mode_for(tenant, contact) not in ("auto", "delay"):
             # Mode says no auto for this contact — clear the stale schedule
             ticket.next_checkin_at = None
@@ -3418,6 +3498,23 @@ def process_due(db, tenant: Tenant) -> int:
         # First letter is never auto
         if (ticket.checkin_count or 0) < 1 and _prior_successful_outbound(db, ticket.id) < 1:
             ticket.next_checkin_at = None
+            continue
+        # Ceiling: stop the unattended loop and let the owner escalation own it.
+        if _prior_successful_outbound(db, ticket.id) >= MAX_AUTO_CHECKINS:
+            ticket.next_checkin_at = None
+            note = (
+                f"[auto] {MAX_AUTO_CHECKINS} check-ins sent with no resolution — "
+                f"auto follow-ups stopped. Needs a decision: push harder, or bring "
+                f"in someone else."
+            )
+            if not (ticket.tech_note or "").endswith(note):
+                ticket.tech_note = (
+                    (ticket.tech_note + "\n" + note) if ticket.tech_note else note
+                )
+            log.info(
+                "auto repair check-in ceiling reached ticket=%s (%d sent)",
+                ticket.id, MAX_AUTO_CHECKINS,
+            )
             continue
         try:
             send_checkin(db, tenant, ticket, via="auto")
@@ -3898,11 +3995,11 @@ def delete_contact_ep(contact_id: int, authorization: str | None = Header(defaul
     tenant = _tenant(authorization)
     with SessionLocal() as db:
         try:
-            soft_delete_contact(db, tenant.id, contact_id)
+            summary = soft_delete_contact(db, tenant.id, contact_id)
             db.commit()
         except ValueError as exc:
             raise HTTPException(404, str(exc))
-        return {"ok": True}
+        return {"ok": True, "removed": summary}
 
 
 @router.post("/v1/array-owners/ops/assign")
