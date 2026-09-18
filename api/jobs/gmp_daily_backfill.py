@@ -72,6 +72,42 @@ def _usable_session(db: Session, account: UtilityAccount) -> Optional[UtilitySes
     return _sessions.session_for_account(db, account)
 
 
+def plan_windows(
+    today: date,
+    window_days: int = WINDOW_DAYS,
+    max_windows: int = MAX_WINDOWS,
+    floor_date: date = MIN_FLOOR_DATE,
+) -> list[tuple[date, date, date]]:
+    """The newest-first walk of (window_start, window_end, fetch_end) cells.
+
+    Pure date arithmetic, no I/O -- so the rule that keeps the sponge finite is
+    testable on its own (see tests/test_gmp_backfill_window_grid.py).
+
+    The grid is anchored at ``floor_date``, NOT at today. That is the whole
+    point: the sponge de-duplicates on the exact (account, window_start,
+    window_end) key, so if the boundaries slide forward a day whenever the job
+    runs, every window looks brand-new, nothing is ever skipped, and each run
+    re-absorbs the account's entire history. That is what grew gmp_usage_raw to
+    21 GB, filled the volume and took the database down on 2026-09-10.
+
+    ``fetch_end`` is the window clamped to "not later than tomorrow" so GMP is
+    never asked for a future range, while the row is still STORED under the
+    stable grid key.
+    """
+    today_end = today + timedelta(days=1)  # inclusive of today
+    cells = ((today_end - floor_date).days // window_days) + 1
+    end = floor_date + timedelta(days=cells * window_days)
+    out: list[tuple[date, date, date]] = []
+    for _ in range(max_windows):
+        start = end - timedelta(days=window_days)
+        if start < floor_date:
+            break
+        if start < today_end:  # skip cells wholly in the future
+            out.append((start, end, min(end, today_end)))
+        end = start
+    return out
+
+
 def _persist_window(
     db: Session,
     account: UtilityAccount,
@@ -212,37 +248,51 @@ def backfill_account(
             if new:
                 jwt = new
 
-        # which windows are already stored (skip set), keyed by (ws, we)
+        # Which windows are already stored AND SETTLED, keyed by (ws, we).
+        # "Settled" = fetched AFTER the window closed, so GMP can no longer add
+        # intervals to it. A window captured while it was still the live window
+        # was necessarily incomplete, so we re-pull it until it closes; the
+        # sponge's unique (account, window) upsert overwrites it in place, so
+        # re-pulling costs nothing in rows.
         stored: set[tuple] = set()
         if not force_refetch:
             for r in db.execute(
                 select(GmpUsageRaw.window_start, GmpUsageRaw.window_end,
-                       GmpUsageRaw.http_status).where(
+                       GmpUsageRaw.http_status, GmpUsageRaw.fetched_at).where(
                     GmpUsageRaw.account_id == account.id)
             ).all():
+                ws_, we_, status_, fetched_ = r[0], r[1], r[2], r[3]
                 # keep 404 windows in the skip set too (don't re-probe the floor)
-                stored.add((r[0], r[1]))
+                if status_ == 404:
+                    stored.add((ws_, we_))
+                elif fetched_ is not None and fetched_.date() > we_:
+                    stored.add((ws_, we_))
 
-        end = date.today() + timedelta(days=1)  # inclusive of today
+        # Anchor the walk to a FIXED grid based at MIN_FLOOR_DATE -- NOT to
+        # today. The skip key is the exact (window_start, window_end) pair, so a
+        # grid that slides with today's date gives every window a brand-new key
+        # on every run: nothing ever matches `stored`, and the job re-absorbs
+        # each account's ENTIRE history (~160 windows back to 2000) twice a day.
+        # That is what grew gmp_usage_raw to 21 GB, filled the 30 GB volume and
+        # took Postgres down on 2026-09-10. A fixed grid makes the key stable,
+        # so each settled window is fetched exactly once, forever.
         empty_streak = 0
         earliest = latest = None
         floor: Optional[date] = None
 
-        for _ in range(max_windows):
-            start = end - timedelta(days=window_days)
-            if start < MIN_FLOOR_DATE:
-                break
+        for start, end, fetch_end in plan_windows(
+            date.today(), window_days, max_windows
+        ):
             key = (start, end)
             # Always re-pull the newest window (idx 0, still-changing data);
             # skip already-stored older windows unless force_refetch.
             is_newest = summary["windows_fetched"] == 0 and summary["windows_skipped"] == 0
             if not force_refetch and key in stored and not is_newest:
                 summary["windows_skipped"] += 1
-                end = start
                 continue
 
             csv_text, parsed, status_code, retried = _fetch_one_window(
-                db, sess, account, jwt, start, end
+                db, sess, account, jwt, start, fetch_end
             )
             if retried and sess.api_token != jwt:
                 jwt = sess.api_token  # refreshed mid-loop
@@ -256,7 +306,6 @@ def backfill_account(
                 if empty_streak >= EMPTY_STREAK_STOP:
                     floor = floor or (latest and start)
                     break
-                end = start
                 continue
             if status_code != 200:
                 # Retry with backoff before giving up on this window -- a single
@@ -267,7 +316,7 @@ def backfill_account(
                 for attempt, backoff in enumerate(WINDOW_ERROR_BACKOFF_SECONDS, start=1):
                     time.sleep(backoff)
                     csv_text, parsed, status_code, retried = _fetch_one_window(
-                        db, sess, account, jwt, start, end
+                        db, sess, account, jwt, start, fetch_end
                     )
                     if retried and sess.api_token != jwt:
                         jwt = sess.api_token
@@ -295,7 +344,6 @@ def backfill_account(
                 latest = parsed["interval_max"] if latest is None else max(latest, parsed["interval_max"])
             # commit per window so a later failure can't lose absorbed data
             db.commit()
-            end = start
 
         floor = floor or earliest
         summary["earliest_day"] = earliest.isoformat() if earliest else None
