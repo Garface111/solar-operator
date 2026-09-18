@@ -31,6 +31,24 @@
 #         --environment production --service worker
 #     railway up --service worker --environment production --detach
 
+# ── Energy Agent on the Claude subscription (opt-in) ────────────────────────
+# EA_CLAUDE_CLI=1 routes the Energy Agent's brain through the Claude Code CLI on
+# Ford's subscription instead of a metered key (both metered providers ran out
+# of credits on 2026-09-10). The CLI is not in the Railpack image, so fetch it
+# here -- the native installer needs no Node. Guarded three ways: only when the
+# flag is armed, only when the binary is missing, and never fatal. If this
+# fails, api/claude_cli.py reports "not installed" and the brain chain simply
+# falls through to the next provider.
+export PATH="$HOME/.local/bin:$PATH"
+if [ "$EA_CLAUDE_CLI" = "1" ] && ! command -v claude >/dev/null 2>&1; then
+  echo "start.sh: EA_CLAUDE_CLI=1 and no claude binary — installing Claude Code"
+  if curl -fsSL --max-time 120 https://claude.ai/install.sh -o /tmp/claude-install.sh 2>/dev/null; then
+    sh /tmp/claude-install.sh >/tmp/claude-install.log 2>&1       && echo "start.sh: Claude Code installed at $(command -v claude)"       || echo "start.sh: WARNING Claude Code install failed (see /tmp/claude-install.log) — EA falls through to the next brain"
+  else
+    echo "start.sh: WARNING could not download the Claude Code installer — EA falls through to the next brain"
+  fi
+fi
+
 if [ "$CLOUD_CAPTURE_HARVESTER" = "1" ]; then
   echo "start.sh: launching Cloud Capture harvester (Xvfb :99)"
   Xvfb :99 -screen 0 1366x900x24 >/tmp/xvfb.log 2>&1 &

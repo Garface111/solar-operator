@@ -43,6 +43,7 @@ from .db import SessionLocal
 from .models import Array, Base, Client, Tenant
 from .notify import send_internal_alert
 from .report_arrays import not_vendor_only
+from . import claude_cli
 
 log = logging.getLogger("energy_agent")
 router = APIRouter()
@@ -9497,11 +9498,21 @@ def _call_llm(
     tool_defs = tools if tools is not None else TOOL_DEFS
     primary = (os.getenv("ENERGY_AGENT_LLM_PRIMARY") or "grok").strip().lower()
     order = []
-    if primary in ("claude", "anthropic", "cloth"):
+    if primary in ("claude-cli", "claude_cli", "cli", "subscription", "max"):
+        order = ["claude_cli", "claude", "grok"]
+    elif primary in ("claude", "anthropic", "cloth"):
         order = ["claude", "grok"]
     else:
         # Default Grok-first — bills Ford's Grok Build credits when OIDC is wired
         order = ["grok", "claude"]
+    # When the subscription backend is armed it is ALWAYS the last resort, even
+    # if it is not primary: metered providers run out of credits (both did, on
+    # the same day, 2026-09-10) and a subscription does not. It governs itself
+    # -- see api/claude_cli.py for the concurrency, daily-ceiling and
+    # usage-limit breaker that keep a product outage from becoming a personal
+    # quota outage.
+    if claude_cli.enabled() and "claude_cli" not in order:
+        order.append("claude_cli")
     last_err = None
     for who in order:
         is_primary = who == order[0]
@@ -9510,6 +9521,8 @@ def _call_llm(
                 return _call_grok(messages, tool_defs, max_tokens=max_tokens)
             if who == "claude" and ANTHROPIC_API_KEY:
                 return _call_anthropic(messages, tool_defs, max_tokens=max_tokens)
+            if who == "claude_cli" and claude_cli.enabled():
+                return claude_cli.call(messages, tool_defs, max_tokens=max_tokens)
             if is_primary:
                 _alert_primary_llm_down(who, "not configured (missing key/credential)")
         except Exception as e:
