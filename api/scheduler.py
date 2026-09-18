@@ -1589,6 +1589,26 @@ def stop() -> None:
         logger.exception("scheduler stop failed")
 
 
+
+def send_due_offtaker_reports() -> None:
+    """Daily: mail the monthly offtaker billing summary to any tenant whose
+    period has finished sending and has aged past its lag (default 15 days).
+
+    The work and the exactly-once guard both live in billing/monthly_report.py;
+    this is only the clock. Runs daily rather than monthly because the trigger
+    is "N days after the LAST invoice went out", which lands on a different
+    calendar date for every operator and every cycle.
+    """
+    try:
+        from .billing import monthly_report as mr
+        res = mr.run_due_reports()
+        if res.get("sent") or res.get("errors"):
+            logger.info("offtaker monthly reports: %s", res)
+    except Exception:  # noqa: BLE001
+        logger.exception("offtaker monthly report pass failed")
+
+
+
 def start():
     """Register all jobs and start BackgroundScheduler. Idempotent.
 
@@ -1603,6 +1623,16 @@ def start():
     scheduler.add_job(
         enqueue_pull_for_all_tenants,
         "interval", hours=6, id="enqueue_pull_bills", replace_existing=True,
+    )
+
+    # Monthly offtaker billing summary — fires N days after a period's last
+    # invoice, so the check is daily and the send is event-driven.
+    scheduler.add_job(
+        send_due_offtaker_reports,
+        CronTrigger(hour=13, minute=20),
+        id="send_due_offtaker_reports",
+        replace_existing=True,
+        max_instances=1,
     )
     # Every 8 min: keep the bill-audit reconcile sweep HOT for active AO tenants so
     # the "Doesn't match GMP" KPI + Bill audit load instantly (Ford 2026-07-07). 8 min

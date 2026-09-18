@@ -6144,3 +6144,197 @@ async def draft_offtaker_from_lead(
             "hint": "Open Invoices to set the final share, bind the utility bill if needed, and generate the first draft. Submit the utility membership change outside AO.",
         },
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Monthly offtaker billing summary  (Ford / Norwich Technologies, Sep 2026)
+#
+# One spreadsheet per period covering every offtaker — name, email, generation,
+# amount billed, paid or not — mailed automatically N days after the LAST
+# invoice of that period went out. Surfaced in the invoicing rail directly
+# below "Utility bill archive". Logic lives in billing/monthly_report.py; these
+# are the thin HTTP edges.
+# ═══════════════════════════════════════════════════════════════════════════
+
+class MonthlyReportSettings(BaseModel):
+    enabled: Optional[bool] = None
+    lag_days: Optional[int] = None
+    recipient: Optional[str] = None
+
+
+def _monthly_report_row_json(r) -> dict:
+    return {
+        "id": r.id,
+        "period_key": r.period_key,
+        "sent_at": r.sent_at.isoformat() + "Z" if r.sent_at else None,
+        "anchor_sent_at": (r.anchor_sent_at.isoformat() + "Z"
+                           if r.anchor_sent_at else None),
+        "recipient": r.recipient,
+        "trigger": r.trigger,
+        "offtaker_count": r.offtaker_count,
+        "paid_count": r.paid_count,
+        "total_kwh": r.total_kwh,
+        "total_billed_usd": r.total_billed_usd,
+        "total_collected_usd": r.total_collected_usd,
+        "filename": r.filename,
+        "size_bytes": len(r.xlsx_bytes or b"") or None,
+        "error": r.error,
+    }
+
+
+@router.get("/monthly-report/manifest")
+def monthly_report_manifest(authorization: Optional[str] = Header(default=None)):
+    """Past summaries + when the next one is due. Drives the rail panel."""
+    from ..models import OfftakerMonthlyReport, Tenant
+    from . import monthly_report as mr
+
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(OfftakerMonthlyReport)
+            .where(OfftakerMonthlyReport.tenant_id == t.id)
+            .order_by(OfftakerMonthlyReport.period_key.desc())
+            .limit(60)
+        ).scalars().all()
+        tenant = db.get(Tenant, t.id) or t
+        try:
+            nxt = mr.next_due_at(db, tenant)
+        except Exception:  # noqa: BLE001
+            logger.exception("monthly-report manifest: next_due_at failed")
+            nxt = None
+        return {
+            "ok": True,
+            "reports": [_monthly_report_row_json(r) for r in rows],
+            "next": nxt,
+            "settings": {
+                "enabled": bool(getattr(tenant, "offtaker_report_enabled", True)),
+                "lag_days": mr.lag_days_for(tenant),
+                "recipient": (getattr(tenant, "offtaker_report_recipient", None)
+                              or tenant.contact_email),
+                "recipient_is_default": not getattr(
+                    tenant, "offtaker_report_recipient", None),
+            },
+        }
+
+
+@router.post("/monthly-report/settings")
+def monthly_report_settings(body: MonthlyReportSettings,
+                            authorization: Optional[str] = Header(default=None)):
+    """Update the schedule. lag_days is clamped to 0..90 — a negative lag would
+    fire before the invoices exist and a huge one silently disables the report,
+    which the on/off switch should express instead."""
+    from ..models import Tenant
+    from . import monthly_report as mr
+
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        tenant = db.get(Tenant, t.id)
+        if tenant is None:
+            raise HTTPException(404, "tenant not found")
+        if body.enabled is not None:
+            tenant.offtaker_report_enabled = bool(body.enabled)
+        if body.lag_days is not None:
+            try:
+                tenant.offtaker_report_lag_days = max(0, min(90, int(body.lag_days)))
+            except (TypeError, ValueError):
+                raise HTTPException(400, "lag_days must be a whole number of days")
+        if body.recipient is not None:
+            v = (body.recipient or "").strip()
+            if v and "@" not in v:
+                raise HTTPException(400, "recipient must be an email address")
+            tenant.offtaker_report_recipient = v or None
+        db.commit()
+        return {
+            "ok": True,
+            "settings": {
+                "enabled": bool(tenant.offtaker_report_enabled),
+                "lag_days": mr.lag_days_for(tenant),
+                "recipient": (tenant.offtaker_report_recipient
+                              or tenant.contact_email),
+                "recipient_is_default": not tenant.offtaker_report_recipient,
+            },
+        }
+
+
+@router.get("/monthly-report/preview")
+def monthly_report_preview(period: Optional[str] = None,
+                           authorization: Optional[str] = Header(default=None)):
+    """What the sheet WOULD say right now — rows as JSON, nothing sent, nothing
+    recorded. `period` defaults to the most recently billed period."""
+    from ..models import Tenant
+    from . import monthly_report as mr
+
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        tenant = db.get(Tenant, t.id) or t
+        pk = (period or "").strip()
+        if not pk:
+            nxt = mr.next_due_at(db, tenant)
+            pk = (nxt or {}).get("period_key") or datetime.utcnow().strftime("%Y-%m")
+        rows = mr.collect_rows(db, tenant, pk)
+        summary = mr.summarize(rows)
+        clean = []
+        for r in rows:
+            d = {k: v for k, v in r.items() if not k.startswith("_")}
+            for key in ("paid_date", "sent_date"):
+                if d.get(key) is not None:
+                    d[key] = str(d[key])
+            d["paid_flag"] = bool(r.get("_paid"))
+            clean.append(d)
+        return {"ok": True, "period_key": pk, "rows": clean, "summary": summary}
+
+
+@router.post("/monthly-report/send-now")
+def monthly_report_send_now(period: Optional[str] = None,
+                            authorization: Optional[str] = Header(default=None)):
+    """Send this period's summary immediately instead of waiting out the lag.
+
+    Records the same exactly-once row the scheduler uses, so a manual send also
+    suppresses the automatic one for that period — the operator gets the
+    summary once, however it was triggered."""
+    from ..models import Tenant
+    from . import monthly_report as mr
+
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    with SessionLocal() as db:
+        tenant = db.get(Tenant, t.id)
+        if tenant is None:
+            raise HTTPException(404, "tenant not found")
+        pk = (period or "").strip()
+        if not pk:
+            nxt = mr.next_due_at(db, tenant)
+            pk = (nxt or {}).get("period_key")
+        if not pk:
+            raise HTTPException(
+                400, "No billed period to report on yet — send some invoices first.")
+        res = mr.send_report(
+            db, tenant, pk, trigger="manual",
+            recipient=(getattr(tenant, "offtaker_report_recipient", None)
+                       or tenant.contact_email),
+        )
+        if res.get("duplicate"):
+            raise HTTPException(
+                409, f"The {pk} summary has already been sent.")
+        return res
+
+
+@router.get("/monthly-report/{report_id}.xlsx")
+def monthly_report_download(report_id: int,
+                            authorization: Optional[str] = Header(default=None)):
+    """The exact bytes that were emailed — not a regeneration."""
+    from ..models import OfftakerMonthlyReport
+
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        r = db.get(OfftakerMonthlyReport, report_id)
+        if r is None or r.tenant_id != t.id:
+            raise HTTPException(404, "report not found")
+        if not r.xlsx_bytes:
+            raise HTTPException(404, "no workbook stored for that report")
+        fname = r.filename or f"offtaker-summary-{r.period_key}.xlsx"
+        return Response(
+            content=r.xlsx_bytes,
+            media_type=("application/vnd.openxmlformats-officedocument"
+                        ".spreadsheetml.sheet"),
+            headers={"Content-Disposition": f'attachment; filename="{fname}"'})
