@@ -42,8 +42,22 @@
 export PATH="$HOME/.local/bin:$PATH"
 if [ "$EA_CLAUDE_CLI" = "1" ] && ! command -v claude >/dev/null 2>&1; then
   echo "start.sh: EA_CLAUDE_CLI=1 and no claude binary — installing Claude Code"
-  if curl -fsSL --max-time 120 https://claude.ai/install.sh -o /tmp/claude-install.sh 2>/dev/null; then
-    sh /tmp/claude-install.sh >/tmp/claude-install.log 2>&1       && echo "start.sh: Claude Code installed at $(command -v claude)"       || echo "start.sh: WARNING Claude Code install failed (see /tmp/claude-install.log) — EA falls through to the next brain"
+  # The Railpack image ships no curl/wget (verified 2026-09-18), so railpack.json
+  # now installs curl -- but fall back to python's urllib rather than trust that,
+  # since python is the one interpreter this image is guaranteed to have. The
+  # installer itself is a #!/bin/bash script: run it with bash, not sh.
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL --max-time 120 https://claude.ai/install.sh -o /tmp/claude-install.sh 2>/dev/null || true
+  else
+    python - <<'PYDL' >/dev/null 2>&1 || true
+import urllib.request
+req = urllib.request.Request("https://claude.ai/install.sh", headers={"User-Agent": "curl/8"})
+with urllib.request.urlopen(req, timeout=60) as r, open("/tmp/claude-install.sh", "wb") as f:
+    f.write(r.read())
+PYDL
+  fi
+  if [ -s /tmp/claude-install.sh ]; then
+    bash /tmp/claude-install.sh >/tmp/claude-install.log 2>&1       && echo "start.sh: Claude Code installed at $(command -v claude)"       || echo "start.sh: WARNING Claude Code install failed (see /tmp/claude-install.log) — EA falls through to the next brain"
   else
     echo "start.sh: WARNING could not download the Claude Code installer — EA falls through to the next brain"
   fi

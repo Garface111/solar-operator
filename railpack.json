@@ -7,7 +7,9 @@
       "fonts-dejavu-core",
       "git",
       "ca-certificates",
-      "openssh-client"
+      "openssh-client",
+      "curl",
+      "unzip"
     ]
   }
 }
