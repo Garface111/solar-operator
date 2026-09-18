@@ -28,6 +28,9 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import re
+
+from sqlalchemy import select
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
 
@@ -318,6 +321,58 @@ def _summary_line(s: dict) -> str:
 
 # ── scheduling ─────────────────────────────────────────────────────────────
 
+# Max stored length of the recipient list. The binding constraint is NOT the
+# settings columns (Tenant.offtaker_report_recipient and
+# OfftakerMonthlyReport.recipient are both String(400)) but
+# email_archive.EmailArchive.to_email, which is String(300) and records every
+# send. Clamp to the narrowest column in the path so an accepted list can never
+# truncate mid-address in the audit trail. Validated at the edge, so a too-long
+# list is REFUSED with a clear message rather than silently cut.
+RECIPIENTS_MAXLEN = 300
+
+
+def parse_recipients(raw) -> list[str]:
+    """Split an operator-entered recipient field into addresses.
+
+    Accepts comma, semicolon, whitespace or newline separated input — people
+    paste from a mail client, a spreadsheet cell, or type it by hand, and all
+    three produce different separators. De-duplicated case-insensitively while
+    preserving the order typed, so the first-listed address stays first.
+    """
+    if not raw:
+        return []
+    if isinstance(raw, (list, tuple, set)):
+        parts = [str(x) for x in raw]
+    else:
+        parts = re.split(r"[,;\s]+", str(raw))
+    out: list[str] = []
+    seen: set[str] = set()
+    for part in parts:
+        addr = part.strip().strip("<>").strip()
+        if not addr:
+            continue
+        k = addr.lower()
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(addr)
+    return out
+
+
+def format_recipients(addrs) -> str:
+    """The canonical stored form: comma-space separated, in order."""
+    return ", ".join(parse_recipients(addrs))
+
+
+def recipients_for(tenant) -> list[str]:
+    """Where this tenant's summary goes — the explicit list if set, else the
+    account contact. Always a list, possibly empty."""
+    explicit = parse_recipients(getattr(tenant, "offtaker_report_recipient", None))
+    if explicit:
+        return explicit
+    return parse_recipients(getattr(tenant, "contact_email", None))
+
+
 def lag_days_for(tenant) -> int:
     v = getattr(tenant, "offtaker_report_lag_days", None)
     try:
@@ -373,8 +428,12 @@ def due_period(db, tenant, now: Optional[datetime] = None) -> Optional[dict]:
                 OfftakerMonthlyReport.period_key == pk,
             )
         ).scalars().first()
-        if already:
-            return None  # newest aged period already reported → nothing due
+        # Exactly-once on DELIVERY, not on attempt. A row whose send failed
+        # (sent_at NULL, error set) is retryable — otherwise one bad address
+        # or a transient mailer error silently costs that month's summary
+        # forever, with no operator-visible way to recover it.
+        if already is not None and already.sent_at is not None:
+            return None  # newest aged period already delivered → nothing due
         return {"period_key": pk, "anchor_sent_at": anchor,
                 "due_at": anchor + timedelta(days=lag)}
     return None
@@ -410,9 +469,9 @@ def next_due_at(db, tenant) -> Optional[dict]:
             OfftakerMonthlyReport.period_key == pk,
         )
     ).scalars().first()
-    if done:
+    if done is not None and done.sent_at is not None:
         return {"period_key": pk, "already_sent": True,
-                "sent_at": done.sent_at.isoformat() + "Z" if done.sent_at else None}
+                "sent_at": done.sent_at.isoformat() + "Z"}
     lag = lag_days_for(tenant)
     return {"period_key": pk, "already_sent": False,
             "anchor_sent_at": by_period[pk].isoformat() + "Z",
@@ -453,7 +512,10 @@ def send_report(db, tenant, period_key: str, *, anchor_sent_at=None,
 
     built = generate(db, tenant, period_key)
     s = built["summary"]
-    to = (recipient or getattr(tenant, "contact_email", None) or "").strip()
+    # `recipient` may be a string (possibly a comma-separated list) or a list;
+    # falling back to the tenant's configured recipients, then contact_email.
+    to_list = parse_recipients(recipient) if recipient else recipients_for(tenant)
+    to = format_recipients(to_list)
 
     row = OfftakerMonthlyReport(
         tenant_id=tenant.id,
@@ -469,16 +531,46 @@ def send_report(db, tenant, period_key: str, *, anchor_sent_at=None,
         filename=built["filename"],
         xlsx_bytes=built["xlsx"],
     )
-    db.add(row)
-    try:
+    # Reuse a prior attempt that never actually went out, rather than tripping
+    # the unique index and refusing forever. A row WITH sent_at is a real
+    # delivery and is still untouchable.
+    prior = db.execute(
+        select(OfftakerMonthlyReport).where(
+            OfftakerMonthlyReport.tenant_id == tenant.id,
+            OfftakerMonthlyReport.period_key == period_key,
+        )
+    ).scalars().first()
+    if prior is not None:
+        if prior.sent_at is not None:
+            logger.info("monthly report: %s %s already delivered — not re-sending",
+                        tenant.id, period_key)
+            return {"ok": False, "duplicate": True, "period_key": period_key}
+        # Refresh the failed row in place with this attempt's numbers.
+        prior.anchor_sent_at = anchor_sent_at or prior.anchor_sent_at
+        prior.recipient = to or None
+        prior.trigger = trigger
+        prior.offtaker_count = s["offtaker_count"]
+        prior.paid_count = s["paid_count"]
+        prior.total_kwh = s["total_kwh"]
+        prior.total_billed_usd = s["total_billed_usd"]
+        prior.total_collected_usd = s["total_collected_usd"]
+        prior.filename = built["filename"]
+        prior.xlsx_bytes = built["xlsx"]
+        prior.error = None
+        row = prior
         db.commit()
-    except IntegrityError:
-        db.rollback()
-        logger.info("monthly report: %s %s already recorded — not re-sending",
-                    tenant.id, period_key)
-        return {"ok": False, "duplicate": True, "period_key": period_key}
+    else:
+        db.add(row)
+        try:
+            db.commit()
+        except IntegrityError:
+            # Lost a race with a concurrent worker — it owns this period.
+            db.rollback()
+            logger.info("monthly report: %s %s claimed concurrently — not re-sending",
+                        tenant.id, period_key)
+            return {"ok": False, "duplicate": True, "period_key": period_key}
 
-    if not to:
+    if not to_list:
         row.error = "no recipient on file"
         db.commit()
         return {"ok": False, "reason": "no_recipient", "period_key": period_key,
@@ -488,7 +580,11 @@ def send_report(db, tenant, period_key: str, *, anchor_sent_at=None,
     body = _email_body(tenant, period_key, s, built)
     try:
         ok = _send_via_resend(
-            to=to, subject=subject, html=body["html"], text=body["text"],
+            # One email addressed to everyone (not N separate sends): the
+            # operator and whoever they added should see the same thread, and
+            # the mailer takes a list natively.
+            to=(to_list[0] if len(to_list) == 1 else to_list),
+            subject=subject, html=body["html"], text=body["text"],
             # Resend wants base64 TEXT, not raw bytes (see notify._send_via_resend
             # callers: every one b64-encodes before handing the dict over).
             attachments=[{
@@ -592,7 +688,8 @@ def run_due_reports(now: Optional[datetime] = None) -> dict:
                     continue
                 res = send_report(db, t, due["period_key"],
                                   anchor_sent_at=due["anchor_sent_at"],
-                                  trigger="scheduled")
+                                  trigger="scheduled",
+                                  recipient=recipients_for(t))
                 if res.get("ok"):
                     sent += 1
                     logger.info("monthly offtaker report sent: %s %s (%s offtakers)",

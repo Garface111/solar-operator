@@ -6209,8 +6209,8 @@ def monthly_report_manifest(authorization: Optional[str] = Header(default=None))
             "settings": {
                 "enabled": bool(getattr(tenant, "offtaker_report_enabled", True)),
                 "lag_days": mr.lag_days_for(tenant),
-                "recipient": (getattr(tenant, "offtaker_report_recipient", None)
-                              or tenant.contact_email),
+                "recipient": mr.format_recipients(mr.recipients_for(tenant)),
+                "recipients": mr.recipients_for(tenant),
                 "recipient_is_default": not getattr(
                     tenant, "offtaker_report_recipient", None),
             },
@@ -6239,18 +6239,32 @@ def monthly_report_settings(body: MonthlyReportSettings,
             except (TypeError, ValueError):
                 raise HTTPException(400, "lag_days must be a whole number of days")
         if body.recipient is not None:
-            v = (body.recipient or "").strip()
-            if v and "@" not in v:
-                raise HTTPException(400, "recipient must be an email address")
-            tenant.offtaker_report_recipient = v or None
+            # One or more addresses, comma/semicolon/whitespace separated. Each
+            # is checked individually so the error can NAME the bad one rather
+            # than rejecting the whole list opaquely.
+            addrs = mr.parse_recipients(body.recipient)
+            bad = [a for a in addrs if not _re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", a)]
+            if bad:
+                raise HTTPException(
+                    400,
+                    ("Not a valid email address: "
+                     + ", ".join(bad[:3])
+                     + (" …" if len(bad) > 3 else "")))
+            joined = mr.format_recipients(addrs)
+            if len(joined) > mr.RECIPIENTS_MAXLEN:
+                raise HTTPException(
+                    400,
+                    f"That is too many addresses to store ({len(joined)} characters, "
+                    f"limit {mr.RECIPIENTS_MAXLEN}). Use a distribution list instead.")
+            tenant.offtaker_report_recipient = joined or None
         db.commit()
         return {
             "ok": True,
             "settings": {
                 "enabled": bool(tenant.offtaker_report_enabled),
                 "lag_days": mr.lag_days_for(tenant),
-                "recipient": (tenant.offtaker_report_recipient
-                              or tenant.contact_email),
+                "recipient": mr.format_recipients(mr.recipients_for(tenant)),
+                "recipients": mr.recipients_for(tenant),
                 "recipient_is_default": not tenant.offtaker_report_recipient,
             },
         }
@@ -6310,8 +6324,7 @@ def monthly_report_send_now(period: Optional[str] = None,
                 400, "No billed period to report on yet — send some invoices first.")
         res = mr.send_report(
             db, tenant, pk, trigger="manual",
-            recipient=(getattr(tenant, "offtaker_report_recipient", None)
-                       or tenant.contact_email),
+            recipient=mr.recipients_for(tenant),
         )
         if res.get("duplicate"):
             raise HTTPException(

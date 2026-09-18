@@ -186,21 +186,44 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
     try:
         import sys as _sys0
         from . import email_archive as _pf
-        _to = to if isinstance(to, str) else (list(to) or [""])[0]
-        # Never gate our own alerting on DNS — if that path broke we would lose
-        # the very channel that reports the breakage.
-        if not _pf.is_internal(_to, subject):
-            deliverable, why = _pf.preflight(_to)
-            if not deliverable:
-                try:
-                    f0 = _sys0._getframe(1)
-                    src0 = f"{os.path.basename(f0.f_code.co_filename)}:{f0.f_code.co_name}"[:80]
-                except Exception:  # noqa: BLE001
-                    src0 = None
-                _pf.record_blocked(_to, subject, why, source=src0)
-                _send_via_resend._last_id = None
-                _send_via_resend._last_error = f"preflight: {why}"
-                return False
+        # PER-RECIPIENT gate. `to` may be a list (the monthly offtaker summary
+        # mails the operator plus whoever they added). Checking only to[0] and
+        # aborting the whole send meant one mistyped domain silently cost every
+        # correctly-spelled recipient their email, and addresses after the
+        # first were never checked at all. Drop the proven-dead ones; fail the
+        # send only when nobody is left.
+        _tos = [to] if isinstance(to, str) else [str(x) for x in (to or []) if x]
+        _kept: list[str] = []
+        _blocked: list[tuple[str, str]] = []
+        for _addr in _tos:
+            # Never gate our own alerting on DNS — if that path broke we would
+            # lose the very channel that reports the breakage.
+            if _pf.is_internal(_addr, subject):
+                _kept.append(_addr)
+                continue
+            deliverable, why = _pf.preflight(_addr)
+            if deliverable:
+                _kept.append(_addr)
+            else:
+                _blocked.append((_addr, why))
+        if _blocked:
+            try:
+                f0 = _sys0._getframe(1)
+                src0 = f"{os.path.basename(f0.f_code.co_filename)}:{f0.f_code.co_name}"[:80]
+            except Exception:  # noqa: BLE001
+                src0 = None
+            # One row per blocked address, so the audit trail names everyone
+            # actually affected rather than just the first.
+            for _addr, why in _blocked:
+                _pf.record_blocked(_addr, subject, why, source=src0)
+        if _tos and not _kept:
+            _send_via_resend._last_id = None
+            _send_via_resend._last_error = (
+                "preflight: %s" % (_blocked[0][1] if _blocked else "no deliverable recipient"))
+            return False
+        if _blocked:
+            # Deliver to the survivors.
+            to = _kept[0] if len(_kept) == 1 else _kept
     except Exception as _pfe:  # noqa: BLE001
         logger.warning("email preflight skipped (sending anyway): %s", _pfe)
 
