@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
+import time
 from datetime import datetime
 from typing import Any, Optional
 
@@ -20,6 +22,15 @@ import stripe
 from sqlalchemy import select
 
 logger = logging.getLogger(__name__)
+
+# Stripe hard-caps a Checkout Session's life at 24h; mint just under it.
+CHECKOUT_TTL_SECONDS = 23 * 3600
+# A Session with less than this left is re-minted on click rather than handed
+# to the offtaker, so nobody starts a checkout that dies under them.
+CHECKOUT_REFRESH_GRACE_SECONDS = 15 * 60
+# Path of the durable per-invoice pay link, served through the product domain's
+# same-origin /v1 proxy (see array-operator public/_redirects).
+PAY_PATH = "/v1/array-operator/billing/pay/"
 
 # Platform fee: basis points of the invoice total (50 = 0.5%). "Scrape a tiny
 # bit" — env-driven so Ford can retune without a code push. Min floor optional.
@@ -319,6 +330,91 @@ def _amount_cents_from_match(match) -> int:
     return dollars_to_cents(ci.get("amount_owed"))
 
 
+def durable_pay_url(tenant, token: str) -> str:
+    """The url that goes on the invoice and in the email: OURS, not Stripe's.
+
+    A Checkout Session dies 24h after it is minted (Stripe hard cap) while the
+    invoice says "due within 28 days" — a town clerk opening the email on day
+    three used to land on Stripe's "session expired" page, and a re-send handed
+    out the same dead url. This url is stable for the life of the invoice; the
+    click (resolve_pay_link) mints or refreshes the Session on demand."""
+    from ..branding import app_url
+    base = app_url(getattr(tenant, "product", "array_operator")).rstrip("/")
+    return f"{base}{PAY_PATH}{token}"
+
+
+def _mint_checkout_session(*, tenant, row, customer_email: Optional[str],
+                           period_label: str = "") -> dict:
+    """Create the Checkout Session for an OfftakerPayment row (destination
+    charge + platform application fee). Returns {id, url, payment_intent,
+    expires_at (epoch seconds)}. Raises on Stripe errors — callers decide how
+    to surface them. Shared by the first mint at send time and every re-mint
+    from the durable link, so the two can never charge different shapes."""
+    from ..branding import app_url
+    base = app_url(getattr(tenant, "product", "array_operator")).rstrip("/")
+    # Public offtaker thank-you page — NEVER the owner dashboard.
+    # (Ford 2026-07-13: success used to land on /?paid=1#reports, so a pay-
+    # link open in the owner's browser dropped the offtaker into Array Operator
+    # with whatever so_session was already there. Offtakers must not enter the
+    # app; paid.html has no auth, no SPA, and tells them to close the tab.)
+    success_url = f"{base}/paid?status=ok"
+    cancel_url = f"{base}/paid?status=cancel"
+    inv_no = str(row.invoice_number or row.period_key)
+    cust = row.customer_name or "Offtaker"
+    operator = (getattr(tenant, "company_name", None) or getattr(tenant, "name", None)
+                or "your solar provider")
+    meta = {
+        "kind": "offtaker_invoice",
+        "tenant_id": str(tenant.id),
+        "subscription_id": str(row.subscription_id),
+        "payment_id": str(row.id),
+        "invoice_number": inv_no[:40],
+        "period_key": str(row.period_key)[:40],
+    }
+    # Stripe Checkout requires expires_at < 24h from creation (prod log
+    # 2026-07-13: 30-day expires_at → pay links never minted). Use time.time()
+    # NOT datetime.utcnow().timestamp() — the latter treats naive UTC as local
+    # time and can land >24h out on non-UTC hosts.
+    expires_at = int(time.time()) + CHECKOUT_TTL_SECONDS
+    session = stripe.checkout.Session.create(
+        mode="payment",
+        success_url=success_url + "&session_id={CHECKOUT_SESSION_ID}",
+        cancel_url=cancel_url,
+        customer_email=(customer_email or None),
+        line_items=[{
+            "quantity": 1,
+            "price_data": {
+                "currency": row.currency or "usd",
+                "unit_amount": int(row.amount_cents),
+                "product_data": {
+                    "name": f"Solar credit invoice {inv_no}",
+                    "description": (
+                        f"{cust} · {period_label or row.period_key} · payable to {operator}"
+                    )[:500],
+                },
+            },
+        }],
+        payment_intent_data={
+            "application_fee_amount": int(row.fee_cents or 0),
+            "transfer_data": {
+                "destination": tenant.stripe_connect_account_id,
+            },
+            "metadata": meta,
+            "description": f"Solar credit · {cust} · {inv_no}"[:500],
+        },
+        metadata=meta,
+        expires_at=expires_at,
+    )
+    sess_id = session["id"] if isinstance(session, dict) else session.id
+    url = session["url"] if isinstance(session, dict) else session.url
+    pi = session.get("payment_intent") if isinstance(session, dict) else getattr(session, "payment_intent", None)
+    if isinstance(pi, dict):
+        pi = pi.get("id")
+    return {"id": sess_id, "url": url,
+            "payment_intent": pi if isinstance(pi, str) else None,
+            "expires_at": expires_at}
+
+
 def create_offtaker_payment(db, *, tenant, sub, match,
                             force: bool = False) -> dict:
     """Create (or reuse) an OfftakerPayment + Checkout Session for this invoice.
@@ -367,13 +463,15 @@ def create_offtaker_payment(db, *, tenant, sub, match,
     cust = (match.customer or {}).get("name") or sub.customer_name or "Offtaker"
     operator = getattr(tenant, "company_name", None) or getattr(tenant, "name", None) or "your solar provider"
 
-    # Reuse an open session for the same period+amount (idempotent re-sends).
+    # Reuse the row for the same period+amount (idempotent re-sends). With a
+    # durable link the SAME url keeps working across re-sends, and an expired
+    # Session is no reason for a new row — the click re-mints it.
     if not force:
         existing = db.execute(
             select(OfftakerPayment).where(
                 OfftakerPayment.subscription_id == sub.id,
                 OfftakerPayment.period_key == period_key,
-                OfftakerPayment.status.in_(("open", "paid")),
+                OfftakerPayment.status.in_(("open", "paid", "expired")),
             ).order_by(OfftakerPayment.id.desc())
         ).scalars().first()
         if existing and existing.status == "paid":
@@ -384,9 +482,11 @@ def create_offtaker_payment(db, *, tenant, sub, match,
                 "amount_cents": existing.amount_cents,
                 "fee_cents": existing.fee_cents,
             }
-        if (existing and existing.status == "open"
+        if (existing and existing.status in ("open", "expired")
                 and existing.amount_cents == amount_cents
-                and existing.pay_url):
+                and existing.pay_url and existing.pay_token):
+            # A legacy row (no token) carries the raw Session url, which is
+            # dead within a day — never hand that out again; mint fresh below.
             return {
                 "ok": True, "reused": True,
                 "payment_id": existing.id,
@@ -394,16 +494,6 @@ def create_offtaker_payment(db, *, tenant, sub, match,
                 "amount_cents": existing.amount_cents,
                 "fee_cents": existing.fee_cents,
             }
-
-    from ..branding import app_url
-    base = app_url(getattr(tenant, "product", "array_operator")).rstrip("/")
-    # Public offtaker thank-you page — NEVER the owner dashboard.
-    # (Ford 2026-07-13: success used to land on /?paid=1#reports, so a pay-
-    # link open in the owner's browser dropped the offtaker into Array Operator
-    # with whatever so_session was already there. Offtakers must not enter the
-    # app; paid.html has no auth, no SPA, and tells them to close the tab.)
-    success_url = f"{base}/paid?status=ok"
-    cancel_url = f"{base}/paid?status=cancel"
 
     # Persist the row first so we have a stable payment_id in metadata even if
     # Stripe succeeds and the process dies before a second write.
@@ -417,70 +507,25 @@ def create_offtaker_payment(db, *, tenant, sub, match,
         currency="usd",
         status="open",
         customer_name=str(cust)[:200],
+        pay_token=secrets.token_urlsafe(24),
     )
     db.add(row)
     db.flush()  # get row.id without committing yet
 
-    meta = {
-        "kind": "offtaker_invoice",
-        "tenant_id": str(tenant.id),
-        "subscription_id": str(sub.id),
-        "payment_id": str(row.id),
-        "invoice_number": inv_no[:40],
-        "period_key": period_key[:40],
-    }
     period_label = ""
     ci = match.computed_invoice or {}
     if ci.get("period_start") and ci.get("period_end"):
         period_label = f"{ci['period_start']} → {ci['period_end']}"
 
     try:
-        session = stripe.checkout.Session.create(
-            mode="payment",
-            success_url=success_url + "&session_id={CHECKOUT_SESSION_ID}",
-            cancel_url=cancel_url,
+        minted = _mint_checkout_session(
+            tenant=tenant, row=row,
             customer_email=(getattr(sub, "client_email", None) or None),
-            line_items=[{
-                "quantity": 1,
-                "price_data": {
-                    "currency": "usd",
-                    "unit_amount": amount_cents,
-                    "product_data": {
-                        "name": f"Solar credit invoice {inv_no}",
-                        "description": (
-                            f"{cust} · {period_label or period_key} · payable to {operator}"
-                        )[:500],
-                    },
-                },
-            }],
-            payment_intent_data={
-                "application_fee_amount": fee_cents,
-                "transfer_data": {
-                    "destination": tenant.stripe_connect_account_id,
-                },
-                "metadata": meta,
-                "description": f"Solar credit · {cust} · {inv_no}"[:500],
-            },
-            metadata=meta,
-            # Stripe Checkout requires expires_at < 24h from creation
-            # (prod log 2026-07-13: 30-day expires_at → pay links never minted).
-            # Use time.time() NOT datetime.utcnow().timestamp() — the latter
-            # treats naive UTC as local time and can land >24h out on non-UTC hosts.
-            expires_at=int(__import__("time").time()) + 23 * 3600,
-        )
-        sess_id = session["id"] if isinstance(session, dict) else session.id
-        pay_url = session["url"] if isinstance(session, dict) else session.url
-        pi = None
-        if isinstance(session, dict):
-            pi = session.get("payment_intent")
-        else:
-            pi = getattr(session, "payment_intent", None)
-        if isinstance(pi, dict):
-            pi = pi.get("id")
-
-        row.stripe_checkout_session_id = sess_id
-        row.stripe_payment_intent_id = pi if isinstance(pi, str) else None
-        row.pay_url = pay_url
+            period_label=period_label)
+        row.stripe_checkout_session_id = minted["id"]
+        row.stripe_payment_intent_id = minted["payment_intent"]
+        row.checkout_expires_at = datetime.utcfromtimestamp(minted["expires_at"])
+        row.pay_url = durable_pay_url(tenant, row.pay_token)
         db.commit()
         # Keep the offtaker's default invoice ledger current (open row).
         try:
@@ -491,10 +536,11 @@ def create_offtaker_payment(db, *, tenant, sub, match,
         return {
             "ok": True,
             "payment_id": row.id,
-            "pay_url": pay_url,
+            "pay_url": row.pay_url,            # durable — goes on the invoice
+            "checkout_url": minted["url"],     # the Session behind it, today
             "amount_cents": amount_cents,
             "fee_cents": fee_cents,
-            "session_id": sess_id,
+            "session_id": minted["id"],
         }
     except Exception as e:  # noqa: BLE001
         logger.exception("offtaker Checkout Session failed for sub=%s", sub.id)
@@ -599,6 +645,190 @@ def mark_payment_paid(db, *, session_dict: dict) -> dict:
         "fee_cents": row.fee_cents,
         "notify": notify,
     }
+
+
+def resolve_pay_link(db, token: str) -> dict:
+    """What a click on the durable pay link should do. Never raises.
+
+      {"action": "redirect", "url": …}        → send the offtaker to Stripe
+      {"action": "paid", …}                    → already settled; show a receipt
+      {"action": "unavailable", "reason": …}   → cannot take a payment right now
+      {"action": "not_found"}
+
+    A fresh open Session is reused as-is (one Stripe read); a stale, expired,
+    failed or never-minted one is replaced on the SAME row, so the invoice's
+    single link keeps working for as long as the invoice is open."""
+    from ..models import OfftakerPayment, Tenant, BillingReportSubscription
+
+    tok = (token or "").strip()
+    if not tok or len(tok) > 64:
+        return {"action": "not_found"}
+    row = db.execute(
+        select(OfftakerPayment).where(OfftakerPayment.pay_token == tok)
+    ).scalars().first()
+    if row is None:
+        return {"action": "not_found"}
+    tenant = db.get(Tenant, row.tenant_id)
+    operator = ((getattr(tenant, "company_name", None) or getattr(tenant, "name", None))
+                if tenant else None) or "your solar provider"
+    base = {"payment_id": row.id, "operator": operator,
+            "invoice_number": row.invoice_number, "amount_cents": row.amount_cents,
+            "customer_name": row.customer_name}
+    if row.status == "paid":
+        return {"action": "paid", "paid_at": row.paid_at, **base}
+    if row.status == "refunded":
+        return {"action": "unavailable",
+                "reason": "This invoice was refunded, so nothing is due on it.", **base}
+    if tenant is None:
+        return {"action": "not_found"}
+    if not payments_enabled() or not _stripe_ready():
+        return {"action": "unavailable",
+                "reason": "Online payment is temporarily unavailable.", **base}
+    if not connect_ready(tenant):
+        try:
+            create_or_get_connect_account(db, tenant)
+            db.refresh(tenant)
+        except Exception:  # noqa: BLE001
+            pass
+        if not connect_ready(tenant):
+            return {"action": "unavailable",
+                    "reason": f"{operator} hasn't finished setting up online payments yet.",
+                    **base}
+
+    now = datetime.utcnow()
+    sid = row.stripe_checkout_session_id
+    exp = row.checkout_expires_at
+    if (row.status == "open" and sid and exp
+            and (exp - now).total_seconds() > CHECKOUT_REFRESH_GRACE_SECONDS):
+        try:
+            sess = stripe.checkout.Session.retrieve(sid)
+            sd = sess.to_dict() if hasattr(sess, "to_dict") else dict(sess)
+            if sd.get("status") == "open" and sd.get("url"):
+                return {"action": "redirect", "url": sd["url"], **base}
+            if sd.get("payment_status") == "paid":
+                # The webhook can lag a click; settle it from the source.
+                mark_payment_paid(db, session_dict=sd)
+                db.refresh(row)
+                return {"action": "paid", "paid_at": row.paid_at, **base}
+        except Exception:  # noqa: BLE001
+            logger.warning("pay-link: Session.retrieve failed for %s — re-minting",
+                           sid, exc_info=True)
+
+    # Stale / expired / failed / unreadable → a fresh Session on the same row.
+    if sid and row.status == "open":
+        try:
+            stripe.checkout.Session.expire(sid)   # never two live links per invoice
+        except Exception:  # noqa: BLE001
+            pass
+    sub = db.get(BillingReportSubscription, row.subscription_id)
+    try:
+        minted = _mint_checkout_session(
+            tenant=tenant, row=row,
+            customer_email=(getattr(sub, "client_email", None) or None))
+    except Exception as e:  # noqa: BLE001
+        logger.exception("pay-link: re-mint failed for payment %s", row.id)
+        row.error = f"re-mint failed: {e}"[:500]
+        db.commit()
+        return {"action": "unavailable",
+                "reason": "Online payment is temporarily unavailable — please try "
+                          "again in a few minutes.", **base}
+    row.stripe_checkout_session_id = minted["id"]
+    row.stripe_payment_intent_id = minted["payment_intent"]
+    row.checkout_expires_at = datetime.utcfromtimestamp(minted["expires_at"])
+    row.status = "open"
+    row.error = None
+    db.commit()
+    return {"action": "redirect", "url": minted["url"], "reminted": True, **base}
+
+
+def _row_for_session(db, session_dict: dict):
+    from ..models import OfftakerPayment
+    meta = session_dict.get("metadata") or {}
+    if meta.get("kind") != "offtaker_invoice":
+        return None
+    sess_id = session_dict.get("id")
+    if not sess_id:
+        return None
+    return db.execute(
+        select(OfftakerPayment).where(
+            OfftakerPayment.stripe_checkout_session_id == sess_id)
+    ).scalars().first()
+
+
+def mark_payment_expired(db, *, session_dict: dict) -> dict:
+    """checkout.session.expired — Stripe's 24h window lapsed. Flips only the
+    row whose CURRENT Session this is: a click may already have re-minted a
+    newer Session on the same row, and that one must stay open. The durable
+    link keeps working either way."""
+    row = _row_for_session(db, session_dict)
+    if row is None:
+        return {"ignored": "no matching open offtaker payment",
+                "session": session_dict.get("id")}
+    if row.status != "open":
+        return {"ok": True, "unchanged": row.status, "payment_id": row.id,
+                "tenant": row.tenant_id}
+    row.status = "expired"
+    db.commit()
+    return {"ok": True, "expired": True, "payment_id": row.id,
+            "tenant": row.tenant_id, "durable": bool(row.pay_token)}
+
+
+def mark_payment_async_failed(db, *, session_dict: dict) -> dict:
+    """checkout.session.async_payment_failed — a delayed method (ACH debit)
+    bounced after Checkout completed. The invoice is NOT paid; the row goes to
+    'failed' and the durable link mints a fresh Session on the next click."""
+    row = _row_for_session(db, session_dict)
+    if row is None:
+        return {"ignored": "no matching offtaker payment",
+                "session": session_dict.get("id")}
+    if row.status == "paid":
+        return {"ok": True, "unchanged": "paid", "payment_id": row.id,
+                "tenant": row.tenant_id}
+    row.status = "failed"
+    row.error = "bank payment failed after checkout"
+    db.commit()
+    return {"ok": True, "failed": True, "payment_id": row.id, "tenant": row.tenant_id,
+            "invoice_number": row.invoice_number, "amount_cents": row.amount_cents,
+            "customer_name": row.customer_name, "subscription_id": row.subscription_id}
+
+
+def mark_payment_refunded(db, *, charge_dict: dict) -> dict:
+    """charge.refunded — money went back to the offtaker. A full refund flips
+    the row to 'refunded' so the ledger and the monthly summary stop counting
+    it as collected; a partial refund is noted on the row, which stays paid."""
+    from ..models import OfftakerPayment
+    pi = charge_dict.get("payment_intent")
+    if isinstance(pi, dict):
+        pi = pi.get("id")
+    if not isinstance(pi, str) or not pi:
+        return {"ignored": "charge has no payment_intent"}
+    row = db.execute(
+        select(OfftakerPayment).where(OfftakerPayment.stripe_payment_intent_id == pi)
+    ).scalars().first()
+    if row is None:
+        return {"ignored": "no offtaker payment for this charge", "payment_intent": pi}
+    try:
+        refunded_cents = int(charge_dict.get("amount_refunded") or 0)
+    except (TypeError, ValueError):
+        refunded_cents = 0
+    full = bool(charge_dict.get("refunded")) or (
+        refunded_cents > 0 and refunded_cents >= int(row.amount_cents or 0))
+    if full:
+        row.status = "refunded"
+        row.error = f"refunded {refunded_cents}¢"[:500]
+    else:
+        row.error = f"partially refunded {refunded_cents}¢ of {row.amount_cents}¢"[:500]
+    db.commit()
+    try:
+        from .invoice_ledger import sync_payment_into_ledger
+        sync_payment_into_ledger(db, row)
+    except Exception:  # noqa: BLE001
+        logger.warning("ledger sync after refund failed for payment %s", row.id,
+                       exc_info=True)
+    return {"ok": True, "refunded": full, "refunded_cents": refunded_cents,
+            "payment_id": row.id, "tenant": row.tenant_id,
+            "invoice_number": row.invoice_number, "amount_cents": row.amount_cents,
+            "customer_name": row.customer_name}
 
 
 def send_payment_received_emails(notify: dict) -> dict:

@@ -41,7 +41,8 @@ from datetime import datetime, timedelta, date
 from typing import Optional
 
 from fastapi import APIRouter, Header, HTTPException, UploadFile, File, Form, Query
-from fastapi.responses import StreamingResponse, Response
+from fastapi.responses import StreamingResponse, Response, RedirectResponse, HTMLResponse
+from html import escape as _html_escape
 from pydantic import BaseModel
 from sqlalchemy import select, func, or_
 from sqlalchemy.orm import selectinload
@@ -5920,6 +5921,58 @@ def list_offtaker_payments(
             "created_at": r.created_at.isoformat() if r.created_at else None,
         } for r in rows]
     return {"ok": True, "payments": items, "count": len(items)}
+
+
+# ─── Durable offtaker pay link (PUBLIC — no session) ─────────────────────────
+# The url printed on every offtaker invoice and email. The per-invoice token
+# (32 random url-safe chars) is the only credential — the same trust model as
+# the Stripe Session url it replaces, minus the 24-hour death.
+
+_PAY_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>{title}</title>
+<style>body{{margin:0;background:#f4f7fb;font:16px/1.5 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:#1f2937}}
+main{{max-width:520px;margin:12vh auto;padding:32px;background:#fff;border-radius:14px;box-shadow:0 4px 24px rgba(20,60,120,.08)}}
+h1{{font-size:22px;margin:0 0 8px}}p{{margin:8px 0}}.muted{{color:#6b7280;font-size:14px}}</style></head>
+<body><main><h1>{title}</h1><p>{body}</p><p class="muted">{foot}</p></main></body></html>"""
+
+_NO_STORE = {"Cache-Control": "no-store"}
+
+
+@router.get("/pay/{token}", include_in_schema=False)
+def offtaker_pay_link(token: str):
+    """Mint or refresh the Checkout Session behind an invoice's pay link and
+    send the offtaker there. Stripe caps a Session at 24h; the invoice says
+    "due within 28 days" — this is what makes the button on the email work on
+    day three (and day twenty-seven). Already-paid and not-available cases get
+    a plain page instead of Stripe's error screen."""
+    from .payments import resolve_pay_link
+    with SessionLocal() as db:
+        res = resolve_pay_link(db, token)
+    action = res.get("action")
+    if action == "redirect":
+        return RedirectResponse(res["url"], status_code=303, headers=_NO_STORE)
+    op = _html_escape(res.get("operator") or "your solar provider")
+    inv = _html_escape(str(res.get("invoice_number") or ""))
+    if action == "paid":
+        amt = (res.get("amount_cents") or 0) / 100
+        when = res.get("paid_at")
+        when_s = f" on {when:%B} {when.day}, {when.year}" if when else ""
+        return HTMLResponse(_PAY_PAGE.format(
+            title="This invoice has already been paid",
+            body=f"Invoice {inv} to {op} for ${amt:,.2f} was paid{when_s}. "
+                 "Nothing more is due on it.",
+            foot="You can close this tab."), headers=_NO_STORE)
+    if action == "unavailable":
+        return HTMLResponse(_PAY_PAGE.format(
+            title="Online payment isn't available right now",
+            body=_html_escape(res.get("reason") or ""),
+            foot=f"You can still pay {op} directly using the details on your invoice."),
+            status_code=409, headers=_NO_STORE)
+    return HTMLResponse(_PAY_PAGE.format(
+        title="We couldn't find that invoice link",
+        body="The link may be incomplete or out of date. Please use the Pay button "
+             "in your most recent invoice email.",
+        foot=""), status_code=404, headers=_NO_STORE)
 
 
 # ─── Offtaker Exchange — vacancy + demand + suggestions + draft offtaker ─────

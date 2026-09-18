@@ -1515,6 +1515,22 @@ def main():
                 conn.execute(text(idx_sql))
             except Exception as _e:  # noqa: BLE001 — table may not exist yet on old envs
                 print(f"  (index skipped: {_e})")
+        # 2026-09 durable pay links: the invoice carries /pay/{token}; the click
+        # mints or refreshes the Checkout Session (Stripe expires them at 24h).
+        if not column_exists(conn, "offtaker_payments", "pay_token"):
+            conn.execute(text(
+                "ALTER TABLE offtaker_payments ADD COLUMN pay_token VARCHAR(48)"))
+            print("  + offtaker_payments.pay_token")
+        if not column_exists(conn, "offtaker_payments", "checkout_expires_at"):
+            conn.execute(text(
+                "ALTER TABLE offtaker_payments ADD COLUMN checkout_expires_at TIMESTAMP"))
+            print("  + offtaker_payments.checkout_expires_at")
+        try:
+            conn.execute(text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_offtaker_payments_pay_token "
+                "ON offtaker_payments (pay_token)"))
+        except Exception as _e:  # noqa: BLE001
+            print(f"  (index skipped: {_e})")
         print(f"  {'✓' if inspect(conn).has_table('offtaker_payments') else '✗ MISSING'} "
               f"table offtaker_payments")
 

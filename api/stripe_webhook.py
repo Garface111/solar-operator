@@ -328,6 +328,58 @@ def _process_offtaker_invoice_paid(sess: dict) -> dict:
     return result
 
 
+def _process_checkout_expired(sess: dict) -> dict:
+    """Stripe closed a Checkout Session (24h cap). The offtaker's durable pay
+    link is unaffected — the next click re-mints — but the row must stop
+    claiming a live Session."""
+    with SessionLocal() as db:
+        from .billing.payments import mark_payment_expired
+        return mark_payment_expired(db, session_dict=sess)
+
+
+def _process_checkout_async_failed(sess: dict) -> dict:
+    """A delayed payment (ACH debit) failed after Checkout completed: the
+    invoice is still unpaid. Alert ops so the owner is not left believing the
+    money is on its way."""
+    with SessionLocal() as db:
+        from .billing.payments import mark_payment_async_failed
+        result = mark_payment_async_failed(db, session_dict=sess)
+    if result.get("failed"):
+        amt = (result.get("amount_cents") or 0) / 100
+        send_internal_alert(
+            f"⚠️ Offtaker bank payment FAILED: ${amt:,.2f}",
+            f"Tenant: {result.get('tenant')}\n"
+            f"Subscription: {result.get('subscription_id')}\n"
+            f"Offtaker: {result.get('customer_name')}\n"
+            f"Invoice: {result.get('invoice_number')}\n"
+            f"Payment id: {result.get('payment_id')}\n"
+            f"Session: {sess.get('id')}\n"
+            "The pay link on the invoice still works — the next click mints a "
+            "fresh Checkout Session."
+        )
+    return result
+
+
+def _process_charge_refunded(charge: dict) -> dict:
+    """A refund issued from the Stripe dashboard: the ledger and the monthly
+    summary must stop counting that invoice as collected."""
+    with SessionLocal() as db:
+        from .billing.payments import mark_payment_refunded
+        result = mark_payment_refunded(db, charge_dict=charge)
+    if result.get("ok"):
+        amt = (result.get("refunded_cents") or 0) / 100
+        send_internal_alert(
+            f"↩️ Offtaker invoice {'refunded' if result.get('refunded') else 'partially refunded'}: "
+            f"${amt:,.2f}",
+            f"Tenant: {result.get('tenant')}\n"
+            f"Offtaker: {result.get('customer_name')}\n"
+            f"Invoice: {result.get('invoice_number')}\n"
+            f"Payment id: {result.get('payment_id')}\n"
+            f"Charge: {charge.get('id')}"
+        )
+    return result
+
+
 def _process_connect_account_updated(account: dict) -> dict:
     """V2: Stripe Connect Express account.updated → flip charges_enabled."""
     with SessionLocal() as db:
@@ -663,6 +715,14 @@ async def stripe_webhook(request: Request, stripe_signature: str | None = Header
         "payment_method.detached": _process_payment_method_detached,
         # V2 offtaker pay-links: Connect Express KYC completed / charges enabled.
         "account.updated": _process_connect_account_updated,
+        # Offtaker pay-link lifecycle (Sep 2026): a Session lapsing, a delayed
+        # (ACH) payment landing or bouncing, and dashboard refunds. Without these
+        # "paid" was one-way and an expired link looked like an unpaid invoice.
+        # The Stripe endpoint must be subscribed to these event types.
+        "checkout.session.expired": _process_checkout_expired,
+        "checkout.session.async_payment_succeeded": _process_checkout_completed,
+        "checkout.session.async_payment_failed": _process_checkout_async_failed,
+        "charge.refunded": _process_charge_refunded,
     }
     handler = handlers.get(event_type)
 

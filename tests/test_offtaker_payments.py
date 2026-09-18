@@ -179,7 +179,9 @@ def test_create_payment_mints_checkout_and_persists(monkeypatch):
                 db, tenant=tenant, sub=sub, match=_FakeMatch(amount=100.0))
 
     assert res["ok"] is True
-    assert res["pay_url"].startswith("https://checkout.stripe.com/")
+    # The invoice carries OUR durable link; the Stripe Session sits behind it.
+    assert "/v1/array-operator/billing/pay/" in res["pay_url"]
+    assert res["checkout_url"].startswith("https://checkout.stripe.com/")
     assert res["fee_cents"] == 50
     assert res["amount_cents"] == 10_000
     with SessionLocal() as db:

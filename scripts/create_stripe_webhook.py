@@ -20,6 +20,19 @@ EVENTS = [
     "customer.subscription.deleted",
     "invoice.payment_succeeded",
     "invoice.payment_failed",
+    "setup_intent.succeeded",
+    "payment_method.detached",
+    # Offtaker pay-link lifecycle (Sep 2026) — api/stripe_webhook.py handles
+    # all four; without the subscription an expired link looks unpaid, an ACH
+    # payment never lands, and a refund still counts as collected.
+    "checkout.session.expired",
+    "checkout.session.async_payment_succeeded",
+    "checkout.session.async_payment_failed",
+    "charge.refunded",
+    # Connect Express KYC progress (account.updated arrives on a CONNECT
+    # endpoint with its own signing secret when it comes from connected
+    # accounts — see the audit note in SHARED-BACKLOG 2026-09-18).
+    "account.updated",
 ]
 
 

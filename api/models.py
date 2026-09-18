@@ -1952,8 +1952,18 @@ class OfftakerPayment(Base):
         String(80), nullable=True, index=True)
     stripe_payment_intent_id: Mapped[str | None] = mapped_column(
         String(80), nullable=True, index=True)
+    # For a tokenized row this is OUR durable url (…/billing/pay/{pay_token});
+    # legacy rows hold the raw Stripe Session url, which dies after 24h.
     pay_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # open | paid | expired | failed
+    # Durable pay link (Sep 2026). Stripe caps a Checkout Session at 24h while
+    # the invoice says "due within 28 days", so the invoice/email carry a stable
+    # per-invoice token and the click mints or refreshes the Session on demand
+    # (payments.resolve_pay_link). NULL on rows minted before this existed.
+    pay_token: Mapped[str | None] = mapped_column(
+        String(48), nullable=True, unique=True, index=True)
+    # When the CURRENT Checkout Session lapses (naive UTC); stale → re-mint.
+    checkout_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # open | paid | expired | failed | refunded
     status: Mapped[str] = mapped_column(
         String(16), default="open", server_default="open", nullable=False, index=True)
     customer_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
