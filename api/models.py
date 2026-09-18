@@ -814,8 +814,8 @@ class UtilityAccount(Base):
     TOUCH_MIN_INTERVAL_S = int(os.environ.get("UA_TOUCH_MIN_INTERVAL_S", "300"))
 
     def touch_last_seen(self) -> bool:
-        """Stamp last_seen ONLY if it is meaningfully stale. Returns True if
-        written.
+        """Mark last_seen for a DEFERRED, non-blocking stamp. Returns True if
+        a stamp was scheduled.
 
         WHY (Ford, 2026-07-20 — "I'm getting a lot of these emails"):
         every capture stamped last_seen on EVERY account, unconditionally. Two
@@ -828,14 +828,21 @@ class UtilityAccount(Base):
         fight showed up in the archive: 500s on /v1/sync AND on
         /v1/array-owners/utility-meter-capture.
 
-        The contended write was pure waste: re-stamping a recency marker that
-        was already seconds old. Skipping it when fresh removes almost all of
-        the contention without changing anything an owner can perceive.
+        ROUND 1 (2026-07-20) added the TOUCH_MIN_INTERVAL_S throttle below and
+        said so plainly: it narrows the window, it does not make the write safe.
+        It did not: the archive still carried 176 LockNotAvailable 500s on those
+        two endpoints through 2026-09-18, because a genuinely stale row under a
+        long ingest still enrols in the caller's transaction and blocks.
 
-        NOTE this narrows the WINDOW for contention, it does not make writes
-        safe by itself — a genuinely stale row under a long ingest can still
-        block. That is correct: a real conflict should still surface rather than
-        be silently swallowed.
+        ROUND 2 (2026-09-18) takes the write out of the fight entirely. This is
+        a recency marker with 5-minute granularity feeding the Capture Freshness
+        Heatmap — it is never worth failing a customer's sync for. Instead of
+        dirtying the column (which enrols the row in the caller's long
+        transaction), we register the id on the Session and let db.py stamp the
+        whole batch AFTER the commit, on its own connection, with a 500ms
+        lock_timeout and LockNotAvailable swallowed. A skipped stamp costs at
+        most one heatmap cell being <=5 minutes stale; the next capture stamps
+        it. A blocked stamp no longer costs the request.
         """
         n = now()
         prev = self.last_seen
@@ -845,7 +852,18 @@ class UtilityAccount(Base):
                     return False
             except TypeError:  # naive/aware mismatch — just write
                 pass
-        self.last_seen = n
+        if self.id is None:
+            # Row does not exist yet — nothing can contend for it, and the
+            # INSERT has to carry a value anyway.
+            self.last_seen = n
+            return True
+        from sqlalchemy.orm import object_session
+        sess = object_session(self)
+        if sess is None:
+            # Detached (tests, ad-hoc scripts). Old behaviour is correct here.
+            self.last_seen = n
+            return True
+        sess.info.setdefault("_last_seen_pending", set()).add(self.id)
         return True
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
 

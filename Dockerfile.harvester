@@ -20,6 +20,13 @@ RUN pip install --no-cache-dir -r requirements-harvester.txt
 COPY . .
 
 ENV PYTHONUNBUFFERED=1
+# Name the process. This is the ONE role allowed to unwrap portal passwords
+# (api/crypto.vault_decrypt_enabled). Leaving it unset reported role=unknown on
+# every capture, which api/crypto._note_decrypt filed as a CRITICAL "vault
+# decrypt on public process" page — 882 false alarms in the ops inbox over 60
+# days (Ford, 2026-09-18). Pool sizing is unaffected (api/db.process_is_worker
+# does not classify this role as a worker) — this is purely about identity.
+ENV PROCESS_ROLE=cloud-capture-harvester
 # Run HEADED under a virtual display: Chint's SPA only fetches in a VISIBLE tab,
 # so a real render is mandatory for it (and harmless for the others). The
 # Playwright base image ships xvfb. Verified end-to-end against a live Chint

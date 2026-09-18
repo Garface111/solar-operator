@@ -136,6 +136,25 @@ def is_internal(to_email: str, subject: str | None) -> bool:
     return bool(internal_to) and internal_to == (to_email or "").strip().lower()
 
 
+# Addresses that are seeded fixtures, not people. api/seed_demo.py mints
+# demo-realistic@energyagent-demo.com, and the hard-delete sweep scrubs a
+# removed tenant to deleted+ten_xxx@invalid.local. Neither domain resolves,
+# so the MX pre-flight correctly refuses the send — and then paged Ford
+# about it, twice a day, 55 times over 60 days (2026-09-18). Refusing to mail
+# a fixture is the system working; it is not an incident. Two announce jobs
+# already carried a private copy of this regex — this is the shared one.
+_PLACEHOLDER_RECIPIENT = re.compile(
+    r"@(example[.](com|org|net)|energyagent-demo[.]com|test[.]com|invalid[.]local|localhost)$"
+    r"|[.](invalid|test|example|localhost)$",
+    re.I,
+)
+
+
+def is_placeholder_recipient(to_email: str) -> bool:
+    """True for a seeded/scrubbed address that can never belong to a person."""
+    return bool(_PLACEHOLDER_RECIPIENT.search((to_email or "").strip().lower()))
+
+
 def scan(to_email: str, subject: str | None, text: str | None,
          html: str | None, *, db=None) -> tuple[str, list[str]]:
     """Return (severity, flags). severity ∈ none|low|high.
@@ -290,8 +309,16 @@ def record(*, to_email: str, subject: str | None, html: str | None,
         log.warning("email_archive: record failed (email still sent): %s", exc)
 
 
-def _alert(db, row: EmailArchive, flags: list[str]) -> None:
-    """Tell Ford an extreme email went out. Throttled per flag class."""
+def _alert(db, row: EmailArchive, flags: list[str], *,
+           blocked: bool = False) -> None:
+    """Tell Ford an extreme email went out. Throttled per flag class.
+
+    ``blocked=True`` means the send was refused by the pre-flight and never
+    left. The body used to assert "The email WAS sent" unconditionally, so
+    every undeliverable_blocked alert both opened with "NOT SENT" and closed
+    by claiming the opposite (Ford, 2026-09-18). An ops alert that
+    contradicts itself is worse than none.
+    """
     try:
         key = sorted(f.split(":")[0] for f in flags)[0]
         if _recent_alert_sent(db, key):
@@ -308,8 +335,10 @@ def _alert(db, row: EmailArchive, flags: list[str]) -> None:
             f"  archive#: {row.id}\n\n"
             f"--- body (first 1500 chars) ---\n"
             f"{(row.body_text or _plain(None, row.body_html))[:1500]}\n\n"
-            f"The email WAS sent — this is a report, not a block.\n"
-            f"Read the full archive: GET /admin/emails?flagged=1\n"
+            + (f"The email was NOT sent — the pre-flight blocked it.\n"
+               if blocked else
+               f"The email WAS sent — this is a report, not a block.\n")
+            + f"Read the full archive: GET /admin/emails?flagged=1\n"
         )
         send_internal_alert(f"Email monitor: {', '.join(flags)}", body)
         # Mark the alert itself so the throttle can find it.
@@ -421,8 +450,13 @@ def record_blocked(to_email: str, subject: str | None, reason: str,
             db.commit()
             log.error("email preflight BLOCKED to=%s reason=%s subject=%r",
                       to_email, reason, subject)
-            if not is_internal(to_email, subject):
-                _alert(db, row, [f"undeliverable_blocked:{reason}"])
+            if is_placeholder_recipient(to_email):
+                # Seeded fixture / scrubbed tenant — archived above for the
+                # audit trail, but there is no human here to have missed mail.
+                log.info("email preflight: placeholder recipient %s — archived, "
+                         "not alerted", to_email)
+            elif not is_internal(to_email, subject):
+                _alert(db, row, [f"undeliverable_blocked:{reason}"], blocked=True)
     except Exception as exc:  # noqa: BLE001
         log.warning("email_archive: record_blocked failed: %s", exc)
 

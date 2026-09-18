@@ -61,7 +61,7 @@ _audit_ctx: ContextVar[dict[str, str]] = ContextVar("crypto_audit_ctx", default=
 _vol_lock = threading.Lock()
 _vol_window_start = 0.0
 _vol_counts: dict[str, int] = {}
-_alert_last_sent: dict[str, float] = {}  # key → monotonic ts
+_alert_last_sent: dict[str, float] = {}  # key → monotonic ts of last send
 _VOL_WINDOW_S = 60.0
 # Shared decrypts fire constantly on dashboard traffic — high bar, log only.
 _SHARED_WARN = int(os.environ.get("CRYPTO_SHARED_DECRYPT_WARN_PER_MIN") or "5000")
@@ -69,6 +69,12 @@ _SHARED_WARN = int(os.environ.get("CRYPTO_SHARED_DECRYPT_WARN_PER_MIN") or "5000
 _VAULT_WARN = int(os.environ.get("CRYPTO_VAULT_DECRYPT_WARN_PER_MIN") or "200")
 # Min gap between identical internal-alert emails (seconds).
 _ALERT_COOLDOWN_S = float(os.environ.get("CRYPTO_DECRYPT_ALERT_COOLDOWN_S") or "3600")
+
+# Roles that must NEVER hold vault-decrypt capability. "unknown" is deliberately
+# NOT here — see _note_decrypt. Note this cooldown is process-LOCAL, so a
+# short-lived process starts fresh every time; the durable throttle that
+# actually caps a storm lives at the send choke point (notify.send_internal_alert).
+_PUBLIC_ROLES = ("web", "api", "worker", "background")
 
 
 def set_decrypt_audit_context(**kwargs: str) -> None:
@@ -117,8 +123,20 @@ def _note_decrypt(kind: str) -> None:
         _vol_counts[kind] = _vol_counts.get(kind, 0) + 1
         count = _vol_counts[kind]
 
-    # ── Vault on public web/worker: any unwrap is a policy violation ──
-    if kind == "vault" and role in ("web", "worker", "unknown"):
+    # ── Vault on a PUBLIC role: any unwrap is a policy violation ──
+    # Reaching here with kind=vault means decrypt_vault_str() already passed
+    # vault_decrypt_enabled() — i.e. this process is ARMED. On a named public
+    # role that is the real misconfiguration and must page.
+    #
+    # role=unknown used to page too, and that was wrong (Ford, 2026-09-18): the
+    # harvester image never sets PROCESS_ROLE, so the ONE process that is
+    # supposed to unwrap portal passwords reported itself as "unknown" and every
+    # capture filed a CRITICAL. 882 of the 3,136 alerts in the Dyson Swarm inbox
+    # over 60 days were this false alarm — enough noise to bury a real one.
+    # Dockerfile.harvester now sets PROCESS_ROLE=cloud-capture-harvester; an
+    # unnamed armed process is a naming gap, so warn in the log and keep the
+    # pager quiet.
+    if kind == "vault" and role in _PUBLIC_ROLES:
         try:
             log.error(
                 "crypto_vault_decrypt_on_non_harvester kind=vault role=%s count=%s "
@@ -138,6 +156,18 @@ def _note_decrypt(kind: str) -> None:
             now_m=now_m,
         )
         return
+
+    if kind == "vault" and role == "unknown":
+        try:
+            log.warning(
+                "crypto_vault_decrypt_unnamed_process kind=vault count=%s — this "
+                "process is armed to unwrap portal passwords but sets no "
+                "PROCESS_ROLE. Name it (PROCESS_ROLE=cloud-capture-harvester) so "
+                "a genuine public-process unwrap is distinguishable.",
+                count,
+            )
+        except Exception:
+            pass
 
     # ── Vault volume on harvester: log spike, mail only at extreme ──
     if kind == "vault":
@@ -175,10 +205,19 @@ def _note_decrypt(kind: str) -> None:
 
 
 def _maybe_alert(*, alert_key: str, subject: str, body: str, now_m: float) -> None:
-    """Send at most one internal alert per key per cooldown window."""
+    """Send at most one internal alert per key per cooldown window.
+
+    The "never sent" sentinel is None, not 0.0. It used to be 0.0, compared
+    against time.monotonic() — which on Linux counts from BOOT, not from
+    process start. So for the first hour of a machine's uptime every key
+    looked like it had just alerted, and the FIRST alert — the one that
+    matters — was swallowed (this is why
+    tests/test_vault_hardening.py::test_vault_decrypt_on_web_alerts failed on
+    main). A throttle that silences the first page is not a throttle.
+    """
     with _vol_lock:
-        last = _alert_last_sent.get(alert_key, 0.0)
-        if now_m - last < _ALERT_COOLDOWN_S:
+        last = _alert_last_sent.get(alert_key)
+        if last is not None and now_m - last < _ALERT_COOLDOWN_S:
             return
         _alert_last_sent[alert_key] = now_m
     try:

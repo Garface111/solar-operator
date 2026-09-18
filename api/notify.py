@@ -9,6 +9,8 @@ free for our volume.
 """
 from __future__ import annotations
 import os
+import threading
+import re
 import logging
 import json
 import urllib.request
@@ -1379,12 +1381,92 @@ def send_repair_checkin_email(
 
 # ─── internal ───────────────────────────────────────────────────────────
 
-def send_internal_alert(subject: str, body: str, to: str | None = None) -> bool:
+# Subject prefix for internal alerts. The product is Array Operator
+# (arrayoperator.com) — "NEPOOL Operator" was the pre-rename brand and stayed
+# hardcoded here, so every ops alert about Array Operator arrived wearing the
+# wrong name. Env-overridable for the NEPOOL-branded deploy.
+ALERT_SUBJECT_PREFIX = (os.getenv("INTERNAL_ALERT_PREFIX") or "Array Operator").strip()
+
+# Durable, cross-process alert dedupe. WHY (2026-09-18): the Dyson Swarm inbox
+# held 3,136 internal alerts in 60 days, 882 of them the SAME vault-decrypt line.
+# Callers that throttle (api/crypto._maybe_alert) keep their cooldown in a
+# process-local dict, so every short-lived harvester/script process starts with
+# a clean slate and the cooldown buys nothing. The choke point is the only place
+# that can see across processes, so the throttle belongs here — backed by
+# email_archive, which is already the durable record of what we sent.
+ALERT_THROTTLE_MIN = float(os.getenv("INTERNAL_ALERT_THROTTLE_MIN") or "60")
+_suppressed_since_send: dict[str, int] = {}
+_suppress_lock = threading.Lock()
+
+
+def _alert_dedupe_key(subject: str, body: str) -> str:
+    """Identity of a repeated alert: subject + body with volatile numbers and
+    ids masked. Two different tenants produce different bodies and are NOT
+    collapsed; the identical line repeating every 6 minutes is."""
+    blob = (subject or "") + "\n" + (body or "")[:400]
+    blob = re.sub(r"\b[0-9a-f]{8,}\b", "#", blob.lower())
+    blob = re.sub(r"\d+", "#", blob)
+    return re.sub(r"\s+", " ", blob).strip()[:300]
+
+
+def _dt_now_utc():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _alert_recently_sent(key: str, window_min: float) -> bool:
+    """True if an alert with this identity already went out inside the window.
+
+    Fail-OPEN: any error here sends the email. Never swallow an alert to be
+    tidy — that is the self-sabotage the email archive exists to prevent."""
+    try:
+        from datetime import timedelta
+        from sqlalchemy import select as _select
+        from .db import SessionLocal
+        from .email_archive import EmailArchive
+        cutoff = _dt_now_utc() - timedelta(minutes=window_min)
+        with SessionLocal() as db:
+            rows = db.execute(
+                _select(EmailArchive.subject, EmailArchive.body_text)
+                .where(EmailArchive.to_email == (INTERNAL_ALERT_TO or "").lower(),
+                       EmailArchive.created_at >= cutoff)
+                .order_by(EmailArchive.created_at.desc())
+                .limit(200)
+            ).all()
+        for subj, btxt in rows:
+            stripped = re.sub(r"^\[[^\]]+\]\s*", "", subj or "")
+            if _alert_dedupe_key(stripped, btxt or "") == key:
+                return True
+    except Exception:
+        logger.debug("alert dedupe check failed — sending", exc_info=True)
+    return False
+
+
+def send_internal_alert(subject: str, body: str, to: str | None = None,
+                        throttle_min: float | None = None) -> bool:
     """Plain-text notification to ourselves. Used for new signups + errors.
     Kept intentionally simple — Ford reads these on his phone at 2am.
 
+    Identical alerts inside ALERT_THROTTLE_MIN are suppressed (see
+    _alert_dedupe_key); the next one that goes out says how many it stands for,
+    so a storm is one honest email rather than four hundred — or a silence.
+
     `to` overrides the default INTERNAL_ALERT_TO recipient — e.g. the new-signup
     alert Ford wants delivered to his gmail rather than the dysonswarm address."""
+    window = ALERT_THROTTLE_MIN if throttle_min is None else float(throttle_min)
+    key = _alert_dedupe_key(subject, body)
+    if window > 0 and not to and _alert_recently_sent(key, window):
+        with _suppress_lock:
+            _suppressed_since_send[key] = _suppressed_since_send.get(key, 0) + 1
+            n = _suppressed_since_send[key]
+        logger.info("internal alert suppressed (%dx in %.0fmin): %s",
+                    n, window, subject)
+        return False
+    with _suppress_lock:
+        repeats = _suppressed_since_send.pop(key, 0)
+    if repeats:
+        body = ("[%d identical alert(s) suppressed in the last %.0f min — "
+                "this is the %dth]\n\n%s" % (repeats, ALERT_THROTTLE_MIN, repeats + 1, body))
     html = (
         "<!DOCTYPE html><html lang='en'><head><meta charset='utf-8'>"
         "<meta name='color-scheme' content='light only'>"
@@ -1398,7 +1480,7 @@ def send_internal_alert(subject: str, body: str, to: str | None = None) -> bool:
     )
     return _send_via_resend(
         to=to or INTERNAL_ALERT_TO,
-        subject=f"[NEPOOL Operator] {subject}",
+        subject=f"[{ALERT_SUBJECT_PREFIX}] {subject}",
         html=html,
         text=body,
     )

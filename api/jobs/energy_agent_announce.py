@@ -40,7 +40,10 @@ _ALLOW_EXACT = {e.strip().lower() for e in
                 (os.environ.get("ANNOUNCE_ALLOWLIST") or "pbozuwa@gmail.com").split(",")
                 if e.strip()}
 # Undeliverable placeholder domains (demo/system rows), never real inboxes.
-_PLACEHOLDER = re.compile(r"@(example\.com|energyagent-demo\.com|test\.com)$", re.I)
+# Shared with the outbound choke point so a fixture address is recognised the
+# same way everywhere — see api/email_archive.is_placeholder_recipient. The
+# local copy this replaces missed invalid.local (scrubbed deleted tenants).
+from ..email_archive import is_placeholder_recipient as _is_placeholder
 
 
 def _deliverable(t: Tenant) -> bool:
@@ -49,7 +52,7 @@ def _deliverable(t: Tenant) -> bool:
         return False
     if email in _ALLOW_EXACT:
         return True
-    if email in _DENY_EXACT or _PLACEHOLDER.search(email):
+    if email in _DENY_EXACT or _is_placeholder(email):
         return False
     return True
 

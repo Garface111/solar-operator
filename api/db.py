@@ -5,9 +5,10 @@ import os
 import pathlib
 import threading
 import time
+from datetime import datetime as _dt
 from typing import Any, Generator, Mapping
 
-from sqlalchemy import create_engine, event, text
+from sqlalchemy import bindparam, create_engine, event, text
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.exc import TimeoutError as SATimeoutError
 
@@ -355,6 +356,73 @@ def get_db() -> Generator[Session, None, None]:
             db.close()
         except Exception:
             pass
+
+
+# -- Deferred last_seen stamps (see UtilityAccount.touch_last_seen) -----------
+# utility_accounts.last_seen is a recency marker for the Capture Freshness
+# Heatmap. Writing it inside a caller's long ingest transaction put it in a
+# row-lock fight with POST /v1/sync and 500'd both endpoints (176
+# LockNotAvailable alerts through 2026-09-18). touch_last_seen() now only
+# registers the id on the Session; we stamp the batch here AFTER the commit, on
+# our own connection, with a short lock_timeout and contention swallowed. One
+# hook, total coverage: every caller gets this for free, HTTP or not.
+_LAST_SEEN_PENDING = "_last_seen_pending"
+_LAST_SEEN_LOCK_TIMEOUT_MS = os.environ.get("DB_LAST_SEEN_LOCK_TIMEOUT_MS", "500")
+
+
+def _touch_slack_s() -> float:
+    from .models import UtilityAccount
+    return float(getattr(UtilityAccount, "TOUCH_MIN_INTERVAL_S", 300))
+
+
+def flush_last_seen_stamps(ids) -> int:
+    """Best-effort batched stamp of utility_accounts.last_seen. Never raises.
+
+    Returns the number of rows stamped (0 when skipped or contended). Rows are
+    taken in id order under FOR UPDATE SKIP LOCKED so two concurrent batches can
+    neither deadlock nor wait, and the staleness check is re-applied in SQL so a
+    racing writer's fresher stamp is never walked backwards.
+    """
+    ids = sorted({int(i) for i in (ids or []) if i is not None})
+    if not ids:
+        return 0
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            if conn.dialect.name == "postgresql":
+                conn.exec_driver_sql(
+                    "SET lock_timeout = '%dms'" % int(_LAST_SEEN_LOCK_TIMEOUT_MS))
+                res = conn.execute(text(
+                    "UPDATE utility_accounts SET last_seen = now() "
+                    "WHERE id IN ("
+                    "  SELECT id FROM utility_accounts"
+                    "  WHERE id = ANY(:ids)"
+                    "    AND (last_seen IS NULL"
+                    "         OR last_seen < now() - make_interval(secs => :slack))"
+                    "  ORDER BY id FOR UPDATE SKIP LOCKED)"
+                ), {"ids": ids, "slack": float(_touch_slack_s())})
+            else:  # sqlite / tests -- no lock_timeout, no SKIP LOCKED
+                res = conn.execute(
+                    text("UPDATE utility_accounts SET last_seen = :n "
+                         "WHERE id IN :ids").bindparams(
+                             bindparam("ids", expanding=True)),
+                    {"n": _dt.utcnow(), "ids": ids})
+            return int(res.rowcount or 0)
+    except Exception as e:  # LockNotAvailable, pool exhaustion, PG down -- all fine
+        logger.debug("last_seen stamp skipped for %d id(s): %s", len(ids), e)
+        return 0
+
+
+@event.listens_for(Session, "after_commit")
+def _stamp_last_seen_after_commit(session: Session) -> None:  # noqa: ANN001
+    ids = session.info.pop(_LAST_SEEN_PENDING, None)
+    if ids:
+        flush_last_seen_stamps(ids)
+
+
+@event.listens_for(Session, "after_rollback")
+def _drop_last_seen_after_rollback(session: Session) -> None:  # noqa: ANN001
+    # The ingest that wanted the stamp did not land -- don't claim we saw it.
+    session.info.pop(_LAST_SEEN_PENDING, None)
 
 
 # Re-export for exception handlers
