@@ -1572,6 +1572,17 @@ def _bulk_classify_columns(header_row: list[str]) -> dict[str, int]:
             if nh in aliases:
                 mapping[field] = idx
                 break
+        else:
+            # No exact alias. A rate header almost always carries its unit —
+            # "Rate ($/kWh)" → "ratekwh", "Solar credit rate/kWh", "Price per
+            # kWh" — and an exact-set miss here used to leave the column
+            # UNMAPPED, so every offtaker's contract rate was silently dropped
+            # on the clean-header fast path (the roster looked 100% ready).
+            if "rate" not in mapping and "kwh" in nh and any(
+                    k in nh for k in ("rate", "price", "tariff")) and "share" not in nh:
+                mapping["rate"] = idx
+            elif "discount" not in mapping and "discount" in nh:
+                mapping["discount"] = idx
     return mapping
 
 
@@ -1696,6 +1707,23 @@ def _bulk_rate(raw: str) -> tuple[Optional[float], Optional[str]]:
     if v < 0 or v > MAX_RATE_PER_KWH:
         return None, f"rate must be between 0 and {MAX_RATE_PER_KWH} $/kWh"
     return v, None
+
+
+_BULK_EMAIL_RE = _re.compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z0-9-]{2,}$")
+
+
+def _bulk_email(raw: Optional[str]) -> tuple[Optional[str], bool]:
+    """Normalize a roster email cell → (email or None, invalid). Lower-cased and
+    trimmed so 'JACK@Example.COM' and 'jack@example.com' are the same offtaker;
+    a cell that is not an address ('harper at example dot com', 'a@@b.com')
+    comes back as None + invalid=True so it is FLAGGED for review rather than
+    persisted as the recipient of a real invoice with send_mode=to_client."""
+    s = (raw or "").strip().lower()
+    if not s:
+        return None, False
+    if not _BULK_EMAIL_RE.match(s):
+        return None, True
+    return s, False
 
 
 def _bulk_budget(raw: str) -> tuple[Optional[float], Optional[str]]:
@@ -1879,9 +1907,12 @@ async def bulk_import_offtakers(
 
     results: list[dict] = []
     # 1-based sheet row of the first data row (header is at header_row_idx, 0-based).
+    from .roster_detector import _row_looks_like_total as _is_total_row
     for i, row in enumerate(data_rows, start=header_row_idx + 2):
         if not any((c or "").strip() for c in row):
             continue  # silently skip a wholly-blank trailing line
+        if _is_total_row(row):
+            continue  # a "Total 100%" footer is not an offtaker
         errors: list[str] = []
         missing: list[str] = []
 
@@ -1902,7 +1933,8 @@ async def bulk_import_offtakers(
         elif pct_err:
             errors.append(pct_err)
 
-        email = _cell(row, "email") or None
+        email_raw = _cell(row, "email") or None
+        email, email_invalid = _bulk_email(email_raw)
         discount, disc_err = _bulk_discount(_cell(row, "discount"))
         if disc_err:
             errors.append(disc_err)
@@ -2002,12 +2034,15 @@ async def bulk_import_offtakers(
         has_bill = bool(chosen_ua and chosen_ua.get("has_bill"))
         # Soft account flags force review even on an otherwise exact host bind —
         # the operator should know the offtaker's own meter isn't linked yet.
+        if email_invalid:
+            flags.append("email_invalid")
         if flags:
             # Don't overwrite a hard error; just ensure status lands on needs_review
             # via confidence demotion when we would otherwise be ready.
             if confidence in ("exact", "high") and (
                     "offtaker_account_not_connected" in flags
-                    or "master_account_not_connected" in flags):
+                    or "master_account_not_connected" in flags
+                    or "email_invalid" in flags):
                 # Keep the match, but force review so the operator confirms host-share
                 # billing until the real sub-account is connected.
                 confidence = "medium"
@@ -2027,7 +2062,11 @@ async def bulk_import_offtakers(
             "alternatives": m.get("alternatives", []),
             "allocation_pct": pct,
             "email": email,
+            "email_raw": email_raw if email_invalid else None,
             "discount_pct": discount,
+            # The per-offtaker $/kWh rate parsed above; commit carries it onto the
+            # subscription (it used to be parsed here and then dropped).
+            "net_rate_per_kwh": rate,
             "budget_amount_usd": budget,
             "offtaker_account_name": offtaker_acct_name,
             "utility_locked": utility_locked,
@@ -2126,6 +2165,7 @@ class _BulkCommitRow(BaseModel):
     allocation_pct: float
     email: Optional[str] = None
     discount_pct: Optional[float] = None
+    net_rate_per_kwh: Optional[float] = None
     budget_amount_usd: Optional[float] = None
 
 
@@ -2200,6 +2240,15 @@ async def bulk_commit_offtakers(body: BulkCommitBody,
             failed.append({"offtaker_name": name,
                            "error": f"utility account {r.utility_account_id} not found"})
             continue
+        # A malformed address never becomes the recipient of a real invoice:
+        # normalize (lower-case/trim) first so 'Liam@Example.COM' and
+        # 'liam@example.com' dedup as the same offtaker; reject what isn't one.
+        email, _email_invalid = _bulk_email(r.email)
+        if _email_invalid:
+            failed.append({"offtaker_name": name,
+                           "error": f'"{r.email}" is not an email address — fix it '
+                                    "in the roster or clear it to bill to yourself"})
+            continue
         # Idempotency vs conflict (#16). A row that already exists live is a safe
         # no-op ONLY if its money-driving values match; if allocation/email/discount
         # DIFFER, skipping would silently keep the stale value — surface it as a
@@ -2215,7 +2264,7 @@ async def bulk_commit_offtakers(body: BulkCommitBody,
                     return False
                 return abs(float(a) - float(b)) < 1e-9
             _same = (_num_eq(_al, r.allocation_pct)
-                     and (_em or None) == (r.email or None)
+                     and ((_em or "").strip().lower() or None) == (email or None)
                      and _num_eq(_di, r.discount_pct))
             if _same:
                 skipped.append({"offtaker_name": name,
@@ -2236,11 +2285,12 @@ async def bulk_commit_offtakers(body: BulkCommitBody,
                 t, customer_name=name, array_id=r.array_id,
                 allocation_pct=r.allocation_pct,
                 utility_account_id=r.utility_account_id, rate_per_kwh=None,
-                discount_pct=r.discount_pct, net_rate_per_kwh=None,
+                discount_pct=r.discount_pct,
+                net_rate_per_kwh=r.net_rate_per_kwh,
                 budget_amount_usd=r.budget_amount_usd,
                 cadence=body.cadence,
-                send_mode=("to_client" if r.email else "to_me"),
-                delivery_mode=body.delivery_mode, client_email=r.email,
+                send_mode=("to_client" if email else "to_me"),
+                delivery_mode=body.delivery_mode, client_email=email,
                 cc_emails=None, operator_email=None, formats=None,
                 include_summary=False, annual_trueup=False, enabled=True,
             )
@@ -2249,7 +2299,10 @@ async def bulk_commit_offtakers(body: BulkCommitBody,
             continue
         created.append({"offtaker_name": name,
                         "subscription_id": out["subscription"]["id"]})
-        existing_keys.add((name.lower(), r.utility_account_id))
+        # Remember what we just created so an exact duplicate row later in the
+        # SAME batch is skipped as identical (and a conflicting one surfaced),
+        # instead of being created twice — the pre-loop snapshot never saw it.
+        existing_vals[_key] = (r.allocation_pct, email, r.discount_pct)
 
     return {"ok": True, "created": len(created), "created_rows": created,
             "skipped": skipped, "failed": failed}
@@ -4312,7 +4365,10 @@ def approve_draft(draft_id: int, authorization: Optional[str] = Header(default=N
             else:
                 result = deliver_subscription(
                     db, sub, t, triggered_by="approval", is_test=False, note=d.note,
-                    expected_period_label=d.period_label, gmp_pdf_override=gmp_override)
+                    expected_period_label=d.period_label,
+                    # The figure the operator approved is the figure that sends.
+                    expected_amount_usd=d.amount_usd,
+                    gmp_pdf_override=gmp_override)
         except Exception:
             d.status = "pending"      # release the claim so it can be retried
             db.commit()

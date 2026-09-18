@@ -293,6 +293,33 @@ def _looks_rate(values: list[Any]) -> float:
     return ok / len(nums)
 
 
+def _decimal_places(v: Any) -> int:
+    """Decimal places a cell carries ('0.18398' → 5, 0.25 → 2, '25%' → 0)."""
+    s = str(v).strip().replace("$", "").replace("%", "").replace(",", "")
+    if "e" in s.lower():
+        return 0
+    return len(s.split(".", 1)[1]) if "." in s else 0
+
+
+def _looks_rate_like(values: list[Any]) -> bool:
+    """True when a numeric column reads as a $/kWh CONTRACT RATE rather than a
+    share: every value in (0, 2), most carry 3+ decimals (0.18398, 0.22398), and
+    only a handful of distinct values repeat down the roster (an operator has a
+    few contract prices; allocation shares vary row to row). Needed because the
+    magnitude test alone calls 0.18398 "percentage-shaped" — which once mapped a
+    Rate column to discount_pct and silently discounted every import by 18%."""
+    nums = [n for n in (_num(v) for v in values) if n is not None]
+    if len(nums) < 3:
+        return False
+    if not all(0.0 < n < 2.0 for n in nums):
+        return False
+    decimals = sum(1 for v in values if _num(v) is not None and _decimal_places(v) >= 3)
+    if decimals / len(nums) < 0.6:
+        return False
+    distinct = len({round(n, 6) for n in nums})
+    return distinct <= max(3, len(nums) // 25)
+
+
 def _frac_free_text(values: list[Any]) -> float:
     """Fraction of cells that are free text (not numeric, not email). The offtaker-name
     column is mostly free text that ISN'T an array/email/number."""
@@ -355,13 +382,18 @@ def _content_scores(grid: list[list], header_row: int, ncols: int,
             "numeric": _frac_numeric(values),
             "pct": _looks_percentage(values),
             "rate": _looks_rate(values),
+            "rate_like": 1.0 if _looks_rate_like(values) else 0.0,
             "text": _frac_free_text(values),
             "acct": _frac_account_id(values, account_numbers),
         })
     # Identify which numeric columns are percentage-shaped, left→right, so the FIRST is
-    # allocation and a SECOND is discount (the common unlabeled convention).
+    # allocation and a SECOND is discount (the common unlabeled convention). A
+    # rate-like column (few repeated 3+-decimal values) is NOT a percentage
+    # column, whatever its magnitude says — otherwise a Rate column left of the
+    # shares shifts the real allocation column into the "discount" slot.
     pct_cols = [c for c in range(ncols)
-                if raw[c]["n"] > 0 and raw[c]["numeric"] >= 0.6 and raw[c]["pct"] >= 0.6]
+                if raw[c]["n"] > 0 and raw[c]["numeric"] >= 0.6 and raw[c]["pct"] >= 0.6
+                and not raw[c]["rate_like"]]
     first_pct = pct_cols[0] if pct_cols else None
     second_pct = pct_cols[1] if len(pct_cols) > 1 else None
 
@@ -386,9 +418,12 @@ def _content_scores(grid: list[list], header_row: int, ncols: int,
             # a lone percentage column is far more likely allocation than discount
             if second_pct is None and col == first_pct:
                 s.setdefault("allocation_pct", 0.9)
-        # net_rate — small-decimal numeric that isn't a percentage share
-        if r["numeric"] >= 0.6 and r["rate"] >= 0.6 and r["pct"] < 0.6:
-            s["net_rate"] = 0.6 + r["rate"] * 0.2
+        # net_rate — small-decimal numeric that isn't a percentage share, or a
+        # rate-like column (see _looks_rate_like) regardless of magnitude.
+        if r["numeric"] >= 0.6 and r["rate"] >= 0.6 and (r["pct"] < 0.6 or r["rate_like"]):
+            s["net_rate"] = 0.6 + r["rate"] * 0.2 + (0.1 if r["rate_like"] else 0.0)
+        if r["rate_like"]:
+            s["_rate_like"] = 1.0  # signal for _assign; stripped before assignment
         # account_number — id-ish / known account number
         if r["acct"] >= 0.5:
             s["account_number"] = r["acct"]
@@ -431,7 +466,29 @@ def _assign(header_scores: list[dict[str, tuple[float, str]]],
     triples: list[tuple[float, str, int, float, float]] = []  # (combined, field, col, hs_norm, cs)
     for col in range(ncols):
         hsc = header_scores[col] if col < len(header_scores) else {}
-        csc = content_scores[col] if col < len(content_scores) else {}
+        csc = dict(content_scores[col]) if col < len(content_scores) else {}
+        rate_like = csc.pop("_rate_like", 0.0) > 0
+        _hs = lambda f: hsc.get(f, (0.0, ""))[0]  # noqa: E731
+        # Header-aware disambiguation of rate vs percentage. Content alone
+        # cannot tell $0.18398/kWh from an 18.4% share; the header usually can.
+        #   • header says rate ($/kWh, tariff, price) and NOT share/discount →
+        #     the column is a rate: drop any percentage claim on it.
+        #   • header says share/discount → it is a percentage even if its
+        #     values repeat like a rate (a roster where every share is 0.0475).
+        #   • no header signal at all → trust the rate-like content test.
+        if _hs("net_rate") >= 15.0 and _hs("allocation_pct") <= 0 and _hs("discount_pct") <= 0:
+            csc.pop("allocation_pct", None)
+            csc.pop("discount_pct", None)
+            csc["net_rate"] = max(csc.get("net_rate", 0.0), 0.7)
+        elif rate_like and (_hs("allocation_pct") > 0 or _hs("discount_pct") > 0):
+            csc.pop("net_rate", None)
+            if _hs("allocation_pct") >= _hs("discount_pct"):
+                csc["allocation_pct"] = max(csc.get("allocation_pct", 0.0), 0.9)
+            else:
+                csc["discount_pct"] = max(csc.get("discount_pct", 0.0), 0.7)
+        elif rate_like and not any(v[0] > 0 for v in hsc.values()):
+            csc.pop("allocation_pct", None)
+            csc.pop("discount_pct", None)
         fields = set(hsc) | set(csc)
         for field in fields:
             hs = hsc.get(field, (0.0, ""))[0]

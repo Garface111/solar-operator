@@ -59,6 +59,33 @@ def next_send_at(cadence: str, after: Optional[datetime] = None) -> datetime:
 _QUARTER_LABEL_RE = re.compile(r"^(\d{4})-Q([1-4])$")
 
 
+def _period_guard_label(key, cadence: Optional[str] = None) -> Optional[str]:
+    """Normalize an exactly-once key to the PERIOD it bills: 'YYYY-MM', or
+    'YYYY-Qn' under quarterly cadence.
+
+    The guard used to compare raw cycle-end DATES, so the same month could be
+    billed twice whenever two bills for it ended on different days: a new
+    sub-metered offtaker first invoiced off the HOST bill (ends 06-30) and then
+    again off their own bill when it landed (ends 06-28); a re-issued bill; a
+    monthly-to-quarterly switch re-aggregating months already invoiced. Two
+    keys that name the same month (or quarter) now compare equal. Non-period
+    keys (free-text labels) compare as themselves; a 'trueup:' key never
+    matches a billing period."""
+    if key is None:
+        return None
+    s = str(key).strip()
+    if not s or s.startswith("trueup:"):
+        return None
+    m = re.match(r"^(\d{4})-(\d{2})(?:-\d{2})?$", s)
+    if not m:
+        q = _QUARTER_LABEL_RE.match(s)
+        return f"{q.group(1)}-Q{q.group(2)}" if q else s
+    y, mo = int(m.group(1)), int(m.group(2))
+    if (cadence or "").strip().lower() == "quarterly":
+        return f"{y}-Q{(mo - 1) // 3 + 1}"
+    return f"{y:04d}-{mo:02d}"
+
+
 def _is_quarter_label(label) -> bool:
     """True for a 'YYYY-Qn' quarter label (vs the 'YYYY-MM' month labels)."""
     return bool(label) and bool(_QUARTER_LABEL_RE.match(str(label)))
@@ -2232,6 +2259,7 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
                          triggered_by: str = "manual", is_test: bool = False,
                          note: Optional[str] = None,
                          expected_period_label: Optional[str] = None,
+                         expected_amount_usd: Optional[float] = None,
                          gmp_pdf_override: Optional[bytes] = None,
                          force: bool = False) -> dict:
     """Generate + email one subscription's report. Stamps schedule fields on
@@ -2281,9 +2309,32 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
     # late GMP bill (build_match returns last month's) or an ops re-run would
     # otherwise re-send with a fresh invoice number. Skip when this exact period
     # was already sent to this offtaker, unless the caller explicitly forces it.
+    if expected_amount_usd is not None and _ci.get("amount_owed") is not None:
+        # The figure the operator approved on the draft is the figure that
+        # sends. A rate/share/budget/credit edit or a re-captured bill between
+        # review and approve must refuse, not silently send a different amount.
+        try:
+            _drift = abs(float(_ci["amount_owed"]) - float(expected_amount_usd))
+        except (TypeError, ValueError):
+            _drift = 0.0
+        if _drift >= 0.005:
+            return {"ok": False, "amount_changed": True,
+                    "error": ("The amount changed since you reviewed this draft "
+                              f"(reviewed ${float(expected_amount_usd):,.2f}; it would "
+                              f"now send as ${float(_ci['amount_owed']):,.2f}). "
+                              "Regenerate the draft to review the current figures, "
+                              "then send."),
+                    "invoice_number": _ci.get("invoice_number"),
+                    "amount_owed": _ci.get("amount_owed"),
+                    "reviewed_amount_usd": expected_amount_usd}
+
     cur_period_key = (_ci.get("period_end") or cur_period_label or None)
-    if (not is_test) and (not force) and cur_period_key and \
-            getattr(sub, "last_sent_period_end", None) == cur_period_key:
+    # Compare PERIODS (month / quarter), not raw cycle-end dates — see
+    # _period_guard_label for the double-bill cases the date compare allowed.
+    _cadence = getattr(sub, "cadence", None)
+    _cur_guard = _period_guard_label(cur_period_key, _cadence)
+    _last_guard = _period_guard_label(getattr(sub, "last_sent_period_end", None), _cadence)
+    if (not is_test) and (not force) and _cur_guard and _last_guard == _cur_guard:
         return {"ok": False, "skipped": True, "already_sent": True,
                 "error": (f"This offtaker's invoice for {cur_period_key} was already "
                           "sent — not sending a duplicate for the same period."),
@@ -2609,7 +2660,10 @@ def draft_subscription(db, sub, tenant, *, triggered_by: str = "scheduled") -> d
     # WITHOUT stamping next_send_at so the real draft appears the moment the
     # next bill lands (same retry semantics as the bill-hold above).
     _pe_key = ci.get("period_end")
-    if _pe_key and getattr(sub, "last_sent_period_end", None) == _pe_key:
+    _pe_guard = _period_guard_label(_pe_key, getattr(sub, "cadence", None))
+    if _pe_guard and _period_guard_label(
+            getattr(sub, "last_sent_period_end", None),
+            getattr(sub, "cadence", None)) == _pe_guard:
         return {"ok": False, "skipped": True, "already_sent": True,
                 "error": (f"The invoice for {_pe_key} was already sent — waiting "
                           "on the next utility bill before drafting again."),
@@ -2711,8 +2765,16 @@ def deliver_trueup_subscription(
     match = build_trueup_match(sub, settlement, operator=operator)
     ci = match.computed_invoice or {}
     cur_period_key = f"trueup:{settlement.window_end.isoformat()}"
+    # Exactly-once for the TRUE-UP lives on its own column. Writing the true-up
+    # key into last_sent_period_end (the MONTHLY guard's key) erased the record
+    # that the month itself had been sent, so the next tick could re-bill it.
+    # last_trueup_window_end is stamped below; rows that still carry the old
+    # 'trueup:' key from before this fix are recognised too.
+    _already_settled = (
+        getattr(sub, "last_trueup_window_end", None) == settlement.window_end
+        or getattr(sub, "last_sent_period_end", None) == cur_period_key)
 
-    if (not is_test) and (not force) and getattr(sub, "last_sent_period_end", None) == cur_period_key:
+    if (not is_test) and (not force) and _already_settled:
         return {"ok": False, "skipped": True, "already_sent": True,
                 "error": f"True-up for {settlement.window_end.isoformat()} already sent",
                 "trueup": settlement.to_dict()}
@@ -2783,7 +2845,10 @@ def deliver_trueup_subscription(
         resend_email_id = _last_resend_id() if ok else None
 
     result = {
-        "ok": bool(ok), "to": to, "cc": cc, "bcc": bcc,
+        # No BCC on the true-up send (see the _send_via_resend call above). This
+        # used to read an unbound name and crash AFTER the email had gone out,
+        # so nothing below was stamped and every retry re-sent the settlement.
+        "ok": bool(ok), "to": to, "cc": cc, "bcc": None,
         "attachments": [p.name for p in paths],
         "invoice_number": ci.get("invoice_number"),
         "amount_owed": ci.get("amount_owed"),
@@ -2802,7 +2867,6 @@ def deliver_trueup_subscription(
             sub.last_sent_amount_usd = float(result["amount_owed"] or 0)
         except (TypeError, ValueError):
             sub.last_sent_amount_usd = 0.0
-        sub.last_sent_period_end = cur_period_key
         sub.last_trueup_window_end = settlement.window_end
         # Bank credit when they overpaid; charge already billed above.
         if settlement.credit_usd > 0:
