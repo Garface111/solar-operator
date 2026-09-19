@@ -25,7 +25,13 @@ class LLMUnavailable(RuntimeError):
 
 
 def llm_available() -> bool:
-    return bool(os.getenv("ANTHROPIC_API_KEY"))
+    if os.getenv("ANTHROPIC_API_KEY"):
+        return True
+    try:
+        from ... import claude_cli
+        return claude_cli.enabled()
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _content_block(text: Optional[str], images: Optional[list[tuple[str, bytes]]]):
@@ -49,9 +55,27 @@ def call_json(*, system: str, user_text: str,
     so the reply is guaranteed-parseable. Raises LLMUnavailable with no key."""
     import httpx
 
+    # Subscription seat first (Ford 2026-09-19). Images are not carried over
+    # the CLI path, so a call WITH images still needs the metered key.
+    if not images:
+        try:
+            from ... import claude_cli
+            if claude_cli.enabled():
+                raw = claude_cli.ask_text(user_text, system=system,
+                                          max_tokens=max_tokens)
+                if raw:
+                    obj = claude_cli._extract_json(raw)
+                    if obj is not None:
+                        return obj
+        except Exception:  # noqa: BLE001
+            pass
+
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
-        raise LLMUnavailable("ANTHROPIC_API_KEY not set")
+        raise LLMUnavailable(
+            "no LLM backend: ANTHROPIC_API_KEY unset and the Claude Code CLI "
+            "is unavailable (or this call carries images, which the CLI path "
+            "does not forward)")
 
     body: dict = {
         "model": model or REPRO_LLM_MODEL,
