@@ -258,3 +258,51 @@ def test_database_crash_after_checkout_creation_replays_same_key(book):
         with SessionLocal() as db:
             assert pay.resolve_pay_link(db, token)["action"] == "redirect"
     assert len(calls) == 2 and calls[0] == calls[1]
+
+
+def test_application_fee_refund_requires_charge_ownership_and_is_monotonic(book):
+    pid, event = paid_row(book)
+    fee = dict(id="fee_"+str(pid), charge="ch_"+str(pid), account=event["_stripe_account"],
+        amount=50, currency="usd", amount_refunded=20)
+    charge = dict(id=fee["charge"], application_fee=fee["id"],
+        payment_intent=event["payment_intent"], amount=10000, currency="usd")
+    with SessionLocal() as db:
+        pay.mark_payment_paid(db, session_dict=event)
+        with patch.object(pay.stripe.Charge, "retrieve", return_value=charge) as retrieve:
+            assert pay.mark_application_fee_refunded(db, fee_dict=fee)["fee_refunded_cents"] == 20
+            retrieve.assert_called_with(fee["charge"], stripe_account=event["_stripe_account"])
+            assert pay.mark_application_fee_refunded(db, fee_dict=fee | {"amount_refunded":10})["fee_refunded_cents"] == 20
+            assert "ignored" in pay.mark_application_fee_refunded(db, fee_dict=fee | {"id":"fee_wrong"})
+            assert "ignored" in pay.mark_application_fee_refunded(db, fee_dict=fee | {"currency":"eur"})
+        assert db.get(OfftakerPayment,pid).fee_refunded_cents == 20
+
+
+def test_refund_before_checkout_paid_recovers_verified_intent(book):
+    pid, event = paid_row(book)
+    charge = dict(payment_intent=event["payment_intent"], amount=10000, currency="usd",
+        _stripe_account=event["_stripe_account"], amount_refunded=10000)
+    intent = dict(id=event["payment_intent"], amount=10000, currency="usd",
+        metadata={"kind":"offtaker_invoice","payment_id":str(pid)})
+    with patch.object(pay.stripe.PaymentIntent,"retrieve",return_value=intent), patch.object(
+        pay.stripe.checkout.Session,"retrieve",return_value=event):
+        with SessionLocal() as db:
+            assert pay.mark_payment_refunded(db,charge_dict=charge)["refunded"]
+            assert pay.mark_payment_paid(db,session_dict=event)["unchanged"] == "refunded"
+            assert db.get(OfftakerPayment,pid).refunded_cents == 10000
+
+
+def test_invoice_balance_refund_is_not_new_debt_and_net_is_unknown(book):
+    from api.billing.invoice_ledger import invoice_balance
+    pid, event = paid_row(book)
+    with SessionLocal() as db:
+        pay.mark_payment_paid(db,session_dict=event)
+        pay.mark_payment_refunded(db,charge_dict=dict(payment_intent=event["payment_intent"],
+            amount_refunded=4000,_stripe_account=event["_stripe_account"]))
+        inv=OfftakerInvoice(tenant_id=book[0].id,subscription_id=book[1],period_key="June",
+            amount_cents=10000,status="accepted",payment_id=pid,snapshot={})
+        db.add(inv);db.commit()
+        value=invoice_balance(db,inv)
+        assert value["refund_state"] == "partial"
+        assert value["collectible_cents"] == value["outstanding_cents"] == 0
+        assert value["after_platform_fee_cents"] == 5950
+        assert value["actual_net_cents"] is None

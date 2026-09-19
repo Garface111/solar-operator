@@ -29,7 +29,7 @@ DEFAULT_COLUMNS: list[tuple[str, str]] = [
     ("amount", "Invoice $"),
     ("status", "Status"),
     ("paid_date", "Paid date"),
-    ("collected", "Collected $"),
+    ("collected", "After platform fee $"),
     ("fee", "Platform fee $"),
     ("invoice_number", "Invoice #"),
 ]
@@ -359,7 +359,13 @@ def invoice_balance(db, invoice) -> dict:
         "invoice_number": invoice.invoice_number, "period_key": invoice.period_key,
         "status": invoice.status, "amount_cents": invoice.amount_cents,
         "gross_collected_cents": gross, "refunded_cents": refunded,
-        "fee_cents": fee, "net_collected_cents": max(gross - refunded - fee, 0),
+        "fee_cents": fee,
+        "after_platform_fee_cents": max(gross - refunded - fee, 0),
+        # Compatibility alias: explicitly not verified processor/bank net.
+        "net_collected_cents": max(gross - refunded - fee, 0),
+        "actual_net_cents": None, "stripe_processing_fee_cents": None,
+        "refund_state": "full" if refunded >= gross and refunded else ("partial" if refunded else "none"),
+        "collectible_cents": max(invoice.amount_cents - gross, 0),
         "offline_collected_cents": offline,
         "outstanding_cents": max(invoice.amount_cents - gross, 0),
         "payment_status": payment.status if payment else None,

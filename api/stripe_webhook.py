@@ -367,6 +367,12 @@ def _process_checkout_async_failed(sess: dict) -> dict:
     return result
 
 
+def _process_application_fee_refunded(fee: dict) -> dict:
+    from .billing.payments import mark_application_fee_refunded
+    with SessionLocal() as db:
+        return mark_application_fee_refunded(db, fee_dict=fee)
+
+
 def _process_charge_refunded(charge: dict) -> dict:
     """A refund issued from the Stripe dashboard: the ledger and the monthly
     summary must stop counting that invoice as collected."""
@@ -744,6 +750,7 @@ async def stripe_webhook(request: Request, stripe_signature: str | None = Header
         "checkout.session.async_payment_succeeded": _process_checkout_completed,
         "checkout.session.async_payment_failed": _process_checkout_async_failed,
         "charge.refunded": _process_charge_refunded,
+        "application_fee.refunded": _process_application_fee_refunded,
     }
     handler = handlers.get(event_type)
 

@@ -1547,6 +1547,7 @@ def main():
         # 2026-09 durable pay links: the invoice carries /pay/{token}; the click
         # mints or refreshes the Checkout Session (Stripe expires them at 24h).
         for field, sql_type in (
+            ("stripe_application_fee_id", "VARCHAR(100)"),
             ("active_key", "VARCHAR(100)"),
             ("refunded_cents", "INTEGER DEFAULT 0"),
             ("fee_refunded_cents", "INTEGER DEFAULT 0"),
@@ -1557,6 +1558,7 @@ def main():
         ):
             if not column_exists(conn, "offtaker_payments", field):
                 conn.execute(text(f"ALTER TABLE offtaker_payments ADD COLUMN {field} {sql_type}"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_offtaker_application_fee ON offtaker_payments (stripe_application_fee_id)"))
         conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_offtaker_active_key ON offtaker_payments (active_key)"))
         if not column_exists(conn, "offtaker_payments", "pay_token"):
             conn.execute(text(

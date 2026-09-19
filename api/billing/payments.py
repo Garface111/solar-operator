@@ -546,7 +546,7 @@ def _retire_payment(db, row):
             ed = expired.to_dict() if hasattr(expired, "to_dict") else dict(expired)
             if ed.get("status") != "expired":
                 raise ValueError("Could not prove old Checkout was expired")
-        elif sd.get("status") != "expired" and row.status != "failed":
+        elif sd.get("status") != "expired":
             raise ValueError("Old Checkout state is unknown")
     row.status = "superseded"
     row.active_key = None
@@ -611,13 +611,20 @@ def create_offtaker_payment(db, *, tenant, sub, match,
     # Reuse the row for the same period+amount (idempotent re-sends). With a
     # durable link the SAME url keeps working across re-sends, and an expired
     # Session is no reason for a new row — the click re-mints it.
-    existing = db.execute(
+    existing_rows = db.execute(
         select(OfftakerPayment).where(
             OfftakerPayment.subscription_id == sub.id,
             OfftakerPayment.period_key == period_key,
             OfftakerPayment.status != "superseded",
         ).order_by(OfftakerPayment.id.desc())
-    ).scalars().first()
+    ).scalars().all()
+    if len(existing_rows) > 1:
+        return {"ok": False, "error": "Multiple historical payment obligations require reconciliation"}
+    existing = existing_rows[0] if existing_rows else None
+    if (existing and existing.checkout_request and not existing.stripe_checkout_session_id
+            and existing.checkout_requested_at
+            and (datetime.utcnow() - existing.checkout_requested_at).total_seconds() >= 23 * 3600):
+        return {"ok": False, "error": "Uncertain Checkout creation requires reconciliation"}
     if existing and existing.status in ("paid", "refunded"):
         if existing.amount_cents != amount_cents:
             return {"ok": False, "error": "Settled invoice revision requires a credit or adjustment"}
@@ -1001,6 +1008,43 @@ def mark_payment_async_failed(db, *, session_dict: dict) -> dict:
             "customer_name": row.customer_name, "subscription_id": row.subscription_id}
 
 
+def _recover_payment_intent(db, pi, account):
+    """Refund may precede Checkout success. Resolve verified provider objects,
+    never metadata alone, so out-of-order delivery cannot drop a reversal."""
+    from ..models import OfftakerPayment
+    if not _stripe_ready():
+        raise RuntimeError("Stripe unavailable for out-of-order refund reconciliation")
+    scope = {"stripe_account": account} if account else {}
+    intent = stripe.PaymentIntent.retrieve(pi, **scope)
+    intent = intent.to_dict() if hasattr(intent, "to_dict") else dict(intent)
+    meta = intent.get("metadata") or {}
+    if meta.get("kind") != "offtaker_invoice":
+        return None
+    try:
+        row = db.get(OfftakerPayment, int(meta.get("payment_id")))
+    except (TypeError, ValueError):
+        return None
+    if row is None:
+        raise RuntimeError("Offtaker payment identity not persisted yet")
+    _lock_payment(db, row)
+    expected_account = (row.checkout_request or {}).get("stripe_account", row.stripe_account_id)
+    if expected_account != account:
+        raise ValueError("Refund account mismatch")
+    if not row.stripe_checkout_session_id:
+        raise RuntimeError("Checkout creation must be reconciled before refund")
+    session = stripe.checkout.Session.retrieve(row.stripe_checkout_session_id, **scope)
+    session = session.to_dict() if hasattr(session, "to_dict") else dict(session)
+    session_pi = session.get("payment_intent")
+    if isinstance(session_pi, dict):
+        session_pi = session_pi.get("id")
+    if (session_pi != pi or intent.get("amount") != row.amount_cents
+            or intent.get("currency") != row.currency):
+        raise ValueError("Refund intent does not match tracked invoice")
+    row.stripe_payment_intent_id = pi
+    db.flush()
+    return row
+
+
 def mark_payment_refunded(db, *, charge_dict: dict) -> dict:
     """charge.refunded — money went back to the offtaker. A full refund flips
     the row to 'refunded' so the ledger and the monthly summary stop counting
@@ -1015,6 +1059,8 @@ def mark_payment_refunded(db, *, charge_dict: dict) -> dict:
         select(OfftakerPayment).where(OfftakerPayment.stripe_payment_intent_id == pi)
     ).scalars().first()
     if row is None:
+        row = _recover_payment_intent(db, pi, charge_dict.get("_stripe_account"))
+    if row is None:
         return {"ignored": "no offtaker payment for this charge", "payment_intent": pi}
     _lock_payment(db, row)
     if charge_dict.get("_stripe_account") != row.stripe_account_id:
@@ -1027,7 +1073,7 @@ def mark_payment_refunded(db, *, charge_dict: dict) -> dict:
         observed = int(charge_dict.get("amount_refunded") or 0)
     except (TypeError, ValueError):
         return {"ignored": "Invalid refund amount"}
-    if observed < 0 or observed > row.amount_cents:
+    if observed <= 0 or observed > row.amount_cents:
         return {"ignored": "Invalid refund amount"}
     refunded_cents = max(int(row.refunded_cents or 0), observed)
     row.refunded_cents = refunded_cents
@@ -1228,9 +1274,11 @@ def record_offline_payment(db, *, tenant_id, invoice_id, amount_cents, request_k
     from ..models import OfftakerInvoice, OfftakerSettlement, OfftakerPayment
     if type(amount_cents) is not int or amount_cents <= 0:
         raise ValueError("Receipt amount must be positive integer cents")
-    if not request_key or len(request_key) > 120 or not actor or not str(note).strip():
+    if (not isinstance(request_key, str) or not request_key.strip() or len(request_key) > 120
+            or not isinstance(actor, str) or not actor.strip() or len(actor) > 200
+            or not isinstance(note, str) or not note.strip()):
         raise ValueError("Request key, actor, and settlement evidence are required")
-    if not isinstance(received_on, date) or received_on > date.today():
+    if type(received_on) is not date or received_on > date.today():
         raise ValueError("Receipt date must not be in the future")
     if method not in ("check", "cash", "bank_transfer"):
         raise ValueError("Unsupported offline receipt method")
@@ -1266,3 +1314,61 @@ def record_offline_payment(db, *, tenant_id, invoice_id, amount_cents, request_k
     db.commit()
     return {"ok": True, "settlement_id": receipt.id, "collected_cents": paid + amount_cents,
             "outstanding_cents": invoice.amount_cents - paid - amount_cents}
+
+
+def mark_application_fee_refunded(db, *, fee_dict: dict) -> dict:
+    """Validate application-fee ownership against its charge before recording a refund."""
+    from ..models import OfftakerPayment, Tenant
+    fee_id, charge_id, account = fee_dict.get("id"), fee_dict.get("charge"), fee_dict.get("account")
+    if isinstance(charge_id, dict):
+        charge_id = charge_id.get("id")
+    if not all(isinstance(v, str) and v for v in (fee_id, charge_id, account)):
+        return {"ignored": "Fee refund missing fee, charge, or account identity"}
+    if not _stripe_ready():
+        raise RuntimeError("Stripe not configured for fee reconciliation")
+    # A direct charge lives on the operator; legacy destination charges live
+    # on the platform. Only a proven missing resource permits that fallback.
+    scope = account
+    try:
+        charge = stripe.Charge.retrieve(charge_id, stripe_account=scope)
+    except stripe.error.InvalidRequestError as exc:
+        if getattr(exc, "code", None) != "resource_missing":
+            raise
+        scope = None
+        charge = stripe.Charge.retrieve(charge_id)
+    charge = charge.to_dict() if hasattr(charge, "to_dict") else dict(charge)
+    attached_fee = charge.get("application_fee")
+    if isinstance(attached_fee, dict):
+        attached_fee = attached_fee.get("id")
+    if charge.get("id") != charge_id or attached_fee != fee_id:
+        return {"ignored": "Fee does not belong to charge"}
+    pi = charge.get("payment_intent")
+    if isinstance(pi, dict):
+        pi = pi.get("id")
+    row = db.scalar(select(OfftakerPayment).where(OfftakerPayment.stripe_payment_intent_id == pi)) if pi else None
+    if row is None and pi:
+        row = _recover_payment_intent(db, pi, scope)
+    if row is None:
+        return {"ignored": "No matching offtaker payment"}
+    _lock_payment(db, row)
+    tenant = db.get(Tenant, row.tenant_id)
+    if (row.stripe_account_id != scope or
+            (scope is None and getattr(tenant, "stripe_connect_account_id", None) != account)):
+        return {"ignored": "Fee account does not own payment"}
+    if (charge.get("amount") != row.amount_cents or
+            charge.get("currency") != row.currency or
+            fee_dict.get("currency") != row.currency or
+            fee_dict.get("amount") != row.fee_cents):
+        return {"ignored": "Fee currency or amount mismatch"}
+    if row.stripe_application_fee_id and row.stripe_application_fee_id != fee_id:
+        return {"ignored": "Fee identity mismatch"}
+    amount = fee_dict.get("amount_refunded")
+    if type(amount) is not int or amount < 0 or amount > row.fee_cents:
+        return {"ignored": "Invalid fee refund amount"}
+    row.stripe_application_fee_id = fee_id
+    row.fee_refunded_cents = max(int(row.fee_refunded_cents or 0), amount)
+    db.commit()
+    from .invoice_ledger import sync_payment_into_ledger
+    sync_payment_into_ledger(db, row)
+    return {"ok": True, "tenant": row.tenant_id, "payment_id": row.id,
+            "fee_refunded_cents": row.fee_refunded_cents}

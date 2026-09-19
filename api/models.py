@@ -1995,6 +1995,7 @@ class OfftakerPayment(Base):
     # account for DIRECT charges; NULL = the platform (legacy destination
     # charges). Every later Stripe call about this row must address it.
     stripe_account_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    stripe_application_fee_id: Mapped[str | None] = mapped_column(String(100), nullable=True, unique=True)
     active_key: Mapped[str | None] = mapped_column(String(100), nullable=True, unique=True)
     refunded_cents: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     fee_refunded_cents: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
