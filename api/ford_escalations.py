@@ -171,6 +171,15 @@ needs_ford=false only if this is pure documentation / already-known and no actio
 Be practical. No fluff."""
 
 
+class PermanentTriageProviderError(RuntimeError):
+    """Authentication/account access needs operator action, not automatic retries."""
+
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+        # Never include the provider response body, account identifiers or keys.
+        super().__init__(f"xAI triage unavailable (HTTP {status_code}); manual review required")
+
+
 def _http_json(url: str, headers: dict, body: dict, timeout: int = 90) -> dict:
     import urllib.error
     import urllib.request
@@ -181,6 +190,9 @@ def _http_json(url: str, headers: dict, body: dict, timeout: int = 90) -> dict:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            e.close()
+            raise PermanentTriageProviderError(e.code) from None
         err = e.read().decode("utf-8", errors="replace")[:500]
         raise RuntimeError(f"HTTP {e.code}: {err}") from e
 
@@ -255,6 +267,7 @@ def process_open_escalations(limit: int | None = None) -> dict:
     processed = 0
     errors = 0
     notified = 0
+    held = 0
 
     with SessionLocal() as db:
         rows = db.execute(
@@ -338,6 +351,22 @@ def process_open_escalations(limit: int | None = None) -> dict:
                         log.exception("notify failed for %s", eid)
 
             processed += 1
+        except PermanentTriageProviderError as exc:
+            errors += 1
+            # The durable inbox remains actionable even when provider credits or
+            # credentials are unavailable. Do not call another provider or send
+            # a notification from this failure path; an admin can reopen later.
+            with SessionLocal() as db:
+                row = db.get(EaEscalation, eid)
+                if row and row.status == "working":
+                    row.status = "needs_ford"
+                    row.updated_at = _now()
+                    note = (f"[xAI triage unavailable: HTTP {exc.status_code}. "
+                            "Manual review required; automatic retry stopped.]")
+                    row.agent_notes = "\n".join(part for part in (row.agent_notes, note) if part)
+                    db.commit()
+                    held += 1
+            log.warning("escalation %s held for manual review: xAI HTTP %s", eid, exc.status_code)
         except Exception:
             errors += 1
             log.exception("process escalation %s failed", eid)
@@ -353,7 +382,8 @@ def process_open_escalations(limit: int | None = None) -> dict:
             except Exception:
                 pass
 
-    return {"processed": processed, "errors": errors, "notified": notified, "batch": limit}
+    return {"processed": processed, "errors": errors, "notified": notified,
+            "held": held, "batch": limit}
 
 
 # ── REST admin API ──────────────────────────────────────────────────────────
@@ -611,6 +641,7 @@ function card(it) {{
     <h2 class="title">${{esc(title)}}</h2>
     <div class="sum">${{esc(it.summary||"")}}</div>
     ${{it.user_said ? `<details><summary>User said</summary><div class="sum">${{esc(it.user_said)}}</div></details>` : ""}}
+    ${{it.status === "needs_ford" && it.proposed_plan && it.agent_notes ? `<div class="plan"><b>Notes</b><br>${{esc(it.agent_notes)}}</div>` : ""}}
     ${{plan ? `<div class="plan"><b>Plan</b><br>${{esc(plan)}}</div>` : ""}}
     ${{fix ? `<details open><summary>Proposed fix</summary><div class="plan">${{esc(fix)}}</div></details>` : ""}}
     <div class="row-acts">
