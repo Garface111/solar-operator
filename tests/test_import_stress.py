@@ -519,9 +519,6 @@ class TestSheetStructureChaos:
         assert rows[0]["array_name"] == "Wide Farm"
         assert rows[0]["nepool_gis_id"] == "53984"
 
-    @pytest.mark.xfail(reason="defect-import-03: heuristic parser always treats row 0 "
-                       "as header; a banner row at top causes actual header to be "
-                       "treated as data, producing a spurious extra row", strict=True)
     def test_banner_row_at_top_breaks_heuristic(self):
         """xlsx with a title banner above the header row — heuristic misparses.
 
@@ -546,10 +543,6 @@ class TestSheetStructureChaos:
         assert len(rows) == 1
         assert rows[0]["array_name"] == "Acme Farm"
 
-    @pytest.mark.xfail(reason="defect-import-04: merged cells in header row produce an "
-                       "empty-string column that shifts subsequent column indices, "
-                       "causing the heuristic to mismap NEPOOL ID to the wrong column",
-                       strict=True)
     def test_merged_header_cells_cause_column_shift(self):
         """Merged 'Array Name' header spanning A:B shifts NEPOOL to wrong column.
 
@@ -961,11 +954,6 @@ class TestDomainLogic:
         names = {r["array_name"] for r in rows}
         assert names == {"Chester", "Chester (East)", "Chester Solar"}
 
-    @pytest.mark.xfail(reason="defect-import-06: account_number > 40 chars passes "
-                       "through _normalize without validation; DB column is String(40) "
-                       "and will raise OperationalError at commit time rather than "
-                       "surfacing a clean parse error to the operator in preview",
-                       strict=True)
     def test_account_number_too_long_flagged_at_parse_time(self):
         """account_number > 40 chars must be flagged in preview, not fail at commit.
 
@@ -1008,3 +996,40 @@ class TestDomainLogic:
         assert '“' not in normalised[0]["array_name"]
         assert '”' not in normalised[0]["array_name"]
         assert "53984" == normalised[0]["nepool_gis_id"]
+
+
+def test_merge_recovery_preserves_aligned_and_unmerged_blank_columns():
+    # A correctly aligned merged header must keep NEPOOL in column C.
+    wb = openpyxl.Workbook(); ws = wb.active
+    ws["A1"] = "Array Name"; ws["C1"] = "NEPOOL GIS ID"
+    ws.merge_cells("A1:B1"); ws.append(["Aligned Farm", "", "53984"])
+    buf = io.BytesIO(); wb.save(buf)
+    rows = _normalize(_heuristic_extract(_xlsx_to_text(buf.getvalue())))
+    assert rows[0]["nepool_gis_id"] == "53984"
+    # A blank unmerged header does NOT authorize shifting an unknown column.
+    wb = openpyxl.Workbook(); ws = wb.active
+    ws.append(["Array Name", "", "NEPOOL GIS ID"])
+    ws.append(["Ambiguous Farm", "53984", ""])
+    buf = io.BytesIO(); wb.save(buf)
+    rows = _normalize(_heuristic_extract(_xlsx_to_text(buf.getvalue())))
+    assert rows[0]["array_name"] == "Ambiguous Farm"
+    assert rows[0]["nepool_gis_id"] is None
+
+
+def test_oversize_account_preserved_flagged_and_commit_rejected(authed_stress):
+    client, auth = authed_stress
+    row = {"operator_name": "Length Guard", "array_name": "No Truncation Farm",
+           "nepool_gis_id": "53984", "gmp_account_number": "A" * 41}
+    parsed = _normalize([row])[0]
+    assert parsed["gmp_account_number"] == row["gmp_account_number"]
+    assert "40 characters" in parsed["account_parse_error"]
+    response = client.post("/v1/ingest/commit", headers={"Authorization": auth},
+                           json={"arrays": [row]})
+    assert response.status_code == 422, response.text
+    assert "40 characters" in response.json()["detail"]
+
+
+def test_each_sheet_finds_its_own_header_below_banners():
+    text = "--- Sheet: First ---\nArray roster\nClient\tArray Name\tNEPOOL ID\nOp\tFarm A\t53984\n"            "--- Sheet: Second ---\nPortfolio 2026\nNEPOOL ID\tArray Name\tClient\n53985\tFarm B\tOp"
+    rows = _normalize(_heuristic_extract(text))
+    assert [(r["array_name"], r["nepool_gis_id"]) for r in rows] == [("Farm A", "53984"), ("Farm B", "53985")]

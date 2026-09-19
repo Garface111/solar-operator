@@ -200,12 +200,36 @@ def _xlsx_to_text(data: bytes) -> str:
     was read, silently dropping every subsequent tab."""
     from openpyxl import load_workbook
 
-    wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    wb = load_workbook(io.BytesIO(data), read_only=False, data_only=True)
     try:
         parts: list[str] = []
         for ws in wb.worksheets:
             lines: list[str] = []
-            for row in ws.iter_rows(values_only=True):
+            grid = [["" if c is None else str(c) for c in row]
+                    for row in ws.iter_rows(values_only=True)]
+            # A merged header can describe a densely packed data table. Only
+            # collapse its merge padding when every data row proves the shifted
+            # NEPOOL column is valid and the original NEPOOL column is empty.
+            # Ordinary blank columns and correctly aligned merges stay intact.
+            for row_index, cells in enumerate(grid):
+                gaps = {col - 1 for span in ws.merged_cells.ranges
+                        if span.min_row == span.max_row == row_index + 1
+                        for col in range(span.min_col + 1, span.max_col + 1)}
+                if not gaps:
+                    continue
+                original = _heuristic_header(cells)
+                compact = [v for i, v in enumerate(cells) if i not in gaps]
+                proposed = _heuristic_header(compact)
+                old_id = next((i for i, f in original.items() if f == "nepool_gis_id"), None)
+                new_id = next((i for i, f in proposed.items() if f == "nepool_gis_id"), None)
+                below = [r for r in grid[row_index + 1:] if any(v.strip() for v in r)]
+                if (len(original) >= 2 and old_id is not None and new_id is not None
+                        and old_id != new_id and below
+                        and all(not (r[old_id].strip() if old_id < len(r) else "")
+                            and new_id < len(r) and _coerce_nepool(r[new_id])[0] is not None
+                            for r in below)):
+                    grid[row_index] = compact
+            for row in grid:
                 if row is None:
                     continue
                 cells = ["" if c is None else str(c) for c in row]
@@ -509,46 +533,56 @@ _HEURISTIC_MAP = [
 ]
 
 
-def _heuristic_extract(text: str) -> list[dict]:
-    """Best-effort parse when no LLM is available: match column headers to
-    fields by keyword, then read each row into that mapping."""
-    rows = [ln.split("\t") for ln in text.splitlines() if ln.strip()]
-    if not rows:
-        return []
-    header = [h.strip().lower() for h in rows[0]]
-    # Map each column index → canonical field.
-    col_field: dict[int, str] = {}
-    used: set[str] = set()
-    for idx, col in enumerate(header):
+def _heuristic_header(cells):
+    mapping, used = {}, set()
+    for idx, col in enumerate(cells):
+        col = str(col).strip().lower()
         for field, keywords in _HEURISTIC_MAP:
-            if field in used:
-                continue
-            if any(k in col for k in keywords):
-                col_field[idx] = field
+            if field not in used and any(k in col for k in keywords):
+                mapping[idx] = field
                 used.add(field)
                 break
+    return mapping
 
-    out: list[dict] = []
-    for raw in rows[1:]:
-        entry = {f: None for f in FIELDS}
-        any_value = False
-        for idx, val in enumerate(raw):
-            field = col_field.get(idx)
-            v = val.strip()
-            if field and v:
-                entry[field] = v
-                any_value = True
-        # If headers were unrecognizable, fall back to positional guessing:
-        # operator, array, nepool — the most common roster shape.
-        if not col_field and len(raw) >= 2:
-            entry["operator_name"] = (raw[0] or "").strip() or None
-            entry["array_name"] = (raw[1] or "").strip() or None
-            if len(raw) >= 3:
-                m = re.search(r"\b\d{4,6}\b", raw[2])
-                entry["nepool_gis_id"] = m.group(0) if m else (raw[2].strip() or None)
-            any_value = any(entry.values())
-        if any_value:
-            out.append(entry)
+
+def _heuristic_extract(text: str) -> list[dict]:
+    """Find real headers below banners; each worksheet has its own mapping."""
+    sections, current = [], []
+    for line in text.splitlines():
+        if line.startswith("--- Sheet: ") and line.endswith(" ---"):
+            if current:
+                sections.append(current)
+            current = []
+        elif line.strip():
+            current.append(line.split("\t"))
+    if current:
+        sections.append(current)
+    out = []
+    for rows in sections:
+        # More distinct recognized columns outrank a one-cell title such as
+        # 'Solar Array Portfolio'. First equally strong header wins.
+        header_idx = max(range(min(len(rows), 25)),
+                         key=lambda i: len(_heuristic_header(rows[i])))
+        col_field = _heuristic_header(rows[header_idx])
+        if len(col_field) < 2:
+            header_idx, col_field = 0, _heuristic_header(rows[0])
+        for raw in rows[header_idx + 1:]:
+            if _heuristic_header(raw) == col_field and all(
+                    raw[i].strip().lower() == rows[header_idx][i].strip().lower()
+                    for i in col_field if i < len(raw)):
+                continue  # repeated page header, never an account
+            entry = {f: None for f in FIELDS}
+            for idx, field in col_field.items():
+                if idx < len(raw) and raw[idx].strip():
+                    entry[field] = raw[idx].strip()
+            if not col_field and len(raw) >= 2:
+                entry["operator_name"] = raw[0].strip() or None
+                entry["array_name"] = raw[1].strip() or None
+                if len(raw) >= 3:
+                    m = re.search(r"\b\d{4,6}\b", raw[2])
+                    entry["nepool_gis_id"] = m.group(0) if m else (raw[2].strip() or None)
+            if any(entry.values()):
+                out.append(entry)
     return out
 
 
@@ -583,6 +617,8 @@ def _normalize(rows: list[dict]) -> list[dict]:
             else:
                 s = clean_text(v)
                 entry[f] = s or None
+                if f == "gmp_account_number" and len(s) > 40:
+                    entry["account_parse_error"] = "Utility account number exceeds 40 characters; correct it before importing"
         # Preserve passthrough keys so callers can read them post-normalization.
         for key in _PASSTHROUGH_KEYS:
             if key in r:
@@ -897,6 +933,10 @@ def ingest_commit(
     rows = _normalize([r.model_dump() for r in body.arrays])
     if not rows:
         raise HTTPException(400, "Nothing to import")
+    invalid_accounts = [i + 1 for i, row in enumerate(rows) if row.get("account_parse_error")]
+    if invalid_accounts:
+        raise HTTPException(422, "Utility account number exceeds 40 characters on row(s): " +
+                            ", ".join(map(str, invalid_accounts)))
     if len(rows) > MAX_COMMIT_ROWS:
         raise HTTPException(
             400, f"Too many rows ({len(rows)}). Import at most {MAX_COMMIT_ROWS} at a time."
