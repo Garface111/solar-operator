@@ -612,6 +612,18 @@ def test_invoice_template_defaults_on_and_toggles_both_ways(client):
 # ─── scheduler ──────────────────────────────────────────────────────────────
 
 
+def _prepare_closed_offline_schedule(sub_id):
+    """Scheduled fixtures predate their bill and deliberately use offline collection."""
+    from datetime import datetime
+    from api.billing.delivery import build_match
+    with SessionLocal() as db:
+        sub = db.get(BillingReportSubscription, sub_id)
+        match = build_match(sub)
+        sub.created_at = datetime.fromisoformat(match.computed_invoice["period_end"]).replace(day=1)
+        db.get(Tenant, sub.tenant_id).offtaker_payment_policy = "offline"
+        db.commit()
+
+
 def test_scheduler_monthly_billing_delivers(client, monkeypatch):
     """The scheduler job picks up THIS tenant's enabled monthly sub. With
     delivery_mode='auto' it sends straight to the recipient. (Asserts on our own
@@ -623,6 +635,7 @@ def test_scheduler_monthly_billing_delivers(client, monkeypatch):
                      delivery_mode="auto", send_mode="to_me").json()["subscription"]["id"]
 
     monkeypatch.setattr("api.notify._send_via_resend", lambda **kw: True)
+    _prepare_closed_offline_schedule(sub_id)
     result = scheduler.deliver_billing_reports("monthly")
     assert sub_id in result["sent"]
     assert sub_id not in result["failed"]
@@ -650,6 +663,7 @@ def test_offtaker_send_bccs_the_operator(client, monkeypatch):
         return True
 
     monkeypatch.setattr("api.notify._send_via_resend", fake_send)
+    _prepare_closed_offline_schedule(sub_id)
     result = scheduler.deliver_billing_reports("monthly")
     assert sub_id in result["sent"]
     to_list = captured["to"] if isinstance(captured["to"], list) else [captured["to"]]
@@ -676,6 +690,7 @@ def test_offtaker_email_is_white_labeled_to_the_operator(client, monkeypatch):
         return True
 
     monkeypatch.setattr("api.notify._send_via_resend", fake_send)
+    _prepare_closed_offline_schedule(sub_id)
     assert sub_id in scheduler.deliver_billing_reports("monthly")["sent"]
     # No Array Operator branding anywhere the offtaker sees:
     assert "Array Operator" not in cap["html"]

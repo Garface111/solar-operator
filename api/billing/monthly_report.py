@@ -59,7 +59,10 @@ COLUMNS: list[tuple[str, str, int]] = [
     ("billed_usd",     "Billed $",        13),
     ("paid",           "Paid?",           10),
     ("paid_date",      "Paid date",       13),
-    ("collected_usd",  "Collected $",     13),
+    ("collected_usd",  "After platform fee $", 22),
+    ("gross_collected_usd", "Gross collected $", 17),
+    ("refunded_usd", "Refunded $", 14),
+    ("outstanding_usd", "Outstanding $", 16),
     ("invoice_number", "Invoice #",       18),
     ("sent_date",      "Invoice sent",    14),
     ("invoice_status", "Invoice status", 18),
@@ -164,17 +167,31 @@ def collect_rows(db, tenant, period_key: str) -> list[dict]:
                 paid_at = datetime.fromisoformat(str(pay["paid_at"]).replace("Z", "+00:00")).date()
             except (TypeError, ValueError):
                 pass
+        balance = invoice_ledger.invoice_balance(db, inv) if accepted else None
+        paid = bool(pay and pay.get("status") == "paid")
+        paid_label = ("Yes" if paid else pay.get("status_label") or "No") if pay else "Not tracked"
+        collected = (pay or {}).get("collected_usd")
+        if balance is not None:
+            paid = balance["outstanding_cents"] == 0
+            paid_label = ("Refunded" if balance["refunded_cents"] else
+                          "No payment due" if inv.amount_cents == 0 else
+                          "Yes" if paid else
+                          "Partial payment" if balance["gross_collected_cents"] else "Awaiting payment")
+            collected = balance["after_platform_fee_cents"] / 100
         rows.append({
             "offtaker": snapshot.get("customer_name") or (snapshot.get("customer") or {}).get("name") or sub.customer_name or "(unnamed)",
             "email": snapshot.get("client_email") or (snapshot.get("customer") or {}).get("email") or _recipients(sub),
             "array": snapshot.get("array_name") or _array_name(db, sub),
             "generation_kwh": round(float(kwh), 2) if kwh is not None else None,
             "billed_usd": round(float(billed), 2) if billed is not None else None,
-            "paid": ("Yes" if pay.get("status") == "paid" else pay.get("status_label") or "No") if pay else "Not tracked",
-            "paid_date": paid_at, "collected_usd": (pay or {}).get("collected_usd"),
+            "paid": paid_label,
+            "paid_date": paid_at, "collected_usd": collected,
+            "gross_collected_usd": balance["gross_collected_cents"] / 100 if balance else None,
+            "refunded_usd": balance["refunded_cents"] / 100 if balance else None,
+            "outstanding_usd": balance["outstanding_cents"] / 100 if balance else None,
             "invoice_number": number, "sent_date": sent.date() if sent else None,
             "invoice_status": status, "exception_reason": reason,
-            "_paid": bool(pay and pay.get("status") == "paid"),
+            "_paid": paid,
         })
     rows.sort(key=lambda r: (r.get("offtaker") or "").lower())
     return rows
@@ -239,7 +256,7 @@ def build_workbook(tenant, period_key: str, rows: list[dict],
         for i, (field, _h, _w) in enumerate(COLUMNS, start=1):
             c = ws.cell(row=r, column=i, value=row.get(field))
             c.border = Border(bottom=rule)
-            if field in ("billed_usd", "collected_usd"):
+            if field in ("billed_usd", "collected_usd", "gross_collected_usd", "refunded_usd", "outstanding_usd"):
                 c.number_format = money
             elif field == "generation_kwh":
                 c.number_format = "#,##0.00"
@@ -554,7 +571,7 @@ def _email_body(tenant, period_key: str, s: dict, built: Optional[dict] = None) 
     lines.append(f"Paid: {s.get('paid_count', 0)}  ·  Outstanding: {unpaid}")
     lines += ["", "The attached spreadsheet lists every offtaker, their email, "
                   "what their array generated, what they were billed, and "
-                  "whether they have paid."]
+                  "whether they have paid. Collected totals subtract platform fees and refunds; Stripe processing fees and bank payouts are not verified."]
     text = "\n".join(lines)
 
     rows_html = "".join(

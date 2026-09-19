@@ -104,3 +104,60 @@ def test_review_job_honors_pause_mode_and_already_sent(monkeypatch):
         sub.last_sent_period_end="2026-06-30";db.commit()
     draft.reset_mock();new_bill_review.run_new_bill_reviews(dry_run=True)
     assert all(call.args[1].id != sid for call in draft.call_args_list)
+
+
+def test_minted_payment_does_not_hide_failed_invoice_retry():
+    from api.models import OfftakerPayment
+    t=_tenant();sid=_sub(t.id)
+    with SessionLocal() as db:
+        sub=db.get(BillingReportSubscription,sid);sub.created_at=datetime(2026,6,1)
+        db.add(OfftakerInvoice(tenant_id=t.id,subscription_id=sid,period_key="2026-06",
+            period_start=date(2026,6,1),period_end=date(2026,6,30),status="failed",snapshot={}))
+        db.add(OfftakerPayment(tenant_id=t.id,subscription_id=sid,period_key="2026-06-30",
+            invoice_number="June",amount_cents=10000,fee_cents=0,status="pending"))
+        db.commit()
+        assert queue_closed_periods(db,sub,today=date(2026,7,1)) == ["2026-06"]
+
+
+def test_changed_cadence_does_not_queue_overlapping_issued_quarter():
+    t=_tenant();sid=_sub(t.id,cadence="monthly")
+    with SessionLocal() as db:
+        sub=db.get(BillingReportSubscription,sid);sub.created_at=datetime(2026,7,1)
+        db.add(OfftakerInvoice(tenant_id=t.id,subscription_id=sid,period_key="2026-Q2",
+            period_start=date(2026,4,1),period_end=date(2026,6,30),status="accepted",snapshot={}))
+        db.commit()
+        assert queue_closed_periods(db,sub,today=date(2026,8,1)) == ["2026-07"]
+        assert db.query(OfftakerInvoice).filter_by(subscription_id=sid).count()==2
+
+
+def test_real_historical_delivery_retries_older_gap_after_newer_invoice(monkeypatch):
+    from tests.test_draft_period_selector import _seed_multi_period_offtaker
+    from api.models import Tenant, BillingEmailDispatch
+    from api.billing import delivery, payments
+    tid,auth,sid=_seed_multi_period_offtaker()
+    monkeypatch.setattr(delivery,"generate_files",lambda *a,**kw:[])
+    monkeypatch.setattr(payments,"create_offtaker_payment",lambda *a,**kw:{"ok":False})
+    monkeypatch.setattr(payments,"link_existing_connect_account",lambda *a,**kw:{})
+    monkeypatch.setattr(payments,"refresh_connect_status",lambda *a,**kw:{})
+    calls=[]
+    def mail(**kw):
+        calls.append(kw)
+        return len(calls)>1
+    monkeypatch.setattr("api.notify._send_via_resend",mail)
+    with SessionLocal() as db:
+        sub=db.get(BillingReportSubscription,sid);sub.created_at=datetime(2025,10,1)
+        tenant=db.get(Tenant,tid);tenant.offtaker_payment_policy="offline"
+        db.commit()
+        periods=queue_closed_periods(db,sub,today=date(2025,12,1))
+        assert periods==["2025-10","2025-11"]
+        assert not delivery.deliver_subscription(db,sub,tenant,period_label=periods[0])["ok"]
+        assert delivery.deliver_subscription(db,sub,tenant,period_label=periods[1])["ok"]
+        for dispatch in db.query(BillingEmailDispatch).filter_by(tenant_id=tid):
+            dispatch.retry_at=None
+        db.commit()
+        assert queue_closed_periods(db,sub,today=date(2025,12,1))==["2025-10"]
+        assert delivery.deliver_subscription(db,sub,tenant,period_label="2025-10")["ok"]
+        assert queue_closed_periods(db,sub,today=date(2025,12,1))==[]
+        invoices=db.query(OfftakerInvoice).filter_by(subscription_id=sid).all()
+        assert len(invoices)==2 and all(i.status=="accepted" for i in invoices)
+    assert len(calls)==3

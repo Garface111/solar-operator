@@ -173,3 +173,19 @@ def test_summary_commit_failure_after_acceptance_never_resends(monkeypatch):
     with SessionLocal() as db:
         assert monthly_report.send_report(db,db.get(Tenant,t.id),"2026-06")["ok"]
     assert len(sent)==1
+
+
+def test_offline_settlement_appears_in_monthly_cash_and_balance():
+    from api.models import OfftakerSettlement
+    t=_tenant();sid=_sub(t.id)
+    with SessionLocal() as db:
+        inv=_invoice(db,t.id,sid,"2026-06")
+        db.add(OfftakerSettlement(tenant_id=t.id,invoice_id=inv.id,subscription_id=sid,
+            amount_cents=6000,received_on=date(2026,7,2),request_key="offline-audit",
+            actor="operator",method="check",note="Check receipt verified"))
+        db.commit()
+        row=monthly_report.collect_rows(db,db.get(Tenant,t.id),"2026-06")[0]
+        assert row["collected_usd"] == 60
+        assert row["gross_collected_usd"] == 60
+        assert row["outstanding_usd"] == 40
+        assert row["paid"] == "Partial payment"
