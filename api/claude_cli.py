@@ -441,8 +441,9 @@ def ask_text(prompt: str, *, system: str | None = None,
     if not enabled():
         return None
     try:
-        res = call([{"role": "user", "content": prompt}], [],
-                   max_tokens=max_tokens) or {}
+        msgs = ([{"role": "system", "content": system}] if system else []) + [
+            {"role": "user", "content": prompt}]
+        res = call(msgs, [], max_tokens=max_tokens) or {}
     except Exception as e:  # noqa: BLE001
         log.info("claude_cli.ask_text unavailable: %s", e)
         return None

@@ -431,6 +431,16 @@ def _llm_extract_hierarchical(text: str) -> Optional[dict]:
     Exported so nepool_assign can reuse the same hierarchical extraction."""
     anthropic_key = os.getenv("ANTHROPIC_API_KEY")
     openai_key = os.getenv("OPENAI_API_KEY")
+    # Subscription seat first (Ford 2026-09-19); metered keys stay as fallback.
+    try:
+        from . import claude_cli
+        if claude_cli.enabled():
+            raw = claude_cli.ask_text(f"{EXTRACTION_PROMPT}\n\n{text}",
+                                      max_tokens=4096)
+            if raw:
+                return _extract_json_block(raw)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("claude-cli hierarchical extraction failed: %s", e)
     if anthropic_key:
         try:
             return _call_anthropic(text, anthropic_key)

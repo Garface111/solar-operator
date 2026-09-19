@@ -1912,11 +1912,36 @@ def _repair_llm_complete(messages: list[dict], *, temperature: float = 0.35) -> 
                 parts.append(block.get("text") or "")
         return "\n".join(parts).strip()
 
+    def _cli() -> str:
+        """Same contract as _grok/_claude: return the completion text."""
+        from . import claude_cli as _cc
+        head = "\n".join((m.get("content") or "") for m in messages
+                          if m.get("role") == "system").strip()
+        convo = "\n\n".join(
+            f"{(m.get('role') or 'user').upper()}: {m.get('content') or ''}"
+            for m in messages if m.get("role") != "system")
+        return _cc.ask_text(convo or "Respond.",
+                            system=head or None) or ""
+
+    try:
+        from . import claude_cli as _cc0
+        cli_key = "cli" if _cc0.enabled() else ""
+    except Exception:  # noqa: BLE001
+        cli_key = ""
+
     primary = (os.getenv("ENERGY_AGENT_LLM_PRIMARY") or "grok").strip().lower()
-    if primary in ("claude", "anthropic", "cloth"):
-        order = [("claude", anth_key, _claude), ("grok", xai_key, _grok)]
+    if primary in ("claude-cli", "claude_cli", "cli", "subscription", "max"):
+        # Ford 2026-09-19: all token demand goes through the Claude Code
+        # subscription first. Without this arm "claude-cli" fell silently to
+        # the else branch and spent Grok credit instead.
+        order = [("claude_cli", cli_key, _cli), ("claude", anth_key, _claude),
+                 ("grok", xai_key, _grok)]
+    elif primary in ("claude", "anthropic", "cloth"):
+        order = [("claude", anth_key, _claude), ("claude_cli", cli_key, _cli),
+                 ("grok", xai_key, _grok)]
     else:
-        order = [("grok", xai_key, _grok), ("claude", anth_key, _claude)]
+        order = [("grok", xai_key, _grok), ("claude", anth_key, _claude),
+                 ("claude_cli", cli_key, _cli)]
 
     last_err: Exception | None = None
     for i, (who, key, call) in enumerate(order):
