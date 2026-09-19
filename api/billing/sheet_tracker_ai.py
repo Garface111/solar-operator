@@ -38,7 +38,15 @@ def ai_available() -> bool:
     """True when the model-mapper can run (a key is configured + not disabled)."""
     if os.getenv("SHEET_TRACKER_AI", "").lower() in ("0", "false", "off", "no"):
         return False
-    return bool(os.getenv("ANTHROPIC_API_KEY"))
+    if os.getenv("ANTHROPIC_API_KEY"):
+        return True
+    # The Claude Code CLI runs on Ford's subscription seat, so header detection
+    # stays alive when the metered key is out of credit.
+    try:
+        from .. import claude_cli
+        return claude_cli.enabled()
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _model() -> str:
@@ -101,6 +109,16 @@ def _prompt(grid_text: str, sheet: Optional[str], offtaker: Optional[str]) -> st
 
 
 def _call_anthropic(prompt: str, timeout: int = 22, max_tokens: int = 600) -> Optional[str]:
+    # CLI first (Ford 2026-09-19: all token demand goes through the Claude Code
+    # subscription). The metered key stays as the fallback for boxes that have
+    # credit but no CLI.
+    try:
+        from .. import claude_cli
+        text = claude_cli.ask_text(prompt, max_tokens=max_tokens)
+        if text:
+            return text
+    except Exception:  # noqa: BLE001
+        pass
     key = os.getenv("ANTHROPIC_API_KEY")
     if not key:
         return None
