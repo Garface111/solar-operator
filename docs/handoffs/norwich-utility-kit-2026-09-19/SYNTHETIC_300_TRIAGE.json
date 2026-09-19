@@ -1,0 +1,154 @@
+{
+  "schema_version": 1,
+  "purpose": "planning_only",
+  "group_count": 4,
+  "offtaker_count": 300,
+  "invoice_ready_count": 0,
+  "count_note": "Counts sum the supplied groups. Keep groups disjoint; this tool cannot establish unique customers without Norwich's roster.",
+  "family_counts": {
+    "gmp": 1,
+    "smarthub": 1,
+    "unknown": 1,
+    "cmp": 1
+  },
+  "integration_routes": {
+    "qualify_existing_family": 2,
+    "new_connector": 1,
+    "add_billing_evidence_path": 1
+  },
+  "groups": [
+    {
+      "provider_code": "gmp",
+      "utility_name": "Green Mountain Power (GMP)",
+      "state": "VT",
+      "portal_host": "greenmountainpower.com",
+      "family": "gmp",
+      "catalog_status": "live",
+      "collector": "api.harvester.vendors.gmp / api.adapters.gmp",
+      "capture_outputs": [
+        "accounts",
+        "bill_json",
+        "bill_pdf",
+        "meter_generation"
+      ],
+      "billing_basis": "bill_credit",
+      "cadence": "monthly",
+      "integration_route": "qualify_existing_family",
+      "identity_issues": [],
+      "limitation": "Confirm the actual account, generation meter, credit lines and contract rate.",
+      "invoice_ready": false,
+      "qualification": "not_assessed_on_real_accounts",
+      "required_evidence": [
+        "official_utility_and_portal_identity",
+        "authorized_access_and_mfa_recovery",
+        "account_meter_and_offtaker_mapping",
+        "two_closed_cycles_with_original_source_files",
+        "independently_checked_amounts_units_and_contract",
+        "relogin_and_repeat_capture",
+        "incomplete_wrong_account_and_duplicate_rejection",
+        "reviewed_live_invoice_canary"
+      ],
+      "group_id": "example-gmp",
+      "offtaker_count": 100,
+      "source_role": "offtaker_credit"
+    },
+    {
+      "provider_code": "vec",
+      "utility_name": "Vermont Electric Cooperative",
+      "state": "VT",
+      "portal_host": "vermontelectric.smarthub.coop",
+      "family": "smarthub",
+      "catalog_status": "live",
+      "collector": "api.harvester.vendors.smarthub",
+      "capture_outputs": [
+        "accounts",
+        "bill_history",
+        "bill_pdf",
+        "meter_readings"
+      ],
+      "billing_basis": "production_kwh",
+      "cadence": "monthly",
+      "integration_route": "qualify_existing_family",
+      "identity_issues": [],
+      "limitation": "Qualify each utility and meter. Bill-credit mode requires actual statement credit/excess semantics and a verified parser. Usage, export and prorated bill totals are not measured generation. Monthly only until quarterly support is implemented.",
+      "invoice_ready": false,
+      "qualification": "not_assessed_on_real_accounts",
+      "required_evidence": [
+        "official_utility_and_portal_identity",
+        "authorized_access_and_mfa_recovery",
+        "account_meter_and_offtaker_mapping",
+        "two_closed_cycles_with_original_source_files",
+        "independently_checked_amounts_units_and_contract",
+        "relogin_and_repeat_capture",
+        "incomplete_wrong_account_and_duplicate_rejection",
+        "reviewed_live_invoice_canary"
+      ],
+      "group_id": "example-smarthub",
+      "offtaker_count": 80,
+      "source_role": "array_generation"
+    },
+    {
+      "provider_code": null,
+      "utility_name": "Fictional Example Utility",
+      "state": null,
+      "portal_host": null,
+      "family": "unknown",
+      "catalog_status": "not_cataloged",
+      "collector": null,
+      "capture_outputs": [],
+      "billing_basis": "bill_credit",
+      "cadence": "monthly",
+      "integration_route": "new_connector",
+      "identity_issues": [],
+      "limitation": "Discover the official portal and source contract before building or enabling a connector.",
+      "invoice_ready": false,
+      "qualification": "not_assessed_on_real_accounts",
+      "required_evidence": [
+        "official_utility_and_portal_identity",
+        "authorized_access_and_mfa_recovery",
+        "account_meter_and_offtaker_mapping",
+        "two_closed_cycles_with_original_source_files",
+        "independently_checked_amounts_units_and_contract",
+        "relogin_and_repeat_capture",
+        "incomplete_wrong_account_and_duplicate_rejection",
+        "reviewed_live_invoice_canary"
+      ],
+      "group_id": "example-unknown",
+      "offtaker_count": 70,
+      "source_role": "offtaker_credit"
+    },
+    {
+      "provider_code": "cmp",
+      "utility_name": "Central Maine Power (CMP)",
+      "state": "ME",
+      "portal_host": "sso.cmpco.com",
+      "family": "cmp",
+      "catalog_status": "live",
+      "collector": "api.harvester.vendors.cmp",
+      "capture_outputs": [
+        "accounts",
+        "meter_candidates"
+      ],
+      "billing_basis": "allocation_statement",
+      "cadence": "monthly",
+      "integration_route": "add_billing_evidence_path",
+      "identity_issues": [],
+      "limitation": "The current collector emits no bill records. Community allocation statements require a separate verified source and mapping.",
+      "invoice_ready": false,
+      "qualification": "not_assessed_on_real_accounts",
+      "required_evidence": [
+        "official_utility_and_portal_identity",
+        "authorized_access_and_mfa_recovery",
+        "account_meter_and_offtaker_mapping",
+        "two_closed_cycles_with_original_source_files",
+        "independently_checked_amounts_units_and_contract",
+        "relogin_and_repeat_capture",
+        "incomplete_wrong_account_and_duplicate_rejection",
+        "reviewed_live_invoice_canary"
+      ],
+      "group_id": "example-cmp",
+      "offtaker_count": 50,
+      "source_role": "both"
+    }
+  ]
+}
