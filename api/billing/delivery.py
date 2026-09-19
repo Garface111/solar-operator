@@ -177,6 +177,22 @@ def build_match(sub, period_label: Optional[str] = None) -> BillingMatch:
                 ci["credit_applied"] = applied
                 ci["pending_credit_remaining"] = remaining
                 ci["amount_owed"] = new_due
+    # An issued/reserved period is immutable, including its original credit.
+    if m is not None and getattr(sub, "id", None) and m.computed_invoice:
+        from ..db import SessionLocal
+        from ..models import OfftakerInvoice
+        from sqlalchemy import select
+        from .issuance import restore
+        key = _period_guard_label(m.computed_invoice.get("period_end"), getattr(sub, "cadence", None))
+        if key:
+            with SessionLocal() as history_db:
+                frozen = history_db.scalar(select(OfftakerInvoice).where(
+                    OfftakerInvoice.tenant_id == sub.tenant_id,
+                    OfftakerInvoice.subscription_id == sub.id,
+                    OfftakerInvoice.period_key == key))
+                if frozen and frozen.snapshot:
+                    return restore(frozen.snapshot)
+
     return m
 
 
@@ -2265,7 +2281,8 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
                          expected_period_label: Optional[str] = None,
                          expected_amount_usd: Optional[float] = None,
                          gmp_pdf_override: Optional[bytes] = None,
-                         force: bool = False) -> dict:
+                         force: bool = False,
+                         period_label: Optional[str] = None) -> dict:
     """Generate + email one subscription's report. Stamps schedule fields on
     success. Returns a structured result dict (never raises for the common
     failure cases — surfaces them in the result instead).
@@ -2286,7 +2303,12 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
     from ..notify import _send_via_resend
 
     try:
-        match = build_match(sub)
+        if period_label is None and expected_period_label:
+            import re
+            dates = re.findall(r"\d{4}-\d{2}-\d{2}", expected_period_label)
+            if dates:
+                period_label = dates[-1][:7]
+        match = build_match(sub, period_label=period_label) if period_label else build_match(sub)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"workbook unreadable: {e}"}
     if not match.matched or not match.latest_period:
@@ -2298,6 +2320,10 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
     # DIFFERENT period than the one reviewed. When the caller pins the reviewed
     # period, refuse (and prompt to regenerate) rather than sending the drift.
     _ci = match.computed_invoice or {}
+    if not is_test and (not _ci.get("period_start") or not _ci.get("period_end")):
+        return {"ok": False, "held": True, "error": "A real invoice requires dated billing coverage"}
+    if _ci.get("generation_complete") is False:
+        return {"ok": False, "held": True, "error": "Generation does not cover the complete billing period"}
     cur_period_label = None
     if _ci.get("period_start") or _ci.get("period_end"):
         cur_period_label = f"{_ci.get('period_start') or '—'} → {_ci.get('period_end') or '—'}"
@@ -2406,6 +2432,29 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
             return {"ok": False, "skipped": True, "error": _reason,
                     "kwh_source": _src}
 
+    invoice_id = None
+    if not is_test:
+        from .issuance import freeze, reconcile
+        # Release any caller read transaction before the independent durable write.
+        db.commit()
+        try:
+            invoice_id, match, invoice_status = freeze(
+                tenant_id=tenant.id, subscription_id=sub.id, key=_cur_guard,
+                match=match, expected_amount=expected_amount_usd)
+            _ci = match.computed_invoice or {}
+            recovery = reconcile(invoice_id)
+            if recovery.get("ok"):
+                db.refresh(sub)
+                return {"ok": False, "already_sent": True, "skipped": True,
+                        "invoice_id": invoice_id, "error": "This immutable invoice was already accepted",
+                        "invoice_number": _ci.get("invoice_number"), "amount_owed": _ci.get("amount_owed")}
+            if recovery.get("uncertain"):
+                return {"ok": False, "held": True, "uncertain": True, "invoice_id": invoice_id,
+                        "error": "A prior send may have succeeded; reconcile delivery before retrying"}
+            db.refresh(sub)
+        except Exception as exc:
+            return {"ok": False, "held": True, "error": str(exc)}
+
     # For a real (non-test) send honor the slider; a test always goes to_me.
     if is_test:
         op = sub.operator_email or getattr(tenant, "contact_email", None)
@@ -2498,15 +2547,21 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
         else:
             from_addr = None
 
-        ok = _send_via_resend(
+        email_payload = dict(
             to=to[0] if len(to) == 1 else to, subject=subject, html=html, text=text,
             attachments=attachments, cc=cc or None, bcc=bcc or None, from_addr=from_addr,
-            reply_to=(op_email or None), product=product,
-        )
+            reply_to=(op_email or None), product=product)
+        dispatch_result = {}
+        if is_test:
+            ok = _send_via_resend(**email_payload)
+        else:
+            from .dispatch import send_email_once
+            dispatch_result = send_email_once(tenant_id=tenant.id, key=f"invoice:{invoice_id}", email=email_payload)
+            ok = dispatch_result.get("ok", False)
         # Capture Resend id immediately after send (bool return is back-compat;
         # id lives on the function attr / last_resend_id helper).
         from ..notify import last_resend_id as _last_resend_id
-        resend_email_id = _last_resend_id() if ok else None
+        resend_email_id = (dispatch_result.get("resend_email_id") if not is_test else _last_resend_id()) if ok else None
 
     result = {"ok": bool(ok), "to": to, "cc": cc, "bcc": bcc,
               "attachments": [p.name for p in paths],
@@ -2520,57 +2575,19 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
               "email_copy_override_id": (_eco_fields or {}).get("email_copy_override_id")}
     if ok:
         result["delivery_status"] = "accepted"
-    if ok and not is_test:
-        now = datetime.utcnow()
-        sub.last_sent_at = now
-        sub.last_invoice_number = result["invoice_number"]
-        # Dollars of the invoice just sent — the send-pipeline dashboard sums
-        # these for the delivered-$ roll-up (never rebuilt per-sub at read time).
-        try:
-            sub.last_sent_amount_usd = (float(result["amount_owed"])
-                                        if result.get("amount_owed") is not None else None)
-        except (TypeError, ValueError):
-            sub.last_sent_amount_usd = None
-        # kWh of the invoice just sent — the sibling of the dollars above. The
-        # monthly offtaker summary reports what was INVOICED; recomputing
-        # generation weeks later can disagree once a bill is re-captured or an
-        # allocation is edited, and a report is a record, not an estimate.
-        try:
-            _ci_kwh = (_ci or {}).get("kwh")
-            sub.last_sent_customer_kwh = (float(_ci_kwh)
-                                          if _ci_kwh is not None else None)
-        except (TypeError, ValueError):
-            sub.last_sent_customer_kwh = None
-        # Record the period just sent so the exactly-once guard (#5) can block a
-        # duplicate send of the same billing period (late bill / ops re-run).
-        if cur_period_key:
-            sub.last_sent_period_end = cur_period_key
-        # Debit banked true-up credit only after a successful non-test send.
-        try:
-            applied = float((_ci or {}).get("credit_applied") or 0.0)
-        except (TypeError, ValueError):
-            applied = 0.0
-        if applied > 0:
-            prev = float(getattr(sub, "pending_credit_usd", None) or 0.0)
-            sub.pending_credit_usd = round(max(0.0, prev - applied), 2)
-            result["credit_applied"] = applied
+    if not is_test:
+        from .issuance import finish
+        finish(invoice_id, dispatch_result, payment_id=payment_id)
+        db.refresh(sub)
+        result["invoice_id"] = invoice_id
+        result["uncertain"] = dispatch_result.get("uncertain", False)
+        result["retry_at"] = dispatch_result.get("retry_at")
+        if ok:
+            result["credit_applied"] = float(_ci.get("credit_applied") or 0)
             result["pending_credit_usd"] = sub.pending_credit_usd
-        # Sequential numbering: this number is now used — advance the counter so the
-        # next invoice gets start+1, start+2, …
-        if getattr(sub, "invoice_number_next", None) is not None:
-            sub.invoice_number_next = sub.invoice_number_next + 1
-        sub.next_send_at = next_send_at(sub.cadence, now)
-        # Expire one-shot / max_sends email-copy overrides after a real send.
-        try:
             from .. import email_copy_overrides as _eco
             _eco.record_send(db, result.get("email_copy_override_id"))
-        except Exception:  # noqa: BLE001
-            logger.exception("email_copy_override record_send failed")
-        # Delivery-truth: stamp Resend id so webhook can match by email_id.
-        # Do NOT set last_delivered_at here — that requires email.delivered.
-        if resend_email_id:
-            sub.last_resend_email_id = str(resend_email_id)[:64]
-        db.commit()
+            db.commit()
     # is_test: return resend_email_id in result (above) but never stamp delivery
     # fields on the subscription row.
     if not ok:
@@ -2627,7 +2644,7 @@ def _operator_review_email(sub, tenant, draft) -> tuple[str, str, str]:
     return subject, html, text
 
 
-def draft_subscription(db, sub, tenant, *, triggered_by: str = "scheduled") -> dict:
+def draft_subscription(db, sub, tenant, *, triggered_by: str = "scheduled", period_label: Optional[str] = None) -> dict:
     """Approval-mode handling for a due scheduled period: create (or reuse) a
     pending ReportDraft from the stored workbook and email the OPERATOR a
     'ready to review' note. The report lands in their inbox — they open it,
@@ -2640,7 +2657,7 @@ def draft_subscription(db, sub, tenant, *, triggered_by: str = "scheduled") -> d
     from ..notify import _send_via_resend
 
     try:
-        match = build_match(sub)
+        match = build_match(sub, period_label=period_label) if period_label else build_match(sub)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"workbook unreadable: {e}"}
     if not match.matched or not match.latest_period:
@@ -2747,7 +2764,8 @@ def draft_subscription(db, sub, tenant, *, triggered_by: str = "scheduled") -> d
 def deliver_trueup_subscription(
     db, sub, tenant, *, as_of: Optional[date] = None,
     triggered_by: str = "sched-billing-trueup", is_test: bool = False,
-    force: bool = False,
+    force: bool = False, expected_period_label: Optional[str] = None,
+    expected_amount_usd: Optional[float] = None,
 ) -> dict:
     """Year-end budget true-up: charge the underpayment or bank a credit.
 
@@ -2792,6 +2810,27 @@ def deliver_trueup_subscription(
                 "error": f"True-up for {settlement.window_end.isoformat()} already sent",
                 "trueup": settlement.to_dict()}
 
+    window_label = f"{settlement.window_start.isoformat()} → {settlement.window_end.isoformat()}"
+    if expected_period_label is not None and expected_period_label != window_label:
+        return {"ok": False, "period_changed": True, "error": "True-up window changed since approval"}
+    if expected_amount_usd is not None and abs(float(ci.get("amount_owed") or 0) - float(expected_amount_usd)) >= .005:
+        return {"ok": False, "amount_changed": True, "error": "True-up amount changed since approval"}
+    invoice_id = None
+    if not is_test:
+        from .issuance import freeze, reconcile
+        db.commit()
+        try:
+            invoice_id, match, _ = freeze(tenant_id=tenant.id, subscription_id=sub.id,
+                key=cur_period_key, match=match, expected_amount=expected_amount_usd)
+            ci = match.computed_invoice or {}
+            recovery = reconcile(invoice_id)
+            if recovery.get("ok") or recovery.get("uncertain"):
+                return {"ok": False, "already_sent": recovery.get("ok"), "uncertain": recovery.get("uncertain"),
+                        "error": "True-up already sent or requires delivery reconciliation", "invoice_id": invoice_id}
+            db.refresh(sub)
+        except Exception as exc:
+            return {"ok": False, "held": True, "error": str(exc)}
+
     # Recipients — same rules as regular delivery. Test mode forces to operator.
     if is_test:
         op = sub.operator_email or getattr(tenant, "contact_email", None)
@@ -2804,6 +2843,8 @@ def deliver_trueup_subscription(
     if not to:
         return {"ok": False, "error": "no recipient email configured"}
 
+    op_bcc = sub.operator_email or getattr(tenant, "contact_email", None)
+    bcc = [op_bcc] if op_bcc and not is_test and op_bcc not in to and op_bcc not in cc else []
     invoice_date = date.today()
     formats = list(sub.formats or ["pdf"])
     pay_url = None
@@ -2850,18 +2891,25 @@ def deliver_trueup_subscription(
         else:
             from_addr = None
 
-        ok = _send_via_resend(
+        email_payload = dict(
             to=to[0] if len(to) == 1 else to, subject=subject, html=html, text=text,
-            attachments=attachments, cc=cc or None, bcc=None,
+            attachments=attachments, cc=cc or None, bcc=bcc or None,
             from_addr=from_addr, reply_to=(op_email or None), product=product)
+        dispatch_result = {}
+        if is_test:
+            ok = _send_via_resend(**email_payload)
+        else:
+            from .dispatch import send_email_once
+            dispatch_result = send_email_once(tenant_id=tenant.id, key=f"invoice:{invoice_id}", email=email_payload, kind="trueup")
+            ok = dispatch_result.get("ok", False)
         from ..notify import last_resend_id as _last_resend_id
-        resend_email_id = _last_resend_id() if ok else None
+        resend_email_id = (dispatch_result.get("resend_email_id") if not is_test else _last_resend_id()) if ok else None
 
     result = {
         # No BCC on the true-up send (see the _send_via_resend call above). This
         # used to read an unbound name and crash AFTER the email had gone out,
         # so nothing below was stamped and every retry re-sent the settlement.
-        "ok": bool(ok), "to": to, "cc": cc, "bcc": None,
+        "ok": bool(ok), "to": to, "cc": cc, "bcc": bcc,
         "attachments": [p.name for p in paths],
         "invoice_number": ci.get("invoice_number"),
         "amount_owed": ci.get("amount_owed"),
@@ -2872,28 +2920,16 @@ def deliver_trueup_subscription(
         "resend_email_id": resend_email_id if ok else None,
         "is_trueup": True,
     }
-    if ok and not is_test:
-        now = datetime.utcnow()
-        sub.last_sent_at = now
-        sub.last_invoice_number = result["invoice_number"]
-        try:
-            sub.last_sent_amount_usd = float(result["amount_owed"] or 0)
-        except (TypeError, ValueError):
-            sub.last_sent_amount_usd = 0.0
-        sub.last_trueup_window_end = settlement.window_end
-        # Bank credit when they overpaid; charge already billed above.
-        if settlement.credit_usd > 0:
-            prev = float(getattr(sub, "pending_credit_usd", None) or 0.0)
-            sub.pending_credit_usd = round(prev + settlement.credit_usd, 2)
-            result["pending_credit_usd"] = sub.pending_credit_usd
-        if getattr(sub, "invoice_number_next", None) is not None:
-            sub.invoice_number_next = sub.invoice_number_next + 1
-        # Don't advance monthly next_send_at off the true-up cadence — true-up
-        # is a side schedule. Leave next_send_at alone.
-        db.commit()
+    if not is_test:
+        from .issuance import finish
+        finish(invoice_id, dispatch_result, payment_id=payment_id)
+        db.refresh(sub)
+        result["invoice_id"] = invoice_id
+        result["uncertain"] = dispatch_result.get("uncertain", False)
+        result["pending_credit_usd"] = sub.pending_credit_usd
+    if ok:
         result["delivery_status"] = "accepted"
-    elif ok:
-        result["delivery_status"] = "accepted"
+
     return result
 
 
