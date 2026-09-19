@@ -51,11 +51,12 @@ def send_email_once(*, tenant_id: str, key: str, email: dict, kind="invoice") ->
         payload, attempts = dict(row.email), row.attempts
     stable_key = "billing-" + hashlib.sha256(f"{tenant_id}:{key}".encode()).hexdigest()
     notify._send_outcome.set("not_sent")
+    notify._send_failure.set({})
     try:
         ok = notify._send_via_resend(**payload, idempotency_key=stable_key)
         receipt = notify.last_resend_id() if ok else None
         uncertain = not ok and notify._send_outcome.get() != "not_sent"
-        error = None if ok else str(getattr(notify._send_via_resend, "_last_error", None) or "email rejected")
+        error = None if ok else str(notify._send_failure.get().get("error") or getattr(notify._send_via_resend, "_last_error", None) or "email rejected")
     except Exception as exc:
         ok, receipt, uncertain, error = False, None, True, str(exc)
     # This commit is separate from the invoice caller's transaction. If it fails,
@@ -64,7 +65,41 @@ def send_email_once(*, tenant_id: str, key: str, email: dict, kind="invoice") ->
         row = db.get(BillingEmailDispatch, row_id)
         row.status = "accepted" if ok else ("uncertain" if uncertain else "failed")
         row.resend_email_id, row.error = receipt, error
-        row.retry_at = None if ok or uncertain else datetime.utcnow() + timedelta(seconds=min(86400, 60 * 2 ** (attempts - 1)))
+        row.retry_at = None if ok or uncertain else datetime.utcnow() + timedelta(seconds=max(float(notify._send_failure.get().get("retry_after") or 0), min(86400, 60 * 2 ** (attempts - 1))))
         db.commit()
     return {"ok": bool(ok), "duplicate": False, "uncertain": uncertain,
             "resend_email_id": receipt, "error": error}
+
+
+def retry_due_dispatches(limit=100):
+    """Resume only proven-unsent outbox entries; unknown external effects stay held."""
+    from ..models import Tenant, OfftakerInvoice, BillingReportSubscription
+    now = datetime.utcnow()
+    with SessionLocal() as db:
+        rows = db.scalars(select(BillingEmailDispatch).where(
+            BillingEmailDispatch.status.in_(["prepared", "failed"]),
+            BillingEmailDispatch.attempts < 8,
+            or_(BillingEmailDispatch.retry_at.is_(None), BillingEmailDispatch.retry_at <= now))
+            .order_by(BillingEmailDispatch.created_at).limit(limit)).all()
+        pending = []
+        for row in rows:
+            tenant = db.get(Tenant, row.tenant_id)
+            if not tenant or tenant.sending_paused or not (tenant.active or tenant.subscription_status in ("comped", "trialing")):
+                continue
+            if row.key.startswith("invoice:"):
+                invoice = db.get(OfftakerInvoice, int(row.key.split(":")[1]))
+                sub = db.get(BillingReportSubscription, invoice.subscription_id) if invoice else None
+                if not sub or sub.deleted_at or not sub.enabled:
+                    continue
+            pending.append((row.tenant_id, row.key, row.email, row.kind))
+    outcomes = []
+    for tenant_id, key, email, kind in pending:
+        try:
+            result = send_email_once(tenant_id=tenant_id, key=key, email=email, kind=kind)
+            if key.startswith("invoice:"):
+                from .issuance import finish
+                finish(int(key.split(":")[1]), result)
+            outcomes.append({"key": key, **result})
+        except Exception as exc:
+            outcomes.append({"key": key, "ok": False, "error": str(exc)})
+    return outcomes

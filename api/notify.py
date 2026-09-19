@@ -31,6 +31,8 @@ EXTENSION_INSTALL_URL = os.getenv(
 )
 
 
+_send_failure: ContextVar[dict] = ContextVar("send_failure", default={})
+
 _send_outcome: ContextVar[str] = ContextVar("send_outcome", default="not_sent")
 
 _resend_receipt: ContextVar[str | None] = ContextVar("resend_receipt", default=None)
@@ -70,6 +72,7 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
     _send_via_resend._last_id = None
     _resend_receipt.set(None)
     _send_outcome.set("not_sent")
+    _send_failure.set({})
     # ── Non-prod safety valve (staging/preview) ───────────────────────────
     # The backend infers "prod" from Railway env vars, which a staging deploy
     # also has — so the code cannot tell staging from prod on its own. These
@@ -154,8 +157,17 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
         (logger.error if log_failures else logger.warning)(
             "Resend send failed: %s: %s", type(e).__name__, e)
         _send_via_resend._last_error = f"{type(e).__name__}: {e}"
-        status = getattr(e, "status_code", None)
-        if isinstance(status, int) and 400 <= status < 500 and status != 409:
+        try:
+            status = int(getattr(e, "status_code", None) or getattr(e, "code", 0))
+        except (ValueError, TypeError):
+            status = 0
+        headers = getattr(e, "headers", None) or {}
+        try:
+            retry_after = max(0, float(headers.get("retry-after") or 0))
+        except (ValueError, TypeError):
+            retry_after = 0
+        _send_failure.set({"error": str(e), "code": status, "retry_after": retry_after})
+        if 400 <= status < 500 and status != 409:
             _send_outcome.set("not_sent")
         return False
 
@@ -200,6 +212,7 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
     """
     _resend_receipt.set(None)
     _send_outcome.set("not_sent")
+    _send_failure.set({})
     try:
         import sys as _sys0
         from . import email_archive as _pf
@@ -252,6 +265,7 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
     )
     receipt = _resend_receipt.get()
     outcome = _send_outcome.get()
+    failure = _send_failure.get()
     try:
         import sys as _sys
         from . import email_archive as _arch
@@ -277,6 +291,7 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
         # Restore the original invoice receipt after that nested send.
         _resend_receipt.set(receipt)
         _send_outcome.set(outcome)
+        _send_failure.set(failure)
     return ok
 
 

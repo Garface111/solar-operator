@@ -1852,6 +1852,11 @@ def start():
         CronTrigger(hour=3, minute=15),
         id="synthetic_gmp_monitor", replace_existing=True,
     )
+    from .billing.dispatch import retry_due_dispatches
+    scheduler.add_job(retry_due_dispatches, CronTrigger(minute="*"),
+                      id="billing_outbox_retry", replace_existing=True,
+                      max_instances=1, coalesce=True, misfire_grace_time=60)
+
     # Daily at 03:00 UTC: pull daily generation for ALL inverter connections
     # (every vendor), iterating InverterConnection rows + legacy solaredge arrays.
     # Rate-limit: 300 req/day per SolarEdge token; N arrays = N requests, well
