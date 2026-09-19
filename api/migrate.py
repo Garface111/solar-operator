@@ -66,6 +66,8 @@ def main():
         added = []
         # Add columns to tenants
         statements = [
+            ("offtaker_payment_policy", "ALTER TABLE tenants ADD COLUMN offtaker_payment_policy VARCHAR(24) NOT NULL DEFAULT 'online_required'"),
+            ("offtaker_payment_policy_audit", "ALTER TABLE tenants ADD COLUMN offtaker_payment_policy_audit JSON"),
             ("stripe_customer_id",     "ALTER TABLE tenants ADD COLUMN stripe_customer_id VARCHAR(64)"),
             ("stripe_subscription_id", "ALTER TABLE tenants ADD COLUMN stripe_subscription_id VARCHAR(64)"),
             ("subscription_status",    "ALTER TABLE tenants ADD COLUMN subscription_status VARCHAR(32)"),

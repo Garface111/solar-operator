@@ -202,6 +202,9 @@ class Tenant(Base):
     # capped $5) and the platform keeps only its application fee; "destination"
     # — legacy: charge on the platform, funds transferred, the PLATFORM eats
     # Stripe's fee. NULL → AO_OFFTAKER_CHARGE_MODEL env (default "direct").
+    offtaker_payment_policy: Mapped[str] = mapped_column(String(24), nullable=False,
+        default="online_required", server_default="online_required")
+    offtaker_payment_policy_audit: Mapped[list | None] = mapped_column(JSON, nullable=True)
     offtaker_charge_model: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     # Customer prefs (controlled via /account portal)

@@ -43,7 +43,7 @@ from typing import Optional
 from fastapi import APIRouter, Header, HTTPException, UploadFile, File, Form, Query
 from fastapi.responses import StreamingResponse, Response, RedirectResponse, HTMLResponse
 from html import escape as _html_escape
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select, func, or_
 from sqlalchemy.orm import selectinload
 
@@ -6551,3 +6551,93 @@ def monthly_report_download(report_id: int,
             media_type=("application/vnd.openxmlformats-officedocument"
                         ".spreadsheetml.sheet"),
             headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+class PaymentPolicyPatch(BaseModel):
+    model_config = {"extra": "forbid"}
+    policy: str
+
+
+def _payment_policy_payload(tenant):
+    return {"ok": True, "policy": tenant.offtaker_payment_policy or "online_required",
+            "audit": tenant.offtaker_payment_policy_audit or []}
+
+
+@router.get("/payment-policy")
+def get_payment_policy(authorization: Optional[str] = Header(default=None)):
+    t = tenant_from_session(authorization)
+    return _payment_policy_payload(t)
+
+
+@router.patch("/payment-policy")
+def update_payment_policy(body: PaymentPolicyPatch,
+                          authorization: Optional[str] = Header(default=None)):
+    from ..models import Tenant
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    if body.policy not in {"online_required", "offline"}:
+        raise HTTPException(400, "policy must be online_required or offline")
+    with SessionLocal() as db:
+        _lock_roster(db, t.id)
+        tenant = db.get(Tenant, t.id)
+        previous = tenant.offtaker_payment_policy or "online_required"
+        if previous != body.policy:
+            tenant.offtaker_payment_policy_audit = [*(tenant.offtaker_payment_policy_audit or []), {
+                "from": previous, "to": body.policy, "at": datetime.utcnow().isoformat() + "Z",
+                "actor": f"tenant:{t.id}:{t.contact_email or ''}"}]
+            tenant.offtaker_payment_policy = body.policy
+        db.commit()
+        return _payment_policy_payload(tenant)
+
+
+class OfflinePaymentBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    amount_cents: int = Field(strict=True)
+    request_key: str
+    received_on: date
+    note: str
+    method: str = "check"
+
+
+@router.post("/invoices/{invoice_id}/offline-payments")
+def create_offline_payment(invoice_id: int, body: OfflinePaymentBody,
+                           authorization: Optional[str] = Header(default=None)):
+    from .payments import record_offline_payment
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    if (t.offtaker_payment_policy or "online_required") != "offline":
+        raise HTTPException(409, "Enable offline collection before recording an offline payment")
+    if body.amount_cents <= 0 or body.amount_cents > 100_000_000:
+        raise HTTPException(400, "amount_cents must be between 1 and 100000000")
+    if not 8 <= len(body.request_key) <= 120:
+        raise HTTPException(400, "request_key must be 8–120 characters")
+    if body.received_on > date.today():
+        raise HTTPException(400, "received_on cannot be in the future")
+    if not body.note.strip() or len(body.note) > 2000:
+        raise HTTPException(400, "Include a payment reference, up to 2000 characters")
+    if body.method not in {"check", "cash", "bank_transfer"}:
+        raise HTTPException(400, "method must be check, cash, or bank_transfer")
+    with SessionLocal() as db:
+        try:
+            result = record_offline_payment(db, tenant_id=t.id, invoice_id=invoice_id,
+                amount_cents=body.amount_cents, request_key=body.request_key,
+                actor=f"tenant:{t.id}:{t.contact_email or ''}", received_on=body.received_on,
+                note=body.note.strip(), method=body.method)
+            db.commit()
+            return result
+        except ValueError as exc:
+            db.rollback()
+            raise HTTPException(404 if str(exc) == "Invoice not found" else 409, str(exc))
+
+
+@router.get("/issued-invoices")
+def list_issued_invoices(authorization: Optional[str] = Header(default=None)):
+    from .invoice_ledger import list_invoice_balances
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        rows = list_invoice_balances(db, t.id)
+        names = dict(db.execute(select(BillingReportSubscription.id,
+            BillingReportSubscription.customer_name).where(
+            BillingReportSubscription.tenant_id == t.id)).all())
+        return {"ok": True, "invoices": [dict(row, id=row["invoice_id"],
+            customer_name=names.get(row["subscription_id"])) for row in rows]}
