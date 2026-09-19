@@ -91,10 +91,10 @@ def _dt(d: date | None) -> datetime | None:
 
 
 def _upsert_vec_bill(db, ua, parsed: dict, pdf_bytes: bytes | None = None):
-    """Idempotent climb-only upsert of a settled VEC Bill for utility-account ``ua``
+    """Versioned upsert of a settled VEC Bill for utility-account ``ua``
     from a ``parse_vec_bill_text`` dict. Keyed on (account_id, period_end) so one
     Bill exists per billing period; a new period creates a new Bill. Mirrors the GMP
-    climb-only convention in array_owners._persist_meter_accounts — never LOWERS an
+    correction history in bill_revisions retains previous values of an
     existing kwh_generated / solar_credit_usd. ``db.add``-only; the caller commits.
 
     ``pdf_bytes`` (when given) is the verbatim bill PDF — persisted in-row so the
@@ -153,19 +153,11 @@ def _upsert_vec_bill(db, ua, parsed: dict, pdf_bytes: bytes | None = None):
             bill.pdf_content_type = "application/pdf"
         db.add(bill)
     else:
-        # Climb-only: never lower a captured generation / credit figure.
-        if kwh is not None:
-            newg = int(round(float(kwh)))
-            if bill.kwh_generated is None or newg > bill.kwh_generated:
-                bill.kwh_generated = newg
-        if sent is not None:
-            news = float(sent)
-            if bill.kwh_sent_to_grid is None or news > bill.kwh_sent_to_grid:
-                bill.kwh_sent_to_grid = news
-        if credit is not None:
-            newc = float(credit)
-            if bill.solar_credit_usd is None or newc > bill.solar_credit_usd:
-                bill.solar_credit_usd = newc
+        from ..bill_revisions import apply_bill_revision
+        import hashlib
+        apply_bill_revision(bill, {"kwh_generated": kwh, "kwh_sent_to_grid": sent,
+            "solar_credit_usd": credit}, source="vec_pdf",
+            evidence={"pdf_sha256": hashlib.sha256(pdf_bytes).hexdigest() if pdf_bytes else None})
         if bill.period_start is None and ps_dt is not None:
             bill.period_start = ps_dt
         if bill.bill_date is None and bd_dt is not None:
@@ -180,6 +172,11 @@ def _upsert_vec_bill(db, ua, parsed: dict, pdf_bytes: bytes | None = None):
             bill.pdf_bytes = bytes(pdf_bytes)
             bill.pdf_content_type = "application/pdf"
         db.add(bill)
+    from ..bill_revisions import apply_bill_revision
+    import hashlib
+    apply_bill_revision(bill, {"kwh_generated": kwh, "kwh_sent_to_grid": sent,
+        "solar_credit_usd": credit}, source="vec_pdf",
+        evidence={"pdf_sha256": hashlib.sha256(pdf_bytes).hexdigest() if pdf_bytes else None})
     return bill
 
 
@@ -191,7 +188,7 @@ def ingest_vec_bill_pdf(db, tenant_id: str, utility_account_id: int,
       1. Parse the PDF (parse_vec_bill_pdf). If unparseable → {"ok": False, reason}.
       2. Load the UtilityAccount by id + tenant_id; require a SmartHub provider —
          else {"ok": False, reason}.
-      3. Climb-only upsert the Bill (_upsert_vec_bill), idempotent on the period.
+      3. Versioned upsert the Bill (_upsert_vec_bill), idempotent on the period.
 
     The caller commits. Returns {"ok": True, "parsed": {...}, "bill_id": int} on
     success or {"ok": False, "reason": str} on any guard failure.

@@ -601,7 +601,7 @@ def _validate_rate(rate):
         r = float(rate)
     except (TypeError, ValueError):
         raise HTTPException(400, "rate_per_kwh must be a number ($/kWh)")
-    if r < 0 or r > MAX_RATE_PER_KWH:
+    if not __import__("math").isfinite(r) or r < 0 or r > MAX_RATE_PER_KWH:
         raise HTTPException(400, f"rate_per_kwh must be between 0 and {MAX_RATE_PER_KWH} $/kWh")
     return r
 
@@ -695,7 +695,7 @@ def _validate_budget(v):
         amt = float(v)
     except (TypeError, ValueError):
         raise HTTPException(400, "budget_amount_usd must be a number")
-    if amt < 0:
+    if not __import__("math").isfinite(amt) or amt < 0:
         raise HTTPException(400, "budget_amount_usd can't be negative")
     return amt
 
@@ -881,6 +881,42 @@ def _match_offtaker_subaccount(name, accounts):
     return best
 
 
+def _lock_roster(db, tenant_id):
+    """Serialize roster validation and mutation across all workers."""
+    from ..models import Tenant
+    from sqlalchemy import text
+    if db.info.get("roster_locked"):
+        return
+    if db.bind.dialect.name == "sqlite":
+        db.execute(text("BEGIN IMMEDIATE"))
+    else:
+        db.execute(select(Tenant.id).where(Tenant.id == tenant_id).with_for_update()).scalar_one()
+    db.info["roster_locked"] = True
+
+
+def _check_allocation_totals(db, tenant_id, *, account_id, array_id, allocation, share=None, exclude_id=None):
+    query = select(BillingReportSubscription).where(
+        BillingReportSubscription.tenant_id == tenant_id,
+        BillingReportSubscription.deleted_at.is_(None))
+    if exclude_id is not None:
+        query = query.where(BillingReportSubscription.id != exclude_id)
+    with db.no_autoflush:
+        others = db.execute(query).scalars().all()
+    meter = sum(float(r.allocation_pct or 0) for r in others if account_id is not None and r.utility_account_id == account_id)
+    if account_id is not None and meter + allocation > 1 + 1e-6:
+        raise HTTPException(409, "This would over-allocate the meter past 100%")
+    if array_id is not None:
+        def group_share(row):
+            if row.array_allocations:
+                return sum(float(a.get("allocation_pct") or 0) for a in row.array_allocations
+                           if a.get("array_id") == array_id)
+            return (float(row.array_share_pct if row.array_share_pct is not None else row.allocation_pct or 0)
+                    if row.array_id == array_id else 0)
+        group = sum(group_share(r) for r in others)
+        if group + (share if share is not None else allocation) > 1 + 1e-6:
+            raise HTTPException(409, "This would over-allocate the array group past 100%")
+
+
 async def _create_manual_subscription(
     t, *, customer_name, array_id, allocation_pct, array_allocations=None,
     utility_account_id=None, array_share_pct=None, crosscheck_threshold_pct=None,
@@ -888,7 +924,7 @@ async def _create_manual_subscription(
     rate_per_kwh, discount_pct,
     net_rate_per_kwh, cadence,
     send_mode, delivery_mode, client_email, cc_emails, operator_email, formats,
-    include_summary, annual_trueup, enabled,
+    include_summary, annual_trueup, enabled, _db=None,
 ):
     """Create a workbook-less subscription from typed fields.
 
@@ -903,6 +939,7 @@ async def _create_manual_subscription(
         The offtaker owns a share of several arrays; delivery sums each array's
         (period kWh × pct) into one combined invoice.
     """
+    from contextlib import nullcontext
     import json as _json
     from ..models import Array, UtilityAccount
 
@@ -929,11 +966,11 @@ async def _create_manual_subscription(
     if utility_account_id is None and array_id is not None and not array_allocations:
         from ..models import UtilityAccount as _UA, Array as _Arr, Bill
         from ..adapters import is_smarthub_provider as _is_sh
-        with SessionLocal() as _db:
-            _arr = _db.get(_Arr, array_id)
+        with (nullcontext(_db) if _db is not None else SessionLocal()) as _resolve_db:
+            _arr = _resolve_db.get(_Arr, array_id)
             if _arr is None or _arr.tenant_id != t.id or _arr.deleted_at is not None:
                 raise HTTPException(404, f"Array {array_id} not found")
-            _accts = _db.execute(
+            _accts = _resolve_db.execute(
                 select(_UA).where(
                     _UA.array_id == array_id,
                     _UA.tenant_id == t.id,
@@ -950,7 +987,7 @@ async def _create_manual_subscription(
                 # Anything still ambiguous demands an explicit override.
                 _with_bill = []
                 for a in _billable:
-                    _has = _db.execute(
+                    _has = _resolve_db.execute(
                         select(func.count(Bill.id)).where(
                             Bill.account_id == a.id, Bill.kwh_generated.isnot(None))
                     ).scalar() or 0
@@ -969,14 +1006,7 @@ async def _create_manual_subscription(
                     # same live; this covers bulk-import + API). Only a UNIQUE,
                     # unambiguous match resolves — otherwise still demand an
                     # explicit choice rather than guess on a billing path.
-                    _matched = _match_offtaker_subaccount(name, _with_bill or _billable)
-                    if _matched is not None:
-                        utility_account_id = _matched.id
-                    else:
-                        raise HTTPException(
-                            400, "This array has multiple connected utility bills — "
-                                 "pass utility_account_id to choose which one invoices "
-                                 "this offtaker.")
+                    raise HTTPException(400, "Multiple utility accounts: explicitly confirm utility_account_id.")
             # else: no billable account → fall through to legacy generation path.
 
     # ── OFFTAKER ↔ UTILITY BILL path (highest priority) ──────────────────────
@@ -997,7 +1027,8 @@ async def _create_manual_subscription(
         share_val = _validate_array_share(array_share_pct)
         threshold_val = _validate_crosscheck_threshold(crosscheck_threshold_pct)
         inv_start_val = _validate_invoice_start(invoice_number_start)
-        with SessionLocal() as db:
+        with (nullcontext(_db) if _db is not None else SessionLocal()) as db:
+            _lock_roster(db, t.id)
             acct = db.get(UtilityAccount, utility_account_id)
             if (acct is None or acct.tenant_id != t.id
                     or acct.deleted_at is not None):
@@ -1038,11 +1069,16 @@ async def _create_manual_subscription(
             # and the GMP allocation cross-check compares the sub's credited excess to
             # (share x the master array's group excess).
             group_array_id = array_id if array_id is not None else acct.array_id
+            if group_array_id is not None:
+                group_array = db.get(Array, group_array_id)
+                if group_array is None or group_array.tenant_id != t.id or group_array.deleted_at is not None:
+                    raise HTTPException(404, "Group array not found")
             _host_id = None
             if group_array_id is not None:
                 _host_id = db.execute(
                     select(UtilityAccount.id).where(
                         UtilityAccount.array_id == group_array_id,
+                        UtilityAccount.tenant_id == t.id,
                         UtilityAccount.deleted_at.is_(None))
                     .order_by(UtilityAccount.id)).scalars().first()
             _is_submeter = _host_id is not None and _host_id != utility_account_id
@@ -1069,20 +1105,8 @@ async def _create_manual_subscription(
             # (0.5pp rounding epsilon). Runs for both single-create and each
             # bulk-commit row (earlier rows are already committed, so the running
             # total stays correct across a batch).
-            _existing_alloc = float(db.execute(
-                select(func.coalesce(func.sum(BillingReportSubscription.allocation_pct), 0.0))
-                .where(
-                    BillingReportSubscription.tenant_id == t.id,
-                    BillingReportSubscription.utility_account_id == utility_account_id,
-                    BillingReportSubscription.deleted_at.is_(None),
-                )
-            ).scalar() or 0.0)
-            if _existing_alloc + pct > 1.0 + 0.005:
-                raise HTTPException(
-                    409,
-                    f"This would over-allocate the meter to {(_existing_alloc + pct) * 100:.0f}% "
-                    f"— offtakers sharing one utility account can't sum past 100% or the "
-                    f"meter's excess is billed twice. It's already at {_existing_alloc * 100:.0f}%.")
+            _check_allocation_totals(db, t.id, account_id=utility_account_id,
+                array_id=group_array_id, allocation=pct, share=share_val)
             client = db.execute(
                 select(Client).where(Client.tenant_id == t.id, Client.name == name,
                                      Client.deleted_at.is_(None))
@@ -1130,8 +1154,10 @@ async def _create_manual_subscription(
                 next_send_at=next_send_at(cadence),
             )
             db.add(sub)
-            db.commit()
-            _sync_invoicing_quantity(t.id)
+            db.flush()
+            if _db is None:
+                db.commit()
+                _sync_invoicing_quantity(t.id)
             return {"ok": True, "subscription": _sub_dict(sub)}
 
     # Parse the optional multi-array allocations list.
@@ -1160,6 +1186,8 @@ async def _create_manual_subscription(
             allocs.append({"array_id": aid, "allocation_pct": p})
         if not allocs:
             raise HTTPException(400, "array_allocations had no usable rows")
+        if len({a["array_id"] for a in allocs}) != len(allocs):
+            raise HTTPException(400, "array_allocations must not repeat an array")
 
     if not allocs:
         # Legacy single-array path.
@@ -1183,7 +1211,8 @@ async def _create_manual_subscription(
     threshold_val = _validate_crosscheck_threshold(crosscheck_threshold_pct)
     inv_start_val = _validate_invoice_start(invoice_number_start)
 
-    with SessionLocal() as db:
+    with (nullcontext(_db) if _db is not None else SessionLocal()) as db:
+        _lock_roster(db, t.id)
         # Validate every referenced array belongs to this tenant.
         aids_to_check = [a["array_id"] for a in allocs] if allocs else [array_id]
         for aid in aids_to_check:
@@ -1191,6 +1220,9 @@ async def _create_manual_subscription(
             if arr is None or arr.tenant_id != t.id or arr.deleted_at is not None:
                 raise HTTPException(404, f"Array {aid} not found")
 
+        for al in (allocs or [{"array_id": array_id, "allocation_pct": pct}]):
+            _check_allocation_totals(db, t.id, account_id=None,
+                array_id=al["array_id"], allocation=al["allocation_pct"], share=share_val)
         client = db.execute(
             select(Client).where(Client.tenant_id == t.id, Client.name == name,
                                  Client.deleted_at.is_(None))
@@ -1236,8 +1268,10 @@ async def _create_manual_subscription(
             next_send_at=next_send_at(cadence),
         )
         db.add(sub)
-        db.commit()
-        _sync_invoicing_quantity(t.id)
+        db.flush()
+        if _db is None:
+            db.commit()
+            _sync_invoicing_quantity(t.id)
         return {"ok": True, "subscription": _sub_dict(sub)}
 
 
@@ -1301,6 +1335,7 @@ def patch_subscription(sub_id: int, body: SubscriptionPatch,
     t = tenant_from_session(authorization)
     require_not_demo(t)
     with SessionLocal() as db:
+        _lock_roster(db, t.id)
         sub = _get_owned(db, t.id, sub_id)
         if body.cadence is not None:
             if body.cadence not in VALID_CADENCE:
@@ -1434,7 +1469,7 @@ def patch_subscription(sub_id: int, body: SubscriptionPatch,
                     amt = float(v)
                 except (TypeError, ValueError):
                     raise HTTPException(400, "budget_amount_usd must be a number")
-                if amt < 0:
+                if not __import__("math").isfinite(amt) or amt < 0:
                     raise HTTPException(400, "budget_amount_usd can't be negative")
                 sub.budget_amount_usd = amt
         # ── Sub-meter invariant (Ford 2026-07-07) ────────────────────────────
@@ -1479,6 +1514,10 @@ def patch_subscription(sub_id: int, body: SubscriptionPatch,
                     if _grp is not None:
                         sub.array_share_pct = _validate_array_share(_grp)
                 sub.allocation_pct = 1.0
+        if {"allocation_pct", "array_share_pct", "array_id", "utility_account_id"} & body.model_fields_set:
+            _check_allocation_totals(db, t.id, account_id=sub.utility_account_id,
+                array_id=sub.array_id, allocation=float(sub.allocation_pct or 0),
+                share=sub.array_share_pct, exclude_id=sub.id)
         db.commit()
         return {"ok": True, "subscription": _sub_dict(sub)}
 
@@ -1705,7 +1744,7 @@ def _bulk_rate(raw: str) -> tuple[Optional[float], Optional[str]]:
         v = float(raw.replace("$", "").strip())
     except ValueError:
         return None, f'"{raw}" isn\'t a valid rate ($/kWh)'
-    if v < 0 or v > MAX_RATE_PER_KWH:
+    if not __import__("math").isfinite(v) or v < 0 or v > MAX_RATE_PER_KWH:
         return None, f"rate must be between 0 and {MAX_RATE_PER_KWH} $/kWh"
     return v, None
 
@@ -1739,7 +1778,7 @@ def _bulk_budget(raw: str) -> tuple[Optional[float], Optional[str]]:
         amt = float(v)
     except ValueError:
         return None, f'"{raw}" isn\'t a valid budget amount ($)'
-    if amt < 0:
+    if not __import__("math").isfinite(amt) or amt < 0:
         return None, "budget can't be negative"
     return amt, None
 
@@ -1767,6 +1806,7 @@ async def bulk_import_offtakers(
     cadence: str = Form(default="monthly"),
     delivery_mode: str = Form(default="approval"),
     column_map: Optional[str] = Form(default=None),
+    header_row: Optional[int] = Form(default=None),
     authorization: Optional[str] = Header(default=None),
 ):
     """Bulk-import v2 — parse a roster (.csv/.xlsx) and return a per-row, fuzzy-
@@ -1825,7 +1865,9 @@ async def bulk_import_offtakers(
 
     # ── Resolve the column mapping (override → alias fast-path → detector). ───────
     detection: Optional[dict] = None
-    header_row_idx = 0
+    header_row_idx = header_row if isinstance(header_row, int) else 0
+    if not 0 <= header_row_idx < len(rows):
+        raise HTTPException(400, "header_row must be a valid zero-based row index")
 
     # (1) Operator-confirmed override: parse by it, skip detection.
     override_map: Optional[dict] = None
@@ -2185,8 +2227,8 @@ async def bulk_commit_offtakers(body: BulkCommitBody,
     fixes any matches. Each row is created via _create_manual_subscription bound to
     the row's array_id + utility_account_id (both validated as belonging to the
     tenant). Idempotent: a row whose (tenant, customer_name, utility_account_id)
-    already matches a LIVE subscription is SKIPPED (never duplicated), so re-running
-    a partially-committed batch is safe.
+    already matches a LIVE subscription is SKIPPED. The entire batch commits or
+    rolls back together while holding the tenant allocation lock.
 
     Returns {ok, created, skipped, failed:[{offtaker_name, error}]}.
     """
@@ -2199,38 +2241,51 @@ async def bulk_commit_offtakers(body: BulkCommitBody,
     if not body.rows:
         raise HTTPException(400, "No rows to commit.")
 
+    with SessionLocal() as db:
+        _lock_roster(db, t.id)
+        result = await _bulk_commit_atomic(body, t, db)
+        if result["failed"]:
+            db.rollback()
+            result.update(ok=False, created=0, created_rows=[])
+        else:
+            db.commit()
+            _sync_invoicing_quantity(t.id)
+        return result
+
+
+async def _bulk_commit_atomic(body, t, db):
     from ..models import UtilityAccount
 
     # Pre-validate every utility account belongs to the tenant + is a billing
     # provider, and snapshot existing (name, ua) subs for idempotency — one query.
-    with SessionLocal() as db:
-        owned_ua = {
-            a.id: a for a in db.execute(
-                select(UtilityAccount).where(
-                    UtilityAccount.tenant_id == t.id,
-                    UtilityAccount.deleted_at.is_(None))
-            ).scalars().all()
-        }
-        existing = db.execute(
-            select(BillingReportSubscription.customer_name,
-                   BillingReportSubscription.utility_account_id,
-                   BillingReportSubscription.allocation_pct,
-                   BillingReportSubscription.client_email,
-                   BillingReportSubscription.discount_pct,
-                   BillingReportSubscription.net_rate_per_kwh,
-                   BillingReportSubscription.budget_amount_usd,
-                   BillingReportSubscription.array_id,
-                   BillingReportSubscription.cadence,
-                   BillingReportSubscription.delivery_mode).where(
-                BillingReportSubscription.tenant_id == t.id,
-                BillingReportSubscription.deleted_at.is_(None))
-        ).all()
+    owned_ua = {
+        a.id: a for a in db.execute(
+            select(UtilityAccount).where(
+                UtilityAccount.tenant_id == t.id,
+                UtilityAccount.deleted_at.is_(None))
+        ).scalars().all()
+    }
+    existing = db.execute(
+        select(BillingReportSubscription.customer_name,
+               BillingReportSubscription.utility_account_id,
+               BillingReportSubscription.allocation_pct,
+               BillingReportSubscription.array_share_pct,
+               BillingReportSubscription.client_email,
+               BillingReportSubscription.discount_pct,
+               BillingReportSubscription.net_rate_per_kwh,
+               BillingReportSubscription.budget_amount_usd,
+               BillingReportSubscription.array_id,
+               BillingReportSubscription.cadence,
+               BillingReportSubscription.delivery_mode).where(
+            BillingReportSubscription.tenant_id == t.id,
+            BillingReportSubscription.deleted_at.is_(None))
+    ).all()
     # Key -> the live sub's money-driving values, so we can tell a true no-op
     # (same values → safe skip) from a real conflict (already live with DIFFERENT
     # allocation/email/discount → must NOT silently skip and leave the stale value,
     # nor silently overwrite live billing; surface it for the operator to resolve).
-    existing_vals = {((n or "").strip().lower(), ua): (al, em, di, nr, bu, ar, ca, dm)
-                     for (n, ua, al, em, di, nr, bu, ar, ca, dm) in existing}
+    existing_vals = {((n or "").strip().lower(), ua): (sh if sh is not None else al, em, di, nr, bu, ar, ca, dm)
+                     for (n, ua, al, sh, em, di, nr, bu, ar, ca, dm) in existing}
     existing_keys = set(existing_vals.keys())
 
     created: list[dict] = []
@@ -2274,7 +2329,7 @@ async def bulk_commit_offtakers(body: BulkCommitBody,
                      and _num_eq(_di, r.discount_pct)
                      and _num_eq(_nr, r.net_rate_per_kwh)
                      and _num_eq(_bu, r.budget_amount_usd)
-                     and _ar == r.array_id and _ca == body.cadence
+                     and _ar == (r.array_id if r.array_id is not None else ua.array_id) and _ca == body.cadence
                      and _dm == body.delivery_mode)
             if _same:
                 skipped.append({"offtaker_name": name,
@@ -2302,7 +2357,7 @@ async def bulk_commit_offtakers(body: BulkCommitBody,
                 send_mode=("to_client" if email else "to_me"),
                 delivery_mode=body.delivery_mode, client_email=email,
                 cc_emails=None, operator_email=None, formats=None,
-                include_summary=False, annual_trueup=False, enabled=True,
+                include_summary=False, annual_trueup=False, enabled=True, _db=db,
             )
         except HTTPException as e:
             failed.append({"offtaker_name": name, "error": str(e.detail)})
@@ -2314,7 +2369,7 @@ async def bulk_commit_offtakers(body: BulkCommitBody,
         # instead of being created twice — the pre-loop snapshot never saw it.
         existing_vals[_key] = (r.allocation_pct, email, r.discount_pct,
                                r.net_rate_per_kwh, r.budget_amount_usd,
-                               r.array_id, body.cadence, body.delivery_mode)
+                               r.array_id if r.array_id is not None else ua.array_id, body.cadence, body.delivery_mode)
 
     return {"ok": True, "created": len(created), "created_rows": created,
             "skipped": skipped, "failed": failed}

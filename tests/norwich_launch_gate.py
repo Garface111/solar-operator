@@ -42,6 +42,13 @@ def test_partial_refund_reduces_reported_collections():
 def test_partial_vec_month_is_not_billable():
     from tests.test_vec_offtaker_billing import _seed
     tid,aid,ua=_seed(with_generation=True)
+    from api.models import DailyGeneration
+    from datetime import date
+    from sqlalchemy import delete
+    with SessionLocal() as db:
+        db.execute(delete(DailyGeneration).where(DailyGeneration.array_id == aid,
+                   DailyGeneration.day > date(2026, 5, 10)))
+        db.commit()
     sub=BillingReportSubscription(tenant_id=tid,customer_name="Partial month",utility_account_id=ua,array_id=aid,allocation_pct=.4,net_rate_per_kwh=.25,discount_pct=.1,billing_model="percent_of_array")
     result=delivery.build_manual_match(sub)
     assert result.computed_invoice["has_utility_bill"] is False, "Ten days of May were treated as a billable month"

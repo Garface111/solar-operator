@@ -6008,10 +6008,10 @@ def _persist_meter_accounts(
                             parse_status="parsed",
                         ))
                     else:
-                        # Never lower a captured generation figure (climbs only).
-                        newg = int(round(float(period_gen)))
-                        if bill.kwh_generated is None or newg > bill.kwh_generated:
-                            bill.kwh_generated = newg
+                        from .bill_revisions import apply_bill_revision
+                        apply_bill_revision(bill, {"kwh_generated": period_gen,
+                            "kwh_sent_to_grid": parsed.get("kwh_sent_to_grid")},
+                            source="meter_closed_period", evidence={"period_end": str(period_end)})
                         if bill.period_start is None and period_start is not None:
                             bill.period_start = datetime.combine(period_start, dtime.min)
                     # The meter capture is an EXTENSION path (the GMP server pull is

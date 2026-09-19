@@ -289,6 +289,10 @@ def resolve_discount_pricing(sub, *, period_end=None, region=None,
             return float(sub_net), "customer"
         if g_net is not None and g_net > 0:
             return float(g_net), "global"
+        if sub_flat is not None and sub_flat > 0:
+            return float(sub_flat), "legacy_flat_customer"
+        if g_flat is not None and g_flat > 0:
+            return float(g_flat), "legacy_flat_global"
         memo_key = (_provider, _region, _fc, period_end)
         auto = rate_memo.get(memo_key) if rate_memo is not None else None
         if auto is None:
@@ -299,10 +303,6 @@ def resolve_discount_pricing(sub, *, period_end=None, region=None,
         if auto.source in ("schedule", "schedule_provisional"):
             net_note = auto.note
             return auto.rate, "auto_" + auto.source
-        if sub_flat is not None and sub_flat > 0:
-            return float(sub_flat), "legacy_flat_customer"
-        if g_flat is not None and g_flat > 0:
-            return float(g_flat), "legacy_flat_global"
         # auto returned the VT default — use it and keep its provenance.
         net_note = auto.note
         return auto.rate, "vt_default"
@@ -408,90 +408,71 @@ def resolve_rate_per_kwh(sub) -> tuple[Optional[float], str]:
     return p["effective_rate"], src
 
 
-def _array_period_kwh(db, array_id: int) -> tuple[Optional[float], Optional[date], Optional[date], Optional[str], Optional[str]]:
-    """The array's most recent full-month generation: (array_kwh, start, end,
-    month_label, dom_source). Prefers DailyGeneration; falls back to Bill.kwh_generated.
-    dom_source ∈ 'daily_csv' (metered/uploaded) | 'bill_prorate' (estimate-dominated
-    month) | 'utility_bill' (a real bill) | None. Returns (None,)*5 when no data yet."""
+def _complete_generation(rows, target_label=None):
+    """Only a full, closed calendar month of finite daily evidence is invoiceable."""
+    import calendar
+    import math
+    grouped = {}
+    for day, kwh, source in rows:
+        grouped.setdefault(day.strftime("%Y-%m"), []).append((day, kwh, source))
+    for label in sorted(grouped, reverse=True):
+        if target_label and label != target_label:
+            continue
+        y, m = map(int, label.split("-"))
+        start, end = date(y, m, 1), date(y, m, calendar.monthrange(y, m)[1])
+        if end >= date.today():
+            continue
+        month = grouped[label]
+        if len(month) != end.day or {r[0].day for r in month} != set(range(1, end.day + 1)):
+            continue
+        if any(k is None or not math.isfinite(float(k)) or float(k) < 0 for _, k, _ in month):
+            continue
+        total = sum(float(k) for _, k, _ in month)
+        prorate = sum(float(k) for _, k, src in month if src == "bill_prorate")
+        src = "bill_prorate" if total > 0 and prorate >= .5 * total else month[0][2]
+        return round(total, 1), start, end, label, src
+    return (None,) * 5
+
+
+def _array_period_kwh(db, array_id: int, target_label=None):
     from ..models import DailyGeneration, Bill, UtilityAccount
-
-    # Prefer DailyGeneration: pick the latest (year, month) that has rows. Track the
-    # SOURCE so provenance is honest (audit #8): a month dominated by 'bill_prorate'
-    # (a flat-smeared utility bill) is an ESTIMATE, not metered/uploaded data.
-    rows = db.execute(
-        select(DailyGeneration.day, DailyGeneration.kwh, DailyGeneration.source)
-        .where(DailyGeneration.array_id == array_id)
-        .order_by(DailyGeneration.day.desc())
-    ).all()
-    if rows:
-        latest_day = rows[0].day
-        y, m = latest_day.year, latest_day.month
-        month_rows = [r for r in rows if r.day.year == y and r.day.month == m]
-        total = sum(float(r.kwh or 0) for r in month_rows)
-        days = sorted(r.day for r in month_rows)
-        label = latest_day.strftime("%Y-%m")
-        prorate = sum(float(r.kwh or 0) for r in month_rows
-                      if (r.source or "") == "bill_prorate")
-        dom = "bill_prorate" if (total > 0 and prorate >= 0.5 * total) else "daily_csv"
-        return round(total, 1), days[0], days[-1], label, dom
-
-    # Fallback: the array's bills (kwh_generated) for the most recent period — a real
-    # utility-bill figure (provenance 'utility_bill', not the prorated daily estimate).
-    bill = db.execute(
-        select(Bill)
-        .join(UtilityAccount, Bill.account_id == UtilityAccount.id)
-        .where(UtilityAccount.array_id == array_id,
-               Bill.kwh_generated.isnot(None),
-               Bill.period_end.isnot(None))
-        .order_by(Bill.period_end.desc())
-    ).scalars().first()
-    if bill is not None:
+    import calendar
+    import math
+    rows = db.execute(select(DailyGeneration.day, DailyGeneration.kwh, DailyGeneration.source)
+        .where(DailyGeneration.array_id == array_id)).all()
+    result = _complete_generation([(r.day, r.kwh, r.source or "daily_csv") for r in rows], target_label)
+    if result[0] is not None:
+        return result
+    # A settled full-month statement is independent complete evidence.
+    bills = db.execute(select(Bill).join(UtilityAccount, Bill.account_id == UtilityAccount.id)
+        .where(UtilityAccount.array_id == array_id, Bill.kwh_generated.isnot(None),
+               Bill.period_end.isnot(None)).order_by(Bill.period_end.desc(), Bill.id.desc())).scalars()
+    for bill in bills:
         ps = bill.period_start.date() if bill.period_start else None
         pe = bill.period_end.date() if bill.period_end else None
-        label = pe.strftime("%Y-%m") if pe else None
-        return round(float(bill.kwh_generated), 1), ps, pe, label, "utility_bill"
-    return None, None, None, None, None
+        if not ps or not pe or pe >= date.today() or ps.day != 1 or (ps.year, ps.month) != (pe.year, pe.month):
+            continue
+        if pe.day != calendar.monthrange(pe.year, pe.month)[1]:
+            continue
+        label = pe.strftime("%Y-%m")
+        if target_label and label != target_label:
+            continue
+        kwh = float(bill.kwh_generated)
+        if math.isfinite(kwh) and kwh >= 0:
+            return round(kwh, 1), ps, pe, label, "utility_bill"
+    return (None,) * 5
 
 
-def _array_period_kwh_sourced(
-    db, array_id: int
-) -> tuple[Optional[float], Optional[date], Optional[date], Optional[str], Optional[str]]:
-    """Source-agnostic period generation for an array, with provenance.
-
-    Precedence (per Ford's call + the GMP_DAILY_READ_CONTRACT):
-      1. GMP daily-read contract (api/reports/gmp_daily_read) — the authoritative
-         metered source. We call its functions only; we never touch the gmp_*
-         tables/ORM directly (storage stays the data-sponge agent's).
-      2. DailyGeneration / Bill (the legacy path) when GMP has no coverage yet
-         (e.g. backfill not run / GMP auth blocked).
-
-    Returns (kwh, start, end, label, kwh_source) where kwh_source is one of
-    'gmp_api' | 'daily_csv' | None. Mirrors _array_period_kwh's "latest month
-    present" semantics so downstream math is unchanged regardless of source.
-    """
-    # 1) Try the GMP contract first. Defensive: a provisional module / empty
-    #    tables must degrade to the fallback, never raise into invoice math.
+def _array_period_kwh_sourced(db, array_id: int, target_label=None):
     try:
         from ..reports import gmp_daily_read as gdr
-        months = gdr.get_monthly_totals(array_id, db=db)
-        if months:
-            latest = months[-1]                       # ascending → last = newest
-            y, m = latest["year"], latest["month"]
-            series = [r for r in gdr.get_daily_series(array_id, db=db)
-                      if r["day"].year == y and r["day"].month == m]
-            if series:
-                days = sorted(r["day"] for r in series)
-                return (round(float(latest["kwh"]), 1), days[0], days[-1],
-                        f"{y:04d}-{m:02d}", "gmp_api")
-    except Exception:  # noqa: BLE001 — provisional contract / missing tables
-        logger.warning("GMP daily-read unavailable for array %s; falling back",
-                       array_id, exc_info=True)
-
-    # 2) Legacy fallback: DailyGeneration → Bill, with honest provenance from
-    #    _array_period_kwh (daily_csv = metered/uploaded, bill_prorate = estimate-
-    #    dominated month, utility_bill = a real bill) instead of a blanket 'daily_csv'.
-    kwh, start, end, label, dom = _array_period_kwh(db, array_id)
-    return kwh, start, end, label, (dom if kwh is not None else None)
+        rows = gdr.get_daily_series(array_id, db=db)
+        result = _complete_generation([(r["day"], r["kwh"], "gmp_api") for r in rows], target_label)
+        if result[0] is not None:
+            return result
+    except Exception:
+        logger.warning("GMP daily-read unavailable for array %s; falling back", array_id, exc_info=True)
+    return _array_period_kwh(db, array_id, target_label=target_label)
 
 
 # Honest operator-set rate sources for a VEC/SmartHub offtaker. A VEC invoice may
@@ -517,7 +498,7 @@ _OPERATOR_ENTERED_RATE_SOURCES = frozenset(
 )
 
 
-def _build_smarthub_offtaker_match(sub, operator, warnings) -> BillingMatch:
+def _build_smarthub_offtaker_match(sub, operator, warnings, period_label=None) -> BillingMatch:
     """VEC/SmartHub offtaker: price the offtaker's allocation_pct of the array's
     MEASURED generation at an OPERATOR-ENTERED net rate. SmartHub bills carry no
     excess+credit, so we REQUIRE an operator rate (per-offtaker or operator-global)
@@ -540,7 +521,7 @@ def _build_smarthub_offtaker_match(sub, operator, warnings) -> BillingMatch:
         # Bill fallback — honest provenance in gen_src). VEC daily generation is
         # populated from the SmartHub net-export pull (api/adapters/smarthub).
         if arr_id is not None:
-            gen_kwh, start, end, label, gen_src = _array_period_kwh_sourced(db, arr_id)
+            gen_kwh, start, end, label, gen_src = _array_period_kwh_sourced(db, arr_id, target_label=period_label)
         else:
             gen_kwh = None
             start = end = None
@@ -1129,7 +1110,7 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
         # SmartHub with NO parsed bill yet → model-A fallback (operator rate).
         # SmartHub WITH a parsed bill → fall through to the bill-priced GMP block.
         if _is_sh and not _sh_has_bill:
-            return _build_smarthub_offtaker_match(sub, operator, warnings)
+            return _build_smarthub_offtaker_match(sub, operator, warnings, period_label=period_label)
         # QUARTERLY cadence aggregates the FULL quarter of settled bills (#6). A
         # month-targeted period_label (sheet-tracker backfill) keeps the single-
         # month math; a 'YYYY-Qn' label pins a specific historical quarter.
@@ -1320,6 +1301,9 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
             # shares this fleet rate (overrides each sub-account bill rate).
             net_rate, net_source = float(_master), "global"
             net_note = "your master solar credit rate"
+        elif pricing["net_source"] == "legacy_flat_global":
+            net_rate, net_source = pricing["net_rate"], "legacy_flat_global"
+            net_note = "your legacy flat rate"
         elif rate_source == "reference":
             net_rate, net_source = (credit_rate or 0.0), "gmp_credit_reference"
             net_note = ("the solar credit rate for comparable months — this period's "
@@ -1370,6 +1354,9 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
             default_net_rate = float(_master)
             default_net_source = "global"
             default_net_note = "your master solar credit rate"
+        elif pricing["net_source"] == "legacy_flat_global":
+            net_rate, net_source = pricing["net_rate"], "legacy_flat_global"
+            net_note = "your legacy flat rate"
         elif rate_source == "reference":
             default_net_rate = credit_rate
             default_net_source = "gmp_credit_reference"
@@ -1539,7 +1526,7 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
                 aid = al["array_id"]
                 apct = al["allocation_pct"]
                 arr = db.get(Array, aid)
-                a_kwh, a_start, a_end, a_label, a_src = _array_period_kwh_sourced(db, aid)
+                a_kwh, a_start, a_end, a_label, a_src = _array_period_kwh_sourced(db, aid, target_label=period_label)
                 if a_kwh is None:
                     warnings.append(f"No generation data yet for "
                                     f"{(arr.name if arr else 'array ' + str(aid))} — "
@@ -1589,6 +1576,7 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
         computed["month"] = label
         computed["project_total_kwh"] = total_array_kwh
         computed["array_kwh"] = total_array_kwh
+        computed["generation_complete"] = len(labels) == len(allocs) and len(set(labels)) == 1
         computed["array_breakdown"] = breakdown   # one line per array
         computed["net_rate_per_kwh"] = round(net_rate, 6)
         computed["discount_pct"] = round(discount, 6)
@@ -1621,7 +1609,7 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
             arr = db.get(Array, sub.array_id)
             array_name = arr.name if arr else None
             array_kwh, start, end, label, kwh_source = _array_period_kwh_sourced(
-                db, sub.array_id)
+                db, sub.array_id, target_label=period_label)
     if array_kwh is None:
         warnings.append("No generation data for this array yet — invoice shows $0 "
                         "until production lands.")
@@ -1651,6 +1639,7 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
     computed["period_start"] = start.isoformat() if start else None
     computed["period_end"] = end.isoformat() if end else None
     computed["month"] = label
+    computed["generation_complete"] = label is not None
     computed["project_total_kwh"] = array_kwh
     computed["array_kwh"] = array_kwh
     # Discount-model fields for the UI/invoice (auditable savings story):

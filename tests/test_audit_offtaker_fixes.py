@@ -111,7 +111,14 @@ def test_bulk_commit_persists_rate_dedups_batch_and_rejects_bad_email(client):
                     headers={"Authorization": auth})
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["created"] == 1, body
+    assert body["created"] == 0 and body["ok"] is False, body
+    with SessionLocal() as db:
+        assert not db.execute(select(BillingReportSubscription).where(
+            BillingReportSubscription.tenant_id == tid)).scalars().all()
+    payload["rows"] = [row, dict(row)]
+    good = client.post(f"{_B}/subscriptions/bulk-commit", json=payload,
+                      headers={"Authorization": auth}).json()
+    assert good["created"] == 1 and not good["failed"]
     assert len(body["skipped"]) == 1 and "identical" in body["skipped"][0]["reason"]
     assert len(body["failed"]) == 1 and "not an email" in body["failed"][0]["error"]
     with SessionLocal() as db:
