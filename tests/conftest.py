@@ -14,7 +14,13 @@ import tempfile
 # ── isolate the test DB (a throwaway sqlite file) ───────────────────────────
 _TMP_DB = os.path.join(tempfile.mkdtemp(prefix="solar-test-"), "test.db")
 os.environ.pop("DATABASE_URL", None)          # don't accidentally hit prod PG
-os.environ["SOLAR_DB_URL"] = f"sqlite:///{_TMP_DB}"
+_pg_test = os.environ.get("NORWICH_TEST_PG_URL")
+if _pg_test:
+    if _pg_test != "postgresql+psycopg2://root@/norwich_audit_20260919":
+        raise RuntimeError("Only the disposable local Norwich audit database is permitted")
+    os.environ["SOLAR_DB_URL"] = _pg_test
+else:
+    os.environ["SOLAR_DB_URL"] = f"sqlite:///{_TMP_DB}"
 os.environ.setdefault("STRIPE_SECRET_KEY", "sk_test_dummy")
 os.environ.pop("STRIPE_WEBHOOK_SECRET", None)  # webhook uses unsigned construct_from
 os.environ.pop("RESEND_API_KEY", None)         # never send real email in tests

@@ -144,6 +144,31 @@ def build_match(sub, period_label: Optional[str] = None) -> BillingMatch:
         m = build_manual_match(sub, period_label=period_label)
     else:
         m = match_billing_workbook(bytes(sub.source_workbook), allow_llm=False)
+        if period_label:
+            from .backlog import canonical_period, bounds
+            from .matcher import compute_invoice, Period
+            key = canonical_period(period_label, getattr(sub, "cadence", "monthly"))
+            selected = [p for p in m.periods if p.end and canonical_period(p.end.isoformat(), getattr(sub, "cadence", "monthly")) == key]
+            expected_count = 3 if key and "Q" in key else 1
+            if not key or len({p.end.strftime("%Y-%m") for p in selected}) != expected_count or any(not p.start for p in selected):
+                m.matched = False
+                m.latest_period = None
+                m.warnings.append("The workbook lacks complete dated rows for the requested billing period")
+                return m
+            selected.sort(key=lambda p: p.end)
+            parts = [compute_invoice(p.customer_kwh, p.tariff, p.adder, m.billing_rate,
+                                     m.billing_model, m.template.get("fixed_amount")) for p in selected]
+            ci = dict(parts[-1])
+            for name in ("kwh", "net_value", "incentive_value", "solar_value", "billed_value", "solar_savings", "amount_owed"):
+                ci[name] = round(sum(v[name] for v in parts), 2)
+            ci.update(invoice_number=key, period_start=selected[0].start.isoformat(),
+                      period_end=selected[-1].end.isoformat(), month=key)
+            m.latest_period = Period(month=key, start=selected[0].start, end=selected[-1].end,
+                array_kwh=sum(p.array_kwh or 0 for p in selected), customer_kwh=ci["kwh"],
+                tariff=selected[-1].tariff, adder=selected[-1].adder,
+                value=ci["solar_value"], bill=ci["billed_value"], savings=ci["solar_savings"])
+            m.computed_invoice = ci
+
     # Sequential invoice numbering: when the operator set a starting number, the
     # running counter (invoice_number_next) replaces the default period-date number
     # on the rendered invoice. The counter is advanced on a real send (deliver).
@@ -440,7 +465,7 @@ def _array_period_kwh(db, array_id: int, target_label=None):
     import math
     rows = db.execute(select(DailyGeneration.day, DailyGeneration.kwh, DailyGeneration.source)
         .where(DailyGeneration.array_id == array_id)).all()
-    result = _complete_generation([(r.day, r.kwh, r.source or "daily_csv") for r in rows], target_label)
+    result = _complete_generation([(r.day, r.kwh, "bill_prorate" if r.source == "bill_prorate" else "daily_csv") for r in rows], target_label)
     if result[0] is not None:
         return result
     # A settled full-month statement is independent complete evidence.
@@ -2503,11 +2528,18 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
             logger.exception("offtaker pay-link creation crashed for sub=%s",
                              getattr(sub, "id", "?"))
 
+    if not is_test:
+        db.commit()  # release payment/subscription locks before the durable issue write
+        from .issuance import attach_payment
+        attach_payment(invoice_id, payment_id)
+
     if (not is_test and (getattr(tenant, "product", None) or "nepool") == "array_operator"
             and getattr(tenant, "offtaker_payment_policy", "online_required") != "offline"
             and float(_ci.get("amount_owed") or 0) > 0 and not pay_url):
-        return {"ok": False, "held": True, "invoice_id": invoice_id,
-                "error": "Online payment is required: " + str(pay_skip_reason or "payment link unavailable")}
+        from .issuance import hold
+        reason = "Online payment is required: " + str(pay_skip_reason or "payment link unavailable")
+        hold(invoice_id, reason)
+        return {"ok": False, "held": True, "invoice_id": invoice_id, "error": reason}
 
     _eco_fields: dict = {}
     with tempfile.TemporaryDirectory(prefix="ao-bill-") as tmp:
@@ -2719,6 +2751,8 @@ def draft_subscription(db, sub, tenant, *, triggered_by: str = "scheduled", peri
     # (e.g. a bumped sequence or a different period_end), which let a regenerated
     # draft DUPLICATE for the same period; period_label (period_start → period_end)
     # is stable for a given billing period, so we update the one draft in place.
+    from sqlalchemy import update
+    db.execute(update(type(sub)).where(type(sub).id == sub.id).values(id=type(sub).id))
     existing = None
     if period_label is not None:
         existing = db.execute(
@@ -2874,10 +2908,17 @@ def deliver_trueup_subscription(
             pay_skip_reason = str(exc)[:200]
             logger.warning("trueup pay-link failed sub=%s: %s", sub.id, exc)
 
+    if not is_test:
+        db.commit()
+        from .issuance import attach_payment
+        attach_payment(invoice_id, payment_id)
+
     if (not is_test and getattr(tenant, "offtaker_payment_policy", "online_required") != "offline"
             and float(ci.get("amount_owed") or 0) > 0 and not pay_url):
-        return {"ok": False, "held": True, "invoice_id": invoice_id,
-                "error": "Online payment is required: " + str(pay_skip_reason or "payment link unavailable")}
+        from .issuance import hold
+        reason = "Online payment is required: " + str(pay_skip_reason or "payment link unavailable")
+        hold(invoice_id, reason)
+        return {"ok": False, "held": True, "invoice_id": invoice_id, "error": reason}
 
     with tempfile.TemporaryDirectory(prefix="ao-trueup-") as tmp:
         try:
@@ -2982,6 +3023,8 @@ def draft_trueup_subscription(
         f"{settlement.window_end.isoformat()}"
     )
 
+    from sqlalchemy import update
+    db.execute(update(type(sub)).where(type(sub).id == sub.id).values(id=type(sub).id))
     existing = db.execute(
         select(ReportDraft).where(
             ReportDraft.subscription_id == sub.id,

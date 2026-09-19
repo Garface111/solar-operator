@@ -28,6 +28,7 @@ def _make_tenant() -> tuple[str, str]:
             contact_email=f"{tid}@operator.test",
             tenant_key="sol_live_" + secrets.token_urlsafe(12),
             plan="standard", active=True, product="array_operator",
+            offtaker_payment_policy="offline",
         ))
         db.commit()
     return tid, f"Bearer {mint_session_for_tenant(tid)}"
@@ -44,7 +45,7 @@ def _upload(client, auth, fixture="fairlee.xlsx", **form):
 # ─── /match ─────────────────────────────────────────────────────────────────
 
 def test_match_preview_saves_nothing(client):
-    _, auth = _make_tenant()
+    tid, auth = _make_tenant()
     data = (FIX / "norwich.xlsx").read_bytes()
     r = client.post("/v1/array-operator/billing/match",
                     files={"file": ("norwich.xlsx", data, "application/octet-stream")},
@@ -56,7 +57,7 @@ def test_match_preview_saves_nothing(client):
     assert body["match"]["billing_model"] == "percent_of_array"
     # nothing persisted
     with SessionLocal() as db:
-        assert db.execute(select(BillingReportSubscription)).first() is None
+        assert db.execute(select(BillingReportSubscription).where(BillingReportSubscription.tenant_id == tid)).first() is None
 
 
 def test_match_requires_auth(client):
@@ -81,7 +82,7 @@ def test_create_subscription_links_client_and_defaults_to_me(client):
     with SessionLocal() as db:
         c = db.execute(select(Client).where(Client.tenant_id == tid)).scalar_one()
         assert c.name == "Town of Fairlee"
-        s = db.execute(select(BillingReportSubscription)).scalar_one()
+        s = db.execute(select(BillingReportSubscription).where(BillingReportSubscription.tenant_id == tid)).scalar_one()
         assert s.source_workbook  # workbook bytes stored
         assert s.client_id == c.id
 

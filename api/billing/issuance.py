@@ -51,11 +51,16 @@ def freeze(*, tenant_id, subscription_id, key, match, expected_amount=None):
             raise ValueError("Invoice requires a closed, dated billing period")
         # A cadence change must not rebill months covered by an existing invoice.
         if not ci.get("is_trueup"):
-            overlap = db.scalar(select(OfftakerInvoice.id).where(
+            from .backlog import bounds
+            def months(period):
+                a, b = bounds(period)
+                return {(a.year, month) for month in range(a.month, b.month + 1)}
+            coverage = months(key)
+            existing = db.scalars(select(OfftakerInvoice).where(
                 OfftakerInvoice.subscription_id == subscription_id,
-                ~OfftakerInvoice.period_key.like("trueup:%"),
-                OfftakerInvoice.period_start <= end, OfftakerInvoice.period_end >= start))
-            if overlap and (row is None or overlap != row.id):
+                ~OfftakerInvoice.period_key.like("trueup:%"))).all()
+            if any(other.snapshot and other.id != getattr(row, "id", None)
+                   and coverage.intersection(months(other.period_key)) for other in existing):
                 raise ValueError("Billing period overlaps an existing obligation")
             before = cents(ci.get("amount_before_credit", ci.get("amount_owed")))
             applied = min(before, cents(sub.pending_credit_usd))
@@ -134,3 +139,29 @@ def reconcile(invoice_id):
     if result["ok"]:
         finish(invoice_id, result)
     return result
+
+
+def attach_payment(invoice_id, payment_id):
+    """Record collection identity before any customer email can escape."""
+    from ..models import OfftakerPayment
+    with SessionLocal() as db:
+        row = db.scalar(select(OfftakerInvoice).where(OfftakerInvoice.id == invoice_id).with_for_update())
+        if payment_id is not None:
+            payment = db.get(OfftakerPayment, payment_id)
+            if (not payment or payment.tenant_id != row.tenant_id
+                    or payment.subscription_id != row.subscription_id
+                    or payment.amount_cents != row.amount_cents):
+                raise ValueError("Invoice payment identity does not match frozen obligation")
+            if row.payment_id and row.payment_id != payment_id:
+                raise ValueError("Immutable invoice already has a different payment")
+            row.payment_id = payment_id
+        db.commit()
+
+
+def hold(invoice_id, reason):
+    with SessionLocal() as db:
+        row = db.get(OfftakerInvoice, invoice_id)
+        if row and row.status not in ("accepted", "sending", "uncertain"):
+            row.status = "held"
+            row.last_error = str(reason)[:1000]
+            db.commit()

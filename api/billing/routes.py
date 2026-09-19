@@ -5680,6 +5680,21 @@ def send_pipeline(authorization: Optional[str] = Header(default=None)):
         pending_auto = sum(int(c) for m, c in pend_rows if (m or "approval") == "auto")
         pending_approval = sum(int(c) for m, c in pend_rows if (m or "approval") != "auto")
         pending = pending_auto + pending_approval
+        from ..models import OfftakerInvoice, BillingEmailDispatch
+        held_invoices = db.scalars(select(OfftakerInvoice).where(
+            OfftakerInvoice.tenant_id == t.id, OfftakerInvoice.status != "accepted")
+            .order_by(OfftakerInvoice.period_start, OfftakerInvoice.id)).all()
+        holds = [{"invoice_id": row.id, "subscription_id": row.subscription_id,
+                  "period": row.period_key, "status": row.status,
+                  "amount_cents": row.amount_cents, "reason": row.last_error or "Awaiting invoice delivery"}
+                 for row in held_invoices]
+        dispatch_holds = [{"id": row.id, "kind": row.kind, "status": row.status,
+                           "attempts": row.attempts, "reason": row.error,
+                           "retry_at": row.retry_at.isoformat() if row.retry_at else None}
+                          for row in db.scalars(select(BillingEmailDispatch).where(
+                              BillingEmailDispatch.tenant_id == t.id,
+                              BillingEmailDispatch.status != "accepted"))]
+
 
     total = len(rows)
     last_period = max((r.last_sent_period_end for r in rows
@@ -5713,6 +5728,7 @@ def send_pipeline(authorization: Optional[str] = Header(default=None)):
     return {
         "ok": True,
         "total_enabled": total,
+        "holds": holds, "dispatch_holds": dispatch_holds,
         "last": {
             "period_end": last_period,
             "period_month": (last_period or "")[:7] or None,

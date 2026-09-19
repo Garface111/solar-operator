@@ -87,7 +87,7 @@ def _delivery_setup(client,monkeypatch):
     sid=_upload(client,auth,"norwich.xlsx").json()["subscription"]["id"]
     monkeypatch.setattr(pay,"link_existing_connect_account",lambda *a:{})
     monkeypatch.setattr(pay,"refresh_connect_status",lambda *a:{})
-    monkeypatch.setattr(pay,"create_offtaker_payment",lambda *a,**kw:{"ok":False,"skipped":True})
+    monkeypatch.setattr(pay,"create_offtaker_payment",lambda *a,**kw:{"ok":True,"pay_url":"https://example.test/pay/safe-fixture"})
     monkeypatch.setattr(delivery,"generate_files",lambda *a,**kw:[])
     return tid,sid
 
