@@ -6692,3 +6692,115 @@ def reconcile_dispatch(dispatch_id: int, body: DispatchReconcileBody,
         raise HTTPException(409, str(exc))
     except Exception:
         raise HTTPException(503, "Provider verification unavailable; the dispatch remains held")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Mail room  (Ford, Sep 2026): what is going out and when, everything that
+# went out, one invoice in full, and an independent auditor. Logic lives in
+# billing/mailroom.py + billing/mailroom_audit.py; these are the HTTP edges.
+# ═══════════════════════════════════════════════════════════════════════════
+
+@router.get("/mailroom")
+def mailroom_board(limit: int = Query(default=300, ge=1, le=1000),
+                   offset: int = Query(default=0, ge=0),
+                   legacy: int = Query(default=1),
+                   authorization: Optional[str] = Header(default=None)):
+    """LEFT: drafts / holds / retries / scheduled sends. RIGHT: issued invoices
+    (frozen figures + envelope + delivery + payment), newest first."""
+    from ..models import Tenant
+    from . import mailroom as mr
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        tenant = db.get(Tenant, t.id) or t
+        return mr.board(db, t.id, tenant, limit=limit, offset=offset,
+                        include_legacy=bool(legacy))
+
+
+@router.get("/mailroom/invoice/{invoice_id}")
+def mailroom_invoice(invoice_id: int, authorization: Optional[str] = Header(default=None)):
+    """One issued invoice, everything: frozen figures, the email as sent,
+    attachments on file, delivery receipts, payment and offline receipts."""
+    from . import mailroom as mr
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        d = mr.invoice_detail(db, t.id, invoice_id)
+    if d is None:
+        raise HTTPException(404, "invoice not found")
+    return {"ok": True, "invoice": d}
+
+
+@router.get("/mailroom/invoice/{invoice_id}/attachment/{filename}")
+def mailroom_invoice_attachment(invoice_id: int, filename: str,
+                                authorization: Optional[str] = Header(default=None)):
+    """The exact bytes the off-taker received — frozen at issue, never re-rendered."""
+    from . import mailroom as mr
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        got = mr.attachment_bytes(db, t.id, invoice_id, filename)
+    if got is None:
+        raise HTTPException(404, "attachment not on file for that invoice")
+    data, ctype = got
+    safe = _re.sub(r'[^A-Za-z0-9._ -]+', "_", filename)[:120] or "attachment"
+    return Response(content=data, media_type=ctype,
+                    headers={"Content-Disposition": f'attachment; filename="{safe}"'})
+
+
+@router.get("/mailroom/invoice/{invoice_id}/email")
+def mailroom_invoice_email(invoice_id: int, authorization: Optional[str] = Header(default=None)):
+    """The invoice email as HTML, for an isolated preview frame. Served with a
+    no-script CSP so an archived body can never run code in the dashboard."""
+    from . import mailroom as mr
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        d = mr.invoice_detail(db, t.id, invoice_id)
+    if d is None:
+        raise HTTPException(404, "invoice not found")
+    html = (d.get("email") or {}).get("html")
+    if not html:
+        text = (d.get("email") or {}).get("text") or "No email body is on file for this invoice."
+        html = "<pre style='font:14px/1.5 -apple-system,Segoe UI,sans-serif;white-space:pre-wrap;padding:24px'>" \
+               + _html_escape(text) + "</pre>"
+    return HTMLResponse(html, headers={
+        "Content-Security-Policy": "default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; font-src https: data:",
+        "Cache-Control": "no-store", "X-Frame-Options": "SAMEORIGIN"})
+
+
+@router.post("/mailroom/audit")
+def mailroom_audit_start(authorization: Optional[str] = Header(default=None)):
+    """Start an independent audit of the mail room. Returns at once with the
+    run id; poll GET /mailroom/audit/{id}. One run per tenant at a time."""
+    from . import mailroom_audit as ma
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        res = ma.start_run(db, t.id, triggered_by="operator")
+    return res
+
+
+@router.get("/mailroom/audit")
+def mailroom_audit_list(limit: int = Query(default=10, ge=1, le=50),
+                        authorization: Optional[str] = Header(default=None)):
+    from ..models import OfftakerAuditRun
+    from . import mailroom_audit as ma
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(OfftakerAuditRun).where(OfftakerAuditRun.tenant_id == t.id)
+            .order_by(OfftakerAuditRun.id.desc()).limit(limit)
+        ).scalars().all()
+        runs = [ma.run_json(r) for r in rows]
+    # The list is a manifest: findings ride only on the single-run endpoint.
+    for r in runs:
+        r["finding_count"] = len(r.pop("findings", []) or [])
+    return {"ok": True, "runs": runs, "latest": runs[0] if runs else None}
+
+
+@router.get("/mailroom/audit/{run_id}")
+def mailroom_audit_get(run_id: int, authorization: Optional[str] = Header(default=None)):
+    from ..models import OfftakerAuditRun
+    from . import mailroom_audit as ma
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        r = db.get(OfftakerAuditRun, run_id)
+        if r is None or r.tenant_id != t.id:
+            raise HTTPException(404, "audit run not found")
+        return {"ok": True, "run": ma.run_json(r)}

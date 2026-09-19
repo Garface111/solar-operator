@@ -2880,3 +2880,29 @@ class BillingEmailRateGate(Base):
     __tablename__ = "billing_email_rate_gates"
     id: Mapped[str] = mapped_column(String(40), primary_key=True)
     next_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class OfftakerAuditRun(Base):
+    """One run of the Mail-room auditor (Sep 2026, Ford): a deterministic pass
+    over every issued and pending off-taker invoice, then a Claude review of
+    the same evidence, stored so the operator can see what was checked, when,
+    by which model, and what it flagged. Findings are advisory — nothing here
+    changes an invoice."""
+    __tablename__ = "offtaker_audit_runs"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    status: Mapped[str] = mapped_column(String(16), default="running", index=True)  # running|done|failed
+    triggered_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    model: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    provider: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    verdict: Mapped[str | None] = mapped_column(String(16), nullable=True)   # ready|caution|stop
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    findings: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    stats: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("ix_offtaker_audit_runs_tenant_started", "tenant_id", "started_at"),
+    )
