@@ -179,6 +179,9 @@ def _job_dict(job: BillDiscoveryJob) -> dict[str, Any]:
         "username_lc": job.username_lc,
         "login_host": job.login_host,
         "status": job.status,
+        "ready": False,
+        "activated": False,
+        "requires_review": job.status == "candidate",
         "abort_reason": job.abort_reason,
         "family": job.family,
         "action": job.action,
@@ -275,8 +278,8 @@ def run_discovery_from_captures(
     """Offline path: synthesize from pre-captured network payloads (tests +
     HAR upload). Fully automatic after captures exist — no browser.
 
-    When start_capture=True and tenant/username provided, auto-approve the
-    adapter and immediately ingest bills + rearm harvest.
+    start_capture is retained for compatibility, but cannot activate a candidate.
+    Successful extraction is evidence for review, not proof of billing readiness.
     """
     result = _synthesize_from_captures(captures, provider=provider)
     if (
@@ -298,6 +301,8 @@ def run_discovery_from_captures(
             result["capture_start"] = {
                 "ok": False, "error": f"{type(e).__name__}: {e}"[:300],
             }
+    if result.get("status") == "succeeded":
+        result.update(status="candidate", ready=False, activated=False, requires_review=True)
     return result
 
 
@@ -309,287 +314,28 @@ def activate_adapter_and_start_capture(
     synthesis: dict,
     captures: list[dict],
 ) -> dict[str, Any]:
-    """Approve the new adapter and begin bill capture immediately.
+    """Compatibility entry point: discovery artifacts are review candidates only.
 
-    1. Promote candidate → approved in auto_adapters registry
-    2. Extract periods from discovery captures via the new spec (+ SmartHub/
-       GMP-shaped rows when present)
-    3. Upsert UtilityAccount + Bill rows for the tenant
-    4. Rearm Cloud Capture (clear last_harvest_at / fail backoff)
-    5. Best-effort trigger a harvest tick so the next pull uses the live portal
+    A generic extractor cannot establish account identity, bill periods or export
+    semantics. Supported families capture through their existing adapters, never
+    through this synthesis path, even when a caller supplies a known provider.
     """
-    from . import auto_adapters as aa
-    from .models import UtilityAccount, Bill
-    from .worker import _upsert_bill
-    from datetime import datetime, timedelta
-
-    provider = (provider or "unknown").strip().lower()
-    username_lc = (username_lc or "").strip().lower()
-    fp = (synthesis or {}).get("fingerprint")
-    spec = (synthesis or {}).get("spec")
-    if not fp and not spec:
-        return {"ok": False, "error": "no fingerprint/spec to activate"}
-
-    approved = 0
-    if fp:
-        try:
-            approved = int(aa.reg_approve(fp) or 0)
-        except Exception as e:
-            log.warning("reg_approve failed fp=%s: %s", fp, e)
-        if not spec:
-            row = aa.reg_get(fp)
-            if row and row.get("spec"):
-                try:
-                    spec = json.loads(row["spec"]) if isinstance(row["spec"], str) else row["spec"]
-                except Exception:
-                    spec = None
-
-    metrics_list: list[dict] = []
-
-    # Path A: declarative adapter extract (date + generation_kwh)
-    if spec:
-        for cap in captures or []:
-            body = cap.get("body")
-            if not body or not isinstance(body, str) or body[0] not in "{[":
-                continue
-            try:
-                recs, _c, _s = aa.extract(spec, body)
-            except Exception:
-                continue
-            for r in recs or []:
-                d = r.get("date")
-                kwh = r.get("generation_kwh")
-                if not d or kwh is None:
-                    continue
-                try:
-                    if isinstance(d, str):
-                        day = datetime.fromisoformat(d[:10])
-                    else:
-                        continue
-                except Exception:
-                    continue
-                kwh_f = float(kwh)
-                metrics_list.append({
-                    "kwh_generated": int(round(kwh_f)) if kwh_f == kwh_f else None,
-                    "kwh_sent_to_grid": float(kwh_f),
-                    "period_start": day.replace(day=1) if hasattr(day, "day") else day,
-                    "period_end": day,
-                    "billing_days": 30,
-                    "bill_date": day,
-                    "parse_status": "parsed",
-                    "document_number": f"auto-{provider}-{d}",
-                    "raw_json": {"source": "bill_discovery_adapter", "record": r,
-                                "fingerprint": fp, "url": cap.get("url")},
-                    "is_net_metered": True,
-                })
-
-    # Path B: SmartHub-shaped bill rows already in captures / fixture shape
-    try:
-        from .adapters.smarthub import parse_bill as sh_parse_bill
-    except Exception:
-        sh_parse_bill = None
-    if sh_parse_bill:
-        for cap in captures or []:
-            body = cap.get("body")
-            if not body:
-                continue
-            try:
-                data = json.loads(body) if isinstance(body, str) else body
-            except Exception:
-                continue
-            rows = data if isinstance(data, list) else (
-                data.get("bills") or data.get("rows") or data.get("billingHistory") or []
-            )
-            if not isinstance(rows, list):
-                continue
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                if not (row.get("billing_date") or row.get("billingDateTimestamp")
-                        or row.get("account_id") or row.get("acctNbr")):
-                    continue
-                # Map raw NISC → extension shape when needed
-                if "billing_date" not in row and "billingDateTimestamp" in row:
-                    try:
-                        from .harvester.vendors.smarthub import SmartHubVendor
-                        row = SmartHubVendor._bill_row(
-                            str(row.get("acctNbr") or row.get("account_id") or "0"),
-                            row,
-                        )
-                    except Exception:
-                        continue
-                try:
-                    b = sh_parse_bill(row)
-                except Exception:
-                    continue
-                bd = b.get("billing_date")
-                if not bd:
-                    continue
-                pe = b.get("period_end") or bd
-                ps = b.get("period_start")
-                if ps is None and pe is not None:
-                    try:
-                        ps = pe - timedelta(days=30)
-                    except Exception:
-                        ps = pe
-                kwh = b.get("kwh")
-                metrics_list.append({
-                    "kwh_generated": int(round(kwh)) if isinstance(kwh, (int, float)) else 0,
-                    "period_start": ps,
-                    "period_end": pe,
-                    "billing_days": ((pe - ps).days if (pe and ps) else 30),
-                    "bill_date": bd,
-                    "parse_status": "parsed" if kwh is not None else "partial",
-                    "document_number": b.get("bill_uuid") or f"sh-{bd}",
-                    "total_cost": b.get("bill_amount") or b.get("total_due"),
-                    "raw_json": row,
-                    "account_hint": b.get("account_id"),
-                })
-
-    # Path C: GMP bill JSON objects
-    try:
-        from .adapters import gmp as gmp_ad
-        for cap in captures or []:
-            body = cap.get("body")
-            if not body:
-                continue
-            try:
-                data = json.loads(body) if isinstance(body, str) else body
-            except Exception:
-                continue
-            bills = data if isinstance(data, list) else (
-                data.get("bills") or ([data] if isinstance(data, dict) and data.get("billSegments") else [])
-            )
-            for bill in bills or []:
-                if not isinstance(bill, dict) or "billSegments" not in bill:
-                    continue
-                try:
-                    m = gmp_ad.bill_json_to_metrics(bill)
-                except Exception:
-                    continue
-                if m.get("period_end") is None and m.get("bill_date") is None:
-                    continue
-                metrics_list.append(m)
-    except Exception:
-        pass
-
-    created = updated = 0
-    account_ids: list[int] = []
-    with SessionLocal() as db:
-        # One account per login (stable key); optional per-hint accounts later.
-        base_acct_no = f"auto_{provider[:10]}_{username_lc[:24]}"[:40]
-        ua = db.execute(
-            select(UtilityAccount).where(
-                UtilityAccount.tenant_id == tenant_id,
-                UtilityAccount.provider == provider,
-                UtilityAccount.account_number == base_acct_no,
-            )
-        ).scalar_one_or_none()
-        if ua is None:
-            ua = UtilityAccount(
-                tenant_id=tenant_id,
-                provider=provider,
-                account_number=base_acct_no,
-                customer_number=username_lc[:40] if username_lc else None,
-                nickname=f"{provider} ({username_lc})"[:200],
-                enabled=True,
-                extra={"adapter_fingerprint": fp, "source": "bill_discovery"},
-            )
-            db.add(ua)
-            db.flush()
-        else:
-            extra = dict(ua.extra or {})
-            extra["adapter_fingerprint"] = fp
-            extra["source"] = "bill_discovery"
-            ua.extra = extra
-            ua.enabled = True
-        account_ids.append(ua.id)
-
-        for m in metrics_list:
-            if m.get("period_end") is None and m.get("bill_date") is not None:
-                m["period_end"] = m["bill_date"]
-            if m.get("period_start") is None and m.get("period_end") is not None:
-                try:
-                    m["period_start"] = m["period_end"] - timedelta(days=30)
-                except Exception:
-                    m["period_start"] = m["period_end"]
-            if m.get("billing_days") is None:
-                m["billing_days"] = 30
-            if m.get("parse_status") is None:
-                m["parse_status"] = "partial"
-            # kwh_generated required-ish for upsert; allow 0
-            if m.get("kwh_generated") is None:
-                m["kwh_generated"] = 0
-            try:
-                action = _upsert_bill(db, tenant_id, ua, m)
-                if action == "created":
-                    created += 1
-                elif action == "updated":
-                    updated += 1
-                # "skipped" → a content-free partial we declined to store.
-            except Exception as e:
-                log.warning("activate upsert bill failed: %s", e)
-
-        # Rearm Cloud Capture so the harvester picks this login up ASAP.
-        rearmed = 0
-        try:
-            from sqlalchemy.orm import defer
-            creds = db.execute(
-                select(PortalCredential).options(
-                    defer(PortalCredential.secret_enc),
-                    defer(PortalCredential.session_state_enc),
-                ).where(
-                    PortalCredential.tenant_id == tenant_id,
-                    PortalCredential.provider == provider,
-                    PortalCredential.username_lc == username_lc,
-                )
-            ).scalars().all()
-            for c in creds:
-                c.cloud_capture_enabled = True
-                c.last_harvest_at = None
-                c.harvest_fails = 0
-                c.updated_at = now()
-                rearmed += 1
-        except Exception as e:
-            log.warning("rearm credential failed: %s", e)
-
-        db.commit()
-
-        # bill → daily so dashboards light up immediately
-        try:
-            from .jobs.bill_to_daily import transform_tenant_bills
-            transform_tenant_bills(tenant_id, db=db)
-            db.commit()
-        except Exception:
-            log.warning("bill_to_daily after activate failed t=%s", tenant_id, exc_info=True)
-
-    # Best-effort live harvest (known vendors / SmartHub host). Never block.
-    harvest = None
-    try:
-        harvest = _trigger_harvest_async(tenant_id, provider, username_lc)
-    except Exception as e:
-        harvest = {"ok": False, "error": str(e)[:200]}
-
-    # Also kick GMP-style JSON pull when a JWT session exists for this tenant.
-    pull = None
-    try:
-        from .worker import pull_bills_for_tenant
-        if provider == "gmp":
-            pull = pull_bills_for_tenant(tenant_id)
-    except Exception as e:
-        pull = {"ok": False, "error": str(e)[:200]}
-
     return {
-        "ok": True,
-        "approved": approved,
-        "fingerprint": fp,
-        "bills_created": created,
-        "bills_updated": updated,
-        "metrics_extracted": len(metrics_list),
-        "accounts": account_ids,
-        "credentials_rearmed": rearmed,
-        "harvest": harvest,
-        "pull": pull,
+        "ok": False,
+        "status": "candidate",
+        "ready": False,
+        "activated": False,
+        "requires_review": True,
+        "detail": "Discovery candidate retained for review; bill capture is not activated.",
+        "approved": 0,
+        "fingerprint": (synthesis or {}).get("fingerprint"),
+        "bills_created": 0,
+        "bills_updated": 0,
+        "metrics_extracted": 0,
+        "accounts": [],
+        "credentials_rearmed": 0,
+        "harvest": None,
+        "pull": None,
     }
 
 
@@ -620,8 +366,6 @@ def _trigger_harvest_async(tenant_id: str, provider: str, username_lc: str) -> d
 
 
 def _finalize_job(job_id: int, result: dict) -> dict[str, Any]:
-    notify_payload = None
-    capture_start = None
     with SessionLocal() as db:
         job = db.get(BillDiscoveryJob, job_id)
         if job is None:
@@ -630,7 +374,7 @@ def _finalize_job(job_id: int, result: dict) -> dict[str, Any]:
         job.abort_reason = result.get("abort_reason")
         job.detail = (result.get("detail") or "")[:4000]
         captures = result.get("captures") or []
-        # Prefer full capture bodies still in memory for ingest; compact for storage.
+        # Retain bounded samples for review; these are never ingested as bills.
         full_captures = captures
         job.captures_count = len(captures)
         compact = []
@@ -641,15 +385,16 @@ def _finalize_job(job_id: int, result: dict) -> dict[str, Any]:
                 "content_type": (c.get("content_type") or "")[:80],
                 "bytes": c.get("bytes") or 0,
                 "body_preview": (c.get("body") or "")[:400],
+                "body_sample": (c.get("body") or "")[:65536],
             })
         job.captures_json = json.dumps(compact)
         syn = result.get("synthesis")
         if syn:
-            job.synthesis_json = json.dumps(syn)[:8000]
+            job.synthesis_json = json.dumps(syn)
             job.fingerprint = syn.get("fingerprint")
         job.finished_at = now()
 
-        should_activate = (
+        should_review = (
             job.status == "succeeded" and syn and syn.get("ok")
             and (syn.get("fingerprint") or syn.get("spec"))
         )
@@ -661,7 +406,7 @@ def _finalize_job(job_id: int, result: dict) -> dict[str, Any]:
         db.refresh(job)
         out = _job_dict(job)
 
-    if should_activate:
+    if should_review:
         try:
             capture_start = activate_adapter_and_start_capture(
                 tenant_id=tenant_id,
@@ -676,10 +421,9 @@ def _finalize_job(job_id: int, result: dict) -> dict[str, Any]:
                 job = db.get(BillDiscoveryJob, job_id_v)
                 if job is not None:
                     extra = (
-                        f" Capture started: created={capture_start.get('bills_created')} "
-                        f"updated={capture_start.get('bills_updated')} "
-                        f"rearmed={capture_start.get('credentials_rearmed')}."
+                        " Discovery candidate retained for review; bill capture is not activated."
                     )
+                    job.status = "candidate"
                     job.detail = ((job.detail or "") + extra)[:4000]
                     db.commit()
                     db.refresh(job)
@@ -692,11 +436,8 @@ def _finalize_job(job_id: int, result: dict) -> dict[str, Any]:
 
         try:
             from .bill_adapter_autopilot import notify_new_bill_adapter
-            cs = out.get("capture_start") or {}
             detail = (
-                f"Adapter approved and bill capture started automatically.\n"
-                f"Bills created={cs.get('bills_created')} updated={cs.get('bills_updated')} "
-                f"extracted={cs.get('metrics_extracted')} rearmed={cs.get('credentials_rearmed')}.\n"
+                "Discovery candidate requires review. Bill capture is not activated.\n"
                 f"{(syn or {}).get('detail') or result.get('detail') or ''}"
             )
             notify_new_bill_adapter(

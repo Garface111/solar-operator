@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import secrets
+import pytest
 
 from sqlalchemy import select
 
@@ -23,6 +24,13 @@ from api.bill_discovery_engine import (
     enqueue_discovery,
     _synthesize_from_captures,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolated_discovery(monkeypatch, tmp_path):
+    monkeypatch.setattr("api.auto_adapters._DB", str(tmp_path / "adapters.db"))
+    monkeypatch.setattr("api.auto_adapters.agent", lambda *a, **k: (None, "disabled in test"))
+    monkeypatch.setattr("api.bill_discovery_engine._spawn_process_one", lambda *a: None)
 
 
 def test_abort_detects_captcha_and_mfa():
@@ -56,7 +64,7 @@ def test_offline_synthesis_from_generation_json():
     }]
     result = run_discovery_from_captures(captures, provider="acme_power")
     # Heuristic may or may not match this shape — never crash; status set.
-    assert result["status"] in ("succeeded", "failed")
+    assert result["status"] in ("candidate", "failed")
     assert "captures" in result
 
 
@@ -94,7 +102,7 @@ def test_gmp_shaped_capture_synthesizes_or_parses():
         "body": body,
         "bytes": len(body),
     }], provider="gmp")
-    assert result["status"] in ("succeeded", "failed")
+    assert result["status"] in ("candidate", "failed")
     assert len(result["captures"]) == 1
 
 
@@ -147,105 +155,77 @@ def test_enqueue_known_family_skips_browser():
     assert job2["family"] == "smarthub"
 
 
-def test_activate_adapter_starts_bill_capture(monkeypatch):
-    """After synthesis, adapter is approved and bills land for the tenant."""
+def test_discovery_candidate_never_activates_or_manufactures_bills(monkeypatch):
+    """Successful generation extraction is not evidence of a utility bill."""
+    from api import bill_discovery_engine as discovery
+    from api import auto_adapters as aa
+    from api.bill_adapter_autopilot import synthesize_bill_extractor
+    from api.models import Bill, UtilityAccount
+
     init_db()
-    tid = "ten_act_" + secrets.token_hex(3)
+    tid = "ten_quarantine_" + secrets.token_hex(3)
     with SessionLocal() as db:
-        db.add(Tenant(
-            id=tid, tenant_key="sol_" + secrets.token_hex(8),
-            name="Act", contact_email=f"{tid}@t.test",
-            active=True, product="array_operator",
-        ))
+        db.add(Tenant(id=tid, tenant_key="sol_" + secrets.token_hex(8),
+                      name="Quarantine", contact_email=f"{tid}@t.test",
+                      active=True, product="array_operator"))
         db.commit()
 
-    # Don't fire real harvest threads / email in unit test.
-    monkeypatch.setattr(
-        "api.bill_discovery_engine._trigger_harvest_async",
-        lambda *a, **k: {"ok": True, "queued": False, "skipped": "test"},
-    )
-    monkeypatch.setattr(
-        "api.bill_adapter_autopilot.notify_new_bill_adapter",
-        lambda **k: True,
-    )
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Discovery must not approve, ingest or schedule capture")
 
-    from api.bill_discovery_engine import activate_adapter_and_start_capture
-    from api.auto_adapters import reg_get
-
-    body = json.dumps({
-        "items": [
-            {"date": "2026-05-01", "generation_kwh": 111.0},
-            {"date": "2026-06-01", "generation_kwh": 222.0},
-        ],
-        "total_generation_kwh": 333.0,
-    })
-    captures = [{
-        "url": "https://portal.acme/api/billing/history",
-        "status": 200,
-        "content_type": "application/json",
-        "body": body,
-        "bytes": len(body),
-    }]
-    # First synthesize so we have a real fingerprint+spec in the registry.
-    from api.bill_adapter_autopilot import synthesize_bill_extractor
+    monkeypatch.setattr(aa, "reg_approve", forbidden)
+    monkeypatch.setattr(discovery, "_trigger_harvest_async", forbidden)
+    monkeypatch.setattr("api.worker._upsert_bill", forbidden)
+    monkeypatch.setattr("api.worker.pull_bills_for_tenant", forbidden)
+    notices = []
+    monkeypatch.setattr("api.bill_adapter_autopilot.notify_new_bill_adapter",
+                        lambda **kw: notices.append(kw))
+    body = json.dumps({"items": [
+        {"date": "2026-05-01", "generation_kwh": 111.0},
+        {"date": "2026-06-01", "generation_kwh": 222.0},
+    ]})  # Deliberately no independent total: structural synthesis only.
+    captures = [{"url": "https://portal.acme/api/billing/history", "status": 200,
+                 "content_type": "application/json", "body": body, "bytes": len(body)}]
     syn = synthesize_bill_extractor(body, provider="acme_power", notify=False)
-    if not syn.get("ok"):
-        # Heuristic may miss this shape — still test SmartHub-shaped path.
-        vec_body = json.dumps([{
-            "account_id": "6578300",
-            "billing_date": "6/15/2026",
-            "bill_amount": "-50.00",
-            "bill_uuid": "u-activate-1",
-            "kwh": 500.0,
-            "period_start": "2026-05-15",
-            "period_end": "2026-06-14",
-        }])
-        captures = [{
-            "url": "https://vermontelectric.smarthub.coop/billing/history",
-            "status": 200,
-            "content_type": "application/json",
-            "body": vec_body,
-            "bytes": len(vec_body),
-        }]
-        syn = {
-            "ok": True,
-            "fingerprint": "fp_manual_test",
-            "source": "test",
-            "spec": {
-                "format": "json",
-                "records": [{"path": ""}],  # unused if SmartHub path hits
-                "fields": {
-                    "date": {"path": "billing_date", "parse": "mdy"},
-                    "generation_kwh": {"path": "kwh", "scale": 1},
-                },
-            },
-        }
+    assert syn["ok"] and syn["spec"]
+    assert syn["reconcile"] is None
+    assert aa.extract(syn["spec"], body)[0]  # Real successful extraction.
 
-    result = activate_adapter_and_start_capture(
-        tenant_id=tid,
-        provider="acme_power",
-        username_lc="owner@x.com",
-        synthesis=syn,
-        captures=captures,
-    )
-    assert result["ok"] is True
-    # At least one path should extract metrics (adaptive or SmartHub-shaped).
-    assert result["metrics_extracted"] >= 1 or result["bills_created"] + result["bills_updated"] >= 1
-    if syn.get("fingerprint") and syn["fingerprint"] != "fp_manual_test":
-        row = reg_get(syn["fingerprint"])
-        assert row is not None
-        assert row["status"] == "approved"
+    # Direct/API compatibility callers cannot bypass using a known-family label.
+    for provider in ("acme_power", "gmp", "vec", "sh_new_utility"):
+        result = discovery.activate_adapter_and_start_capture(
+            tenant_id=tid, provider=provider, username_lc="owner@x.com",
+            synthesis=syn, captures=captures)
+        assert result["status"] == "candidate"
+        assert result["ok"] is False and result["activated"] is False
+        assert result["ready"] is False and result["approved"] == 0
+        assert result["bills_created"] == result["bills_updated"] == 0
+        assert result["credentials_rearmed"] == 0
 
-    from api.models import Bill, UtilityAccount
+    offline = discovery.run_discovery_from_captures(
+        captures, provider="acme_power", tenant_id=tid,
+        username_lc="owner@x.com", start_capture=True)
+    assert offline["status"] == "candidate" and offline["ready"] is False
+    assert offline["capture_start"]["activated"] is False
+    assert offline["synthesis"]["spec"]
+
+    job = discovery.enqueue_discovery(tenant_id=tid, provider="acme_power",
+                                     username="owner@x.com", force_explore=True)
+    finalized = discovery._finalize_job(job["id"], {
+        "status": "succeeded", "synthesis": syn, "captures": captures,
+        "detail": "Extraction succeeded",
+    })
+    assert finalized["status"] == "candidate"
+    assert finalized["ready"] is False and finalized["activated"] is False
+    assert finalized["synthesis"]["spec"] == syn["spec"]
+    assert "not activated" in finalized["detail"]
+    assert notices and "requires review" in notices[-1]["detail"]
+    assert aa.reg_get(syn["fingerprint"])["status"] == "candidate"
     with SessionLocal() as db:
-        uas = db.execute(
-            select(UtilityAccount).where(UtilityAccount.tenant_id == tid)
-        ).scalars().all()
-        assert len(uas) >= 1
-        bills = db.execute(
-            select(Bill).where(Bill.tenant_id == tid)
-        ).scalars().all()
-        assert len(bills) >= 1
+        assert not db.execute(select(Bill).where(Bill.tenant_id == tid)).scalars().all()
+        assert not db.execute(select(UtilityAccount).where(UtilityAccount.tenant_id == tid)).scalars().all()
+        stored = db.get(BillDiscoveryJob, job["id"])
+        assert json.loads(stored.captures_json)[0]["body_sample"] == body
 
 
 def test_notify_new_bill_adapter_sends_internal_alert(monkeypatch):
