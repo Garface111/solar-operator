@@ -26,7 +26,7 @@ def _seed_banked():
         db.flush()
         a = Array(tenant_id=tid, name="Big Array", region="VT")
         db.add(a); db.flush()
-        acct = UtilityAccount(tenant_id=tid, array_id=a.id, provider="zzz_lbl",
+        acct = UtilityAccount(tenant_id=tid, array_id=a.id, provider="gmp",
                               account_number="X" + secrets.token_hex(3))
         db.add(acct); db.flush()
         db.add(Bill(tenant_id=tid, account_id=acct.id,
@@ -44,7 +44,9 @@ def _pdf_text(match):
             return "\n".join(page.extract_text() or "" for page in pdf.pages)
 
 
-def test_gmp_credit_invoice_labels_generation_and_flags_banked():
+def test_gmp_credit_invoice_labels_generation_and_flags_banked(monkeypatch):
+    # Keep the banked reference-rate fixture independent of other fleet tests.
+    monkeypatch.setattr("api.rate_schedule._fleet_credit_rate", lambda *a, **kw: None)
     tid, aid, acct_id = _seed_banked()
     sub = BillingReportSubscription(
         tenant_id=tid, customer_name="Offtaker Co",

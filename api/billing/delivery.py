@@ -460,8 +460,9 @@ def _complete_generation(rows, target_label=None):
         if any(k is None or not math.isfinite(float(k)) or float(k) < 0 for _, k, _ in month):
             continue
         total = sum(float(k) for _, k, _ in month)
-        prorate = sum(float(k) for _, k, src in month if src == "bill_prorate")
-        src = "bill_prorate" if total > 0 and prorate >= .5 * total else month[0][2]
+        # Even a zero-kWh or minority estimated row means this is not a full
+        # month of measured evidence. Preserve that provenance for send gates.
+        src = "bill_prorate" if any(src == "bill_prorate" for _, _, src in month) else month[0][2]
         return round(total, 1), start, end, label, src
     return (None,) * 5
 
@@ -563,6 +564,16 @@ def _build_smarthub_offtaker_match(sub, operator, warnings, period_label=None) -
                 f"This {PROV} account isn't linked to an array yet — link it to "
                 f"the array to bill its generation.")
 
+    if gen_src == "bill_prorate":
+        gen_kwh = None
+        warnings.append("Estimated bill-prorated daily rows cannot support a measured-generation invoice; provide a complete month of measured evidence.")
+    if ((getattr(sub, "cadence", None) or "monthly") == "quarterly"
+            and (period_label is None or _is_quarter_label(period_label))):
+        # This reader returns exactly one calendar month. Never let issuance
+        # canonicalize that month into an invoice consuming the entire quarter.
+        gen_kwh = None
+        warnings.append("Quarterly SmartHub generation billing requires complete quarterly evidence; the monthly generation path cannot issue a quarter.")
+
     # Rate: REQUIRE an operator-entered rate. Never the auto/VT default.
     pricing = resolve_discount_pricing(sub, period_end=end)
     rate_ok = pricing["net_source"] in _SMARTHUB_HONEST_RATE_SOURCES
@@ -631,6 +642,10 @@ def _build_smarthub_offtaker_match(sub, operator, warnings, period_label=None) -
     computed["kwh_source"] = gen_src or "smarthub_generation"
     # The send-guard flag: only True when this is a real, billable invoice.
     computed["has_utility_bill"] = billable
+    # Monthly reads remain usable for annual trueup calculations on quarterly
+    # subscriptions, but are never sufficient evidence to issue a quarter.
+    computed["invoice_evidence_complete"] = bool(
+        billable and (getattr(sub, "cadence", None) or "monthly") != "quarterly")
 
     period = Period(
         month=label, start=start, end=end,
@@ -1131,7 +1146,14 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
         # unaffected — _is_sh is False for them.
         with SessionLocal() as _db0:
             _a0 = _db0.get(UtilityAccount, sub.utility_account_id)
-            _is_sh = is_smarthub_provider((_a0.provider or "").lower()) if _a0 else False
+            _provider = ((_a0.provider or "").strip().lower()) if _a0 else ""
+            _is_sh = is_smarthub_provider(_provider) if _a0 else False
+            if _provider != "gmp" and not _is_sh:
+                return BillingMatch(
+                    matched=False, confidence=0.0, source="manual",
+                    customer={"name": sub.customer_name, "email": sub.client_email},
+                    warnings=[f"Utility billing is not qualified for provider '{_provider or 'unknown'}'; review supported billing evidence before invoicing."],
+                )
             _sh_has_bill = False
             if _is_sh:
                 # Peek the SAME helper the GMP path uses: a non-None credit_usd means
@@ -2405,6 +2427,9 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
     # DIFFERENT period than the one reviewed. When the caller pins the reviewed
     # period, refuse (and prompt to regenerate) rather than sending the drift.
     _ci = match.computed_invoice or {}
+    if _ci.get("invoice_evidence_complete") is False:
+        return {"ok": False, "held": True, "skipped": True,
+                "error": "; ".join(match.warnings or []) or "Evidence does not cover the complete invoice period"}
     if not is_test and (not _ci.get("period_start") or not _ci.get("period_end")):
         return {"ok": False, "held": True, "error": "A real invoice requires dated billing coverage"}
     if _ci.get("generation_complete") is False and getattr(sub, "utility_account_id", None) is not None:
@@ -2776,6 +2801,9 @@ def draft_subscription(db, sub, tenant, *, triggered_by: str = "scheduled", peri
         return {"ok": False, "held": True, "error": "No complete source evidence for this billing period"}
 
     ci = match.computed_invoice or {}
+    if ci.get("invoice_evidence_complete") is False:
+        return {"ok": False, "held": True, "skipped": True,
+                "error": "; ".join(match.warnings or []) or "Evidence does not cover the complete invoice period"}
 
     # ── HOLD, don't draft, while waiting on the utility bill ─────────────────
     # A bill-bound offtaker whose period isn't billable yet — no settled bill,

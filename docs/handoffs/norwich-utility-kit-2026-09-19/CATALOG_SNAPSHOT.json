@@ -1,0 +1,59 @@
+{
+  "code_baseline": "ed81a06f",
+  "catalog_rows": 1622,
+  "smarthub_hosts": 611,
+  "meaning": "Routing catalog only. No count here represents qualified Norwich integrations.",
+  "families": {
+    "gmp": {
+      "collector": "api.harvester.vendors.gmp / api.adapters.gmp",
+      "outputs": [
+        "accounts",
+        "bill_json",
+        "bill_pdf",
+        "meter_generation"
+      ],
+      "billing_paths": [
+        "bill_credit"
+      ],
+      "limitation": "Confirm the actual account, generation meter, credit lines and contract rate."
+    },
+    "smarthub": {
+      "collector": "api.harvester.vendors.smarthub",
+      "outputs": [
+        "accounts",
+        "bill_history",
+        "bill_pdf",
+        "meter_readings"
+      ],
+      "billing_paths": [
+        "production_kwh",
+        "bill_credit"
+      ],
+      "limitation": "Qualify each utility and meter. Bill-credit mode requires actual statement credit/excess semantics and a verified parser. Usage, export and prorated bill totals are not measured generation. Monthly only until quarterly support is implemented."
+    },
+    "eversource": {
+      "collector": "api.harvester.vendors.eversource",
+      "outputs": [
+        "accounts",
+        "meter_candidates"
+      ],
+      "billing_paths": [],
+      "limitation": "The current collector emits no bill records. Login or meter capture does not establish bill-credit extraction."
+    },
+    "cmp": {
+      "collector": "api.harvester.vendors.cmp",
+      "outputs": [
+        "accounts",
+        "meter_candidates"
+      ],
+      "billing_paths": [],
+      "limitation": "The current collector emits no bill records. Community allocation statements require a separate verified source and mapping."
+    },
+    "unknown": {
+      "collector": null,
+      "outputs": [],
+      "billing_paths": [],
+      "limitation": "Discover the official portal and source contract before building or enabling a connector."
+    }
+  }
+}

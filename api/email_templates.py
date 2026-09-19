@@ -548,8 +548,23 @@ def regenerate_template_via_ai(
         f"Current subject template:\n{current_subject}\n\n"
         f"Current body template:\n{current_body}"
     )
+    # Subscription seat first (Ford 2026-09-19). Produces the same `content`
+    # string the HTTP branch does, so all the downstream shaping (fence strip,
+    # JSON parse, tag validation) is shared rather than duplicated.
+    _cli_content = None
     try:
-        resp = httpx.post(
+        from . import claude_cli
+        if claude_cli.enabled():
+            _cli_content = claude_cli.ask_text(
+                "\n\n".join(
+                    [system] + [f"{(m.get('role') or 'user').upper()}: "
+                                f"{m.get('content') or ''}" for m in api_messages]),
+                max_tokens=4096)
+    except Exception:  # noqa: BLE001
+        _cli_content = None
+
+    try:
+        resp = None if _cli_content else httpx.post(
             "https://api.anthropic.com/v1/messages",
             headers={
                 "x-api-key": api_key,
@@ -580,7 +595,7 @@ def regenerate_template_via_ai(
             "subject": None,
         }
 
-    if resp.status_code >= 400:
+    if resp is not None and resp.status_code >= 400:
         # Sentry PYTHON-FASTAPI-10: Anthropic 400 on a well-formed offtaker
         # studio chat ("testing") used to bubble as HTTPException 502. Soft-fail
         # so the operator keeps editing; leave the template unchanged.
@@ -598,8 +613,11 @@ def regenerate_template_via_ai(
             "subject": None,
         }
 
-    body = resp.json()
-    content = "".join(b.get("text", "") for b in body.get("content", []))
+    if _cli_content:
+        content = _cli_content
+    else:
+        body = resp.json()
+        content = "".join(b.get("text", "") for b in body.get("content", []))
     raw = content.strip()
     if raw.startswith("```"):
         raw = re.sub(r"^```[a-zA-Z]*\n?", "", raw).rstrip("`").strip()

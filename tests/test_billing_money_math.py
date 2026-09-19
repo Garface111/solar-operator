@@ -201,8 +201,8 @@ def test_prorate_dominated_month_flagged_as_estimate():
     assert kwh == 310.0                   # total present (display), but flagged
 
 
-def test_metered_dominated_month_flagged_daily_csv():
-    """The mirror case: when real reads dominate, dom='daily_csv' (measured)."""
+def test_metered_dominated_month_retains_estimated_provenance():
+    """Minority estimates still prevent claiming a fully measured month."""
     with SessionLocal() as db:
         tid = _tenant(db)
         aid = _seed_array_with_daily(db, tid, [
@@ -210,7 +210,7 @@ def test_metered_dominated_month_flagged_daily_csv():
         db.commit()
     with SessionLocal() as db:
         kwh, s, e, label, dom = delivery._array_period_kwh(db, aid)
-    assert dom == "daily_csv"
+    assert dom == "bill_prorate"
     assert kwh == 210.0
 
 

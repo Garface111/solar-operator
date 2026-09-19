@@ -50,7 +50,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, ConfigDict
 
 log = logging.getLogger("bill_adapter_autopilot")
 
@@ -66,7 +66,7 @@ class PlatformPlan:
     family: str                     # gmp | smarthub | eversource | cmp | unknown
     bill_pull: str                  # how bills land
     auth_model: str                 # jwt | cookie_browser | unknown
-    automatic: bool                 # True when we can harvest without a new hand adapter
+    automatic: bool                 # Collector exists; NOT proof of usable bills or invoice readiness
     action: str                     # arm_known | synthesize | needs_har
     detail: str
     login_host: Optional[str] = None
@@ -90,22 +90,22 @@ _BESPOKE = {
     ),
     "eversource": PlatformPlan(
         provider="eversource", family="eversource",
-        bill_pull="cloud-capture harvester (harvester/vendors/eversource.py)",
+        bill_pull="account/meter capture only (harvester/vendors/eversource.py); no bill rows emitted",
         auth_model="cookie_browser",
         automatic=True,
         action="arm_known",
-        detail="Bespoke MyAccount portal; harvester module ships with product.",
+        detail="MyAccount collector exists; bill extraction and generation semantics still require qualification.",
         adapter_module="api.harvester.vendors.eversource",
     ),
     "eversource_ma": None,  # filled below
     "eversource_ct": None,
     "cmp": PlatformPlan(
         provider="cmp", family="cmp",
-        bill_pull="cloud-capture harvester (harvester/vendors/cmp.py)",
+        bill_pull="account/meter capture only (harvester/vendors/cmp.py); no bill rows emitted",
         auth_model="cookie_browser",
         automatic=True,
         action="arm_known",
-        detail="Avangrid portal; harvester module ships with product.",
+        detail="Avangrid collector exists; community allocation statements require a separate verified evidence path.",
         adapter_module="api.harvester.vendors.cmp",
     ),
 }
@@ -150,9 +150,9 @@ def classify_login(provider: str, login_host: Optional[str] = None) -> PlatformP
             automatic=True,
             action="arm_known",
             detail=(
-                "All NISC SmartHub co-ops share one secured billing API "
-                "(billing/history/overview + billPdfService). One adapter covers "
-                f"VEC, WEC, and ~600 co-ops. host={host or 'set login_host on credential'}."
+                "A shared NISC SmartHub adapter is available for the billing API "
+                "(billing/history/overview + billPdfService). Each utility and meter needs qualification; family compatibility alone is not invoice readiness. Examples: "
+                f"VEC, WEC. host={host or 'set login_host on credential'}."
             ),
             login_host=host or None,
             adapter_module="api.harvester.vendors.smarthub",
@@ -212,7 +212,7 @@ def on_credential_saved(
     if plan.action == "arm_known":
         result["armed"] = True
         result["detail"] = (
-            f"Armed {plan.family} bill pull for {plan.provider}. "
+            f"Armed {plan.family} collection for {plan.provider}. "
             f"Auth={plan.auth_model}. {plan.detail}"
         )
         log.info(
@@ -665,9 +665,10 @@ def autopilot_status(authorization: Optional[str] = Header(default=None)) -> dic
         },
         "logins": logins,
         "note": (
-            "Automatic bill pull works today for GMP (JWT API) and all SmartHub "
-            "co-ops including VEC (browser harvester or extension). New logins "
-            "are classified on save; unknown portals need a captured payload/HAR."
+            "GMP and SmartHub have bill collectors; each utility/account still needs "
+            "source, generation and billing qualification. Eversource/CMP currently "
+            "capture accounts/meter candidates, not bills. Catalog or login success "
+            "does not certify automatic invoicing. Unknown discoveries remain candidates."
         ),
     }
 
@@ -763,3 +764,32 @@ def list_discoveries(authorization: Optional[str] = Header(default=None),
             ).order_by(BillDiscoveryJob.id.desc()).limit(lim)
         ).scalars().all()
         return {"ok": True, "jobs": [_job_dict(j) for j in rows]}
+
+class UtilityReadinessGroup(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    group_id: str = Field(min_length=1, max_length=80)
+    utility_name: str = Field(default="", max_length=200)
+    provider_code: str = Field(default="", max_length=80)
+    state: str = Field(default="", max_length=2)
+    portal_url: str = Field(default="", max_length=500)
+    billing_basis: str = "unknown"
+    source_role: str = "unknown"
+    cadence: str = "monthly"
+    offtaker_count: int = Field(strict=True, ge=1, le=999999)
+
+
+class UtilityReadinessRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    groups: list[UtilityReadinessGroup] = Field(min_length=1, max_length=5000)
+
+
+@router.post("/v1/bill-autopilot/readiness")
+def utility_readiness(body: UtilityReadinessRequest,
+                      authorization: Optional[str] = Header(default=None)) -> dict:
+    """Read-only intake triage; never connects a portal or arms invoice sending."""
+    _tenant_from_auth(authorization)
+    from .utility_readiness import analyze_roster, IntakeError
+    try:
+        return analyze_roster([row.model_dump() for row in body.groups])
+    except IntakeError as exc:
+        raise HTTPException(422, str(exc)) from exc
