@@ -2216,7 +2216,12 @@ async def bulk_commit_offtakers(body: BulkCommitBody,
                    BillingReportSubscription.utility_account_id,
                    BillingReportSubscription.allocation_pct,
                    BillingReportSubscription.client_email,
-                   BillingReportSubscription.discount_pct).where(
+                   BillingReportSubscription.discount_pct,
+                   BillingReportSubscription.net_rate_per_kwh,
+                   BillingReportSubscription.budget_amount_usd,
+                   BillingReportSubscription.array_id,
+                   BillingReportSubscription.cadence,
+                   BillingReportSubscription.delivery_mode).where(
                 BillingReportSubscription.tenant_id == t.id,
                 BillingReportSubscription.deleted_at.is_(None))
         ).all()
@@ -2224,8 +2229,8 @@ async def bulk_commit_offtakers(body: BulkCommitBody,
     # (same values → safe skip) from a real conflict (already live with DIFFERENT
     # allocation/email/discount → must NOT silently skip and leave the stale value,
     # nor silently overwrite live billing; surface it for the operator to resolve).
-    existing_vals = {((n or "").strip().lower(), ua): (al, em, di)
-                     for (n, ua, al, em, di) in existing}
+    existing_vals = {((n or "").strip().lower(), ua): (al, em, di, nr, bu, ar, ca, dm)
+                     for (n, ua, al, em, di, nr, bu, ar, ca, dm) in existing}
     existing_keys = set(existing_vals.keys())
 
     created: list[dict] = []
@@ -2257,7 +2262,7 @@ async def bulk_commit_offtakers(body: BulkCommitBody,
         # rather than framing it as "already exists".
         _key = (name.lower(), r.utility_account_id)
         if _key in existing_vals:
-            _al, _em, _di = existing_vals[_key]
+            _al, _em, _di, _nr, _bu, _ar, _ca, _dm = existing_vals[_key]
             def _num_eq(a, b):
                 if a is None and b is None:
                     return True
@@ -2266,7 +2271,11 @@ async def bulk_commit_offtakers(body: BulkCommitBody,
                 return abs(float(a) - float(b)) < 1e-9
             _same = (_num_eq(_al, r.allocation_pct)
                      and ((_em or "").strip().lower() or None) == (email or None)
-                     and _num_eq(_di, r.discount_pct))
+                     and _num_eq(_di, r.discount_pct)
+                     and _num_eq(_nr, r.net_rate_per_kwh)
+                     and _num_eq(_bu, r.budget_amount_usd)
+                     and _ar == r.array_id and _ca == body.cadence
+                     and _dm == body.delivery_mode)
             if _same:
                 skipped.append({"offtaker_name": name,
                                 "utility_account_id": r.utility_account_id,
@@ -2303,7 +2312,9 @@ async def bulk_commit_offtakers(body: BulkCommitBody,
         # Remember what we just created so an exact duplicate row later in the
         # SAME batch is skipped as identical (and a conflicting one surfaced),
         # instead of being created twice — the pre-loop snapshot never saw it.
-        existing_vals[_key] = (r.allocation_pct, email, r.discount_pct)
+        existing_vals[_key] = (r.allocation_pct, email, r.discount_pct,
+                               r.net_rate_per_kwh, r.budget_amount_usd,
+                               r.array_id, body.cadence, body.delivery_mode)
 
     return {"ok": True, "created": len(created), "created_rows": created,
             "skipped": skipped, "failed": failed}
@@ -5966,7 +5977,9 @@ def offtaker_pay_link(token: str):
         return HTMLResponse(_PAY_PAGE.format(
             title="Online payment isn't available right now",
             body=_html_escape(res.get("reason") or ""),
-            foot=f"You can still pay {op} directly using the details on your invoice."),
+            foot=("Please wait for confirmation before making another payment."
+                  if res.get("processing") else
+                  "Please confirm the payment status before trying again.")),
             status_code=409, headers=_NO_STORE)
     return HTMLResponse(_PAY_PAGE.format(
         title="We couldn't find that invoice link",

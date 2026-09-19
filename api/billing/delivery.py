@@ -2043,6 +2043,8 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
         DEFAULT_OFFTAKER_SUBJECT_TEMPLATE, DEFAULT_OFFTAKER_BODY_TEMPLATE,
         build_offtaker_context, render_merge, html_to_text,
     )
+    if is_test:
+        pay_url = None  # A preview must never solicit payment.
     inv = match.computed_invoice or {}
     cust = match.customer.get("name") or sub.customer_name or "your array"
     period = ""
@@ -2057,7 +2059,7 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
         'color:#92400e;padding:10px 14px;border-radius:10px;margin:0 0 16px;font-size:13px;'
         'line-height:1.45;">'
         '<b>Test send</b> — this went to you, not the customer. '
-        'The Pay button below is real (same as offtakers will see).</p>' if is_test else "")
+        'No payment is requested for this test copy.</p>' if is_test else "")
 
     # ── The LETTER: the tenant's mass template, rendered per offtaker ────────
     # (Ford, 2026-07-03: "the email should automatically say hi <offtaker name>
@@ -2244,6 +2246,8 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
         wordmark=operator,
         product="array_operator",
     )
+    if is_test:
+        body_text = "TEST COPY — no payment requested.\n\n" + body_text
     text = render_email_skin_text(
         headline="Your solar credit invoice",
         intro_line=(period or cust),
@@ -2424,14 +2428,13 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
     # platform application fee) when the owner has Connect ready. Best-effort —
     # a Stripe failure never blocks the classic invoice email.
     #
-    # ALSO mint on test sends so the operator sees the same Pay button the
-    # offtaker will (screenshot 2026-07-13: test send had no pay link because
-    # we previously gated on not is_test).
+    # A test copy must never create a collectible invoice or mutate the ledger.
+    # Payment integration is exercised separately with Stripe test credentials.
     pay_url = None
     payment_id = None
     fee_cents = None
     pay_skip_reason = None
-    if (getattr(tenant, "product", None) or "nepool") == "array_operator":
+    if not is_test and (getattr(tenant, "product", None) or "nepool") == "array_operator":
         try:
             from . import payments as _pay
             # Refresh / auto-link Connect before minting so a just-finished bank
@@ -2808,7 +2811,7 @@ def deliver_trueup_subscription(
     fee_cents = None
     pay_skip_reason = None
     # Only mint a pay link when there is a real charge.
-    if float(ci.get("amount_owed") or 0) >= 0.50:
+    if not is_test and float(ci.get("amount_owed") or 0) >= 0.50:
         try:
             from . import payments as _pay
             pay_res = _pay.create_offtaker_payment(

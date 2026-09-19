@@ -1,0 +1,157 @@
+........................................................................ [ 39%]
+........................................................................ [ 78%]
+.......................................                                  [100%]
+=============================== warnings summary ===============================
+tests/test_billing_delivery.py::test_match_preview_saves_nothing
+  /root/offtaker-audit-2026-09-19/api/app.py:559: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
+tests/test_billing_delivery.py::test_match_preview_saves_nothing
+  /root/solar-operator/venv/lib/python3.12/site-packages/fastapi/applications.py:4495: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    return self.router.on_event(event_type)
+
+tests/test_billing_delivery.py: 601 warnings
+tests/test_audit_offtaker_fixes.py: 24 warnings
+tests/test_offtaker_pay_link_durable.py: 115 warnings
+tests/test_offtaker_payments.py: 35 warnings
+tests/test_invoice_ledger.py: 70 warnings
+tests/test_offtaker_upload.py: 67 warnings
+tests/test_annual_trueup.py: 4 warnings
+tests/test_quarterly_offtaker_billing.py: 121 warnings
+tests/test_honest_rate_and_adder.py: 39 warnings
+tests/test_realmath_invoice.py: 79 warnings
+tests/test_reconcile_bills.py: 79 warnings
+tests/test_norwich_independent_audit.py: 77 warnings
+tests/test_norwich_scale_and_isolation.py: 1307 warnings
+tests/test_offtaker_delivery_truth.py: 42 warnings
+tests/test_stripe_webhook_sig.py: 4 warnings
+  /root/offtaker-audit-2026-09-19/api/models.py:71: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+tests/test_billing_delivery.py: 27 warnings
+tests/test_audit_offtaker_fixes.py: 2 warnings
+tests/test_offtaker_upload.py: 3 warnings
+tests/test_quarterly_offtaker_billing.py: 4 warnings
+tests/test_norwich_independent_audit.py: 2 warnings
+tests/test_norwich_scale_and_isolation.py: 301 warnings
+tests/test_offtaker_delivery_truth.py: 3 warnings
+  /root/offtaker-audit-2026-09-19/api/billing/delivery.py:42: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    after = after or datetime.utcnow()
+
+tests/test_billing_delivery.py::test_delete_is_soft
+  /root/offtaker-audit-2026-09-19/api/billing/routes.py:2987: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    sub.deleted_at = datetime.utcnow()
+
+tests/test_billing_delivery.py::test_preview_invoice_pdf_streams
+  /root/solar-operator/venv/lib/python3.12/site-packages/reportlab/lib/rl_safe_eval.py:12: DeprecationWarning: ast.NameConstant is deprecated and will be removed in Python 3.14; use ast.Constant instead
+    haveNameConstant = hasattr(ast,'NameConstant')
+
+tests/test_billing_delivery.py: 11 warnings
+tests/test_audit_offtaker_fixes.py: 1 warning
+tests/test_quarterly_offtaker_billing.py: 2 warnings
+tests/test_norwich_independent_audit.py: 3 warnings
+tests/test_norwich_scale_and_isolation.py: 301 warnings
+tests/test_offtaker_delivery_truth.py: 4 warnings
+  /root/offtaker-audit-2026-09-19/api/email_copy_overrides.py:40: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+tests/test_billing_delivery.py::test_send_now_live_to_client_stamps_schedule
+tests/test_billing_delivery.py::test_scheduler_monthly_billing_delivers
+tests/test_billing_delivery.py::test_offtaker_send_bccs_the_operator
+tests/test_billing_delivery.py::test_offtaker_email_is_white_labeled_to_the_operator
+tests/test_quarterly_offtaker_billing.py::test_quarter_sends_once_then_blocks_duplicate
+tests/test_offtaker_delivery_truth.py::test_deliver_stores_resend_id_when_mock_sets_last_id
+  /root/offtaker-audit-2026-09-19/api/billing/delivery.py:2524: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_billing_delivery.py::test_invoice_template_defaults_on_and_toggles_both_ways
+  /root/offtaker-audit-2026-09-19/api/billing/routes.py:4671: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    tpl.updated_at = datetime.utcnow()
+
+tests/test_billing_delivery.py::test_invoice_template_defaults_on_and_toggles_both_ways
+tests/test_billing_delivery.py::test_invoice_template_defaults_on_and_toggles_both_ways
+  /root/offtaker-audit-2026-09-19/api/billing/routes.py:4618: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    tpl.updated_at = datetime.utcnow()
+
+tests/test_billing_delivery.py: 30 warnings
+tests/test_quarterly_offtaker_billing.py: 1 warning
+  /root/offtaker-audit-2026-09-19/api/billing/delivery.py:2721: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_offtaker_pay_link_durable.py: 11 warnings
+tests/test_offtaker_payments.py: 2 warnings
+tests/test_norwich_independent_audit.py: 8 warnings
+  /root/offtaker-audit-2026-09-19/api/billing/payments.py:605: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    row.checkout_expires_at = datetime.utcfromtimestamp(minted["expires_at"])
+
+tests/test_offtaker_pay_link_durable.py: 13 warnings
+tests/test_offtaker_payments.py: 3 warnings
+tests/test_invoice_ledger.py: 6 warnings
+tests/test_norwich_independent_audit.py: 9 warnings
+  /root/offtaker-audit-2026-09-19/api/billing/invoice_ledger.py:272: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    sub.tracker_updated_at = datetime.utcnow()
+
+tests/test_offtaker_pay_link_durable.py::test_create_mints_durable_url_token_and_expiry
+  /root/offtaker-audit-2026-09-19/tests/test_offtaker_pay_link_durable.py:62: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    left = (row.checkout_expires_at - datetime.utcnow()).total_seconds()
+
+tests/test_offtaker_pay_link_durable.py::test_click_on_fresh_session_redirects_without_reminting
+tests/test_offtaker_pay_link_durable.py::test_click_after_stripe_window_lapsed_remints_on_the_same_row
+tests/test_offtaker_pay_link_durable.py::test_click_with_stale_open_session_expires_the_old_one_first
+tests/test_offtaker_pay_link_durable.py::test_click_addresses_the_account_the_session_lives_on
+tests/test_norwich_independent_audit.py::test_uncertain_or_pending_checkout_never_creates_second_charge[complete]
+tests/test_norwich_independent_audit.py::test_uncertain_or_pending_checkout_never_creates_second_charge[unreadable]
+tests/test_norwich_independent_audit.py::test_stale_paid_checkout_is_reconciled_before_replacement
+  /root/offtaker-audit-2026-09-19/api/billing/payments.py:783: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_offtaker_pay_link_durable.py::test_click_after_stripe_window_lapsed_remints_on_the_same_row
+  /root/offtaker-audit-2026-09-19/tests/test_offtaker_pay_link_durable.py:132: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.checkout_expires_at = datetime.utcnow() - timedelta(hours=1)   # day three
+
+tests/test_offtaker_pay_link_durable.py::test_click_after_stripe_window_lapsed_remints_on_the_same_row
+tests/test_offtaker_pay_link_durable.py::test_click_with_stale_open_session_expires_the_old_one_first
+  /root/offtaker-audit-2026-09-19/api/billing/payments.py:832: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    row.checkout_expires_at = datetime.utcfromtimestamp(minted["expires_at"])
+
+tests/test_offtaker_pay_link_durable.py::test_click_after_stripe_window_lapsed_remints_on_the_same_row
+  /root/offtaker-audit-2026-09-19/tests/test_offtaker_pay_link_durable.py:148: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    assert (row.checkout_expires_at - datetime.utcnow()).total_seconds() > 22 * 3600
+
+tests/test_offtaker_pay_link_durable.py::test_click_with_stale_open_session_expires_the_old_one_first
+  /root/offtaker-audit-2026-09-19/tests/test_offtaker_pay_link_durable.py:157: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    datetime.utcnow() + timedelta(minutes=5))   # inside the refresh grace
+
+tests/test_offtaker_pay_link_durable.py::test_async_failed_marks_unpaid_and_full_refund_flips_paid
+  /root/offtaker-audit-2026-09-19/tests/test_offtaker_pay_link_durable.py:255: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    paid_at=datetime.utcnow(), period_key="2026-07-31")
+
+tests/test_offtaker_payments.py::test_mark_payment_paid_idempotent
+tests/test_norwich_independent_audit.py::test_stale_paid_checkout_is_reconciled_before_replacement
+  /root/offtaker-audit-2026-09-19/api/billing/payments.py:686: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.paid_at = datetime.utcnow()
+
+tests/test_offtaker_payments.py::test_list_payments_endpoint
+  /root/offtaker-audit-2026-09-19/tests/test_offtaker_payments.py:320: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    paid_at=datetime.utcnow(),
+
+tests/test_invoice_ledger.py::test_sync_payment_updates_byo_generation_sheet
+  /root/offtaker-audit-2026-09-19/api/billing/sheet_tracker.py:1349: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    sub.tracker_updated_at = datetime.utcnow()
+
+tests/test_norwich_independent_audit.py::test_stale_paid_checkout_is_reconciled_before_replacement
+  /root/offtaker-audit-2026-09-19/tests/test_norwich_independent_audit.py:59: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    db.get(OfftakerPayment,res["payment_id"]).checkout_expires_at=datetime.utcnow()-timedelta(days=1)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+183 passed, 3443 warnings in 21.30s

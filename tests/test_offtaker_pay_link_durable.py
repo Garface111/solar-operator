@@ -157,7 +157,10 @@ def test_click_with_stale_open_session_expires_the_old_one_first(client, monkeyp
             datetime.utcnow() + timedelta(minutes=5))   # inside the refresh grace
         db.commit()
     expire = MagicMock()
-    with patch("api.billing.payments.stripe.checkout.Session.expire", expire), \
+    with patch("api.billing.payments.stripe.checkout.Session.retrieve",
+               return_value=_Sess(id="cs_test_1", status="open", payment_status="unpaid")), \
+            patch("api.billing.payments.stripe.checkout.Session.expire", expire), \
+\
             patch("api.billing.payments.stripe.checkout.Session.create",
                   side_effect=_fake_create(calls)):
         r = client.get(_PAY + token, follow_redirects=False)

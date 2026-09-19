@@ -1,0 +1,169 @@
+FFFFFFFFFF                                                               [100%]
+=================================== FAILURES ===================================
+_____________ test_operator_test_send_cannot_mint_payable_invoice ______________
+tests/test_norwich_independent_audit.py:26: in test_operator_test_send_cannot_mint_payable_invoice
+    mint.assert_not_called()
+/usr/lib/python3.12/unittest/mock.py:905: in assert_not_called
+    raise AssertionError(msg)
+E   AssertionError: Expected 'mock' to not have been called. Called 1 times.
+E   Calls: [call(<sqlalchemy.orm.session.Session object at 0x7fe80f0500e0>, tenant=<api.models.Tenant object at 0x7fe80f03b530>, sub=<api.models.BillingReportSubscription object at 0x7fe80f03a420>, match=BillingMatch(matched=True, confidence=1.0, source='schema', data_sheet='NFD', customer={'name': 'Norwich Fire District', 'address': 'PO Box 777,  293-B Main Street, Norwich Vt. 05055', 'acct': None, 'meter': None, 'email': 'Norwichfiredistrict1@myfairpoint.net'}, allocation_pct=0.16, billing_rate=0.9, billing_model='percent_of_array', periods=[Period(month='August', start=None, end=None, array_kwh=None, customer_kwh=0.0, tariff=0.15417, adder=0.04, value=0.0, bill=0.0, savings=0.0, flat_rate=None), Period(month='September', start=datetime.date(2019, 8, 6), end=datetime.date(2019, 10, 17), array_kwh=36360.0, customer_kwh=5818.0, tariff=0.15417, adder=0.04, value=1129.6810600000001, bill=1016.7129540000001, savings=112.96810600000003, flat_rate=None), Period(month='October', start=datetime.date(2019, 10, 17), end=datetime.date(2019, 11, 18), array_kwh=15480.0, customer_kwh=2477.0, tariff=0.15417, adder=0.04, value=480.95909, bill=432.863181, savings=48.095909000000006, flat_rate=None), Period(month='November', start=datetime.date(2019, 11, 18), end=datetime.date(2019, 12, 17), array_kwh=9720.0, customer_kwh=1555.0, tariff=0.15417, adder=0.04, value=301.93435, bill=271.74091500000003, savings=30.193434999999965, flat_rate=None), Period(month='December', start=datetime.date(2019, 12, 17), end=datetime.date(2020, 1, 16), array_kwh=8640.0, customer_kwh=1382.0, tariff=0.15417, adder=0.04, value=268.34294, bill=241.508646, savings=26.834294, flat_rate=None), Period(month='January', start=datetime.date(2020, 1, 16), end=datetime.date(2020, 2, 17), array_kwh=11700.0, customer_kwh=1872.0, tariff=0.15417, adder=0.04, value=363.48624, bill=327.13761600000004, savings=36.34862399999997, flat_rate=None), Period(month='February', start=datetime.date(2020, 2, 17), end=datetime.date(2020, 3, 17), array_kwh=22500.0, customer_kwh=3600.0, tariff=0.15417, adder=0.04, value=699.0120000000001, bill=629.1108, savings=69.90120000000002, flat_rate=None), Period(month='March', start=datetime.date(2020, 3, 17), end=datetime.date(2020, 4, 17), array_kwh=20880.0, customer_kwh=3341.0, tariff=0.15417, adder=0.04, value=648.72197, bill=583.849773, savings=64.87219700000003, flat_rate=None), Period(month='April', start=datetime.date(2020, 4, 17), end=datetime.date(2020, 5, 18), array_kwh=26640.0, customer_kwh=4262.0, tariff=0.15417, adder=0.04, value=827.55254, bill=744.797286, savings=82.75525400000004, flat_rate=None), Period(month='May', start=datetime.date(2020, 5, 18), end=datetime.date(2020, 6, 17), array_kwh=29700.0, customer_kwh=4752.0, tariff=0.15417, adder=0.04, value=922.6958400000001, bill=830.4262560000001, savings=92.26958400000001, flat_rate=None), Period(month='June', start=datetime.date(2020, 6, 17), end=datetime.date(2020, 7, 17), array_kwh=28800.0, customer_kwh=4608.0, tariff=0.15417, adder=0.04, value=894.73536, bill=805.261824, savings=89.47353599999997, flat_rate=None), Period(month='July', start=datetime.date(2020, 7, 17), end=datetime.date(2020, 8, 18), array_kwh=30240.0, customer_kwh=4838.0, tariff=0.15417, adder=0.04, value=939.3944600000001, bill=845.4550140000001, savings=93.93944599999998, flat_rate=None), Period(month='August', start=datetime.date(2020, 8, 18), end=datetime.date(2020, 9, 17), array_kwh=27000.0, customer_kwh=4320.0, tariff=0.15417, adder=0.04, value=838.8144000000001, bill=754.9329600000001, savings=83.88144, flat_rate=None), Period(month='September', start=datetime.date(2020, 9, 17), end=datetime.date(2020, 10, 19), array_kwh=25740.0, customer_kwh=4118.0, tariff=0.15417, adder=0.04, value=799.5920600000001, bill=719.6328540000001, savings=79.959206, flat_rate=None), Period(month='October', start=datetime.date(2020, 10, 19), end=datetime.date(2020, 11, 18), array_kwh=14400.0, customer_kwh=2304.0, tariff=0.15417, adder=0.04, value=447.36768, bill=402.630912, savings=44.736767999999984, flat_rate=None), Period(month='November', start=datetime.date(2020, 11, 18), end=datetime.date(2020, 12, 16), array_kwh=8100.0, customer_kwh=1296.0, tariff=0.15417, adder=0.04, value=251.64432000000002, bill=226.47988800000002, savings=25.164432000000005, flat_rate=None), Period(month='December', start=datetime.date(2020, 12, 16), end=datetime.date(2021, 1, 15), array_kwh=8820.0, customer_kwh=1411.0, tariff=0.15417, adder=0.04, value=273.97387000000003, bill=246.57648300000002, savings=27.39738700000001, flat_rate=None), Period(month='January', start=datetime.date(2021, 1, 15), end=datetime.date(2021, 2, 16), array_kwh=11700.0, customer_kwh=1872.0, tariff=0.16413, adder=0.04, value=382.13136000000003, bill=343.918224, savings=38.21313600000002, flat_rate=None), Period(month='February', start=datetime.date(2021, 2, 16), end=datetime.date(2021, 3, 17), array_kwh=20700.0, customer_kwh=3312.0, tariff=0.16413, adder=0.04, value=676.07856, bill=608.4707040000001, savings=67.60785599999997, flat_rate=None), Period(month='March', start=datetime.date(2021, 3, 17), end=datetime.date(2021, 4, 16), array_kwh=25142.0, customer_kwh=4023.0, tariff=0.16413, adder=0.04, value=821.2149900000001, bill=739.0934910000001, savings=82.12149899999997, flat_rate=None), Period(month='April', start=datetime.date(2021, 4, 16), end=datetime.date(2021, 5, 18), array_kwh=21475.0, customer_kwh=3436.0, tariff=0.16413, adder=0.04, value=701.39068, bill=631.251612, savings=70.13906799999995, flat_rate=None), Period(month='May', start=datetime.date(2021, 5, 18), end=datetime.date(2021, 6, 17), array_kwh=26888.0, customer_kwh=4302.0, tariff=0.16413, adder=0.04, value=878.16726, bill=790.350534, savings=87.81672600000002, flat_rate=None), Period(month='June', start=datetime.date(2021, 6, 17), end=datetime.date(2021, 7, 19), array_kwh=24095.0, customer_kwh=3855.0, tariff=0.16413, adder=0.04, value=786.92115, bill=708.2290350000001, savings=78.69211499999994, flat_rate=None), Period(month='July', start=datetime.date(2021, 7, 19), end=datetime.date(2021, 8, 18), array_kwh=26713.0, customer_kwh=4274.0, tariff=0.16413, adder=0.04, value=872.45162, bill=785.2064580000001, savings=87.24516199999994, flat_rate=None), Period(month='August', start=datetime.date(2021, 8, 18), end=datetime.date(2021, 9, 17), array_kwh=21825.0, customer_kwh=3492.0, tariff=0.16413, adder=0.04, value=712.82196, bill=641.539764, savings=71.282196, flat_rate=None), Period(month='September', start=datetime.date(2021, 9, 17), end=datetime.date(2021, 10, 18), array_kwh=17460.0, customer_kwh=2794.0, tariff=0.16413, adder=0.04, value=570.3392200000001, bill=513.3052980000001, savings=57.03392199999996, flat_rate=None), Period(month='October', start=datetime.date(2021, 10, 18), end=datetime.date(2021, 11, 17), array_kwh=17285.0, customer_kwh=2766.0, tariff=0.16413, adder=0.04, value=564.6235800000001, bill=508.16122200000007, savings=56.462357999999995, flat_rate=None), Period(month='November', start=datetime.date(2021, 11, 17), end=datetime.date(2021, 12, 16), array_kwh=11872.0, customer_kwh=1900.0, tariff=0.16413, adder=0.04, value=387.84700000000004, bill=349.06230000000005, savings=38.78469999999999, flat_rate=None), Period(month='December', start=datetime.date(2021, 12, 16), end=datetime.date(2022, 1, 17), array_kwh=7857.0, customer_kwh=1257.0, tariff=0.16413, adder=0.04, value=256.59141, bill=230.932269, savings=25.659141000000005, flat_rate=None), Period(month='January', start=datetime.date(2022, 1, 17), end=datetime.date(2022, 2, 16), array_kwh=15714.0, customer_kwh=2514.0, tariff=0.16413, adder=0.04, value=513.18282, bill=461.864538, savings=51.31828200000001, flat_rate=None), Period(month='February', start=datetime.date(2022, 2, 16), end=datetime.date(2022, 3, 17), array_kwh=15889.0, customer_kwh=2542.0, tariff=0.16413, adder=0.04, value=518.89846, bill=467.008614, savings=51.88984599999998, flat_rate=None), Period(month='March', start=datetime.date(2022, 3, 17), end=datetime.date(2022, 4, 19), array_kwh=22523.0, customer_kwh=3604.0, tariff=0.16413, adder=0.04, value=735.68452, bill=662.116068, savings=73.56845199999998, flat_rate=None), Period(month='April', start=datetime.date(2022, 4, 19), end=datetime.date(2022, 5, 18), array_kwh=25492.0, customer_kwh=4079.0, tariff=0.16413, adder=0.04, value=832.6462700000001, bill=749.381643, savings=83.26462700000002, flat_rate=None), Period(month='May', start=datetime.date(2022, 5, 18), end=datetime.date(2022, 6, 17), array_kwh=27586.0, customer_kwh=4414.0, tariff=0.16413, adder=0.04, value=901.02982, bill=810.926838, savings=90.102982, flat_rate=None), Period(month='June', start=datetime.date(2022, 6, 17), end=datetime.date(2022, 7, 19), array_kwh=30206.0, customer_kwh=4833.0, tariff=0.16413, adder=0.04, value=986.56029, bill=887.904261, savings=98.65602899999999, flat_rate=None), Period(month='July', start=datetime.date(2022, 7, 19), end=datetime.date(2022, 8, 18), array_kwh=27761.0, customer_kwh=4442.0, tariff=0.16413, adder=0.04, value=906.74546, bill=816.070914, savings=90.67454599999996, flat_rate=None), Period(month='August', start=datetime.date(2022, 8, 18), end=datetime.date(2022, 9, 19), array_kwh=25666.0, customer_kwh=4107.0, tariff=0.16413, adder=0.04, value=838.3619100000001, bill=754.5257190000001, savings=83.83619099999999, flat_rate=None), Period(month='September', start=datetime.date(2022, 9, 19), end=datetime.date(2022, 10, 18), array_kwh=18333.0, customer_kwh=2933.0, tariff=0.17141, adder=0.04, value=620.0655300000001, bill=558.0589770000001, savings=62.00655299999994, flat_rate=None), Period(month='October', start=datetime.date(2022, 10, 18), end=datetime.date(2022, 11, 16), array_kwh=19904.0, customer_kwh=3185.0, tariff=0.17141, adder=0.04, value=673.34085, bill=606.0067650000001, savings=67.33408499999996, flat_rate=None), Period(month='November', start=datetime.date(2022, 11, 16), end=datetime.date(2022, 12, 15), array_kwh=12397.0, customer_kwh=1984.0, tariff=0.17141, adder=0.04, value=419.43744000000004, bill=377.49369600000006, savings=41.94374399999998, flat_rate=None), Period(month='December', start=datetime.date(2022, 12, 15), end=datetime.date(2023, 1, 16), array_kwh=9777.0, customer_kwh=1564.0, tariff=0.17141, adder=0.04, value=330.64524, bill=297.580716, savings=33.064524000000006, flat_rate=None), Period(month='January', start=datetime.date(2023, 1, 16), end=datetime.date(2023, 2, 16), array_kwh=13270.0, customer_kwh=2123.0, tariff=0.17141, adder=0.04, value=448.82343000000003, bill=403.94108700000004, savings=44.88234299999999, flat_rate=None), Period(month='February', start=datetime.date(2023, 2, 16), end=datetime.date(2023, 3, 17), array_kwh=12571.0, customer_kwh=2011.0, tariff=0.17141, adder=0.04, value=425.14551, bill=382.630959, savings=42.51455099999998, flat_rate=None), Period(month='March', start=datetime.date(2023, 3, 17), end=datetime.date(2023, 4, 18), array_kwh=25492.0, customer_kwh=4079.0, tariff=0.17141, adder=0.04, value=862.34139, bill=776.107251, savings=86.23413900000003, flat_rate=None), Period(month='April', start=datetime.date(2023, 4, 18), end=datetime.date(2023, 5, 18), array_kwh=24967.0, customer_kwh=3995.0, tariff=0.17141, adder=0.04, value=844.5829500000001, bill=760.1246550000001, savings=84.45829500000002, flat_rate=None), Period(month='May', start=datetime.date(2023, 5, 18), end=datetime.date(2023, 6, 18), array_kwh=27587.0, customer_kwh=4414.0, tariff=0.17141, adder=0.04, value=933.1637400000001, bill=839.8473660000001, savings=93.316374, flat_rate=None), Period(month='June', start=datetime.date(2023, 6, 18), end=datetime.date(2023, 7, 18), array_kwh=23047.0, customer_kwh=3688.0, tariff=0.17141, adder=0.04, value=779.6800800000001, bill=701.7120720000001, savings=77.96800799999994, flat_rate=None), Period(month='July', start=datetime.date(2023, 7, 18), end=datetime.date(2023, 8, 17), array_kwh=23745.0, customer_kwh=3799.0, tariff=0.17141, adder=0.04, value=803.1465900000001, bill=722.831931, savings=80.314659, flat_rate=None), Period(month='August', start=datetime.date(2023, 8, 17), end=datetime.date(2023, 9, 18), array_kwh=24968.0, customer_kwh=3995.0, tariff=0.17141, adder=0.04, value=844.5829500000001, bill=760.1246550000001, savings=84.45829500000002, flat_rate=None), Period(month='September', start=datetime.date(2023, 9, 18), end=datetime.date(2023, 10, 18), array_kwh=17883.0, customer_kwh=2861.0, tariff=0.17141, adder=0.04, value=604.84401, bill=544.3596090000001, savings=60.484400999999934, flat_rate=None), Period(month='October', start=datetime.date(2023, 10, 18), end=datetime.date(2023, 11, 17), array_kwh=13270.0, customer_kwh=2123.0, tariff=0.17141, adder=0.04, value=448.82343000000003, bill=403.94108700000004, savings=44.88234299999999, flat_rate=None), Period(month='November', start=datetime.date(2023, 11, 17), end=datetime.date(2023, 12, 17), array_kwh=13078.0, customer_kwh=2092.0, tariff=0.17141, adder=0.04, value=442.26972, bill=398.042748, savings=44.22697199999999, flat_rate=None), Period(month='December', start=datetime.date(2023, 12, 17), end=datetime.date(2024, 1, 17), array_kwh=8730.0, customer_kwh=1397.0, tariff=0.17141, adder=0.04, value=295.33977000000004, bill=265.80579300000005, savings=29.533976999999993, flat_rate=None), Period(month='January', start=datetime.date(2024, 1, 17), end=datetime.date(2024, 2, 16), array_kwh=10999.0, customer_kwh=1760.0, tariff=0.17141, adder=0.04, value=372.08160000000004, bill=334.87344, savings=37.20816000000002, flat_rate=None), Period(month='February', start=datetime.date(2024, 2, 16), end=datetime.date(2024, 3, 19), array_kwh=20602.0, customer_kwh=3296.0, tariff=0.17141, adder=0.04, value=696.80736, bill=627.126624, savings=69.68073600000002, flat_rate=None), Period(month='March', start=datetime.date(2024, 3, 19), end=datetime.date(2024, 4, 18), array_kwh=20079.0, customer_kwh=3213.0, tariff=0.17141, adder=0.04, value=679.2603300000001, bill=611.3342970000001, savings=67.92603299999996, flat_rate=None), Period(month='April', start=datetime.date(2024, 4, 18), end=datetime.date(2024, 5, 20), array_kwh=24619.0, customer_kwh=3939.0, tariff=0.17141, adder=0.04, value=832.74399, bill=749.469591, savings=83.27439900000002, flat_rate=None), Period(month='May', start=datetime.date(2024, 5, 20), end=datetime.date(2024, 6, 19), array_kwh=27586.0, customer_kwh=4414.0, tariff=0.17141, adder=0.04, value=933.1637400000001, bill=839.8473660000001, savings=93.316374, flat_rate=None), Period(month='June', start=datetime.date(2024, 6, 19), end=datetime.date(2024, 7, 19), array_kwh=26190.0, customer_kwh=4190.0, tariff=0.17141, adder=0.04, value=885.8079, bill=797.22711, savings=88.58078999999998, flat_rate=None), Period(month='July', start=datetime.date(2024, 7, 19), end=datetime.date(2024, 8, 19), array_kwh=24793.0, customer_kwh=3967.0, tariff=0.18398, adder=0.04, value=888.5286600000001, bill=799.6757940000001, savings=88.85286599999995, flat_rate=None), Period(month='August', start=datetime.date(2024, 8, 19), end=datetime.date(2024, 9, 18), array_kwh=27586.0, customer_kwh=4414.0, tariff=0.18398, adder=0.04, value=988.64772, bill=889.782948, savings=98.86477200000002, flat_rate=None), Period(month='September', start=datetime.date(2024, 9, 18), end=datetime.date(2024, 10, 18), array_kwh=19206.0, customer_kwh=3073.0, tariff=0.18398, adder=0.04, value=688.2905400000001, bill=619.461486, savings=68.82905400000004, flat_rate=None), Period(month='October', start=datetime.date(2024, 10, 18), end=datetime.date(2024, 11, 18), array_kwh=20428.0, customer_kwh=3268.0, tariff=0.18398, adder=0.04, value=731.96664, bill=658.769976, savings=73.19666399999994, flat_rate=None), Period(month='November', start=datetime.date(2024, 11, 18), end=datetime.date(2024, 12, 16), array_kwh=8206.0, customer_kwh=1313.0, tariff=0.18398, adder=0.04, value=294.08574000000004, bill=264.67716600000006, savings=29.408573999999987, flat_rate=None), Period(month='December', start=datetime.date(2024, 12, 16), end=datetime.date(2025, 1, 15), array_kwh=8555.0, customer_kwh=1369.0, tariff=0.18398, adder=0.04, value=306.62862, bill=275.965758, savings=30.66286200000002, flat_rate=None), Period(month='January', start=datetime.date(2025, 1, 15), end=datetime.date(2025, 2, 14), array_kwh=9079.0, customer_kwh=1453.0, tariff=0.18398, adder=0.04, value=325.44294, bill=292.89864600000004, savings=32.54429399999998, flat_rate=None), Period(month='February', start=datetime.date(2025, 2, 14), end=datetime.date(2025, 3, 18), array_kwh=18682.0, customer_kwh=2989.0, tariff=0.18398, adder=0.04, value=669.47622, bill=602.528598, savings=66.94762200000002, flat_rate=None), Period(month='March', start=datetime.date(2025, 3, 18), end=datetime.date(2025, 4, 16), array_kwh=16587.0, customer_kwh=2654.0, tariff=0.18398, adder=0.04, value=594.4429200000001, bill=534.998628, savings=59.44429200000002, flat_rate=None), Period(month='April', start=datetime.date(2025, 4, 16), end=datetime.date(2025, 5, 16), array_kwh=21127.0, customer_kwh=3380.0, tariff=0.18398, adder=0.04, value=757.0524, bill=681.34716, savings=75.70524, flat_rate=None), Period(month='May', start=datetime.date(2025, 5, 16), end=datetime.date(2025, 6, 17), array_kwh=21475.0, customer_kwh=3436.0, tariff=0.18398, adder=0.04, value=769.59528, bill=692.635752, savings=76.95952799999998, flat_rate=None), Period(month='June', start=datetime.date(2025, 6, 17), end=datetime.date(2025, 7, 17), array_kwh=23746.0, customer_kwh=3799.0, tariff=0.18398, adder=0.04, value=850.90002, bill=765.810018, savings=85.09000200000003, flat_rate=None), Period(month='July', start=datetime.date(2025, 7, 17), end=datetime.date(2025, 8, 15), array_kwh=26015.0, customer_kwh=4162.0, tariff=0.18398, adder=0.04, value=932.2047600000001, bill=838.9842840000001, savings=93.22047599999996, flat_rate=None), Period(month='August', start=datetime.date(2025, 8, 15), end=datetime.date(2025, 9, 16), array_kwh=25840.0, customer_kwh=4134.0, tariff=0.18398, adder=0.04, value=925.9333200000001, bill=833.3399880000001, savings=92.59333200000003, flat_rate=None), Period(month='September', start=datetime.date(2025, 9, 16), end=datetime.date(2025, 10, 16), array_kwh=24968.0, customer_kwh=3995.0, tariff=0.18398, adder=0.04, value=894.8001, bill=805.32009, savings=89.48001, flat_rate=None), Period(month='October', start=datetime.date(2025, 10, 16), end=datetime.date(2025, 11, 17), array_kwh=14491.0, customer_kwh=2319.0, tariff=0.18398, adder=0.04, value=519.40962, bill=467.468658, savings=51.94096200000001, flat_rate=None), Period(month='November', start=datetime.date(2025, 11, 17), end=datetime.date(2025, 12, 16), array_kwh=9254.0, customer_kwh=1481.0, tariff=0.18398, adder=0.04, value=331.71438, bill=298.54294200000004, savings=33.17143799999997, flat_rate=None), Period(month='December', start=datetime.date(2025, 12, 16), end=datetime.date(2026, 1, 15), array_kwh=8206.0, customer_kwh=1313.0, tariff=0.18398, adder=0.04, value=294.08574000000004, bill=264.67716600000006, savings=29.408573999999987, flat_rate=None), Period(month='January', start=datetime.date(2026, 1, 15), end=datetime.date(2026, 2, 16), array_kwh=12222.0, customer_kwh=1956.0, tariff=0.18398, adder=0.04, value=438.10488000000004, bill=394.294392, savings=43.81048800000002, flat_rate=None), Period(month='February', start=datetime.date(2026, 2, 16), end=datetime.date(2026, 3, 18), array_kwh=16761.0, customer_kwh=2682.0, tariff=0.18398, adder=0.04, value=600.71436, bill=540.6429240000001, savings=60.07143599999995, flat_rate=None), Period(month='March', start=datetime.date(2026, 3, 18), end=datetime.date(2026, 4, 17), array_kwh=20340.0, customer_kwh=3254.0, tariff=0.18398, adder=0.04, value=728.83092, bill=655.947828, savings=72.88309200000003, flat_rate=None), Period(month='April', start=datetime.date(2026, 4, 17), end=datetime.date(2026, 5, 19), array_kwh=26825.0, customer_kwh=4292.0, tariff=0.18398, adder=0.04, value=961.32216, bill=865.1899440000001, savings=96.13221599999997, flat_rate=None)], latest_period=Period(month='April', start=datetime.date(2026, 4, 17), end=datetime.date(2026, 5, 19), array_kwh=26825.0, customer_kwh=4292.0, tariff=0.18398, adder=0.04, value=961.32216, bill=865.1899440000001, savings=96.13221599999997, flat_rate=None), template={'operator': 'HCT Sun Enterprises, LLC', 'phone': 'Ph:  443 824 1946', 'email': 'pbozuwa@gmail.com', 'attn': 'Attn:   Paul Bozuwa', 'payable_to': 'Please make check payable to HCT Sun Enterprises, LLC', 'fixed_amount': 865.1899440000001, 'title': 'Invoice - Solar Power Generation'}, computed_invoice={'kwh': 4292.0, 'tariff': 0.18398, 'adder': 0.04, 'billing_rate': 0.9, 'net_value': 789.64, 'incentive_value': 171.68, 'solar_value': 961.32, 'billed_value': 865.19, 'solar_savings': 96.13, 'amount_owed': 865.19, 'invoice_number': '2026-05', 'period_start': '2026-04-17', 'period_end': '2026-05-19', 'month': 'April'}, field_map={'month': 0, 'start': 1, 'end': 2, 'array_kwh': 3, 'tariff': 5, 'adder': 6, 'value': 8, 'bill': 9, 'savings': 10, 'customer_kwh': 4}, project_totals={'total_array_kwh': 1572055.0, 'total_customer_kwh': 251530.0, 'total_solar_value': 52599.87, 'total_savings': 5259.99, 'period_count': 80}, warnings=[]), force=False)].
+___________ test_connect_email_collision_never_links_another_tenant ____________
+tests/test_norwich_independent_audit.py:37: in test_connect_email_collision_never_links_another_tenant
+    assert not result.get("linked"), result
+E   AssertionError: {'ok': True, 'linked': True, 'account_id': 'acct_other', 'charges_enabled': True, ...}
+E   assert not True
+E    +  where True = <built-in method get of dict object at 0x7fe80ef39340>('linked')
+E    +    where <built-in method get of dict object at 0x7fe80ef39340> = {'ok': True, 'linked': True, 'account_id': 'acct_other', 'charges_enabled': True, ...}.get
+___ test_uncertain_or_pending_checkout_never_creates_second_charge[complete] ___
+tests/test_norwich_independent_audit.py:51: in test_uncertain_or_pending_checkout_never_creates_second_charge
+    assert result["action"] == "unavailable", result
+E   AssertionError: {'action': 'redirect', 'url': 'https://checkout.stripe.com/c/pay/cs_test_2', 'reminted': True, 'payment_id': 1, ...}
+E   assert 'redirect' == 'unavailable'
+E     
+E     - unavailable
+E     + redirect
+__ test_uncertain_or_pending_checkout_never_creates_second_charge[unreadable] __
+tests/test_norwich_independent_audit.py:51: in test_uncertain_or_pending_checkout_never_creates_second_charge
+    assert result["action"] == "unavailable", result
+E   AssertionError: {'action': 'redirect', 'url': 'https://checkout.stripe.com/c/pay/cs_test_2', 'reminted': True, 'payment_id': 2, ...}
+E   assert 'redirect' == 'unavailable'
+E     
+E     - unavailable
+E     + redirect
+------------------------------ Captured log call -------------------------------
+WARNING  api.billing.payments:payments.py:791 pay-link: Session.retrieve failed for cs_test_1 — re-minting
+Traceback (most recent call last):
+  File "/root/offtaker-audit-2026-09-19/api/billing/payments.py", line 781, in resolve_pay_link
+    sess = stripe.checkout.Session.retrieve(sid, **_stripe_kw(row))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/unittest/mock.py", line 1134, in __call__
+    return self._mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/unittest/mock.py", line 1138, in _mock_call
+    return self._execute_mock_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/unittest/mock.py", line 1193, in _execute_mock_call
+    raise effect
+RuntimeError: Stripe timed out
+__________ test_stale_paid_checkout_is_reconciled_before_replacement ___________
+tests/test_norwich_independent_audit.py:65: in test_stale_paid_checkout_is_reconciled_before_replacement
+    assert result["action"] == "paid", result
+E   AssertionError: {'action': 'redirect', 'url': 'https://checkout.stripe.com/c/pay/cs_test_2', 'reminted': True, 'payment_id': 3, ...}
+E   assert 'redirect' == 'paid'
+E     
+E     - paid
+E     + redirect
+_________________ test_force_resend_same_amount_reuses_payment _________________
+tests/test_norwich_independent_audit.py:75: in test_force_resend_same_amount_reuses_payment
+    assert again["payment_id"]==res["payment_id"]
+E   assert 5 == 4
+____________________ test_paid_event_cannot_reverse_refund _____________________
+tests/test_norwich_independent_audit.py:87: in test_paid_event_cannot_reverse_refund
+    assert row.status=="refunded"
+E   AssertionError: assert 'paid' == 'refunded'
+E     
+E     - refunded
+E     + paid
+_____________ test_missing_payment_status_is_not_proof_of_payment ______________
+tests/test_norwich_independent_audit.py:96: in test_missing_payment_status_is_not_proof_of_payment
+    assert row.status=="open"
+E   AssertionError: assert 'paid' == 'open'
+E     
+E     - open
+E     + paid
+_____________ test_paid_metadata_cannot_select_different_checkout ______________
+tests/test_norwich_independent_audit.py:105: in test_paid_metadata_cannot_select_different_checkout
+    assert row.status=="open"
+E   AssertionError: assert 'paid' == 'open'
+E     
+E     - open
+E     + paid
+_______ test_bulk_commit_detects_changed_rate_instead_of_identical_skip ________
+tests/test_norwich_independent_audit.py:118: in test_bulk_commit_detects_changed_rate_instead_of_identical_skip
+    assert len(result["failed"])==1, result
+E   AssertionError: {'ok': True, 'created': 0, 'created_rows': [], 'skipped': [{'offtaker_name': 'Rate Test', 'utility_account_id': 1, 'reason': 'already exists (identical) — no change'}], ...}
+E   assert 0 == 1
+E    +  where 0 = len([])
+=============================== warnings summary ===============================
+tests/test_norwich_independent_audit.py::test_operator_test_send_cannot_mint_payable_invoice
+  /root/offtaker-audit-2026-09-19/api/app.py:559: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
+tests/test_norwich_independent_audit.py::test_operator_test_send_cannot_mint_payable_invoice
+  /root/solar-operator/venv/lib/python3.12/site-packages/fastapi/applications.py:4495: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    return self.router.on_event(event_type)
+
+tests/test_norwich_independent_audit.py: 77 warnings
+  /root/offtaker-audit-2026-09-19/api/models.py:71: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+tests/test_norwich_independent_audit.py::test_operator_test_send_cannot_mint_payable_invoice
+tests/test_norwich_independent_audit.py::test_bulk_commit_detects_changed_rate_instead_of_identical_skip
+  /root/offtaker-audit-2026-09-19/api/billing/delivery.py:42: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    after = after or datetime.utcnow()
+
+tests/test_norwich_independent_audit.py::test_operator_test_send_cannot_mint_payable_invoice
+tests/test_norwich_independent_audit.py::test_operator_test_send_cannot_mint_payable_invoice
+  /root/offtaker-audit-2026-09-19/api/email_copy_overrides.py:40: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+tests/test_norwich_independent_audit.py::test_uncertain_or_pending_checkout_never_creates_second_charge[complete]
+tests/test_norwich_independent_audit.py::test_uncertain_or_pending_checkout_never_creates_second_charge[unreadable]
+tests/test_norwich_independent_audit.py::test_stale_paid_checkout_is_reconciled_before_replacement
+tests/test_norwich_independent_audit.py::test_force_resend_same_amount_reuses_payment
+tests/test_norwich_independent_audit.py::test_force_resend_same_amount_reuses_payment
+tests/test_norwich_independent_audit.py::test_paid_event_cannot_reverse_refund
+tests/test_norwich_independent_audit.py::test_missing_payment_status_is_not_proof_of_payment
+tests/test_norwich_independent_audit.py::test_paid_metadata_cannot_select_different_checkout
+  /root/offtaker-audit-2026-09-19/api/billing/payments.py:603: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    row.checkout_expires_at = datetime.utcfromtimestamp(minted["expires_at"])
+
+tests/test_norwich_independent_audit.py: 11 warnings
+  /root/offtaker-audit-2026-09-19/api/billing/invoice_ledger.py:272: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    sub.tracker_updated_at = datetime.utcnow()
+
+tests/test_norwich_independent_audit.py::test_uncertain_or_pending_checkout_never_creates_second_charge[complete]
+tests/test_norwich_independent_audit.py::test_uncertain_or_pending_checkout_never_creates_second_charge[unreadable]
+tests/test_norwich_independent_audit.py::test_stale_paid_checkout_is_reconciled_before_replacement
+  /root/offtaker-audit-2026-09-19/api/billing/payments.py:775: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_norwich_independent_audit.py::test_uncertain_or_pending_checkout_never_creates_second_charge[complete]
+tests/test_norwich_independent_audit.py::test_uncertain_or_pending_checkout_never_creates_second_charge[unreadable]
+tests/test_norwich_independent_audit.py::test_stale_paid_checkout_is_reconciled_before_replacement
+  /root/offtaker-audit-2026-09-19/api/billing/payments.py:814: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    row.checkout_expires_at = datetime.utcfromtimestamp(minted["expires_at"])
+
+tests/test_norwich_independent_audit.py::test_stale_paid_checkout_is_reconciled_before_replacement
+  /root/offtaker-audit-2026-09-19/tests/test_norwich_independent_audit.py:59: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    db.get(OfftakerPayment,res["payment_id"]).checkout_expires_at=datetime.utcnow()-timedelta(days=1)
+
+tests/test_norwich_independent_audit.py::test_paid_event_cannot_reverse_refund
+tests/test_norwich_independent_audit.py::test_missing_payment_status_is_not_proof_of_payment
+tests/test_norwich_independent_audit.py::test_paid_metadata_cannot_select_different_checkout
+  /root/offtaker-audit-2026-09-19/api/billing/payments.py:678: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.paid_at = datetime.utcnow()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_norwich_independent_audit.py::test_operator_test_send_cannot_mint_payable_invoice
+FAILED tests/test_norwich_independent_audit.py::test_connect_email_collision_never_links_another_tenant
+FAILED tests/test_norwich_independent_audit.py::test_uncertain_or_pending_checkout_never_creates_second_charge[complete]
+FAILED tests/test_norwich_independent_audit.py::test_uncertain_or_pending_checkout_never_creates_second_charge[unreadable]
+FAILED tests/test_norwich_independent_audit.py::test_stale_paid_checkout_is_reconciled_before_replacement
+FAILED tests/test_norwich_independent_audit.py::test_force_resend_same_amount_reuses_payment
+FAILED tests/test_norwich_independent_audit.py::test_paid_event_cannot_reverse_refund
+FAILED tests/test_norwich_independent_audit.py::test_missing_payment_status_is_not_proof_of_payment
+FAILED tests/test_norwich_independent_audit.py::test_paid_metadata_cannot_select_different_checkout
+FAILED tests/test_norwich_independent_audit.py::test_bulk_commit_detects_changed_rate_instead_of_identical_skip
+10 failed, 112 warnings in 2.95s

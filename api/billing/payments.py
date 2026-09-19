@@ -150,7 +150,7 @@ def connect_ready(tenant) -> bool:
 
 def link_existing_connect_account(db, tenant) -> dict:
     """If this tenant has no stripe_connect_account_id yet, find a matching
-    Express account on our platform (by metadata.tenant_id or contact email)
+    Express account on our platform by metadata.tenant_id
     and attach it. Fixes the 'I finished Stripe KYC but pay links never mint'
     case when the owner set up Connect under a different session/tenant row
     or the DB write didn't land on the tenant they're sending from.
@@ -160,7 +160,6 @@ def link_existing_connect_account(db, tenant) -> dict:
     if not _stripe_ready():
         return {"ok": False, "error": "Stripe not configured"}
     tid = str(getattr(tenant, "id", "") or "")
-    email = (getattr(tenant, "contact_email", None) or "").strip().lower()
     try:
         # Page through platform connected accounts (small platforms = fine).
         starting_after = None
@@ -176,11 +175,7 @@ def link_existing_connect_account(db, tenant) -> dict:
             for a in data:
                 ad = a if isinstance(a, dict) else a.to_dict() if hasattr(a, "to_dict") else dict(a)
                 meta = ad.get("metadata") or {}
-                a_email = (ad.get("email") or "").strip().lower()
                 if tid and meta.get("tenant_id") == tid:
-                    matched = ad
-                    break
-                if email and a_email and a_email == email:
                     matched = ad
                     break
             if matched:
@@ -192,6 +187,14 @@ def link_existing_connect_account(db, tenant) -> dict:
         if not matched:
             return {"ok": True, "linked": False, "account_id": None}
         acct_id = matched.get("id")
+        # Email is not tenant identity. Also reject an account already attached
+        # elsewhere even when its Stripe metadata was changed independently.
+        from ..models import Tenant
+        owner = db.execute(select(Tenant.id).where(
+            Tenant.stripe_connect_account_id == acct_id,
+            Tenant.id != tenant.id)).scalars().first()
+        if not acct_id or owner is not None:
+            return {"ok": False, "error": "Connect account ownership conflict"}
         enabled = bool(matched.get("charges_enabled"))
         tenant.stripe_connect_account_id = acct_id
         tenant.stripe_connect_charges_enabled = enabled
@@ -542,34 +545,33 @@ def create_offtaker_payment(db, *, tenant, sub, match,
     # Reuse the row for the same period+amount (idempotent re-sends). With a
     # durable link the SAME url keeps working across re-sends, and an expired
     # Session is no reason for a new row — the click re-mints it.
-    if not force:
-        existing = db.execute(
-            select(OfftakerPayment).where(
-                OfftakerPayment.subscription_id == sub.id,
-                OfftakerPayment.period_key == period_key,
-                OfftakerPayment.status.in_(("open", "paid", "expired")),
-            ).order_by(OfftakerPayment.id.desc())
-        ).scalars().first()
-        if existing and existing.status == "paid":
-            return {
-                "ok": True, "already_paid": True,
-                "payment_id": existing.id,
-                "pay_url": existing.pay_url,
-                "amount_cents": existing.amount_cents,
-                "fee_cents": existing.fee_cents,
-            }
-        if (existing and existing.status in ("open", "expired")
-                and existing.amount_cents == amount_cents
-                and existing.pay_url and existing.pay_token):
-            # A legacy row (no token) carries the raw Session url, which is
-            # dead within a day — never hand that out again; mint fresh below.
-            return {
-                "ok": True, "reused": True,
-                "payment_id": existing.id,
-                "pay_url": existing.pay_url,
-                "amount_cents": existing.amount_cents,
-                "fee_cents": existing.fee_cents,
-            }
+    existing = db.execute(
+        select(OfftakerPayment).where(
+            OfftakerPayment.subscription_id == sub.id,
+            OfftakerPayment.period_key == period_key,
+            OfftakerPayment.status.in_(("open", "paid", "expired")),
+        ).order_by(OfftakerPayment.id.desc())
+    ).scalars().first()
+    if existing and existing.status == "paid":
+        return {
+            "ok": True, "already_paid": True,
+            "payment_id": existing.id,
+            "pay_url": existing.pay_url,
+            "amount_cents": existing.amount_cents,
+            "fee_cents": existing.fee_cents,
+        }
+    if (existing and existing.status in ("open", "expired")
+            and existing.amount_cents == amount_cents
+            and existing.pay_url and existing.pay_token):
+        # A legacy row (no token) carries the raw Session url, which is
+        # dead within a day — never hand that out again; mint fresh below.
+        return {
+            "ok": True, "reused": True,
+            "payment_id": existing.id,
+            "pay_url": existing.pay_url,
+            "amount_cents": existing.amount_cents,
+            "fee_cents": existing.fee_cents,
+        }
 
     # Persist the row first so we have a stable payment_id in metadata even if
     # Stripe succeeds and the process dies before a second write.
@@ -660,11 +662,17 @@ def mark_payment_paid(db, *, session_dict: dict) -> dict:
         return {"ignored": "offtaker payment row not found",
                 "payment_id": payment_id, "session": sess_id}
 
+    # Metadata is not sufficient: this event must identify the tracked Session.
+    if not sess_id or sess_id != row.stripe_checkout_session_id:
+        return {"ignored": "checkout session does not match payment", "payment_id": row.id}
+    if row.status == "refunded":
+        return {"ok": True, "duplicate": True, "unchanged": "refunded", "payment_id": row.id,
+                "tenant": row.tenant_id}
     if row.status == "paid":
         return {"ok": True, "duplicate": True, "payment_id": row.id,
                 "tenant": row.tenant_id}
 
-    if session_dict.get("payment_status") not in (None, "paid", "no_payment_required"):
+    if session_dict.get("payment_status") not in ("paid", "no_payment_required"):
         # Still open / unpaid — don't flip.
         if session_dict.get("payment_status") != "paid":
             return {"ok": True, "not_paid_yet": True,
@@ -775,28 +783,38 @@ def resolve_pay_link(db, token: str) -> dict:
     now = datetime.utcnow()
     sid = row.stripe_checkout_session_id
     exp = row.checkout_expires_at
-    if (row.status == "open" and sid and exp
-            and (exp - now).total_seconds() > CHECKOUT_REFRESH_GRACE_SECONDS):
+    # Always reconcile the last Session, even after our local expiry timestamp.
+    # A completed ACH Checkout may remain unpaid for days; it is NOT expired.
+    # A timeout/failed expiry gives no proof that a second charge is safe.
+    if sid and row.status == "open":
         try:
             sess = stripe.checkout.Session.retrieve(sid, **_stripe_kw(row))
             sd = sess.to_dict() if hasattr(sess, "to_dict") else dict(sess)
-            if sd.get("status") == "open" and sd.get("url"):
-                return {"action": "redirect", "url": sd["url"], **base}
-            if sd.get("payment_status") == "paid":
-                # The webhook can lag a click; settle it from the source.
-                mark_payment_paid(db, session_dict=sd)
-                db.refresh(row)
+        except Exception:  # noqa: BLE001
+            logger.warning("pay-link: unable to establish Session state for %s", sid,
+                           exc_info=True)
+            return {"action": "unavailable",
+                    "reason": "Payment status is temporarily unavailable. Please try again later.", **base}
+        if sd.get("payment_status") == "paid":
+            mark_payment_paid(db, session_dict=sd)
+            db.refresh(row)
+            if row.status == "paid":
                 return {"action": "paid", "paid_at": row.paid_at, **base}
-        except Exception:  # noqa: BLE001
-            logger.warning("pay-link: Session.retrieve failed for %s — re-minting",
-                           sid, exc_info=True)
-
-    # Stale / expired / failed / unreadable → a fresh Session on the same row.
-    if sid and row.status == "open":
-        try:
-            stripe.checkout.Session.expire(sid, **_stripe_kw(row))  # never two live links
-        except Exception:  # noqa: BLE001
-            pass
+            return {"action": "unavailable", "reason": "Payment reconciliation is pending.", **base}
+        if sd.get("status") == "complete":
+            return {"action": "unavailable", "processing": True,
+                    "reason": "Your payment is processing. Please do not pay again.", **base}
+        if sd.get("status") == "open":
+            if exp and (exp - now).total_seconds() > CHECKOUT_REFRESH_GRACE_SECONDS and sd.get("url"):
+                return {"action": "redirect", "url": sd["url"], **base}
+            try:
+                stripe.checkout.Session.expire(sid, **_stripe_kw(row))
+            except Exception:  # noqa: BLE001
+                return {"action": "unavailable",
+                        "reason": "Payment status is changing. Please try again later.", **base}
+        elif sd.get("status") != "expired":
+            return {"action": "unavailable",
+                    "reason": "Payment status is temporarily unavailable. Please try again later.", **base}
     sub = db.get(BillingReportSubscription, row.subscription_id)
     try:
         minted = _mint_checkout_session(
@@ -859,8 +877,8 @@ def mark_payment_async_failed(db, *, session_dict: dict) -> dict:
     if row is None:
         return {"ignored": "no matching offtaker payment",
                 "session": session_dict.get("id")}
-    if row.status == "paid":
-        return {"ok": True, "unchanged": "paid", "payment_id": row.id,
+    if row.status in ("paid", "refunded"):
+        return {"ok": True, "unchanged": row.status, "payment_id": row.id,
                 "tenant": row.tenant_id}
     row.status = "failed"
     row.error = "bank payment failed after checkout"

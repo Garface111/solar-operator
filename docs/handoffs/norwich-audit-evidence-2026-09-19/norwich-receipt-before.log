@@ -1,0 +1,12 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+______________ test_parallel_mail_receipts_are_not_cross_assigned ______________
+tests/test_norwich_independent_audit.py:138: in test_parallel_mail_receipts_are_not_cross_assigned
+    assert [first.result(),second.result()]==["receipt-A","receipt-B"]
+E   AssertionError: assert ['receipt-B', 'receipt-B'] == ['receipt-A', 'receipt-B']
+E     
+E     At index 0 diff: 'receipt-B' != 'receipt-A'
+E     Use -v to get more diff
+=========================== short test summary info ============================
+FAILED tests/test_norwich_independent_audit.py::test_parallel_mail_receipts_are_not_cross_assigned
+1 failed in 1.90s

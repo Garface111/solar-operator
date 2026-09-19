@@ -10,6 +10,7 @@ free for our volume.
 from __future__ import annotations
 import os
 import threading
+from contextvars import ContextVar
 import re
 import logging
 import json
@@ -30,13 +31,16 @@ EXTENSION_INSTALL_URL = os.getenv(
 )
 
 
+_resend_receipt: ContextVar[str | None] = ContextVar("resend_receipt", default=None)
+
+
 def last_resend_id() -> str | None:
     """Resend email id from the most recent successful `_send_via_resend` call.
 
     None on failure, dry-run, or when no real send has run yet. Callers that
     need delivery-truth (offtaker invoices) read this immediately after send.
     """
-    return getattr(_send_via_resend, "_last_id", None)
+    return _resend_receipt.get()
 
 
 def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
@@ -62,6 +66,7 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
     offtaker invoice so they always see what the customer received)."""
     # Reset so a prior success never leaks into a later fail/dry-run caller.
     _send_via_resend._last_id = None
+    _resend_receipt.set(None)
     # ── Non-prod safety valve (staging/preview) ───────────────────────────
     # The backend infers "prod" from Railway env vars, which a staging deploy
     # also has — so the code cannot tell staging from prod on its own. These
@@ -133,6 +138,7 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
         if result and result.get("id"):
             _send_via_resend._last_error = None
             _send_via_resend._last_id = result.get("id")
+            _resend_receipt.set(result.get("id"))
             return True
         (logger.error if log_failures else logger.warning)(
             "Resend returned unexpected response: %s", result)
@@ -163,7 +169,7 @@ _send_via_resend._last_error = None  # type: ignore[attr-defined]
 # The id/error contract is preserved for free: the original body assigns to the
 # module global `_send_via_resend._last_id`, which resolves at CALL time to
 # whatever that name currently binds — i.e. this wrapper. last_resend_id() keeps
-# reading the same attribute it always did.
+# reading the per-call ContextVar; the legacy attribute remains for compatibility.
 _send_via_resend_raw = _send_via_resend
 
 
@@ -183,6 +189,7 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
     fails open on every uncertainty, so a slow resolver never costs a customer
     an email. See email_archive.domain_accepts_mail.
     """
+    _resend_receipt.set(None)
     try:
         import sys as _sys0
         from . import email_archive as _pf
@@ -232,6 +239,7 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
         cc=cc, bcc=bcc, from_addr=from_addr, reply_to=reply_to, headers=headers,
         product=product, log_failures=log_failures,
     )
+    receipt = _resend_receipt.get()
     try:
         import sys as _sys
         from . import email_archive as _arch
@@ -245,13 +253,17 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
         _arch.record(
             to_email=to if isinstance(to, str) else ", ".join(to),
             subject=subject, html=html, text=text, product=product, source=src,
-            resend_id=getattr(_send_via_resend, "_last_id", None),
+            resend_id=last_resend_id(),
             ok=bool(ok),
             dry_run=os.getenv("EMAIL_DRY_RUN", "").strip().lower() in ("1", "true", "yes", "on"),
             cc=cc, bcc=bcc, from_addr=from_addr, attachments=attachments,
         )
     except Exception as _e:  # noqa: BLE001
         logger.warning("email archive skipped (email still sent): %s", _e)
+    finally:
+        # Archive monitoring may itself send an alert on this same call stack.
+        # Restore the original invoice receipt after that nested send.
+        _resend_receipt.set(receipt)
     return ok
 
 

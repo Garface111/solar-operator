@@ -231,6 +231,7 @@ def test_deliver_stores_resend_id_when_mock_sets_last_id(client, monkeypatch):
     def fake_send(**kw):
         # last_resend_id() reads api.notify._send_via_resend._last_id
         notify._send_via_resend._last_id = rid
+        notify._resend_receipt.set(rid)
         return True
 
     monkeypatch.setattr("api.notify._send_via_resend", fake_send)
@@ -269,6 +270,7 @@ def test_deliver_test_send_returns_id_but_does_not_stamp(client, monkeypatch):
     def fake_send(**kw):
         fake_send._last_id = rid
         notify._send_via_resend._last_id = rid
+        notify._resend_receipt.set(rid)
         return True
 
     monkeypatch.setattr("api.notify._send_via_resend", fake_send)

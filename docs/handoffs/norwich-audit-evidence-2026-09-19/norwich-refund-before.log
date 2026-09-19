@@ -1,0 +1,35 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+___________ test_delayed_ach_failure_cannot_reopen_refunded_invoice ____________
+tests/test_norwich_independent_audit.py:150: in test_delayed_ach_failure_cannot_reopen_refunded_invoice
+    assert row.status=="refunded",result
+E   AssertionError: {'ok': True, 'failed': True, 'payment_id': 1, 'tenant': 'ten_a87894b023', ...}
+E   assert 'failed' == 'refunded'
+E     
+E     - refunded
+E     + failed
+=============================== warnings summary ===============================
+tests/test_norwich_independent_audit.py::test_delayed_ach_failure_cannot_reopen_refunded_invoice
+tests/test_norwich_independent_audit.py::test_delayed_ach_failure_cannot_reopen_refunded_invoice
+tests/test_norwich_independent_audit.py::test_delayed_ach_failure_cannot_reopen_refunded_invoice
+tests/test_norwich_independent_audit.py::test_delayed_ach_failure_cannot_reopen_refunded_invoice
+tests/test_norwich_independent_audit.py::test_delayed_ach_failure_cannot_reopen_refunded_invoice
+tests/test_norwich_independent_audit.py::test_delayed_ach_failure_cannot_reopen_refunded_invoice
+tests/test_norwich_independent_audit.py::test_delayed_ach_failure_cannot_reopen_refunded_invoice
+tests/test_norwich_independent_audit.py::test_delayed_ach_failure_cannot_reopen_refunded_invoice
+tests/test_norwich_independent_audit.py::test_delayed_ach_failure_cannot_reopen_refunded_invoice
+  /root/offtaker-audit-2026-09-19/api/models.py:71: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+tests/test_norwich_independent_audit.py::test_delayed_ach_failure_cannot_reopen_refunded_invoice
+  /root/offtaker-audit-2026-09-19/api/billing/payments.py:605: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    row.checkout_expires_at = datetime.utcfromtimestamp(minted["expires_at"])
+
+tests/test_norwich_independent_audit.py::test_delayed_ach_failure_cannot_reopen_refunded_invoice
+  /root/offtaker-audit-2026-09-19/api/billing/invoice_ledger.py:272: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    sub.tracker_updated_at = datetime.utcnow()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_norwich_independent_audit.py::test_delayed_ach_failure_cannot_reopen_refunded_invoice
+1 failed, 11 warnings in 2.39s
