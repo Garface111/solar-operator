@@ -203,7 +203,7 @@ def test_budget_bill_overrides_on_workbook_offtaker_bill_path():
     assert ci.get("solar_credit_value") is not None  # real computed credit preserved
 
 
-def test_offtaker_banked_month_bills_at_reference_rate():
+def test_offtaker_banked_month_bills_at_reference_rate(monkeypatch):
     """Option B (Ford, 2026-06-22): a BANKED month — big EXCESS sent to grid but
     solar_credit_usd NULL (credited at ~$0, rolled forward, not cashed) — is NOT
     skipped and NOT over-charged from gross kWh × a flat rate. The offtaker is
@@ -211,8 +211,10 @@ def test_offtaker_banked_month_bills_at_reference_rate():
     no fleet/history available), so a perpetual-banker like Londonderry bills
     monthly for the solar received instead of $0-until-annual-true-up."""
     from api.rate_schedule import DEFAULT_CREDIT_RATE
+    # Isolate the no-fleet reference-rate case without inventing a utility.
+    monkeypatch.setattr("api.rate_schedule._fleet_credit_rate", lambda *a, **kw: None)
     tid, aid, acct_id = _seed(with_bill=False, vendor_kwh=9999.0,
-                              provider="zzz_banked_ref")     # unique → no fleet
+                              provider="gmp")
     with SessionLocal() as db:
         db.add(Bill(tenant_id=tid, account_id=acct_id,
                     period_start=datetime(2026, 5, 1),
@@ -286,13 +288,15 @@ def test_override_wins_but_default_still_reports_the_bill_rate():
     assert abs(ci["default_net_rate_per_kwh"] - 0.2576) < 1e-6
 
 
-def test_default_net_rate_reports_reference_when_banked():
+def test_default_net_rate_reports_reference_when_banked(monkeypatch):
     """A BANKED month (solar_credit_usd None): default_net_rate_source must be
     'gmp_credit_reference' — so the UI labels it a comparable-months reference,
     NOT 'from your GMP bill'. This is the Town of Fairlee prod case."""
     from api.rate_schedule import DEFAULT_CREDIT_RATE
+    # Isolate the no-fleet reference-rate case without inventing a utility.
+    monkeypatch.setattr("api.rate_schedule._fleet_credit_rate", lambda *a, **kw: None)
     tid, aid, acct_id = _seed(with_bill=False, vendor_kwh=9999.0,
-                              provider="zzz_banked_def")     # unique → no fleet
+                              provider="gmp")
     with SessionLocal() as db:
         db.add(Bill(tenant_id=tid, account_id=acct_id,
                     period_start=datetime(2026, 5, 1),
@@ -313,12 +317,14 @@ def test_default_net_rate_reports_reference_when_banked():
     assert "banked" in (ci["default_net_rate_note"] or "")
 
 
-def test_override_on_banked_month_prices_at_override():
+def test_override_on_banked_month_prices_at_override(monkeypatch):
     """Town of Fairlee's real need: a BANKED month whose reference rate the
     operator wants to correct. Setting net_rate_per_kwh prices the excess at the
     override, and the default still reports the banked reference underneath."""
+    # Isolate the no-fleet reference-rate case without inventing a utility.
+    monkeypatch.setattr("api.rate_schedule._fleet_credit_rate", lambda *a, **kw: None)
     tid, aid, acct_id = _seed(with_bill=False, vendor_kwh=9999.0,
-                              provider="zzz_banked_ovr")
+                              provider="gmp")
     with SessionLocal() as db:
         db.add(Bill(tenant_id=tid, account_id=acct_id,
                     period_start=datetime(2026, 5, 1),
