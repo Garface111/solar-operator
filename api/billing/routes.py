@@ -4406,14 +4406,15 @@ def approve_draft(draft_id: int, authorization: Optional[str] = Header(default=N
         # re-read status inside the txn, and flip pending→sending; a second
         # concurrent approve (double-click / client retry) then sees it's no
         # longer pending and 409s instead of sending a duplicate invoice.
-        locked = db.execute(
-            select(ReportDraft).where(ReportDraft.id == d.id).with_for_update()
-        ).scalars().first()
-        if locked is None or locked.status != "pending":
+        from sqlalchemy import update
+        claimed = db.execute(update(ReportDraft).where(
+            ReportDraft.id == d.id, ReportDraft.tenant_id == t.id,
+            ReportDraft.status == "pending").values(status="sending")).rowcount
+        if claimed != 1:
+            db.rollback()
             raise HTTPException(409, "draft already resolved")
-        locked.status = "sending"
         db.commit()
-        d = locked
+        db.refresh(d)
         sub = _get_owned(db, t.id, d.subscription_id)
         # #4: attach the draft's manually-uploaded GMP bill for THIS send only —
         # passed through, never persisted onto the sub (persisting it made a stale
@@ -4428,7 +4429,8 @@ def approve_draft(draft_id: int, authorization: Optional[str] = Header(default=N
                 from .delivery import deliver_trueup_subscription
                 result = deliver_trueup_subscription(
                     db, sub, t, triggered_by="approval-trueup", is_test=False,
-                    force=True)
+                    force=True, expected_period_label=str(d.period_label).removeprefix("True-up "),
+                    expected_amount_usd=d.amount_usd)
             else:
                 result = deliver_subscription(
                     db, sub, t, triggered_by="approval", is_test=False, note=d.note,
@@ -4440,8 +4442,10 @@ def approve_draft(draft_id: int, authorization: Optional[str] = Header(default=N
             d.status = "pending"      # release the claim so it can be retried
             db.commit()
             raise
+        if result.get("already_sent"):
+            result["ok"] = True  # accepted durable history recovered after an interrupted approval
         if not result.get("ok"):
-            d.status = "pending"      # release the claim; nothing was sent
+            d.status = "held" if result.get("uncertain") else "pending"
             db.commit()
             raise HTTPException(422, result.get("error", "send failed"))
         d.status = "sent"

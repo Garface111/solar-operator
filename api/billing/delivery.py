@@ -2472,7 +2472,8 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
     payment_id = None
     fee_cents = None
     pay_skip_reason = None
-    if not is_test and (getattr(tenant, "product", None) or "nepool") == "array_operator":
+    if (not is_test and (getattr(tenant, "product", None) or "nepool") == "array_operator"
+            and getattr(tenant, "offtaker_payment_policy", "online_required") != "offline"):
         try:
             from . import payments as _pay
             # Refresh / auto-link Connect before minting so a just-finished bank
@@ -2501,6 +2502,12 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
             pay_skip_reason = f"pay-link error: {e}"
             logger.exception("offtaker pay-link creation crashed for sub=%s",
                              getattr(sub, "id", "?"))
+
+    if (not is_test and (getattr(tenant, "product", None) or "nepool") == "array_operator"
+            and getattr(tenant, "offtaker_payment_policy", "online_required") != "offline"
+            and float(_ci.get("amount_owed") or 0) > 0 and not pay_url):
+        return {"ok": False, "held": True, "invoice_id": invoice_id,
+                "error": "Online payment is required: " + str(pay_skip_reason or "payment link unavailable")}
 
     _eco_fields: dict = {}
     with tempfile.TemporaryDirectory(prefix="ao-bill-") as tmp:
@@ -2688,6 +2695,15 @@ def draft_subscription(db, sub, tenant, *, triggered_by: str = "scheduled", peri
                           "on the next utility bill before drafting again."),
                 "triggered_by": triggered_by}
 
+    from ..models import OfftakerInvoice
+    historical = db.scalar(select(OfftakerInvoice).where(
+        OfftakerInvoice.subscription_id == sub.id,
+        OfftakerInvoice.period_key == _pe_guard,
+        OfftakerInvoice.status.in_(["accepted", "sending", "uncertain"])))
+    if historical:
+        return {"ok": False, "already_sent": historical.status == "accepted", "held": True,
+                "error": "This billing period is already issued or awaiting delivery reconciliation"}
+
     inv_no = ci.get("invoice_number")
     period_label = None
     if ci.get("period_start") or ci.get("period_end"):
@@ -2738,9 +2754,10 @@ def draft_subscription(db, sub, tenant, *, triggered_by: str = "scheduled", peri
             if getattr(tenant, "send_from_email", None):
                 nm = getattr(tenant, "send_from_name", None) or getattr(tenant, "company_name", None)
                 from_addr = f'"{nm}" <{tenant.send_from_email}>' if nm else tenant.send_from_email
-            notified = bool(_send_via_resend(
-                to=op, subject=subject, html=html, text=text,
-                from_addr=from_addr, product="array_operator"))
+            from .dispatch import send_email_once
+            notified = bool(send_email_once(tenant_id=tenant.id, key=f"draft:{draft.id}", kind="review",
+                email=dict(to=op, subject=subject, html=html, text=text,
+                           from_addr=from_addr, product="array_operator")).get("ok"))
         except Exception:  # noqa: BLE001
             notified = False
     return {"ok": True, "drafted": True, "draft_id": draft.id,
@@ -2799,7 +2816,7 @@ def deliver_trueup_subscription(
                 "error": f"True-up for {settlement.window_end.isoformat()} already sent",
                 "trueup": settlement.to_dict()}
 
-    window_label = f"{settlement.window_start.isoformat()} → {settlement.window_end.isoformat()}"
+    window_label = f"{ci.get('period_start')} → {ci.get('period_end')}"
     if expected_period_label is not None and expected_period_label != window_label:
         return {"ok": False, "period_changed": True, "error": "True-up window changed since approval"}
     if expected_amount_usd is not None and abs(float(ci.get("amount_owed") or 0) - float(expected_amount_usd)) >= .005:
@@ -2841,7 +2858,8 @@ def deliver_trueup_subscription(
     fee_cents = None
     pay_skip_reason = None
     # Only mint a pay link when there is a real charge.
-    if not is_test and float(ci.get("amount_owed") or 0) >= 0.50:
+    if (not is_test and float(ci.get("amount_owed") or 0) >= 0.50
+            and getattr(tenant, "offtaker_payment_policy", "online_required") != "offline"):
         try:
             from . import payments as _pay
             pay_res = _pay.create_offtaker_payment(
@@ -2855,6 +2873,11 @@ def deliver_trueup_subscription(
         except Exception as exc:  # noqa: BLE001
             pay_skip_reason = str(exc)[:200]
             logger.warning("trueup pay-link failed sub=%s: %s", sub.id, exc)
+
+    if (not is_test and getattr(tenant, "offtaker_payment_policy", "online_required") != "offline"
+            and float(ci.get("amount_owed") or 0) > 0 and not pay_url):
+        return {"ok": False, "held": True, "invoice_id": invoice_id,
+                "error": "Online payment is required: " + str(pay_skip_reason or "payment link unavailable")}
 
     with tempfile.TemporaryDirectory(prefix="ao-trueup-") as tmp:
         try:
@@ -2990,9 +3013,10 @@ def draft_trueup_subscription(
                       or getattr(tenant, "company_name", None))
                 from_addr = (f'"{nm}" <{tenant.send_from_email}>' if nm
                              else tenant.send_from_email)
-            notified = bool(_send_via_resend(
-                to=op, subject=subject, html=html, text=text,
-                from_addr=from_addr, product="array_operator"))
+            from .dispatch import send_email_once
+            notified = bool(send_email_once(tenant_id=tenant.id, key=f"draft:{draft.id}", kind="review",
+                email=dict(to=op, subject=subject, html=html, text=text,
+                           from_addr=from_addr, product="array_operator")).get("ok"))
         except Exception:  # noqa: BLE001
             notified = False
     return {

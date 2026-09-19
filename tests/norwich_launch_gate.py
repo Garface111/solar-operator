@@ -96,9 +96,10 @@ def test_concurrent_send_paths_only_send_once(client,monkeypatch):
     tid,sid=_delivery_setup(client,monkeypatch)
     barrier=Barrier(2); sends=[]
     def mail(**kwargs):
-        sends.append(kwargs);barrier.wait(timeout=10);return True
+        sends.append(kwargs);return True
     monkeypatch.setattr("api.notify._send_via_resend",mail)
     def deliver():
+        barrier.wait(timeout=10)
         with SessionLocal() as db:
             return delivery.deliver_subscription(db,db.get(BillingReportSubscription,sid),db.get(Tenant,tid))
     with ThreadPoolExecutor(max_workers=2) as pool:
@@ -114,7 +115,12 @@ def test_crash_after_mail_acceptance_does_not_resend(client,monkeypatch):
     monkeypatch.setattr("api.notify._send_via_resend",mail)
     with SessionLocal() as db:
         tenant=db.get(Tenant,tid);sub=db.get(BillingReportSubscription,sid)
-        monkeypatch.setattr(db,"commit",MagicMock(side_effect=RuntimeError("database unavailable after mail accepted")))
+        original_commit = db.commit
+        def commit_after_acceptance():
+            if sends:
+                raise RuntimeError("database unavailable after mail accepted")
+            return original_commit()
+        monkeypatch.setattr(db, "commit", commit_after_acceptance)
         with pytest.raises(RuntimeError):
             delivery.deliver_subscription(db,sub,tenant)
         db.rollback()
