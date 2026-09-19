@@ -55,7 +55,7 @@ def _seed(months, *, host_months=None, share=None, cadence="quarterly",
     with SessionLocal() as db:
         db.add(Tenant(id=tid, tenant_key=secrets.token_hex(8), name="Q Test",
                       contact_email=f"{tid}@e.com", active=True,
-                      product="array_operator"))
+                      product="array_operator", offtaker_payment_policy="offline"))
         db.flush()
         arr = Array(tenant_id=tid, name="Quarter Farm", region="VT")
         db.add(arr); db.flush()
@@ -273,7 +273,7 @@ def _route_tenant():
     with SessionLocal() as db:
         db.add(Tenant(id=tid, tenant_key=secrets.token_hex(8), name="Q Routes",
                       contact_email=f"{tid}@e.com", active=True,
-                      product="array_operator"))
+                      product="array_operator", offtaker_payment_policy="offline"))
         db.commit()
     return tid, f"Bearer {mint_session_for_tenant(tid)}"
 

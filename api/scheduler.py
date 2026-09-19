@@ -528,7 +528,7 @@ def _auto_send_should_hold(db, sub, *, period_label=None) -> bool:
     return alloc.get("status") in ("mismatch", "error")
 
 
-def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
+def deliver_billing_reports(cadence: str, *, trueup_only: bool = False, tenant_id: str | None = None) -> dict:
     """Array Operator automatic billing reports — deliver every enabled
     BillingReportSubscription whose cadence matches (or, for the annual run,
     every sub with annual_trueup set).
@@ -560,6 +560,8 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
             .where(BillingReportSubscription.enabled == True)  # noqa: E712
             .where(BillingReportSubscription.deleted_at.is_(None))
         )
+        if tenant_id is not None:
+            q = q.where(BillingReportSubscription.tenant_id == tenant_id)
         if trueup_only:
             q = q.where(BillingReportSubscription.annual_trueup == True)  # noqa: E712
         else:
@@ -655,6 +657,8 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
                         triggered_by=f"sched-billing-{cadence}", period_label=period)
                     if result.get("ok"):
                         sent.append(sid)
+                    elif result.get("held"):
+                        held.append(sid)
                     elif result.get("skipped"):
                         skipped.append(sid)   # waiting on bill / already sent — benign
                     else:
@@ -665,6 +669,8 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
                         triggered_by=f"sched-draft-{cadence}", period_label=period)
                     if result.get("ok"):
                         drafted.append(sid)
+                    elif result.get("held"):
+                        held.append(sid)
                     elif result.get("skipped"):
                         skipped.append(sid)
                     else:

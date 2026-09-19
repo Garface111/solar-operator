@@ -5719,6 +5719,11 @@ def send_pipeline(authorization: Optional[str] = Header(default=None)):
 
     now = datetime.utcnow()
 
+    def _next_daily(hour, minute):
+        from datetime import timedelta
+        candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        return candidate if candidate > now else candidate + timedelta(days=1)
+
     def _split(cadence: str) -> dict:
         subs = [r for r in rows if (r.cadence or "monthly") == cadence]
         auto = sum(1 for r in subs if (r.delivery_mode or "approval") == "auto")
@@ -5742,9 +5747,9 @@ def send_pipeline(authorization: Optional[str] = Header(default=None)):
                      "waiting": waiting},
         "default_delivery_mode": default_mode,
         "mode_split": {"auto": auto_all, "approval": approval_all},
-        "next_monthly": {"fires_at": _next_month_first(now).isoformat(),
+        "next_monthly": {"fires_at": _next_daily(9, 0).isoformat(),
                          **_split("monthly")},
-        "next_quarterly": {"fires_at": _next_quarter_first(now).isoformat(),
+        "next_quarterly": {"fires_at": _next_daily(9, 15).isoformat(),
                            **_split("quarterly")},
         "paused": bool(getattr(tenant, "sending_paused", False)),
     }

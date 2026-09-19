@@ -42,7 +42,7 @@ def _seed_tenant_and_sub(
             tenant_key="sol_test_" + secrets.token_hex(8),
             plan="comped",
             active=True,
-            product="array_operator",
+            product="array_operator", offtaker_payment_policy="offline",
             subscription_status="comped",
         ))
         db.flush()
@@ -188,7 +188,7 @@ def test_send_via_resend_sets_last_id_on_success(monkeypatch):
 
     fake_resend = SimpleNamespace(Emails=_Emails, api_key=None)
     import sys
-    sys.modules["resend"] = fake_resend  # type: ignore[assignment]
+    monkeypatch.setitem(sys.modules, "resend", fake_resend)
 
     ok = notify._send_via_resend(
         to="a@b.test", subject="hi", html="<p>x</p>", text="x",
@@ -353,7 +353,7 @@ def _make_tenant_auth() -> tuple[str, str]:
             id=tid, name="Billing Test Operator",
             contact_email=f"{tid}@operator.test",
             tenant_key="sol_live_" + secrets.token_urlsafe(12),
-            plan="standard", active=True, product="array_operator",
+            plan="standard", active=True, product="array_operator", offtaker_payment_policy="offline",
         ))
         db.commit()
     return tid, f"Bearer {mint_session_for_tenant(tid)}"

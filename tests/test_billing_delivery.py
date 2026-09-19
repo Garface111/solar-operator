@@ -636,7 +636,7 @@ def test_scheduler_monthly_billing_delivers(client, monkeypatch):
 
     monkeypatch.setattr("api.notify._send_via_resend", lambda **kw: True)
     _prepare_closed_offline_schedule(sub_id)
-    result = scheduler.deliver_billing_reports("monthly")
+    result = scheduler.deliver_billing_reports("monthly", tenant_id=tid)
     assert sub_id in result["sent"]
     assert sub_id not in result["failed"]
     # And it stamped the schedule on our sub.
@@ -664,7 +664,7 @@ def test_offtaker_send_bccs_the_operator(client, monkeypatch):
 
     monkeypatch.setattr("api.notify._send_via_resend", fake_send)
     _prepare_closed_offline_schedule(sub_id)
-    result = scheduler.deliver_billing_reports("monthly")
+    result = scheduler.deliver_billing_reports("monthly", tenant_id=tid)
     assert sub_id in result["sent"]
     to_list = captured["to"] if isinstance(captured["to"], list) else [captured["to"]]
     assert "offtaker@example.test" in to_list      # the customer is the To
@@ -691,7 +691,7 @@ def test_offtaker_email_is_white_labeled_to_the_operator(client, monkeypatch):
 
     monkeypatch.setattr("api.notify._send_via_resend", fake_send)
     _prepare_closed_offline_schedule(sub_id)
-    assert sub_id in scheduler.deliver_billing_reports("monthly")["sent"]
+    assert sub_id in scheduler.deliver_billing_reports("monthly", tenant_id=tid)["sent"]
     # No Array Operator branding anywhere the offtaker sees:
     assert "Array Operator" not in cap["html"]
     # The sky-hero skin's background IMAGE is served from arrayoperator.com; an

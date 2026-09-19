@@ -2378,6 +2378,14 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
     `force=True` bypasses the exactly-once-per-period guard for a deliberate
     operator re-send."""
     from ..notify import _send_via_resend
+    from ..models import Tenant
+    tenant = db.get(Tenant, tenant.id)
+    if tenant is None or sub.tenant_id != tenant.id or sub.deleted_at:
+        return {"ok": False, "held": True, "error": "Subscription is not available for this tenant"}
+    db.refresh(tenant)
+    if triggered_by.startswith("sched") and (tenant.sending_paused or not sub.enabled):
+        return {"ok": False, "held": True, "error": "Scheduled billing is paused"}
+
 
     try:
         if period_label is None and expected_period_label:
@@ -2389,7 +2397,7 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"workbook unreadable: {e}"}
     if not match.matched or not match.latest_period:
-        return {"ok": False, "error": "no current billing period in the stored workbook"}
+        return {"ok": False, "held": True, "error": "No complete source evidence for this billing period"}
 
     # ── Guard: don't send a period the operator didn't review (#3) ────────────
     # approve_draft rebuilds the invoice fresh here; if a newer utility bill landed
@@ -2399,7 +2407,7 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
     _ci = match.computed_invoice or {}
     if not is_test and (not _ci.get("period_start") or not _ci.get("period_end")):
         return {"ok": False, "held": True, "error": "A real invoice requires dated billing coverage"}
-    if _ci.get("generation_complete") is False:
+    if _ci.get("generation_complete") is False and getattr(sub, "utility_account_id", None) is not None:
         return {"ok": False, "held": True, "error": "Generation does not cover the complete billing period"}
     cur_period_label = None
     if _ci.get("period_start") or _ci.get("period_end"):
@@ -2767,7 +2775,7 @@ def draft_subscription(db, sub, tenant, *, triggered_by: str = "scheduled", peri
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"workbook unreadable: {e}"}
     if not match.matched or not match.latest_period:
-        return {"ok": False, "error": "no current billing period in the stored workbook"}
+        return {"ok": False, "held": True, "error": "No complete source evidence for this billing period"}
 
     ci = match.computed_invoice or {}
 
@@ -2894,6 +2902,14 @@ def deliver_trueup_subscription(
     """
     from .trueup import compute_annual_trueup, build_trueup_match
     from ..notify import _send_via_resend
+    from ..models import Tenant
+    tenant = db.get(Tenant, tenant.id)
+    if tenant is None or sub.tenant_id != tenant.id or sub.deleted_at:
+        return {"ok": False, "held": True, "error": "Subscription is not available for this tenant"}
+    db.refresh(tenant)
+    if triggered_by.startswith("sched") and (tenant.sending_paused or not sub.enabled):
+        return {"ok": False, "held": True, "error": "Scheduled billing is paused"}
+
 
     if not getattr(sub, "annual_trueup", False) and not force:
         return {"ok": False, "skipped": True,

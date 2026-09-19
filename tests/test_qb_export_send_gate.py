@@ -33,8 +33,8 @@ def _mk_bill(db, tid, acct_id, excess, credit,
 def _cleanup(db, tid):
     """Remove this test's rows — some legacy tests assert on WHOLE tables, so
     leftover rows from this file would order-dependently break them."""
-    from api.models import ReportDraft
-    for model in (ReportDraft, BillingReportSubscription, Bill,
+    from api.models import ReportDraft, OfftakerInvoice, BillingEmailDispatch
+    for model in (BillingEmailDispatch, OfftakerInvoice, ReportDraft, BillingReportSubscription, Bill,
                   UtilityAccount, Array):
         db.query(model).filter(model.tenant_id == tid).delete(
             synchronize_session=False)
@@ -50,7 +50,7 @@ def test_register_excludes_unsendable_and_disabled():
         tid = "ten_" + secrets.token_hex(4)
         db.add(Tenant(id=tid, tenant_key=secrets.token_hex(8), name="QG",
                       contact_email=f"{tid}@e.com", active=True,
-                      product="array_operator"))
+                      product="array_operator", offtaker_payment_policy="offline"))
         db.flush()
         arr = Array(tenant_id=tid, name="Gate Array", region="VT")
         db.add(arr)
@@ -108,7 +108,7 @@ def test_register_targets_chosen_period_and_memo_and_iif():
         tid = "ten_" + secrets.token_hex(4)
         db.add(Tenant(id=tid, tenant_key=secrets.token_hex(8), name="PT",
                       contact_email=f"{tid}@e.com", active=True,
-                      product="array_operator"))
+                      product="array_operator", offtaker_payment_policy="offline"))
         db.flush()
         arr = Array(tenant_id=tid, name="Period Array", region="VT")
         db.add(arr)
@@ -192,7 +192,7 @@ def test_bill_bound_legacy_flat_rate_is_the_price():
         tid = "ten_" + secrets.token_hex(4)
         db.add(Tenant(id=tid, tenant_key=secrets.token_hex(8), name="FL",
                       contact_email=f"{tid}@e.com", active=True,
-                      product="array_operator"))
+                      product="array_operator", offtaker_payment_policy="offline"))
         db.flush()
         arr = Array(tenant_id=tid, name="Flat Rate Array", region="VT")
         db.add(arr)
@@ -242,7 +242,7 @@ def test_draft_not_recreated_after_period_sent(monkeypatch):
         tid = "ten_" + secrets.token_hex(4)
         db.add(Tenant(id=tid, tenant_key=secrets.token_hex(8), name="DG",
                       contact_email=f"{tid}@e.com", active=True,
-                      product="array_operator"))
+                      product="array_operator", offtaker_payment_policy="offline"))
         db.flush()
         arr = Array(tenant_id=tid, name="Draft Guard Array", region="VT")
         db.add(arr)
