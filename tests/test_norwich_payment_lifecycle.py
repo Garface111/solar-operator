@@ -306,3 +306,51 @@ def test_invoice_balance_refund_is_not_new_debt_and_net_is_unknown(book):
         assert value["collectible_cents"] == value["outstanding_cents"] == 0
         assert value["after_platform_fee_cents"] == 5950
         assert value["actual_net_cents"] is None
+
+
+def test_concurrent_refresh_mints_only_one_new_session(book):
+    import threading
+    sessions = {}
+    calls = []
+    guard = threading.Lock()
+    def provider(**kw):
+        with guard:
+            calls.append(kw)
+            sid = "cs_refresh_" + str(len(calls))
+            sessions[sid] = dict(id=sid, url="https://mock/"+sid,
+                payment_intent=None, status="open", payment_status="unpaid")
+            return sessions[sid]
+    with patch.object(pay.stripe.checkout.Session, "create", side_effect=provider):
+        original = create(book)
+    with SessionLocal() as db:
+        row=db.get(OfftakerPayment,original["payment_id"])
+        sid=row.stripe_checkout_session_id
+        sessions[sid]["status"]="expired"
+        row.checkout_expires_at=datetime.utcnow()-timedelta(days=1)
+        token=row.pay_token
+        db.commit()
+    def resolve(_):
+        with SessionLocal() as db:
+            return pay.resolve_pay_link(db,token)
+    with patch.object(pay.stripe.checkout.Session, "create", side_effect=provider), patch.object(
+        pay.stripe.checkout.Session,"retrieve",side_effect=lambda sid, **kw:sessions[sid]):
+        with ThreadPoolExecutor(2) as pool:
+            results=list(pool.map(resolve,range(2)))
+    assert all(r["action"]=="redirect" for r in results)
+    assert results[0]["url"]==results[1]["url"]
+    assert len(calls)==2  # original plus exactly one replacement
+    assert calls[0]["idempotency_key"] != calls[1]["idempotency_key"]
+
+
+def test_partial_refund_before_paid_retains_receipt_obligation(book):
+    pid,event=paid_row(book)
+    intent=dict(id=event["payment_intent"],amount=10000,currency="usd",
+        metadata={"kind":"offtaker_invoice","payment_id":str(pid)})
+    with patch.object(pay.stripe.PaymentIntent,"retrieve",return_value=intent), patch.object(
+        pay.stripe.checkout.Session,"retrieve",return_value=event):
+        with SessionLocal() as db:
+            pay.mark_payment_refunded(db,charge_dict=dict(payment_intent=event["payment_intent"],
+                amount_refunded=4000,_stripe_account=event["_stripe_account"]))
+            result=pay.mark_payment_paid(db,session_dict=event)
+            assert result["notify"]["payment_id"]==pid
+            assert db.get(OfftakerPayment,pid).refunded_cents==4000

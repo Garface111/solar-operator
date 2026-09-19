@@ -776,7 +776,7 @@ def mark_payment_paid(db, *, session_dict: dict) -> dict:
     if row.status in ("refunded", "superseded"):
         return {"ok": True, "duplicate": True, "unchanged": row.status, "payment_id": row.id,
                 "tenant": row.tenant_id}
-    if row.status == "paid":
+    if row.status == "paid" and row.receipt_payload:
         return {"ok": True, "duplicate": True, "payment_id": row.id,
                 "tenant": row.tenant_id, "notify": row.receipt_payload}
 
