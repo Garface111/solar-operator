@@ -1992,6 +1992,13 @@ class OfftakerPayment(Base):
     # account for DIRECT charges; NULL = the platform (legacy destination
     # charges). Every later Stripe call about this row must address it.
     stripe_account_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    active_key: Mapped[str | None] = mapped_column(String(100), nullable=True, unique=True)
+    refunded_cents: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    fee_refunded_cents: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    checkout_generation: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    checkout_request: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    checkout_requested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    receipt_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # open | paid | expired | failed | refunded
     status: Mapped[str] = mapped_column(
         String(16), default="open", server_default="open", nullable=False, index=True)
@@ -2004,6 +2011,17 @@ class OfftakerPayment(Base):
     __table_args__ = (
         Index("ix_offtaker_pay_sub_period", "subscription_id", "period_key"),
     )
+
+
+class OfftakerRefund(Base):
+    """Observed refund transactions; cumulative charge snapshots control totals."""
+    __tablename__ = "offtaker_refunds"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    payment_id: Mapped[int] = mapped_column(Integer, ForeignKey("offtaker_payments.id"), index=True)
+    stripe_refund_id: Mapped[str] = mapped_column(String(100), unique=True)
+    amount_cents: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(24), default="succeeded")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 
 class OfftakerMonthlyReport(Base):

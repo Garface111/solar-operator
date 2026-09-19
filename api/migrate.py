@@ -1544,6 +1544,18 @@ def main():
                 print(f"  (index skipped: {_e})")
         # 2026-09 durable pay links: the invoice carries /pay/{token}; the click
         # mints or refreshes the Checkout Session (Stripe expires them at 24h).
+        for field, sql_type in (
+            ("active_key", "VARCHAR(100)"),
+            ("refunded_cents", "INTEGER DEFAULT 0"),
+            ("fee_refunded_cents", "INTEGER DEFAULT 0"),
+            ("checkout_generation", "INTEGER DEFAULT 0"),
+            ("checkout_request", "JSON"),
+            ("checkout_requested_at", "TIMESTAMP"),
+            ("receipt_payload", "JSON"),
+        ):
+            if not column_exists(conn, "offtaker_payments", field):
+                conn.execute(text(f"ALTER TABLE offtaker_payments ADD COLUMN {field} {sql_type}"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_offtaker_active_key ON offtaker_payments (active_key)"))
         if not column_exists(conn, "offtaker_payments", "pay_token"):
             conn.execute(text(
                 "ALTER TABLE offtaker_payments ADD COLUMN pay_token VARCHAR(48)"))

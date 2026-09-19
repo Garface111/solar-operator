@@ -102,10 +102,13 @@ def list_payment_rows(db, sub) -> list[dict]:
             "status": p.status,
             "status_label": _status_label(p.status),
             "amount_usd": _money(p.amount_cents),
-            "fee_usd": _money(p.fee_cents),
+            "fee_usd": _money(max(int(p.fee_cents or 0) - int(p.fee_refunded_cents or 0), 0)),
+            "gross_collected_usd": _money(p.amount_cents) if p.status in ("paid", "refunded") else None,
+            "refunded_usd": _money(p.refunded_cents or 0),
+            "bank_payout_verified": False,
             "collected_usd": (
-                _money(max(int(p.amount_cents or 0) - int(p.fee_cents or 0), 0))
-                if p.status == "paid" else None
+                _money(max(int(p.amount_cents or 0) - int(p.refunded_cents or 0) - int(p.fee_cents or 0) + int(p.fee_refunded_cents or 0), 0))
+                if p.status in ("paid", "refunded") else None
             ),
             "pay_url": p.pay_url if p.status == "open" else None,
             "paid_at": p.paid_at.isoformat() + "Z" if p.paid_at else None,
