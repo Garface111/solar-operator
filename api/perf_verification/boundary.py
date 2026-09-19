@@ -5,7 +5,8 @@ Priority per (array, day):
   2. inverter / extension / csv  → boundary "inverter"
   3. none                        → unavailable
 
-Estimates (bill_prorate, utility_meter) never count as measured for PI.
+Monthly bill estimates (bill_prorate) never count as measured for PI.
+utility_meter denotes real single-day utility captures, not bill prorations.
 """
 from __future__ import annotations
 

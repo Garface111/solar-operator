@@ -149,3 +149,20 @@ def test_utility_meter_lost_race_never_clobbers_measured():
             DailyGeneration.array_id == aid)).scalar_one()
         assert row.kwh == 900.0
         assert row.source == "solaredge"
+
+
+def test_utility_meter_lost_race_lower_reading_does_not_regress():
+    """Race and ordinary paths both preserve a fuller same-day meter reading."""
+    tid, aid, _ = _mk_fixture()
+    day = date(2026, 7, 7)
+    with SessionLocal() as db:
+        db.add(DailyGeneration(tenant_id=tid, array_id=aid, day=day, kwh=500,
+                               source="utility_meter"))
+        db.commit()
+    with SessionLocal() as db:
+        assert not _insert_daily_generation_race_safe(
+            db, tenant_id=tid, array_id=aid, day=day, kwh=100, source="utility_meter")
+        db.commit()
+        row = db.scalar(select(DailyGeneration).where(DailyGeneration.array_id == aid))
+        assert row.kwh == 500
+        assert row.source == "utility_meter"

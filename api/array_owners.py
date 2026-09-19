@@ -4796,13 +4796,15 @@ def _insert_daily_generation_race_safe(db, *, tenant_id: str, array_id: int,
                 return True
             return False
         if source == "utility_meter":
-            # Mirrors _persist_meter_accounts non-race branch.
-            if not generation_sources.is_measured(row.source):
-                row.kwh = kwh
-                row.source = source
-                row.uploaded_at = now()
-                return True
-            return False
+            # Utility captures are measured, too. Reuse the normal update
+            # policy after the concurrent insert: utility values may climb,
+            # positive vendor readings remain protected, stale zeros may fill.
+            from .production_fallback import apply_utility_day
+            action = apply_utility_day(
+                db, tenant_id=tenant_id, array_id=array_id, day=day,
+                utility_kwh=kwh, utility_source=source,
+            )
+            return action in ("updated", "gap_filled")
         if source == "bill_prorate":
             if row.source is None or row.source == "bill_prorate":
                 row.kwh = kwh

@@ -21,15 +21,16 @@ from api.writers import gmcs_writer
 
 
 @pytest.fixture()
-def db():
+def db(monkeypatch):
     engine = create_engine("sqlite://")
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine)
     s = Session()
     import api.reports.gmp_daily_read as rd
-    rd.SessionLocal = Session
+    monkeypatch.setattr(rd, "SessionLocal", Session)
     yield s
     s.close()
+    engine.dispose()
 
 
 def _seed(db):
