@@ -13,7 +13,7 @@ def _seed_mixed_array():
     key = "inv_test_" + secrets.token_hex(8)
     with SessionLocal() as db:
         db.add(Tenant(id=tid, name="Chint Test", contact_email=f"{key}@t.test",
-                      tenant_key=key, plan="standard", active=True))
+                      tenant_key=key, plan="standard", active=True, product="array_operator"))
         db.flush()
         arr = Array(tenant_id=tid, name="Londonderry", fuel_type="solar")
         db.add(arr); db.flush()

@@ -84,7 +84,8 @@ def test_healthy_units_pull_their_weight():
 def test_dead_unit_detected():
     units = _by_id(pa.analyze_cohort(_demo_cohort()))
     assert units["U4"]["status"] == "dead"
-    assert "zero output" in units["U4"]["diagnosis"].lower()
+    assert "no production for 4 days" in units["U4"]["diagnosis"].lower()
+    assert "while peers kept producing" in units["U4"]["diagnosis"].lower()
 
 
 def test_comm_gap_distinct_from_dead():

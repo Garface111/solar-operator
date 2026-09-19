@@ -341,10 +341,15 @@ def test_malformed_fields_degrade_per_field_never_500(client):
     r = client.post(CAPTURE, json=payload, headers=_auth(key))
     assert r.status_code == 200, r.text
     with SessionLocal() as db:
-        # Exactly one good daily row survived; the garbage was skipped, not stored.
+        # The valid historical site read survives, as does the separately valid
+        # 30 kWh inverter read rolled up to today's array total. Invalid cells
+        # contribute neither a new date nor additional kWh.
         rows = db.execute(select(DailyGeneration).where(
             DailyGeneration.tenant_id == tid)).scalars().all()
-        assert len(rows) == 1 and math.isclose(rows[0].kwh, 33.0)
+        from datetime import date
+        from api.models import local_today
+        by_day = {row.day: row.kwh for row in rows}
+        assert by_day == {date(2026, 6, 17): 33.0, local_today(): 30.0}
         # Blank-serial inverter never created; only the real one.
         invs = db.execute(select(Inverter).where(
             Inverter.tenant_id == tid)).scalars().all()
@@ -456,3 +461,23 @@ def test_no_site_power_stamps_no_live_reading(client):
         d1 = db.execute(select(Inverter).where(
             Inverter.tenant_id == tid)).scalar_one()
         assert d1.last_power_w is None
+
+
+def test_rejected_historical_device_readings_are_not_rebalanced(client):
+    """A site total must not replace rejected device readings with estimates."""
+    tid,key=_mk_tenant()
+    payload={"provider":"fronius","sites":[{
+        "site_id":SID,"name":"Rejected history","peak_power_kw":50,
+        "daily":[{"date":"2026-06-17","kwh":300},{"date":"2026-06-18","kwh":300}],
+        "inverters":[
+            {"serial":"bad","nameplate_kw":7.6,"daily":[
+                {"date":"2026-06-17","kwh":36000},{"date":"2026-06-18","kwh":-9}]},
+            {"serial":"good","nameplate_kw":7.6,"daily":[
+                {"date":"2026-06-17","kwh":40},{"date":"2026-06-18","kwh":45}]}]}]}
+    response=client.post(CAPTURE,json=payload,headers=_auth(key))
+    assert response.status_code==200,response.text
+    with SessionLocal() as db:
+        invs={iv.serial:iv for iv in db.scalars(select(Inverter).where(Inverter.tenant_id==tid))}
+        assert db.scalars(select(InverterDaily).where(InverterDaily.inverter_id==invs["bad"].id)).all()==[]
+        good=db.scalars(select(InverterDaily).where(InverterDaily.inverter_id==invs["good"].id).order_by(InverterDaily.day)).all()
+        assert [row.kwh for row in good]==[40,45]

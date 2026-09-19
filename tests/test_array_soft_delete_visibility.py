@@ -257,8 +257,8 @@ def test_soft_deleted_orphan_account_not_unclassified(client):
     assert u_null_id not in uncl_ids, "fully-orphaned soft-deleted account leaked as a card"
     assert u_detached_id not in uncl_ids, "detached soft-deleted account leaked as a card"
 
-    # And a LIVE orphan (array_id None, not deleted) DOES still appear — the
-    # legitimate "needs attaching" case must keep working.
+    # Orphan floaters were retired in d0b204cbd (July 15): live orphans also
+    # stay off the canvas until attached, but their persisted identity survives.
     with SessionLocal() as db:
         u_live = UtilityAccount(
             tenant_id=tid, array_id=None, provider="gmp",
@@ -270,4 +270,6 @@ def test_soft_deleted_orphan_account_not_unclassified(client):
 
     resp2 = client.get("/v1/sandbox/canvas", headers={"Authorization": auth})
     uncl_ids2 = {a["id"] for a in resp2.json()["unclassified"]}
-    assert u_live_id in uncl_ids2, "live unattached account should still show as a card"
+    assert u_live_id not in uncl_ids2, "unattached accounts must not reappear as floating cards"
+    with SessionLocal() as db:
+        assert db.get(UtilityAccount, u_live_id).deleted_at is None

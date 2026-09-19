@@ -5265,6 +5265,7 @@ def _inverter_capture_for_tenant(tenant: Tenant, provider: str, body: "InverterC
             _np_sum = sum(float(c.nameplate_kw) for c in _site_invs if c.nameplate_kw)
 
             inv_persisted = 0
+            rejected_inverter_days = set()
             for ci in (site.inverters or []):
                 serial = str(ci.serial or "").strip()
                 if not serial:
@@ -5424,18 +5425,25 @@ def _inverter_capture_for_tenant(tenant: Tenant, provider: str, body: "InverterC
                     return kwh <= inv_ceiling
 
                 want: dict = {}
+                if (ci.energy_today_kwh is not None and
+                        (ci.energy_today_kwh < 0 or not _inv_plausible(float(ci.energy_today_kwh)))):
+                    rejected_inverter_days.add(today)
                 if (ci.energy_today_kwh is not None and ci.energy_today_kwh >= 0
                         and _inv_plausible(float(ci.energy_today_kwh))):
                     want[today] = float(ci.energy_today_kwh)
                 for pt in (ci.daily or []):
-                    if pt.kwh is None or pt.kwh < 0:
+                    if pt.kwh is None:
                         continue
                     try:
                         dd = date.fromisoformat(str(pt.date)[:10])
                     except (TypeError, ValueError):
                         continue
                     v = float(pt.kwh)
+                    if v < 0:
+                        rejected_inverter_days.add(dd)
+                        continue
                     if not _inv_plausible(v):
+                        rejected_inverter_days.add(dd)
                         log.warning(
                             "inverter-capture: dropping implausible per-inverter "
                             "daily kWh %.0f for inverter %s day %s (ceiling %.0f = "
@@ -5485,7 +5493,10 @@ def _inverter_capture_for_tenant(tenant: Tenant, provider: str, body: "InverterC
             if provider == "fronius" and want_arr and _db_invs:
                 _rebalance_fronius_inverter_dailies(
                     db, tenant_id=tenant.id, array_id=arr.id,
-                    site_days=want_arr, inv_rows=_db_invs,
+                    # A rejected reading must remain absent. Rebalancing this
+                    # day would manufacture a replacement and alter valid peers.
+                    site_days={d: k for d, k in want_arr.items() if d not in rejected_inverter_days},
+                    inv_rows=_db_invs,
                 )
 
             # ── Inverse rollup: InverterDaily history → array DailyGeneration ──
