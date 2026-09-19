@@ -139,24 +139,81 @@ def _period_figures(sub, period_label: str) -> MonthTrueup:
         # only when it is NOT a budget override of a different figure.
         if ci.get("budget_override") and budget is not None:
             # amount_owed is the budget; actual missing — treat as 0 actual
-            actual = 0.0
             row.reason = "actual credit unavailable"
+            return row
         else:
             actual = float(ci["amount_owed"])
     else:
         row.reason = "no amount for period"
         return row
 
-    if budget is not None:
-        budgeted = float(budget)
-    else:
-        # Without a fixed budget, "true-up" is a no-op (already billed actual).
-        budgeted = actual
-
-    row.budgeted_usd = round(budgeted, 2)
+    # The accounting basis comes from issued history, never today's budget setting.
+    row.budgeted_usd = 0.0
     row.actual_usd = round(actual, 2)
     row.included = True
     return row
+
+
+def _issued_budgets(sub, start: date, end: date) -> dict[str, int]:
+    """Billed-basis reconciliation. Unpaid invoices remain outstanding.
+
+    Pre-ledger payment records are explicit legacy evidence, including unpaid
+    issued obligations. Never infer twelve invoices from the current budget.
+    A legacy row cannot prove past credit use, so no credit is invented.
+    """
+    from sqlalchemy import select
+    from sqlalchemy.orm import object_session
+    from ..db import SessionLocal
+    from ..models import OfftakerInvoice, OfftakerPayment
+    if not getattr(sub, "id", None) or not getattr(sub, "tenant_id", None):
+        raise ValueError("Issued invoice history is required for annual true-up.")
+    owned = object_session(sub) is None
+    db = object_session(sub) or SessionLocal()
+    try:
+        invoices = db.execute(select(OfftakerInvoice).where(
+            OfftakerInvoice.tenant_id == sub.tenant_id,
+            OfftakerInvoice.subscription_id == sub.id)).scalars().all()
+        totals = {}
+        covered = set()
+        for inv in invoices:
+            if str(inv.period_key).startswith("trueup:"):
+                continue
+            pe = inv.period_end
+            if pe is None or not start <= pe <= end:
+                continue
+            if inv.period_start is not None and inv.period_start < start:
+                raise ValueError("Invoice spans the true-up boundary; reconcile its allocation before settlement.")
+            if inv.status in ("sending", "uncertain"):
+                raise ValueError("Uncertain invoice delivery must be reconciled before true-up.")
+            if inv.status != "accepted":
+                continue
+            month = pe.strftime("%Y-%m")
+            covered.add(str(inv.period_key))
+            covered.add(pe.isoformat())
+            totals[month] = totals.get(month, 0) + inv.amount_cents + (inv.credit_applied_cents or 0)
+        legacy = db.execute(select(OfftakerPayment).where(
+            OfftakerPayment.tenant_id == sub.tenant_id,
+            OfftakerPayment.subscription_id == sub.id)).scalars().all()
+        seen = set()
+        for pay in legacy:
+            key = str(pay.period_key or "")
+            if key in covered or key[:7] in covered or key.startswith("trueup:"):
+                continue
+            try:
+                month = key[:7]
+                pd = date.fromisoformat(month + "-01")
+            except ValueError:
+                continue
+            if not start <= pd <= end:
+                continue
+            if key in seen:
+                raise ValueError("Ambiguous legacy invoice revisions require reconciliation before true-up.")
+            seen.add(key)
+            totals[month] = totals.get(month, 0) + pay.amount_cents
+        return totals
+    finally:
+        if owned:
+            db.close()
 
 
 def compute_annual_trueup(sub, *, as_of: Optional[date] = None) -> TrueupSettlement:
@@ -198,12 +255,19 @@ def compute_annual_trueup(sub, *, as_of: Optional[date] = None) -> TrueupSettlem
         except Exception:
             pass
 
+    try:
+        issued = _issued_budgets(sub, start, end)
+    except (ValueError, RuntimeError) as exc:
+        settlement.error = str(exc)
+        return settlement
+
     months: list[MonthTrueup] = []
     total_b = 0.0
     total_a = 0.0
     n = 0
     for lab in labels:
         row = _period_figures(sub, lab)
+        row.budgeted_usd = issued.get(lab, 0) / 100
         months.append(row)
         if row.included and row.budgeted_usd is not None and row.actual_usd is not None:
             total_b += row.budgeted_usd
@@ -214,9 +278,9 @@ def compute_annual_trueup(sub, *, as_of: Optional[date] = None) -> TrueupSettlem
     settlement.total_budgeted = round(total_b, 2)
     settlement.total_actual = round(total_a, 2)
     settlement.months_included = n
-    if n == 0:
+    if n != len(labels):
         settlement.error = (
-            "No billable months in the true-up window — wait until utility "
+            "Incomplete actual-value evidence in the true-up window — wait until utility "
             "bills cover the year, then re-run."
         )
         return settlement
@@ -297,17 +361,17 @@ def build_trueup_match(sub, settlement: TrueupSettlement, *, operator: str = "Ar
     computed["solar_credit_value"] = settlement.total_actual
     if settlement.credit_usd > 0:
         computed["trueup_note"] = (
-            f"You overpaid ${settlement.credit_usd:,.2f} vs actual solar value "
-            f"this year. That credit will apply to your next invoice(s)."
+            f"Issued budget invoices exceeded actual solar value by ${settlement.credit_usd:,.2f} "
+            f"this year. Existing unpaid invoices remain due; the credit adjustment will apply to your next invoice(s)."
         )
     elif settlement.charge_usd > 0:
         computed["trueup_note"] = (
-            f"Actual solar value exceeded budgeted payments by "
+            f"Actual solar value exceeded issued budget invoices by "
             f"${settlement.charge_usd:,.2f}. This invoice settles the difference."
         )
     else:
         computed["trueup_note"] = (
-            "Budgeted payments matched actual solar value for the year — "
+            "Issued budget invoices matched actual solar value for the year — "
             "nothing further is due."
         )
 

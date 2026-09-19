@@ -313,9 +313,22 @@ def run_new_bill_reviews(*, dry_run: bool = False, to_override: str | None = Non
             tenant = db.get(Tenant, sub.tenant_id) if sub else None
             if sub is None or tenant is None:
                 continue
+            if getattr(tenant, "sending_paused", False):
+                continue
+            if (getattr(sub, "delivery_mode", None) or "approval") != "approval":
+                continue
             _kwh, _ps, _pe, label = _utility_bill_period_kwh(db, sub.utility_account_id)
             if not label:
                 continue  # no settled bill covers a period yet → nothing to review
+            from ..models import OfftakerInvoice
+            issued = db.execute(select(OfftakerInvoice).where(
+                OfftakerInvoice.tenant_id == tenant.id,
+                OfftakerInvoice.subscription_id == sub.id,
+                OfftakerInvoice.period_key == label,
+                OfftakerInvoice.status.in_(["accepted", "sending", "uncertain"]),
+            )).scalars().first()
+            if issued or str(sub.last_sent_period_end or "")[:7] == label:
+                continue
             already = (sub.review_emailed_period or "").strip()
             if already == label and not to_override:
                 continue  # already prompted for this exact bill period
