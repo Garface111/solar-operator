@@ -2791,3 +2791,45 @@ class SessionPing(Base):
         UniqueConstraint("tenant_id", "minute_bucket", name="uq_session_ping_tenant_minute"),
         Index("ix_session_ping_tenant_day", "tenant_id", "day"),
     )
+
+
+class OfftakerInvoice(Base):
+    """Immutable issued obligation; acceptance survives caller transaction failure."""
+    __tablename__ = "offtaker_invoices"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    subscription_id: Mapped[int] = mapped_column(Integer, ForeignKey("billing_report_subscriptions.id"), index=True)
+    period_key: Mapped[str] = mapped_column(String(80))
+    period_start: Mapped[date | None] = mapped_column(Date, nullable=True)
+    period_end: Mapped[date | None] = mapped_column(Date, nullable=True)
+    invoice_number: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    amount_cents: Mapped[int] = mapped_column(Integer, default=0)
+    credit_applied_cents: Mapped[int] = mapped_column(Integer, default=0)
+    customer_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
+    snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(20), default="prepared", index=True)
+    payment_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("offtaker_payments.id"), nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+    __table_args__ = (UniqueConstraint("tenant_id", "subscription_id", "period_key", name="uq_offtaker_invoice_period"),)
+
+
+class BillingEmailDispatch(Base):
+    """Permanent delivery deduplication and frozen payload; ambiguous sends are held."""
+    __tablename__ = "billing_email_dispatches"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    key: Mapped[str] = mapped_column(String(220))
+    kind: Mapped[str] = mapped_column(String(40), default="invoice")
+    email: Mapped[dict] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(20), default="prepared", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    retry_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    resend_email_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+    __table_args__ = (UniqueConstraint("tenant_id", "key", name="uq_billing_dispatch_key"),)

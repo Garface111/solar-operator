@@ -31,6 +31,8 @@ EXTENSION_INSTALL_URL = os.getenv(
 )
 
 
+_send_outcome: ContextVar[str] = ContextVar("send_outcome", default="not_sent")
+
 _resend_receipt: ContextVar[str | None] = ContextVar("resend_receipt", default=None)
 
 
@@ -51,7 +53,7 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
                      reply_to: str | None = None,
                      headers: dict | None = None,
                      product: str = "nepool",
-                     log_failures: bool = True) -> bool:
+                     log_failures: bool = True, idempotency_key: str | None = None) -> bool:
     """Returns True on success, False otherwise. Uses the official Resend
     SDK so we play nice with their Cloudflare bot rules.
 
@@ -67,6 +69,7 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
     # Reset so a prior success never leaks into a later fail/dry-run caller.
     _send_via_resend._last_id = None
     _resend_receipt.set(None)
+    _send_outcome.set("not_sent")
     # ── Non-prod safety valve (staging/preview) ───────────────────────────
     # The backend infers "prod" from Railway env vars, which a staging deploy
     # also has — so the code cannot tell staging from prod on its own. These
@@ -133,12 +136,15 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
         params["attachments"] = attachments
 
     try:
-        result = resend.Emails.send(params)
+        _send_outcome.set("unknown")
+        result = (resend.Emails.send(params, {"idempotency_key": idempotency_key})
+                  if idempotency_key else resend.Emails.send(params))
         # result is a dict like {"id": "xxx"}
         if result and result.get("id"):
             _send_via_resend._last_error = None
             _send_via_resend._last_id = result.get("id")
             _resend_receipt.set(result.get("id"))
+            _send_outcome.set("accepted")
             return True
         (logger.error if log_failures else logger.warning)(
             "Resend returned unexpected response: %s", result)
@@ -148,6 +154,9 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
         (logger.error if log_failures else logger.warning)(
             "Resend send failed: %s: %s", type(e).__name__, e)
         _send_via_resend._last_error = f"{type(e).__name__}: {e}"
+        status = getattr(e, "status_code", None)
+        if isinstance(status, int) and 400 <= status < 500 and status != 409:
+            _send_outcome.set("not_sent")
         return False
 
 
@@ -181,7 +190,7 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
                      reply_to: str | None = None,
                      headers: dict | None = None,
                      product: str = "nepool",
-                     log_failures: bool = True) -> bool:
+                     log_failures: bool = True, idempotency_key: str | None = None) -> bool:
     """Pre-flight, send, then archive + monitor.
 
     Archiving can never affect the send. The pre-flight CAN stop one — but only
@@ -190,6 +199,7 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
     an email. See email_archive.domain_accepts_mail.
     """
     _resend_receipt.set(None)
+    _send_outcome.set("not_sent")
     try:
         import sys as _sys0
         from . import email_archive as _pf
@@ -238,8 +248,10 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
         to=to, subject=subject, html=html, text=text, attachments=attachments,
         cc=cc, bcc=bcc, from_addr=from_addr, reply_to=reply_to, headers=headers,
         product=product, log_failures=log_failures,
+        **({"idempotency_key": idempotency_key} if idempotency_key else {}),
     )
     receipt = _resend_receipt.get()
+    outcome = _send_outcome.get()
     try:
         import sys as _sys
         from . import email_archive as _arch
@@ -264,6 +276,7 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
         # Archive monitoring may itself send an alert on this same call stack.
         # Restore the original invoice receipt after that nested send.
         _resend_receipt.set(receipt)
+        _send_outcome.set(outcome)
     return ok
 
 
