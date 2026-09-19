@@ -173,7 +173,11 @@ def test_resolver_truly_banked_falls_back_to_reference():
 def _seed_array_with_daily(db, tid, rows):
     """rows: [(day:int, source, kwh)] in 2026-05. Returns array_id."""
     a = Array(tenant_id=tid, name="Prorate Arr", region="VT"); db.add(a); db.flush()
-    for d, src, k in rows:
+    by_day = {d: (src, k) for d, src, k in rows}
+    # Explicit measured-zero days complete the month without changing the
+    # source-weighted totals this provenance test is intended to compare.
+    for d in range(1, 32):
+        src, k = by_day.get(d, ("csv", 0.0))
         db.add(DailyGeneration(tenant_id=tid, array_id=a.id, day=date(2026, 5, d),
                                kwh=k, source=src))
     db.flush()
@@ -266,7 +270,7 @@ _VEC_CASES = [
 def test_vec_manual_rate_path(label, pct, rate, tdefault, disc, billable,
                               amount, rate_source):
     with SessionLocal() as db:
-        tid, aid, acct_id = _seed_vec(db, gen_days=10, daily_kwh=100.0,
+        tid, aid, acct_id = _seed_vec(db, gen_days=31, daily_kwh=1000.0 / 31,
                                       default_net_rate=tdefault)
         db.commit()
     sub = BillingReportSubscription(
@@ -341,9 +345,11 @@ def _seed_multi_array(db, allocations):
     for kwh, pct in allocations:
         arr = Array(tenant_id=tid, name=f"MA {secrets.token_hex(2)}", region="VT")
         db.add(arr); db.flush()
-        # One metered day carrying the whole month's kWh (simplest exact fixture).
-        db.add(DailyGeneration(tenant_id=tid, array_id=arr.id, day=date(2026, 5, 15),
-                               kwh=kwh, source="csv"))
+        # Complete May coverage; the explicit daily amounts sum to the
+        # independently specified monthly generation used by the assertions.
+        for day in range(1, 32):
+            db.add(DailyGeneration(tenant_id=tid, array_id=arr.id,
+                day=date(2026, 5, day), kwh=kwh / 31, source="csv"))
         aids.append(arr.id)
         raw_alloc.append({"array_id": arr.id, "allocation_pct": pct})
     db.flush()

@@ -575,7 +575,10 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
         for sid in candidates:
             sub = db.get(BillingReportSubscription, sid)
             tenant = db.get(Tenant, sub.tenant_id) if sub else None
-            if sub is None or tenant is None or getattr(tenant, "sending_paused", False):
+            if sub is None or tenant is None:
+                continue
+            if getattr(tenant, "sending_paused", False):
+                skipped.append(sid)
                 continue
             if trueup_only:
                 work.append((sid, None))

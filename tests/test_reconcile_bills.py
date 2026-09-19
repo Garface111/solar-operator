@@ -31,9 +31,9 @@ def _seed():
         a3 = Array(tenant_id=tid, name="Stratton Ridge", region="VT")
         db.add_all([a1, a2, a3]); db.flush()
         for a in (a1, a2, a3):
-            for d in range(1, 5):
+            for d in range(1, 31):
                 db.add(DailyGeneration(tenant_id=tid, array_id=a.id, day=date(2026, 6, d),
-                                       kwh=250.0, source="csv"))   # 1000 kWh each, June
+                                       kwh=1000.0 / 30, source="csv"))   # 1000 kWh each, June
         # GMP accounts + bills for A1 (match) and A2 (mismatch).
         acc1 = UtilityAccount(tenant_id=tid, provider="gmp", account_number="111", array_id=a1.id)
         acc2 = UtilityAccount(tenant_id=tid, provider="gmp", account_number="222", array_id=a2.id)
