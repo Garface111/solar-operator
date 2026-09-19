@@ -492,7 +492,20 @@ def _mint_checkout_session(*, tenant, row, customer_email: Optional[str],
             # required. Never risk replay after the provider forgets the key.
             if (datetime.utcnow() - row.checkout_requested_at).total_seconds() >= 23 * 3600:
                 raise ValueError("Uncertain Checkout creation requires reconciliation")
-            session = stripe.checkout.Session.create(**create_kwargs)
+            try:
+                session = stripe.checkout.Session.create(**create_kwargs)
+            except stripe.error.InvalidRequestError as exc:
+                if create_kwargs.get("payment_method_types") and getattr(exc, "param", None) == "payment_method_types":
+                    # Validation rejection proves no Session was created.
+                    # Freeze a distinct request/key before the safe fallback.
+                    fallback = dict(create_kwargs)
+                    fallback.pop("payment_method_types")
+                    fallback["idempotency_key"] += ":automatic"
+                    row.checkout_request = fallback
+                    db.commit()
+                    return _mint_checkout_session(tenant=tenant, row=row,
+                        customer_email=customer_email, period_label=period_label)
+                raise
     else:
         create_kwargs["idempotency_key"] = f"offtaker:{row.id}:checkout:{int(getattr(row, 'checkout_generation', 0) or 0)}"
         session = stripe.checkout.Session.create(**create_kwargs)
@@ -945,7 +958,8 @@ def _row_for_session(db, session_dict: dict):
         OfftakerPayment.stripe_checkout_session_id == sess_id)).scalars().first()
     if row is not None:
         _lock_payment(db, row)
-        if session_dict.get("_stripe_account") != row.stripe_account_id:
+        if (session_dict.get("_stripe_account") != row.stripe_account_id
+                or row.stripe_checkout_session_id != sess_id):
             return None
     return row
 
@@ -1204,3 +1218,51 @@ def sync_connect_from_account_event(db, account: dict) -> dict:
         "charges_enabled": enabled,
         "changed": old != enabled,
     }
+
+
+def record_offline_payment(db, *, tenant_id, invoice_id, amount_cents, request_key,
+                           actor, received_on, note, method="check"):
+    """Record a tenant-authorized receipt without risking parallel online collection."""
+    from datetime import date
+    from sqlalchemy import func
+    from ..models import OfftakerInvoice, OfftakerSettlement, OfftakerPayment
+    if type(amount_cents) is not int or amount_cents <= 0:
+        raise ValueError("Receipt amount must be positive integer cents")
+    if not request_key or len(request_key) > 120 or not actor or not str(note).strip():
+        raise ValueError("Request key, actor, and settlement evidence are required")
+    if not isinstance(received_on, date) or received_on > date.today():
+        raise ValueError("Receipt date must not be in the future")
+    if method not in ("check", "cash", "bank_transfer"):
+        raise ValueError("Unsupported offline receipt method")
+    claimed = db.execute(update(OfftakerInvoice).where(
+        OfftakerInvoice.id == invoice_id, OfftakerInvoice.tenant_id == tenant_id
+    ).values(id=OfftakerInvoice.id).execution_options(synchronize_session=False)).rowcount
+    if not claimed:
+        raise ValueError("Invoice not found")
+    invoice = db.get(OfftakerInvoice, invoice_id)
+    db.refresh(invoice)
+    existing = db.scalar(select(OfftakerSettlement).where(
+        OfftakerSettlement.tenant_id == tenant_id, OfftakerSettlement.request_key == request_key))
+    if existing:
+        if (existing.invoice_id, existing.amount_cents, existing.received_on, existing.method,
+            existing.actor, existing.note) != (invoice_id, amount_cents, received_on, method, actor, note):
+            raise ValueError("Receipt request key conflicts with an existing receipt")
+        return {"ok": True, "duplicate": True, "settlement_id": existing.id}
+    if invoice.status != "accepted":
+        raise ValueError("Only issued invoices can receive offline payments")
+    paid = db.scalar(select(func.coalesce(func.sum(OfftakerSettlement.amount_cents), 0)).where(
+        OfftakerSettlement.invoice_id == invoice_id)) or 0
+    if paid + amount_cents > invoice.amount_cents:
+        raise ValueError("Receipt exceeds invoice balance")
+    if invoice.payment_id:
+        online = db.get(OfftakerPayment, invoice.payment_id)
+        if online and online.status != "superseded":
+            _retire_payment(db, online)
+    receipt = OfftakerSettlement(tenant_id=tenant_id, invoice_id=invoice_id,
+        subscription_id=invoice.subscription_id, request_key=request_key,
+        amount_cents=amount_cents, actor=actor, received_on=received_on,
+        note=note, method=method)
+    db.add(receipt)
+    db.commit()
+    return {"ok": True, "settlement_id": receipt.id, "collected_cents": paid + amount_cents,
+            "outstanding_cents": invoice.amount_cents - paid - amount_cents}

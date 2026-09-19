@@ -245,6 +245,7 @@ def test_mark_payment_paid_idempotent(monkeypatch):
         "payment_status": "paid",
         "payment_intent": "pi_paid_1",
         "amount_total": 10_000,
+        "currency": "usd",
         "metadata": {
             "kind": "offtaker_invoice",
             "payment_id": str(pid),
@@ -429,6 +430,8 @@ def test_send_payment_received_emails_calls_resend():
     # at call time, so patch the notify module attribute.
     with patch("api.notify._send_via_resend", side_effect=fake_send):
         res = pay.send_payment_received_emails({
+            "tenant_id": _tenant().id,
+            "payment_id": 987654,
             "offtaker_email": "off@example.com",
             "offtaker_name": "Town of Test",
             "owner_email": "owner@example.com",

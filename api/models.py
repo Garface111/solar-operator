@@ -2851,3 +2851,20 @@ class BillingEmailDispatch(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
     __table_args__ = (UniqueConstraint("tenant_id", "key", name="uq_billing_dispatch_key"),)
+
+
+class OfftakerSettlement(Base):
+    """Audited, immutable offline receipts against an issued obligation."""
+    __tablename__ = "offtaker_settlements"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    invoice_id: Mapped[int] = mapped_column(Integer, ForeignKey("offtaker_invoices.id"), index=True)
+    subscription_id: Mapped[int] = mapped_column(Integer, ForeignKey("billing_report_subscriptions.id"), index=True)
+    request_key: Mapped[str] = mapped_column(String(120))
+    amount_cents: Mapped[int] = mapped_column(Integer)
+    received_on: Mapped[date] = mapped_column(Date)
+    actor: Mapped[str] = mapped_column(String(200))
+    method: Mapped[str] = mapped_column(String(24))
+    note: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    __table_args__ = (UniqueConstraint("tenant_id", "request_key", name="uq_offtaker_settlement_request"),)

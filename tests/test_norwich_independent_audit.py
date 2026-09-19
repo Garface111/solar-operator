@@ -58,7 +58,7 @@ def test_stale_paid_checkout_is_reconciled_before_replacement(monkeypatch):
     with SessionLocal() as db:
         db.get(OfftakerPayment,res["payment_id"]).checkout_expires_at=datetime.utcnow()-timedelta(days=1)
         db.commit()
-    session={"id":"cs_test_1", "status":"complete", "payment_status":"paid", "metadata":{"kind":"offtaker_invoice","payment_id":str(res["payment_id"])}}
+    session={"id":"cs_test_1", "status":"complete", "payment_status":"paid", "amount_total":10000,"currency":"usd", "metadata":{"kind":"offtaker_invoice","payment_id":str(res["payment_id"])}}
     with patch.object(pay.stripe.checkout.Session,"retrieve",return_value=session), patch.object(pay.stripe.checkout.Session,"expire",side_effect=RuntimeError("already complete")), patch.object(pay.stripe.checkout.Session,"create",side_effect=_fake_create(calls)):
         with SessionLocal() as db:
             result=pay.resolve_pay_link(db,res["pay_url"].rsplit("/",1)[-1])

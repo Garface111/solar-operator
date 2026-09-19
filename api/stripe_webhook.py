@@ -765,7 +765,7 @@ async def stripe_webhook(request: Request, stripe_signature: str | None = Header
         result = handler(data_obj)
         with SessionLocal() as db:
             ev = db.get(StripeEvent, event_id)
-            if ev:
+            if ev and ev.status == "processing" and ev.processed_at == claimed_at:
                 ev.status = "processed"
                 ev.processed_at = now()
                 ev.tenant_id = result.get("tenant") or result.get("tenant_activated") or result.get("tenant_canceled")
@@ -775,7 +775,7 @@ async def stripe_webhook(request: Request, stripe_signature: str | None = Header
         logger.exception("Webhook handler failed for %s", event_type)
         with SessionLocal() as db:
             ev = db.get(StripeEvent, event_id)
-            if ev:
+            if ev and ev.status == "processing" and ev.processed_at == claimed_at:
                 ev.status = "error"
                 ev.note = f"{type(e).__name__}: {e}"[:500]
                 db.commit()

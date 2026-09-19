@@ -86,10 +86,11 @@ def _status_label(status: str) -> str:
 def list_payment_rows(db, sub) -> list[dict]:
     """Payment history for one offtaker, newest first — drives UI + ledger."""
     from sqlalchemy import select
-    from ..models import OfftakerPayment
+    from ..models import OfftakerPayment, OfftakerInvoice, OfftakerSettlement
     rows = db.execute(
         select(OfftakerPayment).where(
             OfftakerPayment.subscription_id == sub.id,
+            OfftakerPayment.status != "superseded",
         ).order_by(OfftakerPayment.id.desc())
     ).scalars().all()
     out = []
@@ -115,6 +116,28 @@ def list_payment_rows(db, sub) -> list[dict]:
             "created_at": p.created_at.isoformat() + "Z" if p.created_at else None,
             "customer_name": p.customer_name,
         })
+    # Issued invoices exist independently of Stripe, including offline policy.
+    from sqlalchemy import func
+    payment_ids = {p.id for p in rows}
+    invoices = db.scalars(select(OfftakerInvoice).where(
+        OfftakerInvoice.subscription_id == sub.id,
+        OfftakerInvoice.tenant_id == sub.tenant_id,
+        OfftakerInvoice.status == "accepted")).all()
+    for inv in invoices:
+        received = int(db.scalar(select(func.coalesce(func.sum(OfftakerSettlement.amount_cents), 0)).where(
+            OfftakerSettlement.invoice_id == inv.id)) or 0)
+        if inv.payment_id in payment_ids and not received:
+            continue
+        settled = received >= inv.amount_cents
+        out.append({"id": None, "invoice_id": inv.id, "period_key": inv.period_key,
+            "period_label": _period_label_from_payment(inv), "invoice_number": inv.invoice_number,
+            "status": "paid" if settled else "open",
+            "status_label": "Paid offline" if settled else ("Partially paid offline" if received else "Awaiting payment"),
+            "amount_usd": _money(inv.amount_cents), "fee_usd": 0,
+            "gross_collected_usd": _money(received), "refunded_usd": 0,
+            "collected_usd": _money(received), "bank_payout_verified": False,
+            "pay_url": None, "paid_at": None,
+            "created_at": inv.created_at.isoformat() + "Z", "customer_name": sub.customer_name})
     return out
 
 
@@ -217,7 +240,7 @@ def build_default_ledger(db, sub) -> tuple[bytes, dict]:
             "amount": p.get("amount_usd") if p.get("amount_usd") is not None else "",
             "status": p.get("status_label") or p.get("status") or "",
             "paid_date": paid_date if is_paid else "",
-            "collected": (p.get("collected_usd") if is_paid and p.get("collected_usd") is not None else ""),
+            "collected": (p.get("collected_usd") if p.get("collected_usd") is not None else ""),
             "fee": (p.get("fee_usd") if is_paid and p.get("fee_usd") is not None else ""),
             "invoice_number": p.get("invoice_number") or "",
         }
@@ -240,7 +263,7 @@ def build_default_ledger(db, sub) -> tuple[bytes, dict]:
         ws.cell(row=r, column=1, value="TOTAL collected").font = Font(bold=True)
         total_collected = sum(
             (p.get("collected_usd") or 0)
-            for p in payments if (p.get("status") or "").lower() == "paid"
+            for p in payments
         )
         total_inv = sum((p.get("amount_usd") or 0) for p in payments)
         ws.cell(row=r, column=3, value=round(total_inv, 2)).number_format = '"$"#,##0.00'
@@ -318,3 +341,34 @@ def sync_payment_into_ledger(db, payment) -> dict:
         except Exception:
             pass
         return {"ok": False, "error": str(e)[:200]}
+
+
+def invoice_balance(db, invoice) -> dict:
+    """Invoice balance is independent of fees and refunds do not reopen debt."""
+    from sqlalchemy import select, func
+    from ..models import OfftakerPayment, OfftakerSettlement
+    offline = int(db.scalar(select(func.coalesce(func.sum(OfftakerSettlement.amount_cents), 0)).where(
+        OfftakerSettlement.invoice_id == invoice.id,
+        OfftakerSettlement.tenant_id == invoice.tenant_id)) or 0)
+    payment = db.get(OfftakerPayment, invoice.payment_id) if invoice.payment_id else None
+    settled = bool(payment and payment.status in ("paid", "refunded"))
+    gross = (int(payment.amount_cents or 0) if settled else 0) + offline
+    refunded = int(payment.refunded_cents or 0) if settled else 0
+    fee = max(int(payment.fee_cents or 0) - int(payment.fee_refunded_cents or 0), 0) if settled else 0
+    return {"invoice_id": invoice.id, "subscription_id": invoice.subscription_id,
+        "invoice_number": invoice.invoice_number, "period_key": invoice.period_key,
+        "status": invoice.status, "amount_cents": invoice.amount_cents,
+        "gross_collected_cents": gross, "refunded_cents": refunded,
+        "fee_cents": fee, "net_collected_cents": max(gross - refunded - fee, 0),
+        "offline_collected_cents": offline,
+        "outstanding_cents": max(invoice.amount_cents - gross, 0),
+        "payment_status": payment.status if payment else None,
+        "bank_payout_verified": False}
+
+
+def list_invoice_balances(db, tenant_id) -> list[dict]:
+    from sqlalchemy import select
+    from ..models import OfftakerInvoice
+    return [invoice_balance(db, inv) for inv in db.scalars(select(OfftakerInvoice).where(
+        OfftakerInvoice.tenant_id == tenant_id, OfftakerInvoice.status == "accepted"
+    ).order_by(OfftakerInvoice.period_key.desc(), OfftakerInvoice.id.desc())).all()]
