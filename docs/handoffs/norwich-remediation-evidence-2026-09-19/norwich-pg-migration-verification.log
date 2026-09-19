@@ -1,0 +1,11 @@
+norwich_migration_20260919: tenant, paid invoice, and$12.34credit preserved; upgrade idempotent
+norwich_restore_20260919: tenant, paid invoice, and$12.34credit preserved; backup restore verified
+
+                Table "public.billing_email_rate_gates"
+ Column  |            Type             | Collation | Nullable | Default 
+---------+-----------------------------+-----------+----------+---------
+ id      | character varying(40)       |           | not null | 
+ next_at | timestamp without time zone |           | not null | 
+Indexes:
+    "billing_email_rate_gates_pkey" PRIMARY KEY, btree (id)
+

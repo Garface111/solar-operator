@@ -1,5 +1,7 @@
 # Norwich offtaker invoicing: independent readiness audit
 
+> Subsequent remediation: [current verification report](NORWICH_REMEDIATION_VERIFICATION_2026-09-19.md). The findings below preserve the original audit state.
+
 Date: 2026-09-19. Decision: **NO-GO for unattended invoicing of Norwich’s 300 offtakers.**
 
 Ordinary billing calculations and a synthetic 300-row import work under the tested conditions. The system still has demonstrated duplicate-send, historical-record, refund, partial-data, and reconciliation failures. The fixes on the audit branches reduce risk but do not make the entire invoicing lifecycle safe.

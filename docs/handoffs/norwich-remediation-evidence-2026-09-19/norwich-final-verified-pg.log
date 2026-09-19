@@ -1,0 +1,212 @@
+........................................................................ [ 97%]
+..                                                                       [100%]
+=============================== warnings summary ===============================
+tests/test_norwich_launch_gate.py: 95 warnings
+tests/test_norwich_300_dispatch.py: 3480 warnings
+tests/test_norwich_dispatch_recovery.py: 39 warnings
+tests/test_norwich_frozen_evidence.py: 31 warnings
+tests/test_norwich_payment_lifecycle.py: 230 warnings
+tests/test_norwich_data_guards.py: 27 warnings
+tests/test_norwich_reporting_recovery.py: 77 warnings
+tests/test_norwich_backlog.py: 101 warnings
+tests/test_norwich_payment_policy_routes.py: 3 warnings
+  /root/offtaker-audit-2026-09-19/api/models.py:71: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+tests/test_norwich_launch_gate.py::test_partial_refund_reduces_reported_collections
+  /root/offtaker-audit-2026-09-19/api/billing/invoice_ledger.py:298: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    sub.tracker_updated_at = datetime.utcnow()
+
+tests/test_norwich_launch_gate.py::test_overallocated_batch_does_not_partially_create_roster
+  /root/offtaker-audit-2026-09-19/api/app.py:559: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
+tests/test_norwich_launch_gate.py::test_overallocated_batch_does_not_partially_create_roster
+  /root/solar-operator/venv/lib/python3.12/site-packages/fastapi/applications.py:4495: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    return self.router.on_event(event_type)
+
+tests/test_norwich_launch_gate.py: 4 warnings
+tests/test_norwich_300_dispatch.py: 300 warnings
+tests/test_norwich_dispatch_recovery.py: 2 warnings
+tests/test_norwich_frozen_evidence.py: 3 warnings
+tests/test_norwich_data_guards.py: 2 warnings
+  /root/offtaker-audit-2026-09-19/api/billing/delivery.py:42: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    after = after or datetime.utcnow()
+
+tests/test_norwich_launch_gate.py: 6 warnings
+tests/test_norwich_300_dispatch.py: 900 warnings
+tests/test_norwich_dispatch_recovery.py: 3 warnings
+tests/test_norwich_frozen_evidence.py: 6 warnings
+tests/test_norwich_backlog.py: 6 warnings
+  /root/offtaker-audit-2026-09-19/api/email_copy_overrides.py:40: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+tests/test_norwich_launch_gate.py: 2 warnings
+tests/test_norwich_300_dispatch.py: 300 warnings
+tests/test_norwich_dispatch_recovery.py: 1 warning
+tests/test_norwich_frozen_evidence.py: 2 warnings
+tests/test_norwich_backlog.py: 2 warnings
+  /root/offtaker-audit-2026-09-19/api/billing/delivery.py:2340: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "prepared_at": datetime.utcnow().isoformat() + "Z",
+
+tests/test_norwich_launch_gate.py: 3 warnings
+tests/test_norwich_300_dispatch.py: 360 warnings
+tests/test_norwich_dispatch_recovery.py: 6 warnings
+tests/test_norwich_frozen_evidence.py: 2 warnings
+tests/test_norwich_payment_lifecycle.py: 6 warnings
+tests/test_norwich_reporting_recovery.py: 4 warnings
+tests/test_norwich_backlog.py: 3 warnings
+  /root/offtaker-audit-2026-09-19/api/billing/dispatch.py:55: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_norwich_launch_gate.py::test_concurrent_send_paths_only_send_once
+tests/test_norwich_launch_gate.py::test_concurrent_send_paths_only_send_once
+  /root/offtaker-audit-2026-09-19/api/billing/dispatch.py:37: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row = BillingEmailRateGate(id="resend-billing", next_at=datetime.utcnow())
+
+tests/test_norwich_launch_gate.py: 3 warnings
+tests/test_norwich_300_dispatch.py: 363 warnings
+tests/test_norwich_dispatch_recovery.py: 14 warnings
+tests/test_norwich_frozen_evidence.py: 2 warnings
+tests/test_norwich_payment_lifecycle.py: 3 warnings
+tests/test_norwich_reporting_recovery.py: 2 warnings
+tests/test_norwich_backlog.py: 3 warnings
+  /root/offtaker-audit-2026-09-19/api/billing/dispatch.py:44: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_norwich_launch_gate.py: 3 warnings
+tests/test_norwich_300_dispatch.py: 360 warnings
+tests/test_norwich_dispatch_recovery.py: 4 warnings
+tests/test_norwich_frozen_evidence.py: 2 warnings
+tests/test_norwich_payment_lifecycle.py: 3 warnings
+tests/test_norwich_reporting_recovery.py: 2 warnings
+tests/test_norwich_backlog.py: 3 warnings
+  /root/offtaker-audit-2026-09-19/api/billing/dispatch.py:76: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_norwich_launch_gate.py: 2 warnings
+tests/test_norwich_300_dispatch.py: 300 warnings
+tests/test_norwich_dispatch_recovery.py: 1 warning
+tests/test_norwich_frozen_evidence.py: 2 warnings
+tests/test_norwich_backlog.py: 2 warnings
+  /root/offtaker-audit-2026-09-19/api/billing/issuance.py:111: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    stamp = datetime.utcnow()
+
+tests/test_norwich_300_dispatch.py::test_300_dispatch_reject_retry_concurrent_replay
+tests/test_norwich_payment_policy_routes.py::test_policy_default_optin_audit_and_tenant_isolation
+tests/test_norwich_payment_policy_routes.py::test_offline_route_requires_policy_and_derives_identity
+  /root/offtaker-audit-2026-09-19/api/billing/routes.py:6607: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "from": previous, "to": body.policy, "at": datetime.utcnow().isoformat() + "Z",
+
+tests/test_norwich_300_dispatch.py: 30 warnings
+tests/test_norwich_dispatch_recovery.py: 1 warning
+tests/test_norwich_backlog.py: 1 warning
+  /root/offtaker-audit-2026-09-19/api/billing/dispatch.py:111: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.retry_at = None if ok or uncertain else datetime.utcnow() + timedelta(seconds=max(float(notify._send_failure.get().get("retry_after") or 0), min(86400, 60 * 2 ** (attempts - 1))))
+
+tests/test_norwich_300_dispatch.py::test_300_dispatch_reject_retry_concurrent_replay
+  /root/offtaker-audit-2026-09-19/tests/test_norwich_300_dispatch.py:109: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    BillingEmailDispatch.status == "failed").values(retry_at=datetime.utcnow()-timedelta(seconds=1)))
+
+tests/test_norwich_dispatch_recovery.py::test_real_sdk_rate_limit_is_retryable_and_obeys_provider_delay
+  /root/offtaker-audit-2026-09-19/tests/test_norwich_dispatch_recovery.py:82: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    assert row.status=="failed" and row.retry_at >= datetime.utcnow()+timedelta(seconds=170)
+
+tests/test_norwich_dispatch_recovery.py::test_real_sdk_rate_limit_is_retryable_and_obeys_provider_delay
+  /root/offtaker-audit-2026-09-19/tests/test_norwich_dispatch_recovery.py:83: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.retry_at=datetime.utcnow()-timedelta(seconds=1);db.commit()
+
+tests/test_norwich_dispatch_recovery.py::test_real_sdk_rate_limit_is_retryable_and_obeys_provider_delay
+  /root/offtaker-audit-2026-09-19/api/billing/dispatch.py:120: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_norwich_payment_lifecycle.py::test_concurrent_first_mints_have_one_collectible_session
+tests/test_norwich_payment_lifecycle.py::test_crash_after_provider_creation_replays_exact_request
+tests/test_norwich_payment_lifecycle.py::test_unknown_creation_beyond_provider_retention_is_held
+tests/test_norwich_payment_lifecycle.py::test_revised_amount_retires_old_token_only_after_proven_expiry
+tests/test_norwich_payment_lifecycle.py::test_revised_amount_retires_old_token_only_after_proven_expiry
+tests/test_norwich_payment_lifecycle.py::test_database_crash_after_checkout_creation_replays_same_key
+tests/test_norwich_payment_lifecycle.py::test_concurrent_refresh_mints_only_one_new_session
+tests/test_norwich_payment_lifecycle.py::test_concurrent_refresh_mints_only_one_new_session
+  /root/offtaker-audit-2026-09-19/api/billing/payments.py:477: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.checkout_requested_at = datetime.utcnow()
+
+tests/test_norwich_payment_lifecycle.py: 11 warnings
+  /root/offtaker-audit-2026-09-19/api/billing/payments.py:493: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    if (datetime.utcnow() - row.checkout_requested_at).total_seconds() >= 23 * 3600:
+
+tests/test_norwich_payment_lifecycle.py::test_concurrent_first_mints_have_one_collectible_session
+tests/test_norwich_payment_lifecycle.py::test_revised_amount_retires_old_token_only_after_proven_expiry
+tests/test_norwich_payment_lifecycle.py::test_revised_amount_retires_old_token_only_after_proven_expiry
+tests/test_norwich_payment_lifecycle.py::test_database_crash_after_checkout_creation_replays_same_key
+tests/test_norwich_payment_lifecycle.py::test_concurrent_refresh_mints_only_one_new_session
+  /root/offtaker-audit-2026-09-19/api/billing/payments.py:695: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    row.checkout_expires_at = datetime.utcfromtimestamp(minted["expires_at"])
+
+tests/test_norwich_payment_lifecycle.py::test_crash_after_provider_creation_replays_exact_request
+tests/test_norwich_payment_lifecycle.py::test_unknown_creation_beyond_provider_retention_is_held
+tests/test_norwich_payment_lifecycle.py::test_database_crash_after_checkout_creation_replays_same_key
+tests/test_norwich_payment_lifecycle.py::test_concurrent_refresh_mints_only_one_new_session
+tests/test_norwich_payment_lifecycle.py::test_concurrent_refresh_mints_only_one_new_session
+  /root/offtaker-audit-2026-09-19/api/billing/payments.py:888: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_norwich_payment_lifecycle.py::test_crash_after_provider_creation_replays_exact_request
+tests/test_norwich_payment_lifecycle.py::test_database_crash_after_checkout_creation_replays_same_key
+tests/test_norwich_payment_lifecycle.py::test_concurrent_refresh_mints_only_one_new_session
+tests/test_norwich_payment_lifecycle.py::test_concurrent_refresh_mints_only_one_new_session
+  /root/offtaker-audit-2026-09-19/api/billing/payments.py:948: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    row.checkout_expires_at = datetime.utcfromtimestamp(minted["expires_at"])
+
+tests/test_norwich_payment_lifecycle.py::test_unknown_creation_beyond_provider_retention_is_held
+  /root/offtaker-audit-2026-09-19/tests/test_norwich_payment_lifecycle.py:77: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.checkout_requested_at = datetime.utcnow() - timedelta(days=2)
+
+tests/test_norwich_payment_lifecycle.py::test_concurrent_paid_events_and_receipt_retries_deduplicate
+tests/test_norwich_payment_lifecycle.py::test_refunds_are_monotonic_deduplicated_and_reduce_net
+tests/test_norwich_payment_lifecycle.py::test_payment_receipt_provider_accept_then_process_crash_holds_replay
+tests/test_norwich_payment_lifecycle.py::test_application_fee_refund_requires_charge_ownership_and_is_monotonic
+tests/test_norwich_payment_lifecycle.py::test_invoice_balance_refund_is_not_new_debt_and_net_is_unknown
+tests/test_norwich_payment_lifecycle.py::test_partial_refund_before_paid_retains_receipt_obligation
+  /root/offtaker-audit-2026-09-19/api/billing/payments.py:794: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.paid_at = datetime.utcnow()
+
+tests/test_norwich_payment_lifecycle.py::test_webhook_concurrent_duplicate_is_retryable_until_handler_commits
+  /root/offtaker-audit-2026-09-19/api/stripe_webhook.py:770: DeprecationWarning: Deprecated. The public interface will be removed in a future version.
+    data_obj = raw_obj.to_dict() if hasattr(raw_obj, "to_dict") else dict(raw_obj)
+
+tests/test_norwich_payment_lifecycle.py::test_webhook_concurrent_duplicate_is_retryable_until_handler_commits
+  /root/offtaker-audit-2026-09-19/api/stripe_webhook.py:771: DeprecationWarning: Deprecated. The public interface will be removed in a future version.
+    data_obj["_stripe_account"] = (event.to_dict() if hasattr(event, "to_dict") else dict(event)).get("account")
+
+tests/test_norwich_payment_lifecycle.py::test_concurrent_refresh_mints_only_one_new_session
+  /root/offtaker-audit-2026-09-19/tests/test_norwich_payment_lifecycle.py:329: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.checkout_expires_at=datetime.utcnow()-timedelta(days=1)
+
+tests/test_norwich_reporting_recovery.py::test_monthly_send_uses_one_stable_dispatch_identity_and_frozen_workbook
+tests/test_norwich_reporting_recovery.py::test_monthly_send_uses_one_stable_dispatch_identity_and_frozen_workbook
+tests/test_norwich_reporting_recovery.py::test_concurrent_summary_calls_share_durable_claim
+tests/test_norwich_reporting_recovery.py::test_concurrent_summary_calls_share_durable_claim
+tests/test_norwich_reporting_recovery.py::test_summary_commit_failure_after_acceptance_never_resends
+tests/test_norwich_reporting_recovery.py::test_summary_commit_failure_after_acceptance_never_resends
+  /root/offtaker-audit-2026-09-19/api/billing/monthly_report.py:244: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    ws["A3"] = ("Generated " + datetime.utcnow().strftime("%Y-%m-%d") +
+
+tests/test_norwich_reporting_recovery.py::test_concurrent_summary_calls_share_durable_claim
+tests/test_norwich_reporting_recovery.py::test_summary_commit_failure_after_acceptance_never_resends
+tests/test_norwich_reporting_recovery.py::test_summary_commit_failure_after_acceptance_never_resends
+  /root/offtaker-audit-2026-09-19/api/billing/monthly_report.py:556: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.sent_at = datetime.utcnow()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+74 passed, 7176 warnings in 24.74s
