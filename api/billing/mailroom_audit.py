@@ -400,13 +400,76 @@ def _bounded_json(payload: dict) -> str:
     return txt
 
 
-def model_review(payload: dict, rule_findings: list[dict]) -> dict:
-    """Ask Claude. Returns {ok, verdict, summary, findings, model, provider} or
-    {ok: False, error} — never raises."""
+CLI_ADDENDUM = """
+
+=== HOW TO ANSWER HERE ===
+Put the complete audit JSON object — {"verdict", "summary", "findings"} exactly as
+described above — as the value of "content" (a JSON string), and leave
+"tool_calls" empty. Nothing else."""
+
+
+def _friendly_api_error(e: Exception) -> str:
+    """The reason a layer was skipped, in the operator's words."""
+    txt = ""
+    resp = getattr(e, "response", None)
+    try:
+        txt = (resp.text if resp is not None else "") or str(e)
+    except Exception:  # noqa: BLE001
+        txt = str(e)
+    low = txt.lower()
+    if "credit balance" in low:
+        return ("the Anthropic API key on the server has no credit left (top up under "
+                "Plans & Billing at console.anthropic.com)")
+    if "api key" in low and ("invalid" in low or "authentication" in low):
+        return "the Anthropic API key on the server was rejected"
+    if "rate limit" in low or "429" in low:
+        return "the Anthropic API rate limit was hit — try again in a minute"
+    if "busy" in low:
+        return "the Claude CLI is busy with another task — try again in a minute"
+    if "not enabled" in low:
+        return "the Claude CLI is not enabled on the server"
+    return str(e)[:200]
+
+
+def _review_via_api(system: str, user: str, model: Optional[str]) -> dict:
     from .repro import llm
-    model = os.getenv("MAILROOM_AUDIT_MODEL") or None
     if not llm.llm_available():
-        return {"ok": False, "error": "ANTHROPIC_API_KEY not set — model review skipped"}
+        raise RuntimeError("ANTHROPIC_API_KEY not set")
+    obj = llm.call_json(system=system, user_text=user, schema=FINDINGS_SCHEMA,
+                        max_tokens=4096, model=model)
+    return {"obj": obj, "model": model or llm.REPRO_LLM_MODEL, "provider": "anthropic"}
+
+
+def _review_via_cli(system: str, user: str) -> dict:
+    """Ford's Claude subscription through the Claude Code CLI — the same brain
+    the Energy Agent runs on (EA_CLAUDE_CLI=1). One call, no tools."""
+    from .. import claude_cli
+    if not claude_cli.enabled():
+        raise RuntimeError("claude-cli not enabled")
+    res = claude_cli.call(
+        [{"role": "system", "content": system + CLI_ADDENDUM},
+         {"role": "user", "content": user}],
+        [], max_tokens=4096)
+    msg = res.get("message") or {}
+    content = msg.get("content")
+    obj = content if isinstance(content, dict) else claude_cli._extract_json(str(content or ""))
+    if not isinstance(obj, dict) or "findings" not in obj:
+        raise RuntimeError("claude-cli reply was not the audit JSON")
+    return {"obj": obj, "model": ",".join(claude_cli._models()), "provider": "claude-cli"}
+
+
+def _review_order() -> list[str]:
+    primary = (os.getenv("ENERGY_AGENT_LLM_PRIMARY") or "").strip().lower()
+    if primary in ("claude-cli", "claude_cli", "cli", "subscription", "max"):
+        return ["cli", "api"]
+    return ["api", "cli"]
+
+
+def model_review(payload: dict, rule_findings: list[dict]) -> dict:
+    """Ask Claude — on the subscription (CLI) or the metered API, in the order
+    the Energy Agent uses. Returns {ok, verdict, summary, findings, model,
+    provider, seconds} or {ok: False, error} — never raises."""
+    model = os.getenv("MAILROOM_AUDIT_MODEL") or None
     user = (
         "MAIL ROOM DATA (JSON):\n" + _bounded_json(payload) +
         "\n\nRULE FINDINGS ALREADY RAISED (JSON):\n" +
@@ -414,12 +477,20 @@ def model_review(payload: dict, rule_findings: list[dict]) -> dict:
                     for f in rule_findings], default=str)
     )
     t0 = time.time()
-    try:
-        res = llm.call_json(system=SYSTEM_PROMPT, user_text=user, schema=FINDINGS_SCHEMA,
-                            max_tokens=4096, model=model)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("mailroom audit: model review failed: %s", e)
-        return {"ok": False, "error": str(e)[:300]}
+    errors: list[str] = []
+    got = None
+    for how in _review_order():
+        try:
+            got = _review_via_cli(SYSTEM_PROMPT, user) if how == "cli" else \
+                  _review_via_api(SYSTEM_PROMPT, user, model)
+            break
+        except Exception as e:  # noqa: BLE001
+            reason = _friendly_api_error(e)
+            logger.warning("mailroom audit: %s review failed: %s", how, reason)
+            errors.append(f"{'Claude CLI' if how == 'cli' else 'Anthropic API'}: {reason}")
+    if got is None:
+        return {"ok": False, "error": "; ".join(errors) or "no model available"}
+    res = got["obj"]
     findings = []
     for f in (res.get("findings") or []) if isinstance(res, dict) else []:
         if not isinstance(f, dict):
@@ -430,10 +501,11 @@ def model_review(payload: dict, rule_findings: list[dict]) -> dict:
                          "subscription_id": f.get("subscription_id"), "invoice_id": f.get("invoice_id"),
                          "customer_name": f.get("customer_name"), "action": f.get("action"),
                          "evidence": {}, "source": "model"})
-    return {"ok": True, "verdict": res.get("verdict") if isinstance(res, dict) else None,
+    verdict = res.get("verdict") if isinstance(res, dict) else None
+    return {"ok": True, "verdict": verdict if verdict in ("ready", "caution", "stop") else None,
             "summary": (res.get("summary") if isinstance(res, dict) else None),
-            "findings": findings, "model": model or llm.REPRO_LLM_MODEL,
-            "provider": "anthropic", "seconds": round(time.time() - t0, 1)}
+            "findings": findings, "model": got["model"], "provider": got["provider"],
+            "seconds": round(time.time() - t0, 1), "skipped": errors or None}
 
 
 # ── the run ────────────────────────────────────────────────────────────────
@@ -482,6 +554,7 @@ def execute_run(run_id: int, *, tenant_id: str) -> None:
             "by_severity": {s: sum(1 for f in findings if f.get("severity") == s) for s in SEVERITIES},
             "model_ok": bool(review.get("ok")),
             "model_error": review.get("error"),
+            "model_skipped": review.get("skipped"),
             "model_seconds": review.get("seconds"),
             "seconds": round(time.time() - t0, 1),
         }

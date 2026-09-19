@@ -332,3 +332,53 @@ def test_model_review_bounds_payload_and_parses(monkeypatch):
     assert res["ok"] and res["verdict"] == "ready" and res["findings"][0]["source"] == "model"
     assert captured["schema"] is mailroom_audit.FINDINGS_SCHEMA
     assert len(captured["user_text"]) <= mailroom_audit.MAX_PAYLOAD_CHARS + 5000
+
+
+# ─── model routing: subscription CLI first, API fallback, plain reasons ─────
+
+def test_model_review_uses_claude_cli_when_it_is_the_primary_brain(monkeypatch):
+    monkeypatch.setenv("ENERGY_AGENT_LLM_PRIMARY", "claude-cli")
+    monkeypatch.setenv("EA_CLAUDE_CLI", "1")
+    seen = {}
+
+    def fake_call(messages, tools, *, max_tokens=None):
+        seen["messages"] = messages
+        return {"message": {"role": "assistant",
+                            "content": '{"verdict":"caution","summary":"One thing.","findings":[{"severity":"medium","title":"Odd share","detail":"5% looks low","subscription_id":7,"invoice_id":null,"customer_name":"Sub 7","action":null}]}'},
+                "usage": {}, "provider": "claude-cli"}
+
+    with patch("api.claude_cli.call", side_effect=fake_call), \
+            patch("api.claude_cli._models", return_value=["claude-sonnet-5"]), \
+            patch("api.billing.repro.llm.call_json", side_effect=AssertionError("API must not be called")):
+        res = mailroom_audit.model_review(_payload(), [])
+    assert res["ok"] and res["provider"] == "claude-cli" and res["model"] == "claude-sonnet-5"
+    assert res["verdict"] == "caution" and res["findings"][0]["source"] == "model"
+    assert "HOW TO ANSWER HERE" in seen["messages"][0]["content"]
+
+
+def test_model_review_falls_back_to_api_and_names_the_reason(monkeypatch):
+    monkeypatch.setenv("ENERGY_AGENT_LLM_PRIMARY", "claude-cli")
+    monkeypatch.setenv("EA_CLAUDE_CLI", "1")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    with patch("api.claude_cli.call", side_effect=RuntimeError("claude-cli busy (one call at a time)")), \
+            patch("api.billing.repro.llm.call_json",
+                  return_value={"verdict": "ready", "summary": "Clean.", "findings": []}):
+        res = mailroom_audit.model_review(_payload(), [])
+    assert res["ok"] and res["provider"] == "anthropic"
+    assert res["skipped"] and "busy" in res["skipped"][0]
+
+
+def test_model_review_explains_an_empty_api_balance(monkeypatch):
+    monkeypatch.setenv("ENERGY_AGENT_LLM_PRIMARY", "grok")
+    monkeypatch.delenv("EA_CLAUDE_CLI", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    import httpx
+    req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    resp = httpx.Response(400, request=req,
+                          text='{"error":{"message":"Your credit balance is too low to access the Anthropic API."}}')
+    with patch("api.billing.repro.llm.call_json",
+               side_effect=httpx.HTTPStatusError("400", request=req, response=resp)):
+        res = mailroom_audit.model_review(_payload(), [])
+    assert res["ok"] is False
+    assert "no credit left" in res["error"] and "console.anthropic.com" in res["error"]
+    assert "not enabled" in res["error"]          # the CLI layer was tried and explained too
