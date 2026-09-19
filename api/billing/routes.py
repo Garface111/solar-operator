@@ -4126,6 +4126,25 @@ def subscription_bill_periods(sub_id: int,
         cadence = getattr(sub, "cadence", None) or "monthly"
         from .delivery import settled_periods_for_sub
         periods = settled_periods_for_sub(sub)
+        # The selector must not turn an explicit zero-excess bill into a
+        # billable month by falling back to gross generation.
+        from ..models import Bill
+        from .backlog import canonical_period
+        eligible = set()
+        bills = db.scalars(select(Bill).where(
+            Bill.tenant_id == t.id, Bill.account_id == sub.utility_account_id,
+            Bill.period_end.isnot(None))).all() if sub.utility_account_id else []
+        for bill in bills:
+            excess = bill.kwh_sent_to_grid
+            if excess is None and bill.kwh_generated is not None and bill.kwh_consumed is not None:
+                excess = bill.kwh_generated - bill.kwh_consumed
+            if excess is not None and excess > 0:
+                eligible.add(canonical_period(bill.period_end.date().isoformat(), cadence))
+        periods = [p for p in periods if p["label"] in eligible]
+        for p in periods:
+            p.pop("is_latest", None)
+        if periods:
+            periods[0]["is_latest"] = True
         return {"ok": True, "cadence": cadence, "periods": periods}
 
 
