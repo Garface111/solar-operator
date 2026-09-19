@@ -191,11 +191,15 @@ class TestPasswordLogin:
 class TestChangePassword:
     def test_change_with_correct_current(self, client):
         tid, auth = _make_tenant()
-        client.post(
+        first = client.post(
             "/v1/auth/set-password",
             json={"password": "InitialPass1"},
             headers={"Authorization": auth},
         )
+        assert first.status_code == 200, first.text
+        # Password writes revoke the old session; use the replacement token.
+        auth = f"Bearer {first.json()['session_token']}"
+
         resp = client.post(
             "/v1/auth/set-password",
             json={"password": "NewPassword2x", "current_password": "InitialPass1"},
@@ -212,11 +216,15 @@ class TestChangePassword:
 
     def test_change_with_wrong_current_rejected(self, client):
         _, auth = _make_tenant()
-        client.post(
+        first = client.post(
             "/v1/auth/set-password",
             json={"password": "InitialPass1"},
             headers={"Authorization": auth},
         )
+        assert first.status_code == 200, first.text
+        # Password writes revoke the old session; use the replacement token.
+        auth = f"Bearer {first.json()['session_token']}"
+
         resp = client.post(
             "/v1/auth/set-password",
             json={"password": "NewPassword2x", "current_password": "WrongCurrent1"},
@@ -226,11 +234,15 @@ class TestChangePassword:
 
     def test_change_without_current_when_required(self, client):
         _, auth = _make_tenant()
-        client.post(
+        first = client.post(
             "/v1/auth/set-password",
             json={"password": "InitialPass1"},
             headers={"Authorization": auth},
         )
+        assert first.status_code == 200, first.text
+        # Password writes revoke the old session; use the replacement token.
+        auth = f"Bearer {first.json()['session_token']}"
+
         # Omit current_password — should fail since a password is already set
         resp = client.post(
             "/v1/auth/set-password",
@@ -261,11 +273,15 @@ class TestHasPasswordFlag:
 
     def test_true_after_set(self, client):
         _, auth = _make_tenant()
-        client.post(
+        first = client.post(
             "/v1/auth/set-password",
             json={"password": "TestPassword1"},
             headers={"Authorization": auth},
         )
+        assert first.status_code == 200, first.text
+        # Password writes revoke the old session; use the replacement token.
+        auth = f"Bearer {first.json()['session_token']}"
+
         resp = client.get("/v1/account", headers={"Authorization": auth})
         assert resp.status_code == 200
         assert resp.json()["has_password"] is True
@@ -468,3 +484,20 @@ class TestMagicLinkProductScoping:
         assert sent is True
         assert "arrayoperator.com/accounts/?token=" in cap["html"]
 
+
+
+def test_password_changes_rotate_session_and_revoke_previous_clients(client):
+    _, original_auth = _make_tenant()
+    first = client.post("/v1/auth/set-password", json={"password": "InitialPass1"},
+                        headers={"Authorization": original_auth})
+    assert first.status_code == 200
+    current_auth = "Bearer " + first.json()["session_token"]
+    assert client.get("/v1/account", headers={"Authorization": original_auth}).status_code == 401
+    assert client.get("/v1/account", headers={"Authorization": current_auth}).status_code == 200
+    changed = client.post("/v1/auth/set-password",
+        json={"password": "NewPassword2x", "current_password": "InitialPass1"},
+        headers={"Authorization": current_auth})
+    assert changed.status_code == 200
+    fresh_auth = "Bearer " + changed.json()["session_token"]
+    assert client.get("/v1/account", headers={"Authorization": current_auth}).status_code == 401
+    assert client.get("/v1/account", headers={"Authorization": fresh_auth}).json()["has_password"] is True

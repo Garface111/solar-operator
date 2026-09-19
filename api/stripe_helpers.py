@@ -640,16 +640,14 @@ def reconcile_offtaker_quantity(tenant_id: str) -> None:
 
 
 def migrate_ao_subscription_lines(tenant_id: str) -> None:
-    """Bring a LIVE Array Operator subscription's LINES in line with the tenant's
-    currently-chosen plan — ADD or REMOVE the per-kWh monitoring meter and the
-    per-offtaker invoicing line so a plan change (monitoring↔invoicing↔both) actually
-    changes what they're billed, with proration.
+    """Reconcile a live AO subscription with the unified regular product.
 
-    Call after Tenant.billing_plan changes. reconcile_offtaker_quantity owns the
-    invoicing line's QUANTITY; this owns which lines EXIST. Best-effort — never
-    raises. No-op for a non-AO tenant or one with no live subscription (a trialing
-    tenant gets the right lines when they first add a card). Idempotent: re-selecting
-    the same plan finds the lines already correct and touches nothing in Stripe.
+    Every AO tenant retains monitoring; the invoicing line exists only when
+    actual registered offtakers exist. Retired billing_plan labels never remove
+    monitoring or impose a minimum of one phantom offtaker. This helper owns
+    line existence; reconcile_offtaker_quantity updates existing quantities.
+    Trialing tenants without subscriptions are no-ops. Stripe failures alert
+    operators and never block the caller.
     """
     from .db import SessionLocal
     from .models import Tenant
