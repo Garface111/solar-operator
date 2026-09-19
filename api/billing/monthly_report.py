@@ -160,6 +160,17 @@ def collect_rows(db, tenant, period_key: str) -> list[dict]:
             kwh = getattr(sub, "last_sent_customer_kwh", None) if stamped else None
             sent = sub.last_sent_at if stamped else None
             number = sub.last_invoice_number if stamped else (pay or {}).get("invoice_number")
+        if kwh is None and (accepted or legacy):
+            # Provenance order for generation: the issued invoice's own figure,
+            # then the value stamped at send, then a recomputation from that
+            # period's bills. The first two are NULL on every invoice issued
+            # before customer_kwh existed, and "the amount generated" is one of
+            # the four questions this report exists to answer — a blank column
+            # there is a failure, not an honest unknown.
+            try:
+                kwh = invoice_ledger._generation_for_period(db, sub, period_key)
+            except Exception:  # noqa: BLE001
+                kwh = None
         status = inv.status if inv else ("legacy issued" if legacy else "unsent")
         reason = None
         if not accepted and not legacy:
