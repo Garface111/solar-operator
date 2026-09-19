@@ -1,0 +1,5 @@
+group_id,utility_name,provider_code,state,portal_url,source_role,billing_basis,cadence,offtaker_count
+example-gmp,Green Mountain Power (GMP),gmp,VT,https://greenmountainpower.com,offtaker_credit,bill_credit,monthly,100
+example-smarthub,Vermont Electric Cooperative,vec,VT,https://vermontelectric.smarthub.coop,array_generation,production_kwh,monthly,80
+example-cmp,Central Maine Power (CMP),cmp,ME,https://sso.cmpco.com/login,both,allocation_statement,monthly,50
+example-unknown,Fictional Example Utility,,,,offtaker_credit,bill_credit,monthly,70

@@ -17,6 +17,9 @@ records a clean "skipped".
 """
 from __future__ import annotations
 
+import re
+
+from ...adapters.smarthub import ALL_SMARTHUB_PROVIDERS
 from .gmp import GMPVendor
 from .eversource import EversourceVendor
 from .cmp import CMPVendor
@@ -46,8 +49,8 @@ _API_ONLY_INVERTERS = {"solaredge", "solis", "enphase", "tigo", "alsoenergy", "l
 def module_for(provider: str):
     """Return the vendor module for a provider code, or None if unsupported.
 
-    Any code that is not a known bespoke utility / inverter cloud / API-only
-    inverter is treated as a SmartHub co-op (vec / wec / sh_*).
+    SmartHub requires a catalog code or a syntactically valid discovered code.
+    The SmartHub vendor also verifies that the credential host matches that code.
     """
     p = (provider or "").strip().lower()
     if not p:
@@ -62,4 +65,6 @@ def module_for(provider: str):
         return _INVERTERS[p]
     if p in _API_ONLY_INVERTERS:
         return None
-    return _SMARTHUB
+    if p in ALL_SMARTHUB_PROVIDERS or re.fullmatch(r"sh_[a-z0-9][a-z0-9_]{0,36}", p):
+        return _SMARTHUB
+    return None

@@ -1,0 +1,27 @@
+{
+  "recorded_date": "2026-09-19",
+  "actual_norwich_utility_list": "entirely_pending",
+  "synthetic_demo_only": true,
+  "previous_production_commit": "b6f39b621921e44bf331e7bb648b134d1c28e820",
+  "backup": {
+    "createdAt": "2026-09-19T22:07:02.649Z",
+    "expiresAt": null,
+    "id": "5de89667-c3ed-4683-b065-d27ac76c8f25",
+    "name": "Before Norwich utility hardening 2026-09-19",
+    "referencedMB": 31526
+  },
+  "production_readonly_preflight": {
+    "discovery_tagged_accounts": [],
+    "enabled_credential_routes_checked": 15,
+    "enabled_credential_routes_retained": 15,
+    "live_utility_login_attempts": 0
+  },
+  "test_results": {
+    "integrated": "727 passed, 7100 warnings in 28.66s",
+    "postgres_initial": "73 passed, 816 warnings in 3.89s",
+    "merged_targets": "99 passed, 844 warnings in 17.06s",
+    "postgres_final": "75 passed, 736 warnings in 3.72s",
+    "full_suite": "3415 passed, 33926 warnings in 348.56s (0:05:48)"
+  },
+  "tested_code_commit": "63a97078047c4a43787e53d1ef790f91a7bfde8b"
+}

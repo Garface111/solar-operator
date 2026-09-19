@@ -14,6 +14,9 @@ from __future__ import annotations
 
 import base64
 import logging
+import re
+
+from ...adapters.smarthub import derive_provider_from_host
 from datetime import datetime, timedelta
 
 from .base import CaptureRequest, ScrapeResult
@@ -55,11 +58,21 @@ def _iso(ts) -> str | None:
 class SmartHubVendor:
     provider = "smarthub"       # registry maps any co-op code here
 
+    @staticmethod
+    def _credential_host(creds) -> str:
+        host = (creds.login_host or "").strip().lower()
+        # Accept bare DNS hosts only: no URL userinfo, ports, paths or suffix tricks.
+        label = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+        if len(host) > 253 or not re.fullmatch(rf"(?:{label}\.)+smarthub\.coop", host):
+            raise RuntimeError("smarthub credential requires a valid *.smarthub.coop login_host")
+        entry = derive_provider_from_host(host)
+        provider = (creds.provider or "").strip().lower()
+        if not entry or entry["provider"] != provider:
+            raise RuntimeError("smarthub credential provider does not match login_host")
+        return host
+
     async def login_url(self, creds) -> str:
-        host = (creds.login_host or "").strip()
-        if not host:
-            raise RuntimeError("smarthub credential missing login_host (co-op subdomain)")
-        return f"https://{host}/"
+        return f"https://{self._credential_host(creds)}/"
 
     async def is_logged_in(self, page) -> bool:
         try:
@@ -75,7 +88,7 @@ class SmartHubVendor:
             return False
 
     async def scrape(self, page, context, creds) -> ScrapeResult:
-        host = (creds.login_host or "").strip()
+        host = self._credential_host(creds)
         base = f"https://{host}"
         email = creds.username
         req = context.request                      # shares the cookie jar
