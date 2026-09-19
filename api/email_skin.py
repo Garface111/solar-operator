@@ -166,7 +166,7 @@ def render_email_skin(
 ) -> str:
     """Return a complete HTML email wrapped in the product's brand design.
 
-    product: "array_operator" → AO dark theme; anything else → NEPOOL light.
+    product: "array_operator" → AO sky theme; anything else → NEPOOL light.
     preheader: hidden inbox-preview line (15-90 chars).
     headline: bold leading line in the header strip. Defaults to the brand name.
     intro_line: quiet tagline under the headline (do NOT pass the subject here).

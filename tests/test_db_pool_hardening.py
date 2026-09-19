@@ -71,21 +71,26 @@ def test_pool_watchdog_registered():
     class FakeSched:
         def __init__(self):
             self.jobs = []
+            self.running = False
+            self.start_count = 0
         def add_job(self, fn, *a, **kw):
             self.jobs.append({"fn": fn, "id": kw.get("id"), "kwargs": kw})
         def start(self):
-            pass
+            self.running = True
+            self.start_count += 1
 
     fake = FakeSched()
     real = sched_mod.scheduler
     sched_mod.scheduler = fake
     try:
         sched_mod.start()
+        sched_mod.start()  # already-running scheduler must not register twice
     finally:
         sched_mod.scheduler = real
 
     ids = [j["id"] for j in fake.jobs]
-    assert "db_pool_watchdog" in ids, f"watchdog missing from {ids}"
+    assert ids.count("db_pool_watchdog") == 1, f"watchdog missing or duplicated in {ids}"
+    assert fake.start_count == 1
 
 
 def test_watchdog_disposes_after_two_pressure_ticks(monkeypatch):

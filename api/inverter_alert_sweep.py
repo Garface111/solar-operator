@@ -365,8 +365,8 @@ def sweep_tenant(db, tenant: Tenant) -> int:
     """Process one tenant. Returns the number of inverters emailed about."""
     if not getattr(tenant, "inverter_alerts_enabled", False):
         return 0
-    # Invoicing-only AO accounts bought offtaker invoicing, not fleet monitoring —
-    # vendor-health alerts are noise for them. (monitoring/both/no-plan still alert.)
+    # Product eligibility is separate from the explicit notification opt-out
+    # above. Retired AO plan labels no longer restrict monitoring access.
     if not ao_gets_vendor_emails(getattr(tenant, "product", None),
                                  getattr(tenant, "billing_plan", None)):
         return 0

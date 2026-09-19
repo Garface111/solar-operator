@@ -267,14 +267,13 @@ def test_underperforming_needs_fresh_data():
         assert sweep._flagged_inverters(_tree(col), 50) == [], state
 
 
-# ── invoicing-only accounts don't get vendor-data emails ──────────────────────
+# ── retired plan labels do not suppress vendor-data email eligibility ────────
 
 def test_ao_gets_vendor_emails_predicate():
     AO = "array_operator"
-    # Suppressed ONLY for explicit invoicing-only AO accounts.
-    assert ao_gets_vendor_emails(AO, "invoicing") is False
-    # Everyone else keeps getting them — incl. 'both' (has monitoring too) and the
-    # not-yet-chosen (null) plan, so a legacy monitoring customer is never silenced.
+    # 17e2da51 retired the plan split: legacy labels preserve full access.
+    assert ao_gets_vendor_emails(AO, "invoicing") is True
+    # All other legacy labels and unchosen plans remain eligible too.
     assert ao_gets_vendor_emails(AO, "monitoring") is True
     assert ao_gets_vendor_emails(AO, "both") is True
     assert ao_gets_vendor_emails(AO, None) is True
@@ -284,15 +283,19 @@ def test_ao_gets_vendor_emails_predicate():
     assert ao_gets_vendor_emails(None, None) is True
 
 
-def test_sweep_tenant_skips_invoicing_only_before_any_db_work():
-    # db=None is safe: the invoicing-only gate returns 0 before build_fleet_tree.
+def test_sweep_tenant_respects_explicit_alert_opt_out_before_db_work(monkeypatch):
+    # Email eligibility never overrides the operator's explicit notification preference.
     t = SimpleNamespace(
-        id="t1", inverter_alerts_enabled=True, product="array_operator",
+        id="t1", inverter_alerts_enabled=False, product="array_operator",
         billing_plan="invoicing", inverter_alert_email="x@y.com",
         contact_email="x@y.com", inverter_alert_grace_hours=12,
         inverter_alert_threshold_pct=50,
     )
+    from unittest.mock import Mock
+    build = Mock()
+    monkeypatch.setattr(sweep.inverter_fleet, "build_fleet_tree", build)
     assert sweep.sweep_tenant(None, t) == 0
+    build.assert_not_called()
 
 
 def test_via_digest_skips_separate_email(monkeypatch):
