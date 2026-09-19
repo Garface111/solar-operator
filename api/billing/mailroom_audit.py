@@ -138,13 +138,71 @@ def _dt(v) -> Optional[datetime]:
 
 # ── deterministic checks ───────────────────────────────────────────────────
 
+# The suggested fix every rule carries when the call site does not spell one
+# out, and the place in the app that fixes it (the UI renders one button per
+# target: open the invoice drawer, open the off-taker card, open the draft,
+# the Bill audit tab, the delivery-holds panel, payment collection, the cycle
+# card's resume switch).
+_DEFAULT_FIX = {
+    "duplicate_period": "Refund or credit the second invoice, then check the exactly-once guard on that off-taker before the next run.",
+    "amount_jump": "Open the invoice and compare its kWh and rate to the utility bill for the same period; if the bill is right, the jump is real — say so in the email note.",
+    "rate_not_entered": "Enter the contract rate (and any incentive adder) on the off-taker so invoices stop pricing from the bill's credit line.",
+    "no_utility_bill": "Bind the off-taker to its utility account so the invoice is computed from the settled bill, then re-issue.",
+    "rate_outlier": "Check the rate on the off-taker; a decimal-point slip is the usual cause.",
+    "zero_amount": "Confirm the bill really shows no excess for the period, or that a credit legitimately zeroed it; otherwise fix the share or the binding.",
+    "zero_kwh": "Confirm the utility bill for the period shows generation; if it does, the binding or the share is wrong.",
+    "bounced": "Correct the email address on the off-taker and re-send the invoice.",
+    "unconfirmed_send": "Verify the receipt in the delivery holds panel with the provider's email id; do not re-send until it is settled.",
+    "no_recipient": "Add the off-taker's billing email and set the recipient slider to the customer.",
+    "unpaid_aging": "Send a reminder; record the payment as an offline receipt if a check arrived.",
+    "payment_not_tracked": "Record the check when it arrives, or finish Stripe Connect so a pay link mints on the next invoice.",
+    "stale_draft": "Open the draft and approve, edit or dismiss it.",
+    "held_invoice": "Read the hold reason; most holds clear when the utility bill for the period is captured.",
+    "retrying_invoice": "Nothing to do until the retry window; if it keeps failing, check the mailer status.",
+    "unconfirmed_invoice": "Verify the provider receipt in delivery holds before anything is re-sent.",
+    "auto_to_me": "Move the recipient slider to the customer if this off-taker should receive invoices directly.",
+    "missing_email": "Add the off-taker's billing email.",
+    "over_allocated": "Correct the shares on the listed off-takers so the array totals 100% before the next run.",
+    "gmp_mismatch": "Open Bill audit for this off-taker and re-check the utility-account binding and the period.",
+    "gmp_share_mismatch": "Compare the entered share to what the utility credited on the bill; fix whichever is wrong.",
+    "legacy_history": "No action; newer invoices keep full evidence automatically.",
+    "paused": "Resume sending from the cycle card when you are ready.",
+}
+
+
+def _targets(code: str, *, subscription_id=None, invoice_id=None, draft_id=None) -> list[dict]:
+    t: list[dict] = []
+    if invoice_id is not None and not str(invoice_id).startswith("legacy"):
+        t.append({"kind": "invoice", "id": invoice_id, "label": "Open invoice"})
+    elif invoice_id is not None:
+        t.append({"kind": "invoice", "id": invoice_id, "label": "Open invoice"})
+    if draft_id is not None:
+        t.append({"kind": "draft", "id": draft_id, "subscription_id": subscription_id, "label": "Open draft"})
+    if subscription_id is not None:
+        t.append({"kind": "offtaker", "id": subscription_id, "label": "Open off-taker"})
+    if code in ("gmp_mismatch", "gmp_share_mismatch", "no_utility_bill"):
+        t.append({"kind": "bill_audit", "label": "Bill audit"})
+    if code in ("unconfirmed_send", "unconfirmed_invoice", "held_invoice", "retrying_invoice"):
+        t.append({"kind": "holds", "label": "Delivery holds"})
+    if code in ("unpaid_aging", "payment_not_tracked"):
+        t.append({"kind": "collection", "label": "Payment collection"})
+    if code == "paused":
+        t.append({"kind": "cycle", "label": "Resume sending"})
+    return t
+
+
 def _f(code: str, severity: str, title: str, detail: str, *, subscription_id=None,
        invoice_id=None, customer_name=None, evidence: Optional[dict] = None,
-       action: Optional[str] = None) -> dict:
+       action: Optional[str] = None, draft_id=None) -> dict:
+    fix = action or _DEFAULT_FIX.get(code) or "Open it and check the figures against the utility bill."
+    if draft_id is None and isinstance(evidence, dict) and evidence.get("draft_id") is not None:
+        draft_id = evidence.get("draft_id")
     return {"code": code, "severity": severity, "title": title, "detail": detail,
             "subscription_id": subscription_id, "invoice_id": invoice_id,
             "customer_name": customer_name, "evidence": evidence or {},
-            "action": action, "source": "rules"}
+            "action": fix, "fix": fix, "source": "rules",
+            "targets": _targets(code, subscription_id=subscription_id,
+                                invoice_id=invoice_id, draft_id=draft_id)}
 
 
 def deterministic_checks(payload: dict, now: Optional[datetime] = None) -> list[dict]:
@@ -233,7 +291,7 @@ def deterministic_checks(payload: dict, now: Optional[datetime] = None) -> list[
             out.append(_f("bounced", "high", "Invoice email bounced",
                           f"{cn} #{x.get('invoice_number')} to {', '.join(x.get('to') or [])}: {d.get('reason') or 'bounced'}.",
                           subscription_id=x["subscription_id"], invoice_id=x["id"], customer_name=cn,
-                          evidence=d, action="Fix the address and re-send."))
+                          evidence=d))
         elif d.get("status") == "unconfirmed":
             out.append(_f("unconfirmed_send", "high", "Mailer never confirmed this send",
                           f"{cn} #{x.get('invoice_number')}: {d.get('reason') or 'no provider receipt'}.",
@@ -353,14 +411,15 @@ FINDINGS_SCHEMA = {
                     "subscription_id": {"type": ["integer", "null"]},
                     "invoice_id": {"type": ["integer", "null"]},
                     "customer_name": {"type": ["string", "null"]},
-                    "action": {"type": ["string", "null"]},
+                    "fix": {"type": "string"},
                 },
                 "required": ["severity", "title", "detail", "subscription_id", "invoice_id",
-                             "customer_name", "action"],
+                             "customer_name", "fix"],
             },
         },
+        "what_to_look_for": {"type": "array", "items": {"type": "string"}},
     },
-    "required": ["verdict", "summary", "findings"],
+    "required": ["verdict", "summary", "findings", "what_to_look_for"],
 }
 
 SYSTEM_PROMPT = """You are an independent billing auditor for a community-solar operator.
@@ -379,7 +438,14 @@ add something. Every finding must cite the subscription_id and, when it concerns
 specific invoice, the invoice_id from the data. Be concrete: say the numbers. If the
 evidence is clean, say so plainly and give a 'ready' verdict — do not invent problems.
 Use 'stop' only when a real customer would receive a wrong invoice or a wrong amount
-would be collected. Keep the summary to three sentences."""
+would be collected. Keep the summary to three sentences.
+
+For every finding give a concrete "fix": the single next action the operator should
+take, in one sentence, naming the off-taker or invoice. Also return "what_to_look_for":
+three to eight short checks the operator should do by eye before the next invoices go
+out — specific to THIS board (name the off-takers, periods, amounts or rates worth a
+second look), not generic advice. If the board is empty, say what to check once the
+first invoices exist."""
 
 
 def _bounded_json(payload: dict) -> str:
@@ -403,8 +469,8 @@ def _bounded_json(payload: dict) -> str:
 CLI_ADDENDUM = """
 
 === HOW TO ANSWER HERE ===
-Put the complete audit JSON object — {"verdict", "summary", "findings"} exactly as
-described above — as the value of "content" (a JSON string), and leave
+Put the complete audit JSON object — {"verdict", "summary", "findings",
+"what_to_look_for"} exactly as described above — as the value of "content" (a JSON string), and leave
 "tool_calls" empty. Nothing else."""
 
 
@@ -496,16 +562,90 @@ def model_review(payload: dict, rule_findings: list[dict]) -> dict:
         if not isinstance(f, dict):
             continue
         sev = f.get("severity") if f.get("severity") in SEVERITIES else "medium"
+        fix = str(f.get("fix") or f.get("action") or "").strip()[:600] or None
         findings.append({"code": "model", "severity": sev, "title": str(f.get("title") or "")[:200],
                          "detail": str(f.get("detail") or "")[:2000],
                          "subscription_id": f.get("subscription_id"), "invoice_id": f.get("invoice_id"),
-                         "customer_name": f.get("customer_name"), "action": f.get("action"),
-                         "evidence": {}, "source": "model"})
+                         "customer_name": f.get("customer_name"), "action": fix, "fix": fix,
+                         "evidence": {}, "source": "model",
+                         "targets": _targets("model", subscription_id=f.get("subscription_id"),
+                                             invoice_id=f.get("invoice_id"))})
     verdict = res.get("verdict") if isinstance(res, dict) else None
+    look = [str(x).strip()[:300] for x in ((res.get("what_to_look_for") or []) if isinstance(res, dict) else [])
+            if str(x).strip()][:8]
     return {"ok": True, "verdict": verdict if verdict in ("ready", "caution", "stop") else None,
             "summary": (res.get("summary") if isinstance(res, dict) else None),
-            "findings": findings, "model": got["model"], "provider": got["provider"],
+            "findings": findings, "what_to_look_for": look,
+            "model": got["model"], "provider": got["provider"],
             "seconds": round(time.time() - t0, 1), "skipped": errors or None}
+
+
+# ── what to look for ───────────────────────────────────────────────────────
+
+def look_for(payload: dict, findings: list[dict]) -> list[str]:
+    """A short checklist for the operator's own eyes, specific to this board.
+    The model may add to it; these are the checks the rules cannot make for
+    them (recipients that look wrong, amounts that only a human would
+    question, the first-run essentials on an empty book)."""
+    sent = [x for x in payload.get("sent") or [] if not x.get("legacy")]
+    legacy = [x for x in payload.get("sent") or [] if x.get("legacy")]
+    outgoing = payload.get("outgoing") or []
+    subs = [x for x in payload.get("subscriptions") or [] if x.get("enabled")]
+    codes = {f.get("code") for f in findings}
+    out: list[str] = []
+
+    if not subs and not sent and not legacy:
+        out += [
+            "Load the off-taker roster and bind every off-taker to its utility account before the first run.",
+            "Enter each off-taker's contract rate (or the master rate) so nothing prices from the bill's credit line.",
+            "Send one test invoice to yourself and open it here: check the letterhead, the recipient, the period and the figures.",
+            "Set the recipient slider to the customer only for off-takers whose email you have confirmed.",
+        ]
+        return out[:10]
+
+    drafts = [o for o in outgoing if o.get("kind") == "draft"]
+    if drafts:
+        names = ", ".join(sorted({o.get("customer_name") or "?" for o in drafts})[:4])
+        out.append(f"Open the {len(drafts)} draft{'s' if len(drafts) != 1 else ''} waiting on you ({names}{'…' if len(drafts) > 4 else ''}) and read the amount and period before approving.")
+    held = [o for o in outgoing if o.get("kind") in ("held", "retrying", "unconfirmed")]
+    if held:
+        out.append(f"Read the reason on the {len(held)} held or unconfirmed invoice{'s' if len(held) != 1 else ''} — a missing utility bill is the usual cause, a mailer refusal is not.")
+    to_me = [o for o in outgoing if (o.get("send_mode") or "to_me") == "to_me"]
+    if to_me and len(to_me) == len(outgoing) and outgoing:
+        out.append("Every queued invoice is still addressed to you (recipient slider on 'to me'); move the slider for off-takers who should receive theirs directly.")
+    if sent:
+        newest = sent[:3]
+        names = ", ".join(f"{x.get('customer_name')} ({x.get('period_label') or x.get('period_key')})" for x in newest)
+        out.append(f"Open the newest invoices — {names} — and compare the kWh on each to the utility bill for that period.")
+        inferred = [x for x in sent if (x.get("rate") or {}).get("operator_entered") is False]
+        if inferred and "rate_not_entered" not in codes:
+            out.append(f"{len(inferred)} invoice{'s' if len(inferred) != 1 else ''} priced from an inferred rate: confirm the contract rate on those off-takers.")
+        recips = {}
+        for x in sent:
+            for a in x.get("to") or []:
+                recips.setdefault(a.lower(), set()).add(x.get("customer_name"))
+        shared = {a: n for a, n in recips.items() if len(n) > 1}
+        if shared:
+            a, n = next(iter(shared.items()))
+            out.append(f"{a} receives invoices for {len(n)} different off-takers ({', '.join(sorted(x for x in n if x)[:3])}) — make sure that is intended.")
+        unpaid = [x for x in sent if x.get("payment_summary") in ("unpaid", "partial")]
+        if unpaid:
+            due = sum(float(x.get("outstanding_usd") or 0) for x in unpaid)
+            out.append(f"{len(unpaid)} invoice{'s' if len(unpaid) != 1 else ''} still open, ${due:,.2f} outstanding — decide who gets a reminder.")
+        by_sub: dict = {}
+        for x in sent:
+            by_sub.setdefault(x.get("subscription_id"), []).append(x)
+        gaps = [c for c, rows in by_sub.items() if len(rows) >= 2]
+        if gaps and "amount_jump" not in codes:
+            out.append("Scan each off-taker's amounts month to month; anything that moved more than a quarter deserves a reason you can name.")
+    if legacy and not sent:
+        out.append(f"The {len(legacy)} older invoice{'s' if len(legacy) != 1 else ''} here have no frozen email or attachment; the first new run will be the first you can audit line by line.")
+    if subs:
+        no_email = [x for x in subs if not x.get("client_email")]
+        if no_email and "missing_email" not in codes:
+            out.append(f"{len(no_email)} enabled off-taker{'s have' if len(no_email) != 1 else ' has'} no email on file.")
+        out.append("Check that each array's shares add up to 100% and that no off-taker appears twice under slightly different names.")
+    return out[:10]
 
 
 # ── the run ────────────────────────────────────────────────────────────────
@@ -540,11 +680,25 @@ def execute_run(run_id: int, *, tenant_id: str) -> None:
                 f.setdefault("source", "model")
                 f.setdefault("code", "model")
                 f.setdefault("evidence", {})
+                if not f.get("fix") and f.get("action"):
+                    f["fix"] = f["action"]
+                if not f.get("targets"):
+                    f["targets"] = _targets("model", subscription_id=f.get("subscription_id"),
+                                            invoice_id=f.get("invoice_id"))
                 model_findings.append(f)
         findings = sorted(rules + model_findings,
                           key=lambda f: (_SEV_RANK.get(f.get("severity"), 99), f.get("customer_name") or ""))
         verdict = _verdict_from(findings, review.get("verdict") if review.get("ok") else None)
+        seen_lf: set[str] = set()
+        what_to_look_for: list[str] = []
+        for item in (review.get("what_to_look_for") or []) + look_for(payload, findings):
+            k = item.strip().lower()[:80]
+            if k and k not in seen_lf:
+                seen_lf.add(k)
+                what_to_look_for.append(item)
+        what_to_look_for = what_to_look_for[:10]
         stats = {
+            "what_to_look_for": what_to_look_for,
             "subscriptions": len(payload.get("subscriptions") or []),
             "outgoing": len(payload.get("outgoing") or []),
             "sent": len(payload.get("sent") or []),
@@ -627,5 +781,6 @@ def run_json(run) -> dict:
         "started_at": _iso(run.started_at), "finished_at": _iso(run.finished_at),
         "model": run.model, "provider": run.provider, "verdict": run.verdict,
         "summary": run.summary, "findings": run.findings or [], "stats": run.stats or {},
+        "what_to_look_for": (run.stats or {}).get("what_to_look_for") or [],
         "error": run.error,
     }

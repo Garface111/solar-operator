@@ -6729,6 +6729,40 @@ def mailroom_invoice(invoice_id: int, authorization: Optional[str] = Header(defa
     return {"ok": True, "invoice": d}
 
 
+@router.get("/mailroom/legacy/{kind}/{ref_id}")
+def mailroom_legacy(kind: str, ref_id: int, authorization: Optional[str] = Header(default=None)):
+    """An invoice issued before frozen evidence existed: the inbox row or the
+    last-send stamp, plus the archived email when the receipt still matches."""
+    from . import mailroom as mr
+    t = tenant_from_session(authorization)
+    if kind not in ("draft", "sub"):
+        raise HTTPException(404, "unknown legacy kind")
+    with SessionLocal() as db:
+        d = mr.legacy_detail(db, t.id, kind, ref_id)
+    if d is None:
+        raise HTTPException(404, "invoice not found")
+    return {"ok": True, "invoice": d}
+
+
+@router.get("/mailroom/legacy/{kind}/{ref_id}/email")
+def mailroom_legacy_email(kind: str, ref_id: int, authorization: Optional[str] = Header(default=None)):
+    from . import mailroom as mr
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        d = mr.legacy_detail(db, t.id, kind, ref_id) if kind in ("draft", "sub") else None
+    if d is None:
+        raise HTTPException(404, "invoice not found")
+    html = (d.get("email") or {}).get("html")
+    if not html:
+        text = (d.get("email") or {}).get("text") or ("No copy of this email survives — it was sent before "
+                                                       "the platform kept one for every invoice.")
+        html = "<pre style='font:14px/1.5 -apple-system,Segoe UI,sans-serif;white-space:pre-wrap;padding:24px'>" \
+               + _html_escape(text) + "</pre>"
+    return HTMLResponse(html, headers={
+        "Content-Security-Policy": "default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; font-src https: data:",
+        "Cache-Control": "no-store", "X-Frame-Options": "SAMEORIGIN"})
+
+
 @router.get("/mailroom/invoice/{invoice_id}/attachment/{filename}")
 def mailroom_invoice_attachment(invoice_id: int, filename: str,
                                 authorization: Optional[str] = Header(default=None)):

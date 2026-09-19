@@ -676,3 +676,85 @@ def board(db, tenant_id: str, tenant, *, limit: int = 300, offset: int = 0,
         "counts": counts,
         "limit": limit, "offset": offset,
     }
+
+
+# ── one legacy send, what we still have ────────────────────────────────────
+
+def legacy_detail(db, tenant_id: str, kind: str, ref_id: int) -> Optional[dict]:
+    """A send from before the frozen table: the approval-inbox row or the
+    subscription's last-send stamp, plus the archived email if the mailer
+    receipt still matches one. Honest about what is missing."""
+    from ..models import ReportDraft, BillingReportSubscription
+    ctx = sub_context(db, tenant_id)
+    if kind == "draft":
+        d = db.get(ReportDraft, ref_id)
+        if d is None or d.tenant_id != tenant_id:
+            return None
+        c = ctx.get(d.subscription_id) or {}
+        item = _legacy_item(f"legacy:draft:{d.id}", d.subscription_id, c,
+                            invoice_number=d.invoice_number, amount=d.amount_usd,
+                            kwh=d.customer_kwh, period_label=d.period_label,
+                            sent_at=d.sent_at or d.created_at)
+        item["array_kwh"] = d.array_total_kwh
+        item["allocation_pct"] = d.allocation_pct if d.allocation_pct is not None else item.get("allocation_pct")
+        item["figures"] = {"amount_owed": d.amount_usd, "kwh": d.customer_kwh,
+                           "project_total_kwh": d.array_total_kwh, "allocation_pct": d.allocation_pct,
+                           "invoice_number": d.invoice_number, "period_label": d.period_label,
+                           "note": d.note, "gmp_attachment": d.gmp_filename}
+        sent_at = d.sent_at or d.created_at
+        resend_id = c.get("last_resend_email_id") if (
+            c.get("last_sent_at") and sent_at and abs((datetime.fromisoformat(c["last_sent_at"].rstrip("Z")) - sent_at).total_seconds()) < 3600) else None
+    elif kind == "sub":
+        sub = db.get(BillingReportSubscription, ref_id)
+        if sub is None or sub.tenant_id != tenant_id:
+            return None
+        c = ctx.get(sub.id) or {}
+        item = _legacy_item(f"legacy:sub:{sub.id}", sub.id, c,
+                            invoice_number=c.get("last_invoice_number"),
+                            amount=c.get("last_sent_amount_usd"), kwh=None,
+                            period_label=c.get("last_sent_period_end"), sent_at=c.get("last_sent_at"))
+        item["figures"] = {"amount_owed": c.get("last_sent_amount_usd"),
+                           "invoice_number": c.get("last_invoice_number"),
+                           "period_end": c.get("last_sent_period_end")}
+        resend_id = c.get("last_resend_email_id")
+        sent_at = None
+    else:
+        return None
+    email = {"subject": None, "html": None, "text": None, "from_addr": None, "reply_to": None}
+    try:
+        from ..email_archive import EmailArchive
+        row = None
+        if resend_id:
+            row = db.execute(select(EmailArchive).where(EmailArchive.resend_id == resend_id)).scalars().first()
+        if row is None and item.get("to") and sent_at is not None:
+            lo, hi = sent_at - timedelta(hours=2), sent_at + timedelta(hours=2)
+            row = db.execute(
+                select(EmailArchive).where(EmailArchive.to_email == item["to"][0],
+                                           EmailArchive.created_at >= lo,
+                                           EmailArchive.created_at <= hi)
+                .order_by(EmailArchive.created_at.desc())).scalars().first()
+        if row is not None:
+            email = {"subject": row.subject, "html": row.body_html, "text": row.body_text,
+                     "from_addr": row.from_addr, "reply_to": None}
+            if row.cc:
+                item["cc"] = _as_list(row.cc)
+            if row.bcc:
+                item["bcc"] = _as_list(row.bcc)
+            item["from_addr"] = row.from_addr
+            item["subject"] = row.subject
+            if row.attachments:
+                item["attachments"] = [a.strip().split("(")[0].strip() for a in row.attachments.split(",") if a.strip()]
+            if row.dry_run:
+                item["delivery"] = {"status": "dry_run", "delivered_at": None, "bounced_at": None,
+                                    "reason": "sent in dry-run mode — nothing left the server"}
+            elif not row.ok:
+                item["delivery"] = {"status": "bounced" if "bounce" in (row.flags or "") else "unconfirmed",
+                                    "delivered_at": None, "bounced_at": None, "reason": row.flags}
+    except Exception:  # noqa: BLE001
+        logger.warning("mailroom: legacy email lookup failed", exc_info=True)
+    item.update({"email": email, "attachment_files": [], "settlements": [],
+                 "prepared_at": None, "last_error": None, "evidence": "legacy",
+                 "subscription": {k: v for k, v in (ctx.get(item["subscription_id"]) or {}).items()
+                                  if not k.startswith("_")}})
+    return item
+

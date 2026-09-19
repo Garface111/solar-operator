@@ -382,3 +382,87 @@ def test_model_review_explains_an_empty_api_balance(monkeypatch):
     assert res["ok"] is False
     assert "no credit left" in res["error"] and "console.anthropic.com" in res["error"]
     assert "not enabled" in res["error"]          # the CLI layer was tried and explained too
+
+
+# ─── fixes, targets, what to look for, legacy detail ───────────────────────
+
+def test_every_rule_finding_has_a_fix_and_a_jump_target():
+    p = _payload(sent=[
+        _sent(1, 7, "2026-06", 82.0), _sent(2, 7, "2026-06", 82.0),
+        _sent(3, 9, "2026-06", 50.0, rate={"effective_rate_per_kwh": 0.22, "operator_entered": False, "source": "bill"}),
+        _sent(4, 11, "2026-06", 50.0, delivery={"status": "bounced", "reason": "mailbox full"}),
+    ], outgoing=[{"kind": "draft", "subscription_id": 1, "customer_name": "A", "period_label": "Jul", "amount_usd": 5,
+                  "created_at": "2026-08-01T00:00:00", "send_mode": "to_client", "email": "a@x.test", "draft_id": 55}])
+    f = mailroom_audit.deterministic_checks(p, now=datetime(2026, 9, 19))
+    assert f
+    for x in f:
+        assert x["fix"] and x["targets"], x["code"]
+    dup = next(x for x in f if x["code"] == "duplicate_period")
+    assert [t["kind"] for t in dup["targets"]] == ["invoice", "offtaker"]
+    stale = next(x for x in f if x["code"] == "stale_draft")
+    assert any(t["kind"] == "draft" and t["id"] == 55 for t in stale["targets"])
+    bounced = next(x for x in f if x["code"] == "bounced")
+    assert "email address" in bounced["fix"]
+
+
+def test_look_for_is_specific_to_the_board():
+    empty = mailroom_audit.look_for(_payload(), [])
+    assert any("roster" in x for x in empty) and len(empty) >= 3
+    busy = _payload(
+        subscriptions=[{"subscription_id": 7, "enabled": True, "customer_name": "Sub 7", "client_email": "a@b.test", "arrays": ["Maple"]}],
+        sent=[_sent(1, 7, "2026-05", 80.0), _sent(2, 7, "2026-06", 84.0, payment_summary="unpaid", outstanding_usd=84.0)],
+        outgoing=[{"kind": "draft", "subscription_id": 7, "customer_name": "Sub 7", "period_label": "Jul", "amount_usd": 90,
+                   "created_at": "2026-09-18T00:00:00", "send_mode": "to_client", "email": "a@b.test", "draft_id": 1}])
+    look = mailroom_audit.look_for(busy, [])
+    assert any("Sub 7" in x and "draft" in x for x in look)
+    assert any("$84.00 outstanding" in x for x in look)
+    assert any("compare the kWh" in x for x in look)
+    assert len(look) <= 10
+
+
+def test_run_merges_model_look_for_with_rules(client):
+    t = _tenant()
+    sid = _sub(t.id, customer_name="Town of Test")
+    with SessionLocal() as db:
+        inv = _frozen(db, t.id, sid, "2026-06"); _dispatch(db, t.id, inv.id); db.commit(); iid = inv.id
+    fake = {"ok": True, "verdict": "ready", "summary": "Fine.", "findings": [
+                {"severity": "low", "title": "Check the clerk", "detail": "x", "subscription_id": sid,
+                 "invoice_id": iid, "customer_name": "Town of Test", "fix": "Ask the town who pays the solar bill."}],
+            "what_to_look_for": ["Confirm the Town of Test invoice went to the finance office, not the fire chief."],
+            "model": "claude-test", "provider": "claude-cli", "seconds": 1.0}
+    with patch("api.billing.mailroom_audit.model_review", return_value=fake):
+        rid = client.post(f"{_B}/mailroom/audit", headers=_auth(t)).json()["run_id"]
+        for _ in range(100):
+            run = client.get(f"{_B}/mailroom/audit/{rid}", headers=_auth(t)).json()["run"]
+            if run["status"] != "running":
+                break
+            time.sleep(0.1)
+    assert run["status"] == "done"
+    assert run["what_to_look_for"][0].startswith("Confirm the Town of Test")
+    assert len(run["what_to_look_for"]) >= 2                 # rules added the board checks
+    m = next(f for f in run["findings"] if f["source"] == "model")
+    assert m["fix"] == "Ask the town who pays the solar bill."
+    assert [x["kind"] for x in m["targets"]] == ["invoice", "offtaker"]
+
+
+def test_legacy_detail_endpoint_returns_what_survives(client):
+    t = _tenant()
+    sid = _sub(t.id, customer_name="Old Co", client_email="old@x.test", send_mode="to_client")
+    with SessionLocal() as db:
+        db.add(ReportDraft(tenant_id=t.id, subscription_id=sid, customer_name="Old Co", status="sent",
+                           period_label="2026-03-01 → 2026-03-31", amount_usd=58.0, customer_kwh=310,
+                           array_total_kwh=6200, allocation_pct=0.05, sent_at=datetime(2026, 4, 2),
+                           invoice_number="2026-03"))
+        db.commit()
+        from sqlalchemy import select as _sel
+        did = db.execute(_sel(ReportDraft.id).where(ReportDraft.tenant_id == t.id)).scalar()
+    r = client.get(f"{_B}/mailroom/legacy/draft/{did}", headers=_auth(t))
+    assert r.status_code == 200, r.text
+    inv = r.json()["invoice"]
+    assert inv["legacy"] and inv["amount_usd"] == 58.0 and inv["kwh"] == 310 and inv["array_kwh"] == 6200
+    assert inv["figures"]["allocation_pct"] == 0.05 and inv["to"] == ["old@x.test"]
+    assert inv["email"]["html"] is None                       # nothing archived → honest
+    e = client.get(f"{_B}/mailroom/legacy/draft/{did}/email", headers=_auth(t))
+    assert e.status_code == 200 and "No copy of this email survives" in e.text
+    assert client.get(f"{_B}/mailroom/legacy/draft/{did}", headers=_auth(_tenant())).status_code == 404
+    assert client.get(f"{_B}/mailroom/legacy/nope/{did}", headers=_auth(t)).status_code == 404
