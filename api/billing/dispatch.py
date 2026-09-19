@@ -5,10 +5,10 @@ A permanent DB key protects retries beyond the provider idempotency window.
 """
 from datetime import datetime, timedelta
 import hashlib
-from sqlalchemy import select, update, or_
+from sqlalchemy import select, update, or_, text
 from sqlalchemy.exc import IntegrityError
 from ..db import SessionLocal
-from ..models import BillingEmailDispatch
+from ..models import BillingEmailDispatch, BillingEmailRateGate
 
 
 def get_dispatch_status(tenant_id, key):
@@ -16,6 +16,38 @@ def get_dispatch_status(tenant_id, key):
         row = db.scalar(select(BillingEmailDispatch).where(
             BillingEmailDispatch.tenant_id == tenant_id, BillingEmailDispatch.key == key))
         return row.status if row else None
+
+
+def wait_for_send_slot():
+    """Conservative one billing email/second by default, shared across processes.
+
+    No invoice is claimed while waiting: process death before transmission is
+    safely retryable. Locks and pooled connections are released before sleeping.
+    """
+    import os
+    import time
+    interval = max(.001, float(os.getenv("BILLING_EMAIL_INTERVAL_SECONDS", "1")))
+    while True:
+        with SessionLocal() as db:
+            if db.bind.dialect.name == "sqlite":
+                db.execute(text("BEGIN IMMEDIATE"))
+            row = db.scalar(select(BillingEmailRateGate).where(
+                BillingEmailRateGate.id == "resend-billing").with_for_update())
+            if row is None:
+                row = BillingEmailRateGate(id="resend-billing", next_at=datetime.utcnow())
+                db.add(row)
+                try:
+                    db.flush()
+                except IntegrityError:
+                    db.rollback()
+                    continue
+            now = datetime.utcnow()
+            delay = (row.next_at - now).total_seconds()
+            if delay <= 0:
+                row.next_at = now + timedelta(seconds=interval)
+                db.commit()
+                return
+        time.sleep(min(delay, 1))
 
 
 def send_email_once(*, tenant_id: str, key: str, email: dict, kind="invoice") -> dict:
@@ -34,6 +66,16 @@ def send_email_once(*, tenant_id: str, key: str, email: dict, kind="invoice") ->
                 row = db.scalar(select(BillingEmailDispatch).where(
                     BillingEmailDispatch.tenant_id == tenant_id, BillingEmailDispatch.key == key))
         row_id = row.id
+        if (row.status not in ("prepared", "failed") or row.attempts >= 8
+                or row.retry_at is not None and row.retry_at > now):
+            return {"ok": row.status == "accepted", "duplicate": True,
+                    "uncertain": row.status in ("sending", "uncertain"),
+                    "resend_email_id": row.resend_email_id, "error": row.error or row.status,
+                    "retry_at": row.retry_at.isoformat() if row.retry_at else None}
+    wait_for_send_slot()
+    now = datetime.utcnow()
+    with SessionLocal() as db:
+        row = db.get(BillingEmailDispatch, row_id)
         claimed = db.execute(update(BillingEmailDispatch).where(
             BillingEmailDispatch.id == row_id,
             BillingEmailDispatch.status.in_(["prepared", "failed"]),

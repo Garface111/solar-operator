@@ -145,3 +145,16 @@ def test_provider_evidence_reconciles_uncertain_send_without_retransmit(client,m
         row=db.get(BillingEmailDispatch,did)
         assert row.status=="accepted" and row.resend_email_id=="receipt-fixture"
         assert tid in row.error
+
+
+def test_shared_throttle_serializes_independent_senders(monkeypatch):
+    import time
+    monkeypatch.setenv("BILLING_EMAIL_INTERVAL_SECONDS", "0.035")
+    barrier=Barrier(4)
+    def reserve(_):
+        barrier.wait(timeout=10)
+        dispatch.wait_for_send_slot()
+        return time.monotonic()
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        stamps=sorted(pool.map(reserve,range(4)))
+    assert all(b-a >= .025 for a,b in zip(stamps,stamps[1:]))

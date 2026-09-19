@@ -2873,3 +2873,10 @@ class OfftakerSettlement(Base):
     note: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     __table_args__ = (UniqueConstraint("tenant_id", "request_key", name="uq_offtaker_settlement_request"),)
+
+
+class BillingEmailRateGate(Base):
+    """Shared billing transport pace across web and worker processes."""
+    __tablename__ = "billing_email_rate_gates"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    next_at: Mapped[datetime] = mapped_column(DateTime, default=now)

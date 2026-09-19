@@ -23,6 +23,7 @@ else:
     os.environ["SOLAR_DB_URL"] = f"sqlite:///{_TMP_DB}"
 os.environ.setdefault("STRIPE_SECRET_KEY", "sk_test_dummy")
 os.environ.pop("STRIPE_WEBHOOK_SECRET", None)  # webhook uses unsigned construct_from
+os.environ["BILLING_EMAIL_INTERVAL_SECONDS"] = "0.001"  # real shared gate, accelerated only in isolated tests
 os.environ.pop("RESEND_API_KEY", None)         # never send real email in tests
 
 import pytest
