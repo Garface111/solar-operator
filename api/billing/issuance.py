@@ -29,7 +29,7 @@ def restore(snapshot):
     return BillingMatch(**d)
 
 
-def freeze(*, tenant_id, subscription_id, key, match, expected_amount=None):
+def freeze(*, tenant_id, subscription_id, key, match, expected_amount=None, prepare=None):
     with SessionLocal() as db:
         if db.bind.dialect.name == "sqlite":
             db.execute(text("BEGIN IMMEDIATE"))
@@ -43,6 +43,8 @@ def freeze(*, tenant_id, subscription_id, key, match, expected_amount=None):
             OfftakerInvoice.subscription_id == subscription_id,
             OfftakerInvoice.period_key == key))
         if row and row.snapshot:
+            if prepare is not None and not row.render_snapshot:
+                raise ValueError("Frozen invoice lacks original rendered evidence; reconcile before retrying")
             return row.id, restore(row.snapshot), row.status
         ci = match.computed_invoice
         start = date.fromisoformat(str(ci.get("period_start"))[:10])
@@ -77,11 +79,12 @@ def freeze(*, tenant_id, subscription_id, key, match, expected_amount=None):
         # spend the same credit. A held invoice retains its visible reservation.
         credit = cents(ci.get("credit_applied"))
         sub.pending_credit_usd = (cents(sub.pending_credit_usd) - credit) / 100
+        rendered = prepare(match) if prepare is not None else None
         values = dict(tenant_id=tenant_id, subscription_id=subscription_id,
             period_key=key, period_start=start, period_end=end,
             invoice_number=str(ci.get("invoice_number") or ""), amount_cents=amount,
             credit_applied_cents=credit, customer_kwh=ci.get("kwh"),
-            snapshot=match.to_dict(), status="prepared")
+            snapshot=match.to_dict(), render_snapshot=rendered, status="prepared")
         if row is None:
             row = OfftakerInvoice(**values)
             db.add(row)
@@ -165,3 +168,27 @@ def hold(invoice_id, reason):
             row.status = "held"
             row.last_error = str(reason)[:1000]
             db.commit()
+
+
+def load_frozen(tenant_id, subscription_id, key):
+    """Read immutable evidence without touching current utility/workbook inputs."""
+    if not key:
+        return None
+    with SessionLocal() as db:
+        row = db.scalar(select(OfftakerInvoice).where(
+            OfftakerInvoice.tenant_id == tenant_id,
+            OfftakerInvoice.subscription_id == subscription_id,
+            OfftakerInvoice.period_key == key))
+        if row and row.snapshot:
+            match = restore(row.snapshot)
+            match._frozen_invoice_id = row.id
+            return match
+    return None
+
+
+def rendered_evidence(invoice_id):
+    with SessionLocal() as db:
+        row = db.get(OfftakerInvoice, invoice_id)
+        if not row or not row.render_snapshot:
+            raise ValueError("Original rendered invoice evidence is unavailable")
+        return dict(row.render_snapshot)

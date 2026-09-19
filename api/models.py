@@ -2829,6 +2829,7 @@ class OfftakerInvoice(Base):
     credit_applied_cents: Mapped[int] = mapped_column(Integer, default=0)
     customer_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
     snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    render_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="prepared", index=True)
     payment_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("offtaker_payments.id"), nullable=True)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

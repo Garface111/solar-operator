@@ -64,6 +64,8 @@ def main():
 
     with engine.begin() as conn:
         added = []
+        if not column_exists(conn, "offtaker_invoices", "render_snapshot"):
+            conn.execute(text("ALTER TABLE offtaker_invoices ADD COLUMN render_snapshot JSON"))
         # Add columns to tenants
         statements = [
             ("offtaker_payment_policy", "ALTER TABLE tenants ADD COLUMN offtaker_payment_policy VARCHAR(24) NOT NULL DEFAULT 'online_required'"),

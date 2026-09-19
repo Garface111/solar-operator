@@ -129,6 +129,13 @@ def build_match(sub, period_label: Optional[str] = None) -> BillingMatch:
         generation. Both produce the same BillingMatch shape so every downstream
         consumer (invoice/summary renderers, delivery, drafts) is unchanged.
     """
+    if period_label and getattr(sub, "id", None):
+        from .issuance import load_frozen
+        from .backlog import canonical_period
+        frozen = load_frozen(sub.tenant_id, sub.id,
+            canonical_period(period_label, getattr(sub, "cadence", "monthly")))
+        if frozen is not None:
+            return frozen
     # Bill from the GMP bill (percent-of-array: allocation_pct × the bill's generation)
     # whenever the operator has EXPLICITLY configured it — both a linked utility account
     # AND a share are set. That explicit config OVERRIDES a stored workbook (which would
@@ -2289,6 +2296,62 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
     return subject, html, text
 
 
+_FROZEN_PAY_PLACEHOLDER = "https://invoice.invalid/frozen-payment-link"
+
+
+def _prepare_invoice_evidence(match, sub, tenant, *, invoice_date=None, note=None,
+                              gmp_pdf_override=None, trueup=False):
+    """Called inside freeze's transaction after final credit/number allocation.
+
+    Render once before payment-provider failures. Both email variants and exact
+    invoice/utility attachments remain unchanged on every subsequent retry.
+    """
+    to, cc, problems = resolve_recipients(sub, tenant)
+    if not to:
+        raise ValueError("; ".join(problems) or "No invoice recipient configured")
+    op_email = sub.operator_email or getattr(tenant, "contact_email", None)
+    bcc = [op_email] if op_email and op_email not in to and op_email not in cc else []
+    # A durable payment URL is not available until Checkout has been prepared;
+    # the immutable attachment directs the recipient to the email's Pay button.
+    match.template = dict(match.template or {})
+    match.template["payable_to"] = "Payment instructions are in the invoice email."
+    with tempfile.TemporaryDirectory(prefix="ao-frozen-") as tmp:
+        paths = generate_files(match, list(sub.formats or ["pdf"]),
+            False if trueup else sub.include_summary, pathlib.Path(tmp),
+            invoice_date=invoice_date or date.today(), sub=sub,
+            gmp_pdf_override=gmp_pdf_override, pay_url=None)
+        attachments = [_b64(p) for p in paths]
+    product = getattr(tenant, "product", "array_operator")
+    op_name = _operator_company_name(tenant.id) or getattr(tenant, "name", None)
+    sender = getattr(tenant, "send_from_email", None) or _platform_from_email(product)
+    from_addr = f'"{op_name}" <{sender}>' if op_name else sender
+    variants = {}
+    for variant, url in (("offline", None), ("online", _FROZEN_PAY_PLACEHOLDER)):
+        subject, html, text = _email_html(match, sub, False, note=note,
+            attachment_names=[p["filename"] for p in attachments], pay_url=url)
+        variants[variant] = dict(to=to[0] if len(to) == 1 else to, cc=cc or None,
+            bcc=bcc or None, subject=subject, html=html, text=text,
+            from_addr=from_addr,
+            reply_to=getattr(tenant, "contact_email", None), product=product)
+    eco = _offtaker_email_fields(tenant.id, subscription_id=sub.id)
+    import hashlib
+    return {"variants": variants, "attachments": attachments,
+        "artifact_sha256": {a["filename"]: hashlib.sha256(base64.b64decode(a["content"])).hexdigest() for a in attachments},
+        "prepared_at": datetime.utcnow().isoformat() + "Z",
+        "email_copy_override_id": eco.get("email_copy_override_id")}
+
+
+def _frozen_email_payload(invoice_id, pay_url):
+    from .issuance import rendered_evidence
+    evidence = rendered_evidence(invoice_id)
+    payload = dict(evidence["variants"]["online" if pay_url else "offline"])
+    payload["attachments"] = evidence["attachments"]
+    if pay_url:
+        payload["html"] = payload["html"].replace(_FROZEN_PAY_PLACEHOLDER, pay_url)
+        payload["text"] = payload["text"].replace(_FROZEN_PAY_PLACEHOLDER, pay_url)
+    return payload, evidence
+
+
 def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None,
                          triggered_by: str = "manual", is_test: bool = False,
                          note: Optional[str] = None,
@@ -2405,7 +2468,7 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
     # but this period's bill hasn't landed, OR never bound at all (only telemetry
     # available) — SKIP and wait, test or not. Workbook subscriptions are exempt.
     _ci_guard = match.computed_invoice or {}
-    if not getattr(sub, "source_workbook", None):
+    if not getattr(match, "_frozen_invoice_id", None) and not getattr(sub, "source_workbook", None):
         _src = _ci_guard.get("kwh_source")
         _has_bill = _ci_guard.get("has_utility_bill") is True
         # Is the bound account a VEC/SmartHub one? (Its measured-generation source
@@ -2454,7 +2517,9 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
         try:
             invoice_id, match, invoice_status = freeze(
                 tenant_id=tenant.id, subscription_id=sub.id, key=_cur_guard,
-                match=match, expected_amount=expected_amount_usd)
+                match=match, expected_amount=expected_amount_usd,
+                prepare=lambda frozen: _prepare_invoice_evidence(frozen, sub, tenant,
+                    invoice_date=invoice_date, note=note, gmp_pdf_override=gmp_pdf_override))
             _ci = match.computed_invoice or {}
             recovery = reconcile(invoice_id)
             if recovery.get("ok"):
@@ -2475,7 +2540,9 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
         to, cc, problems = ([op] if op else []), [], (
             [] if op else ["No operator email on file for the test send."])
     else:
-        to, cc, problems = resolve_recipients(sub, tenant)
+        envelope, _ = _frozen_email_payload(invoice_id, None)
+        to = envelope["to"] if isinstance(envelope["to"], list) else [envelope["to"]]
+        cc, problems = envelope.get("cc") or [], []
     if not to:
         return {"ok": False, "error": "; ".join(problems) or "no recipients"}
 
@@ -2541,55 +2608,66 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
         hold(invoice_id, reason)
         return {"ok": False, "held": True, "invoice_id": invoice_id, "error": reason}
 
-    _eco_fields: dict = {}
-    with tempfile.TemporaryDirectory(prefix="ao-bill-") as tmp:
-        try:
-            paths = generate_files(match, formats, sub.include_summary,
-                                   pathlib.Path(tmp), invoice_date=invoice_date,
-                                   sub=sub, gmp_pdf_override=gmp_pdf_override,
-                                   pay_url=pay_url)
-        except Exception as e:  # noqa: BLE001
-            logger.exception("billing render failed")
-            return {"ok": False, "error": f"render failed: {e}"}
-        attachments = [_b64(p) for p in paths]
-        # Snapshot override id before send so one-shot overrides can expire.
-        _eco_fields = _offtaker_email_fields(
-            getattr(tenant, "id", None) or getattr(sub, "tenant_id", None),
-            subscription_id=getattr(sub, "id", None),
-        )
-        subject, html, text = _email_html(match, sub, is_test, note=note,
-                                          attachment_names=[p.name for p in paths],
-                                          pay_url=pay_url)
+    if not is_test:
+        from .dispatch import send_email_once
+        email_payload, evidence = _frozen_email_payload(invoice_id, pay_url)
+        dispatch_result = send_email_once(tenant_id=tenant.id, key=f"invoice:{invoice_id}", email=email_payload)
+        ok = dispatch_result.get("ok", False)
+        resend_email_id = dispatch_result.get("resend_email_id") if ok else None
+        paths = [pathlib.Path(a["filename"]) for a in email_payload["attachments"]]
+        to = email_payload["to"] if isinstance(email_payload["to"], list) else [email_payload["to"]]
+        cc, bcc = email_payload.get("cc") or [], email_payload.get("bcc") or []
+        _eco_fields = evidence
+    else:
+        _eco_fields: dict = {}
+        with tempfile.TemporaryDirectory(prefix="ao-bill-") as tmp:
+            try:
+                paths = generate_files(match, formats, sub.include_summary,
+                                       pathlib.Path(tmp), invoice_date=invoice_date,
+                                       sub=sub, gmp_pdf_override=gmp_pdf_override,
+                                       pay_url=pay_url)
+            except Exception as e:  # noqa: BLE001
+                logger.exception("billing render failed")
+                return {"ok": False, "error": f"render failed: {e}"}
+            attachments = [_b64(p) for p in paths]
+            # Snapshot override id before send so one-shot overrides can expire.
+            _eco_fields = _offtaker_email_fields(
+                getattr(tenant, "id", None) or getattr(sub, "tenant_id", None),
+                subscription_id=getattr(sub, "id", None),
+            )
+            subject, html, text = _email_html(match, sub, is_test, note=note,
+                                              attachment_names=[p.name for p in paths],
+                                              pay_url=pay_url)
 
-        # White-label the sender: the offtaker sees the OPERATOR, not Array
-        # Operator. Send under the operator's name — from their own verified
-        # sending domain if they configured one, else the platform's sending
-        # address carrying their display name — and route replies to the operator.
-        product = getattr(tenant, "product", "array_operator")
-        op_name = _operator_company_name(getattr(tenant, "id", None)) or getattr(tenant, "name", None)
-        op_email = getattr(tenant, "contact_email", None)
-        if getattr(tenant, "send_from_email", None):
-            from_addr = (f'"{op_name}" <{tenant.send_from_email}>' if op_name else tenant.send_from_email)
-        elif op_name:
-            from_addr = f'"{op_name}" <{_platform_from_email(product)}>'
-        else:
-            from_addr = None
+            # White-label the sender: the offtaker sees the OPERATOR, not Array
+            # Operator. Send under the operator's name — from their own verified
+            # sending domain if they configured one, else the platform's sending
+            # address carrying their display name — and route replies to the operator.
+            product = getattr(tenant, "product", "array_operator")
+            op_name = _operator_company_name(getattr(tenant, "id", None)) or getattr(tenant, "name", None)
+            op_email = getattr(tenant, "contact_email", None)
+            if getattr(tenant, "send_from_email", None):
+                from_addr = (f'"{op_name}" <{tenant.send_from_email}>' if op_name else tenant.send_from_email)
+            elif op_name:
+                from_addr = f'"{op_name}" <{_platform_from_email(product)}>'
+            else:
+                from_addr = None
 
-        email_payload = dict(
-            to=to[0] if len(to) == 1 else to, subject=subject, html=html, text=text,
-            attachments=attachments, cc=cc or None, bcc=bcc or None, from_addr=from_addr,
-            reply_to=(op_email or None), product=product)
-        dispatch_result = {}
-        if is_test:
-            ok = _send_via_resend(**email_payload)
-        else:
-            from .dispatch import send_email_once
-            dispatch_result = send_email_once(tenant_id=tenant.id, key=f"invoice:{invoice_id}", email=email_payload)
-            ok = dispatch_result.get("ok", False)
-        # Capture Resend id immediately after send (bool return is back-compat;
-        # id lives on the function attr / last_resend_id helper).
-        from ..notify import last_resend_id as _last_resend_id
-        resend_email_id = (dispatch_result.get("resend_email_id") if not is_test else _last_resend_id()) if ok else None
+            email_payload = dict(
+                to=to[0] if len(to) == 1 else to, subject=subject, html=html, text=text,
+                attachments=attachments, cc=cc or None, bcc=bcc or None, from_addr=from_addr,
+                reply_to=(op_email or None), product=product)
+            dispatch_result = {}
+            if is_test:
+                ok = _send_via_resend(**email_payload)
+            else:
+                from .dispatch import send_email_once
+                dispatch_result = send_email_once(tenant_id=tenant.id, key=f"invoice:{invoice_id}", email=email_payload)
+                ok = dispatch_result.get("ok", False)
+            # Capture Resend id immediately after send (bool return is back-compat;
+            # id lives on the function attr / last_resend_id helper).
+            from ..notify import last_resend_id as _last_resend_id
+            resend_email_id = (dispatch_result.get("resend_email_id") if not is_test else _last_resend_id()) if ok else None
 
     result = {"ok": bool(ok), "to": to, "cc": cc, "bcc": bcc,
               "attachments": [p.name for p in paths],
@@ -2821,19 +2899,33 @@ def deliver_trueup_subscription(
         return {"ok": False, "skipped": True,
                 "error": "annual_trueup is not enabled for this offtaker"}
 
-    settlement = compute_annual_trueup(sub, as_of=as_of)
-    if not settlement.ok:
-        # Already settled this window → benign skip; missing budget/months → skip.
-        return {"ok": False, "skipped": True, "error": settlement.error,
-                "trueup": settlement.to_dict()}
+    from .issuance import load_frozen
+    from .trueup import trueup_window
+    window_end = trueup_window(as_of)[1]
+    if expected_period_label:
+        import re
+        dates = re.findall(r"\d{4}-\d{2}-\d{2}", expected_period_label)
+        if dates:
+            window_end = date.fromisoformat(dates[-1])
+    match = load_frozen(tenant.id, sub.id, f"trueup:{window_end.isoformat()}")
+    if match is not None:
+        from types import SimpleNamespace
+        frozen_settlement = match.computed_invoice["trueup"]
+        settlement = SimpleNamespace(window_end=window_end, to_dict=lambda: frozen_settlement)
+    else:
+        settlement = compute_annual_trueup(sub, as_of=as_of)
+        if not settlement.ok:
+            # Already settled this window → benign skip; missing budget/months → skip.
+            return {"ok": False, "skipped": True, "error": settlement.error,
+                    "trueup": settlement.to_dict()}
 
-    operator = (
-        _operator_company_name(getattr(tenant, "id", None))
-        or getattr(tenant, "company_name", None)
-        or getattr(tenant, "name", None)
-        or "Array Operator"
-    )
-    match = build_trueup_match(sub, settlement, operator=operator)
+        operator = (
+            _operator_company_name(getattr(tenant, "id", None))
+            or getattr(tenant, "company_name", None)
+            or getattr(tenant, "name", None)
+            or "Array Operator"
+        )
+        match = build_trueup_match(sub, settlement, operator=operator)
     ci = match.computed_invoice or {}
     cur_period_key = f"trueup:{settlement.window_end.isoformat()}"
     # Exactly-once for the TRUE-UP lives on its own column. Writing the true-up
@@ -2861,7 +2953,9 @@ def deliver_trueup_subscription(
         db.commit()
         try:
             invoice_id, match, _ = freeze(tenant_id=tenant.id, subscription_id=sub.id,
-                key=cur_period_key, match=match, expected_amount=expected_amount_usd)
+                key=cur_period_key, match=match, expected_amount=expected_amount_usd,
+                prepare=lambda frozen: _prepare_invoice_evidence(frozen, sub, tenant,
+                    note=frozen.computed_invoice.get("trueup_note"), trueup=True))
             ci = match.computed_invoice or {}
             recovery = reconcile(invoice_id)
             if recovery.get("ok") or recovery.get("uncertain"):
@@ -2877,7 +2971,9 @@ def deliver_trueup_subscription(
         to, cc, problems = ([op] if op else [], [],
                             [] if op else ["No operator email on file."])
     else:
-        to, cc, problems = resolve_recipients(sub, tenant)
+        envelope, _ = _frozen_email_payload(invoice_id, None)
+        to = envelope["to"] if isinstance(envelope["to"], list) else [envelope["to"]]
+        cc, problems = envelope.get("cc") or [], []
     if problems and not to:
         return {"ok": False, "error": "; ".join(problems)}
     if not to:
@@ -2920,43 +3016,53 @@ def deliver_trueup_subscription(
         hold(invoice_id, reason)
         return {"ok": False, "held": True, "invoice_id": invoice_id, "error": reason}
 
-    with tempfile.TemporaryDirectory(prefix="ao-trueup-") as tmp:
-        try:
-            paths = generate_files(
-                match, formats, False, pathlib.Path(tmp),
-                invoice_date=invoice_date, sub=sub, pay_url=pay_url)
-        except Exception as e:  # noqa: BLE001
-            logger.exception("trueup render failed")
-            return {"ok": False, "error": f"render failed: {e}"}
-        attachments = [_b64(p) for p in paths]
-        subject, html, text = _email_html(
-            match, sub, is_test, note=ci.get("trueup_note"),
-            attachment_names=[p.name for p in paths], pay_url=pay_url)
+    if not is_test:
+        from .dispatch import send_email_once
+        email_payload, evidence = _frozen_email_payload(invoice_id, pay_url)
+        dispatch_result = send_email_once(tenant_id=tenant.id, key=f"invoice:{invoice_id}", email=email_payload, kind="trueup")
+        ok = dispatch_result.get("ok", False)
+        resend_email_id = dispatch_result.get("resend_email_id") if ok else None
+        paths = [pathlib.Path(a["filename"]) for a in email_payload["attachments"]]
+        to = email_payload["to"] if isinstance(email_payload["to"], list) else [email_payload["to"]]
+        cc, bcc = email_payload.get("cc") or [], email_payload.get("bcc") or []
+    else:
+        with tempfile.TemporaryDirectory(prefix="ao-trueup-") as tmp:
+            try:
+                paths = generate_files(
+                    match, formats, False, pathlib.Path(tmp),
+                    invoice_date=invoice_date, sub=sub, pay_url=pay_url)
+            except Exception as e:  # noqa: BLE001
+                logger.exception("trueup render failed")
+                return {"ok": False, "error": f"render failed: {e}"}
+            attachments = [_b64(p) for p in paths]
+            subject, html, text = _email_html(
+                match, sub, is_test, note=ci.get("trueup_note"),
+                attachment_names=[p.name for p in paths], pay_url=pay_url)
 
-        product = getattr(tenant, "product", "array_operator")
-        op_name = _operator_company_name(getattr(tenant, "id", None)) or getattr(tenant, "name", None)
-        op_email = getattr(tenant, "contact_email", None)
-        if getattr(tenant, "send_from_email", None):
-            from_addr = (f'"{op_name}" <{tenant.send_from_email}>' if op_name
-                         else tenant.send_from_email)
-        elif op_name:
-            from_addr = f'"{op_name}" <{_platform_from_email(product)}>'
-        else:
-            from_addr = None
+            product = getattr(tenant, "product", "array_operator")
+            op_name = _operator_company_name(getattr(tenant, "id", None)) or getattr(tenant, "name", None)
+            op_email = getattr(tenant, "contact_email", None)
+            if getattr(tenant, "send_from_email", None):
+                from_addr = (f'"{op_name}" <{tenant.send_from_email}>' if op_name
+                             else tenant.send_from_email)
+            elif op_name:
+                from_addr = f'"{op_name}" <{_platform_from_email(product)}>'
+            else:
+                from_addr = None
 
-        email_payload = dict(
-            to=to[0] if len(to) == 1 else to, subject=subject, html=html, text=text,
-            attachments=attachments, cc=cc or None, bcc=bcc or None,
-            from_addr=from_addr, reply_to=(op_email or None), product=product)
-        dispatch_result = {}
-        if is_test:
-            ok = _send_via_resend(**email_payload)
-        else:
-            from .dispatch import send_email_once
-            dispatch_result = send_email_once(tenant_id=tenant.id, key=f"invoice:{invoice_id}", email=email_payload, kind="trueup")
-            ok = dispatch_result.get("ok", False)
-        from ..notify import last_resend_id as _last_resend_id
-        resend_email_id = (dispatch_result.get("resend_email_id") if not is_test else _last_resend_id()) if ok else None
+            email_payload = dict(
+                to=to[0] if len(to) == 1 else to, subject=subject, html=html, text=text,
+                attachments=attachments, cc=cc or None, bcc=bcc or None,
+                from_addr=from_addr, reply_to=(op_email or None), product=product)
+            dispatch_result = {}
+            if is_test:
+                ok = _send_via_resend(**email_payload)
+            else:
+                from .dispatch import send_email_once
+                dispatch_result = send_email_once(tenant_id=tenant.id, key=f"invoice:{invoice_id}", email=email_payload, kind="trueup")
+                ok = dispatch_result.get("ok", False)
+            from ..notify import last_resend_id as _last_resend_id
+            resend_email_id = (dispatch_result.get("resend_email_id") if not is_test else _last_resend_id()) if ok else None
 
     result = {
         # No BCC on the true-up send (see the _send_via_resend call above). This
