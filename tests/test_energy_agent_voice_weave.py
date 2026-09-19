@@ -6,9 +6,14 @@ import os
 from api import energy_agent as ea
 
 
-def test_voice_weave_enabled_by_default(monkeypatch):
+def test_voice_weave_disabled_by_default(monkeypatch):
     monkeypatch.delenv("EA_VOICE_WEAVE", raising=False)
-    assert ea._voice_weave_enabled() is True
+    # 20fed9b7 deliberately reverted to mouth-only after instruction/audio leaks.
+    # Match public/energy-agent.js; explicit opt-in remains tested below.
+    assert ea._voice_weave_enabled() is False
+    cfg = ea._realtime_session_config()
+    assert cfg["audio"]["input"]["turn_detection"]["create_response"] is False
+    assert "tools" not in cfg
 
 
 def test_realtime_config_weave_has_tool_and_create_response(monkeypatch):

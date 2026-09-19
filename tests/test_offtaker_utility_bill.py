@@ -257,7 +257,7 @@ def test_default_net_rate_exposes_bill_rate_when_cashed():
     # The honest DEFAULT mirrors the bill's own rate + source (no override set).
     assert ci["default_net_rate_source"] == "gmp_bill_credit"
     assert abs(ci["default_net_rate_per_kwh"] - 0.2576) < 1e-6
-    assert "GMP bill" in (ci["default_net_rate_note"] or "") \
+    assert "utility bill" in (ci["default_net_rate_note"] or "") \
         or "net-metering credit" in (ci["default_net_rate_note"] or "")
 
 

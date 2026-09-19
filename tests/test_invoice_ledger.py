@@ -123,7 +123,7 @@ def test_build_default_ledger_xlsx_has_collection_columns():
         blob, mapping = build_default_ledger(db, sub)
     assert mapping["auto"] is True
     assert mapping["data_rows"] == 2
-    assert "Collected $" in mapping["headers"]
+    assert "After platform fee $" in mapping["headers"]
     assert "Paid date" in mapping["headers"]
     wb = load_workbook(io.BytesIO(blob))
     ws = wb.active
@@ -131,7 +131,7 @@ def test_build_default_ledger_xlsx_has_collection_columns():
     headers = [c.value for c in ws[1]]
     assert headers == [
         "Period", "Generation kWh", "Invoice $", "Status",
-        "Paid date", "Collected $", "Platform fee $", "Invoice #",
+        "Paid date", "After platform fee $", "Platform fee $", "Invoice #",
     ]
     # oldest first in sheet
     assert ws.cell(2, 1).value == "2026-04"
@@ -201,7 +201,7 @@ def test_tracker_status_includes_payments_and_auto_ledger(client, monkeypatch):
     assert tr["payments_open"] == 1
     assert tr["collected_usd"] == 99.50
     assert len(tr["payments"]) == 2
-    assert "Collected $" in (tr.get("headers") or [])
+    assert "After platform fee $" in (tr.get("headers") or [])
 
 
 def test_tracker_download_default_ledger(client, monkeypatch):
@@ -217,7 +217,7 @@ def test_tracker_download_default_ledger(client, monkeypatch):
     assert "spreadsheetml" in (r.headers.get("content-type") or "")
     wb = load_workbook(io.BytesIO(r.content))
     headers = [c.value for c in wb.active[1]]
-    assert "Collected $" in headers
+    assert "After platform fee $" in headers
     assert "Invoice $" in headers
 
 
@@ -302,7 +302,7 @@ def test_sync_payment_updates_byo_generation_sheet(monkeypatch):
     # Unit: apply_payment_to_workbook
     wb = Workbook()
     ws = wb.active
-    ws.append(["Period", "Generation kWh", "Invoice $", "Status", "Paid date", "Collected $"])
+    ws.append(["Period", "Generation kWh", "Invoice $", "Status", "Paid date", "After platform fee $"])
     ws.append(["2026-05", 120.5, 51.90, "Awaiting payment", "", ""])
     ws.append(["2026-04", 100.0, 40.00, "Paid", "2026-05-01", 39.80])
     buf = io.BytesIO()

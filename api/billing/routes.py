@@ -43,7 +43,7 @@ from typing import Optional
 from fastapi import APIRouter, Header, HTTPException, UploadFile, File, Form, Query
 from fastapi.responses import StreamingResponse, Response, RedirectResponse, HTMLResponse
 from html import escape as _html_escape
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select, func, or_
 from sqlalchemy.orm import selectinload
 
@@ -601,7 +601,7 @@ def _validate_rate(rate):
         r = float(rate)
     except (TypeError, ValueError):
         raise HTTPException(400, "rate_per_kwh must be a number ($/kWh)")
-    if r < 0 or r > MAX_RATE_PER_KWH:
+    if not __import__("math").isfinite(r) or r < 0 or r > MAX_RATE_PER_KWH:
         raise HTTPException(400, f"rate_per_kwh must be between 0 and {MAX_RATE_PER_KWH} $/kWh")
     return r
 
@@ -695,7 +695,7 @@ def _validate_budget(v):
         amt = float(v)
     except (TypeError, ValueError):
         raise HTTPException(400, "budget_amount_usd must be a number")
-    if amt < 0:
+    if not __import__("math").isfinite(amt) or amt < 0:
         raise HTTPException(400, "budget_amount_usd can't be negative")
     return amt
 
@@ -881,6 +881,42 @@ def _match_offtaker_subaccount(name, accounts):
     return best
 
 
+def _lock_roster(db, tenant_id):
+    """Serialize roster validation and mutation across all workers."""
+    from ..models import Tenant
+    from sqlalchemy import text
+    if db.info.get("roster_locked"):
+        return
+    if db.bind.dialect.name == "sqlite":
+        db.execute(text("BEGIN IMMEDIATE"))
+    else:
+        db.execute(select(Tenant.id).where(Tenant.id == tenant_id).with_for_update()).scalar_one()
+    db.info["roster_locked"] = True
+
+
+def _check_allocation_totals(db, tenant_id, *, account_id, array_id, allocation, share=None, exclude_id=None):
+    query = select(BillingReportSubscription).where(
+        BillingReportSubscription.tenant_id == tenant_id,
+        BillingReportSubscription.deleted_at.is_(None))
+    if exclude_id is not None:
+        query = query.where(BillingReportSubscription.id != exclude_id)
+    with db.no_autoflush:
+        others = db.execute(query).scalars().all()
+    meter = sum(float(r.allocation_pct or 0) for r in others if account_id is not None and r.utility_account_id == account_id)
+    if account_id is not None and meter + allocation > 1 + 1e-6:
+        raise HTTPException(409, "This would over-allocate the meter past 100%")
+    if array_id is not None:
+        def group_share(row):
+            if row.array_allocations:
+                return sum(float(a.get("allocation_pct") or 0) for a in row.array_allocations
+                           if a.get("array_id") == array_id)
+            return (float(row.array_share_pct if row.array_share_pct is not None else row.allocation_pct or 0)
+                    if row.array_id == array_id else 0)
+        group = sum(group_share(r) for r in others)
+        if group + (share if share is not None else allocation) > 1 + 1e-6:
+            raise HTTPException(409, "This would over-allocate the array group past 100%")
+
+
 async def _create_manual_subscription(
     t, *, customer_name, array_id, allocation_pct, array_allocations=None,
     utility_account_id=None, array_share_pct=None, crosscheck_threshold_pct=None,
@@ -888,7 +924,7 @@ async def _create_manual_subscription(
     rate_per_kwh, discount_pct,
     net_rate_per_kwh, cadence,
     send_mode, delivery_mode, client_email, cc_emails, operator_email, formats,
-    include_summary, annual_trueup, enabled,
+    include_summary, annual_trueup, enabled, _db=None,
 ):
     """Create a workbook-less subscription from typed fields.
 
@@ -903,6 +939,7 @@ async def _create_manual_subscription(
         The offtaker owns a share of several arrays; delivery sums each array's
         (period kWh × pct) into one combined invoice.
     """
+    from contextlib import nullcontext
     import json as _json
     from ..models import Array, UtilityAccount
 
@@ -929,11 +966,11 @@ async def _create_manual_subscription(
     if utility_account_id is None and array_id is not None and not array_allocations:
         from ..models import UtilityAccount as _UA, Array as _Arr, Bill
         from ..adapters import is_smarthub_provider as _is_sh
-        with SessionLocal() as _db:
-            _arr = _db.get(_Arr, array_id)
+        with (nullcontext(_db) if _db is not None else SessionLocal()) as _resolve_db:
+            _arr = _resolve_db.get(_Arr, array_id)
             if _arr is None or _arr.tenant_id != t.id or _arr.deleted_at is not None:
                 raise HTTPException(404, f"Array {array_id} not found")
-            _accts = _db.execute(
+            _accts = _resolve_db.execute(
                 select(_UA).where(
                     _UA.array_id == array_id,
                     _UA.tenant_id == t.id,
@@ -950,7 +987,7 @@ async def _create_manual_subscription(
                 # Anything still ambiguous demands an explicit override.
                 _with_bill = []
                 for a in _billable:
-                    _has = _db.execute(
+                    _has = _resolve_db.execute(
                         select(func.count(Bill.id)).where(
                             Bill.account_id == a.id, Bill.kwh_generated.isnot(None))
                     ).scalar() or 0
@@ -969,14 +1006,7 @@ async def _create_manual_subscription(
                     # same live; this covers bulk-import + API). Only a UNIQUE,
                     # unambiguous match resolves — otherwise still demand an
                     # explicit choice rather than guess on a billing path.
-                    _matched = _match_offtaker_subaccount(name, _with_bill or _billable)
-                    if _matched is not None:
-                        utility_account_id = _matched.id
-                    else:
-                        raise HTTPException(
-                            400, "This array has multiple connected utility bills — "
-                                 "pass utility_account_id to choose which one invoices "
-                                 "this offtaker.")
+                    raise HTTPException(400, "Multiple utility accounts: explicitly confirm utility_account_id.")
             # else: no billable account → fall through to legacy generation path.
 
     # ── OFFTAKER ↔ UTILITY BILL path (highest priority) ──────────────────────
@@ -997,7 +1027,8 @@ async def _create_manual_subscription(
         share_val = _validate_array_share(array_share_pct)
         threshold_val = _validate_crosscheck_threshold(crosscheck_threshold_pct)
         inv_start_val = _validate_invoice_start(invoice_number_start)
-        with SessionLocal() as db:
+        with (nullcontext(_db) if _db is not None else SessionLocal()) as db:
+            _lock_roster(db, t.id)
             acct = db.get(UtilityAccount, utility_account_id)
             if (acct is None or acct.tenant_id != t.id
                     or acct.deleted_at is not None):
@@ -1038,11 +1069,16 @@ async def _create_manual_subscription(
             # and the GMP allocation cross-check compares the sub's credited excess to
             # (share x the master array's group excess).
             group_array_id = array_id if array_id is not None else acct.array_id
+            if group_array_id is not None:
+                group_array = db.get(Array, group_array_id)
+                if group_array is None or group_array.tenant_id != t.id or group_array.deleted_at is not None:
+                    raise HTTPException(404, "Group array not found")
             _host_id = None
             if group_array_id is not None:
                 _host_id = db.execute(
                     select(UtilityAccount.id).where(
                         UtilityAccount.array_id == group_array_id,
+                        UtilityAccount.tenant_id == t.id,
                         UtilityAccount.deleted_at.is_(None))
                     .order_by(UtilityAccount.id)).scalars().first()
             _is_submeter = _host_id is not None and _host_id != utility_account_id
@@ -1069,20 +1105,8 @@ async def _create_manual_subscription(
             # (0.5pp rounding epsilon). Runs for both single-create and each
             # bulk-commit row (earlier rows are already committed, so the running
             # total stays correct across a batch).
-            _existing_alloc = float(db.execute(
-                select(func.coalesce(func.sum(BillingReportSubscription.allocation_pct), 0.0))
-                .where(
-                    BillingReportSubscription.tenant_id == t.id,
-                    BillingReportSubscription.utility_account_id == utility_account_id,
-                    BillingReportSubscription.deleted_at.is_(None),
-                )
-            ).scalar() or 0.0)
-            if _existing_alloc + pct > 1.0 + 0.005:
-                raise HTTPException(
-                    409,
-                    f"This would over-allocate the meter to {(_existing_alloc + pct) * 100:.0f}% "
-                    f"— offtakers sharing one utility account can't sum past 100% or the "
-                    f"meter's excess is billed twice. It's already at {_existing_alloc * 100:.0f}%.")
+            _check_allocation_totals(db, t.id, account_id=utility_account_id,
+                array_id=group_array_id, allocation=pct, share=share_val)
             client = db.execute(
                 select(Client).where(Client.tenant_id == t.id, Client.name == name,
                                      Client.deleted_at.is_(None))
@@ -1130,8 +1154,10 @@ async def _create_manual_subscription(
                 next_send_at=next_send_at(cadence),
             )
             db.add(sub)
-            db.commit()
-            _sync_invoicing_quantity(t.id)
+            db.flush()
+            if _db is None:
+                db.commit()
+                _sync_invoicing_quantity(t.id)
             return {"ok": True, "subscription": _sub_dict(sub)}
 
     # Parse the optional multi-array allocations list.
@@ -1160,6 +1186,8 @@ async def _create_manual_subscription(
             allocs.append({"array_id": aid, "allocation_pct": p})
         if not allocs:
             raise HTTPException(400, "array_allocations had no usable rows")
+        if len({a["array_id"] for a in allocs}) != len(allocs):
+            raise HTTPException(400, "array_allocations must not repeat an array")
 
     if not allocs:
         # Legacy single-array path.
@@ -1183,7 +1211,8 @@ async def _create_manual_subscription(
     threshold_val = _validate_crosscheck_threshold(crosscheck_threshold_pct)
     inv_start_val = _validate_invoice_start(invoice_number_start)
 
-    with SessionLocal() as db:
+    with (nullcontext(_db) if _db is not None else SessionLocal()) as db:
+        _lock_roster(db, t.id)
         # Validate every referenced array belongs to this tenant.
         aids_to_check = [a["array_id"] for a in allocs] if allocs else [array_id]
         for aid in aids_to_check:
@@ -1191,6 +1220,9 @@ async def _create_manual_subscription(
             if arr is None or arr.tenant_id != t.id or arr.deleted_at is not None:
                 raise HTTPException(404, f"Array {aid} not found")
 
+        for al in (allocs or [{"array_id": array_id, "allocation_pct": pct}]):
+            _check_allocation_totals(db, t.id, account_id=None,
+                array_id=al["array_id"], allocation=al["allocation_pct"], share=share_val)
         client = db.execute(
             select(Client).where(Client.tenant_id == t.id, Client.name == name,
                                  Client.deleted_at.is_(None))
@@ -1236,8 +1268,10 @@ async def _create_manual_subscription(
             next_send_at=next_send_at(cadence),
         )
         db.add(sub)
-        db.commit()
-        _sync_invoicing_quantity(t.id)
+        db.flush()
+        if _db is None:
+            db.commit()
+            _sync_invoicing_quantity(t.id)
         return {"ok": True, "subscription": _sub_dict(sub)}
 
 
@@ -1301,6 +1335,7 @@ def patch_subscription(sub_id: int, body: SubscriptionPatch,
     t = tenant_from_session(authorization)
     require_not_demo(t)
     with SessionLocal() as db:
+        _lock_roster(db, t.id)
         sub = _get_owned(db, t.id, sub_id)
         if body.cadence is not None:
             if body.cadence not in VALID_CADENCE:
@@ -1434,7 +1469,7 @@ def patch_subscription(sub_id: int, body: SubscriptionPatch,
                     amt = float(v)
                 except (TypeError, ValueError):
                     raise HTTPException(400, "budget_amount_usd must be a number")
-                if amt < 0:
+                if not __import__("math").isfinite(amt) or amt < 0:
                     raise HTTPException(400, "budget_amount_usd can't be negative")
                 sub.budget_amount_usd = amt
         # ── Sub-meter invariant (Ford 2026-07-07) ────────────────────────────
@@ -1479,6 +1514,10 @@ def patch_subscription(sub_id: int, body: SubscriptionPatch,
                     if _grp is not None:
                         sub.array_share_pct = _validate_array_share(_grp)
                 sub.allocation_pct = 1.0
+        if {"allocation_pct", "array_share_pct", "array_id", "utility_account_id"} & body.model_fields_set:
+            _check_allocation_totals(db, t.id, account_id=sub.utility_account_id,
+                array_id=sub.array_id, allocation=float(sub.allocation_pct or 0),
+                share=sub.array_share_pct, exclude_id=sub.id)
         db.commit()
         return {"ok": True, "subscription": _sub_dict(sub)}
 
@@ -1705,7 +1744,7 @@ def _bulk_rate(raw: str) -> tuple[Optional[float], Optional[str]]:
         v = float(raw.replace("$", "").strip())
     except ValueError:
         return None, f'"{raw}" isn\'t a valid rate ($/kWh)'
-    if v < 0 or v > MAX_RATE_PER_KWH:
+    if not __import__("math").isfinite(v) or v < 0 or v > MAX_RATE_PER_KWH:
         return None, f"rate must be between 0 and {MAX_RATE_PER_KWH} $/kWh"
     return v, None
 
@@ -1739,7 +1778,7 @@ def _bulk_budget(raw: str) -> tuple[Optional[float], Optional[str]]:
         amt = float(v)
     except ValueError:
         return None, f'"{raw}" isn\'t a valid budget amount ($)'
-    if amt < 0:
+    if not __import__("math").isfinite(amt) or amt < 0:
         return None, "budget can't be negative"
     return amt, None
 
@@ -1767,6 +1806,7 @@ async def bulk_import_offtakers(
     cadence: str = Form(default="monthly"),
     delivery_mode: str = Form(default="approval"),
     column_map: Optional[str] = Form(default=None),
+    header_row: Optional[int] = Form(default=None),
     authorization: Optional[str] = Header(default=None),
 ):
     """Bulk-import v2 — parse a roster (.csv/.xlsx) and return a per-row, fuzzy-
@@ -1825,7 +1865,9 @@ async def bulk_import_offtakers(
 
     # ── Resolve the column mapping (override → alias fast-path → detector). ───────
     detection: Optional[dict] = None
-    header_row_idx = 0
+    header_row_idx = header_row if isinstance(header_row, int) else 0
+    if not 0 <= header_row_idx < len(rows):
+        raise HTTPException(400, "header_row must be a valid zero-based row index")
 
     # (1) Operator-confirmed override: parse by it, skip detection.
     override_map: Optional[dict] = None
@@ -2185,8 +2227,8 @@ async def bulk_commit_offtakers(body: BulkCommitBody,
     fixes any matches. Each row is created via _create_manual_subscription bound to
     the row's array_id + utility_account_id (both validated as belonging to the
     tenant). Idempotent: a row whose (tenant, customer_name, utility_account_id)
-    already matches a LIVE subscription is SKIPPED (never duplicated), so re-running
-    a partially-committed batch is safe.
+    already matches a LIVE subscription is SKIPPED. The entire batch commits or
+    rolls back together while holding the tenant allocation lock.
 
     Returns {ok, created, skipped, failed:[{offtaker_name, error}]}.
     """
@@ -2199,33 +2241,51 @@ async def bulk_commit_offtakers(body: BulkCommitBody,
     if not body.rows:
         raise HTTPException(400, "No rows to commit.")
 
+    with SessionLocal() as db:
+        _lock_roster(db, t.id)
+        result = await _bulk_commit_atomic(body, t, db)
+        if result["failed"]:
+            db.rollback()
+            result.update(ok=False, created=0, created_rows=[])
+        else:
+            db.commit()
+            _sync_invoicing_quantity(t.id)
+        return result
+
+
+async def _bulk_commit_atomic(body, t, db):
     from ..models import UtilityAccount
 
     # Pre-validate every utility account belongs to the tenant + is a billing
     # provider, and snapshot existing (name, ua) subs for idempotency — one query.
-    with SessionLocal() as db:
-        owned_ua = {
-            a.id: a for a in db.execute(
-                select(UtilityAccount).where(
-                    UtilityAccount.tenant_id == t.id,
-                    UtilityAccount.deleted_at.is_(None))
-            ).scalars().all()
-        }
-        existing = db.execute(
-            select(BillingReportSubscription.customer_name,
-                   BillingReportSubscription.utility_account_id,
-                   BillingReportSubscription.allocation_pct,
-                   BillingReportSubscription.client_email,
-                   BillingReportSubscription.discount_pct).where(
-                BillingReportSubscription.tenant_id == t.id,
-                BillingReportSubscription.deleted_at.is_(None))
-        ).all()
+    owned_ua = {
+        a.id: a for a in db.execute(
+            select(UtilityAccount).where(
+                UtilityAccount.tenant_id == t.id,
+                UtilityAccount.deleted_at.is_(None))
+        ).scalars().all()
+    }
+    existing = db.execute(
+        select(BillingReportSubscription.customer_name,
+               BillingReportSubscription.utility_account_id,
+               BillingReportSubscription.allocation_pct,
+               BillingReportSubscription.array_share_pct,
+               BillingReportSubscription.client_email,
+               BillingReportSubscription.discount_pct,
+               BillingReportSubscription.net_rate_per_kwh,
+               BillingReportSubscription.budget_amount_usd,
+               BillingReportSubscription.array_id,
+               BillingReportSubscription.cadence,
+               BillingReportSubscription.delivery_mode).where(
+            BillingReportSubscription.tenant_id == t.id,
+            BillingReportSubscription.deleted_at.is_(None))
+    ).all()
     # Key -> the live sub's money-driving values, so we can tell a true no-op
     # (same values → safe skip) from a real conflict (already live with DIFFERENT
     # allocation/email/discount → must NOT silently skip and leave the stale value,
     # nor silently overwrite live billing; surface it for the operator to resolve).
-    existing_vals = {((n or "").strip().lower(), ua): (al, em, di)
-                     for (n, ua, al, em, di) in existing}
+    existing_vals = {((n or "").strip().lower(), ua): (sh if sh is not None else al, em, di, nr, bu, ar, ca, dm)
+                     for (n, ua, al, sh, em, di, nr, bu, ar, ca, dm) in existing}
     existing_keys = set(existing_vals.keys())
 
     created: list[dict] = []
@@ -2257,7 +2317,7 @@ async def bulk_commit_offtakers(body: BulkCommitBody,
         # rather than framing it as "already exists".
         _key = (name.lower(), r.utility_account_id)
         if _key in existing_vals:
-            _al, _em, _di = existing_vals[_key]
+            _al, _em, _di, _nr, _bu, _ar, _ca, _dm = existing_vals[_key]
             def _num_eq(a, b):
                 if a is None and b is None:
                     return True
@@ -2266,7 +2326,11 @@ async def bulk_commit_offtakers(body: BulkCommitBody,
                 return abs(float(a) - float(b)) < 1e-9
             _same = (_num_eq(_al, r.allocation_pct)
                      and ((_em or "").strip().lower() or None) == (email or None)
-                     and _num_eq(_di, r.discount_pct))
+                     and _num_eq(_di, r.discount_pct)
+                     and _num_eq(_nr, r.net_rate_per_kwh)
+                     and _num_eq(_bu, r.budget_amount_usd)
+                     and _ar == (r.array_id if r.array_id is not None else ua.array_id) and _ca == body.cadence
+                     and _dm == body.delivery_mode)
             if _same:
                 skipped.append({"offtaker_name": name,
                                 "utility_account_id": r.utility_account_id,
@@ -2293,7 +2357,7 @@ async def bulk_commit_offtakers(body: BulkCommitBody,
                 send_mode=("to_client" if email else "to_me"),
                 delivery_mode=body.delivery_mode, client_email=email,
                 cc_emails=None, operator_email=None, formats=None,
-                include_summary=False, annual_trueup=False, enabled=True,
+                include_summary=False, annual_trueup=False, enabled=True, _db=db,
             )
         except HTTPException as e:
             failed.append({"offtaker_name": name, "error": str(e.detail)})
@@ -2303,7 +2367,9 @@ async def bulk_commit_offtakers(body: BulkCommitBody,
         # Remember what we just created so an exact duplicate row later in the
         # SAME batch is skipped as identical (and a conflicting one surfaced),
         # instead of being created twice — the pre-loop snapshot never saw it.
-        existing_vals[_key] = (r.allocation_pct, email, r.discount_pct)
+        existing_vals[_key] = (r.allocation_pct, email, r.discount_pct,
+                               r.net_rate_per_kwh, r.budget_amount_usd,
+                               r.array_id if r.array_id is not None else ua.array_id, body.cadence, body.delivery_mode)
 
     return {"ok": True, "created": len(created), "created_rows": created,
             "skipped": skipped, "failed": failed}
@@ -4060,6 +4126,25 @@ def subscription_bill_periods(sub_id: int,
         cadence = getattr(sub, "cadence", None) or "monthly"
         from .delivery import settled_periods_for_sub
         periods = settled_periods_for_sub(sub)
+        # The selector must not turn an explicit zero-excess bill into a
+        # billable month by falling back to gross generation.
+        from ..models import Bill
+        from .backlog import canonical_period
+        eligible = set()
+        bills = db.scalars(select(Bill).where(
+            Bill.tenant_id == t.id, Bill.account_id == sub.utility_account_id,
+            Bill.period_end.isnot(None))).all() if sub.utility_account_id else []
+        for bill in bills:
+            excess = bill.kwh_sent_to_grid
+            if excess is None and bill.kwh_generated is not None and bill.kwh_consumed is not None:
+                excess = bill.kwh_generated - bill.kwh_consumed
+            if excess is not None and excess > 0:
+                eligible.add(canonical_period(bill.period_end.date().isoformat(), cadence))
+        periods = [p for p in periods if p["label"] in eligible]
+        for p in periods:
+            p.pop("is_latest", None)
+        if periods:
+            periods[0]["is_latest"] = True
         return {"ok": True, "cadence": cadence, "periods": periods}
 
 
@@ -4340,14 +4425,15 @@ def approve_draft(draft_id: int, authorization: Optional[str] = Header(default=N
         # re-read status inside the txn, and flip pending→sending; a second
         # concurrent approve (double-click / client retry) then sees it's no
         # longer pending and 409s instead of sending a duplicate invoice.
-        locked = db.execute(
-            select(ReportDraft).where(ReportDraft.id == d.id).with_for_update()
-        ).scalars().first()
-        if locked is None or locked.status != "pending":
+        from sqlalchemy import update
+        claimed = db.execute(update(ReportDraft).where(
+            ReportDraft.id == d.id, ReportDraft.tenant_id == t.id,
+            ReportDraft.status == "pending").values(status="sending")).rowcount
+        if claimed != 1:
+            db.rollback()
             raise HTTPException(409, "draft already resolved")
-        locked.status = "sending"
         db.commit()
-        d = locked
+        db.refresh(d)
         sub = _get_owned(db, t.id, d.subscription_id)
         # #4: attach the draft's manually-uploaded GMP bill for THIS send only —
         # passed through, never persisted onto the sub (persisting it made a stale
@@ -4362,7 +4448,8 @@ def approve_draft(draft_id: int, authorization: Optional[str] = Header(default=N
                 from .delivery import deliver_trueup_subscription
                 result = deliver_trueup_subscription(
                     db, sub, t, triggered_by="approval-trueup", is_test=False,
-                    force=True)
+                    force=True, expected_period_label=str(d.period_label).removeprefix("True-up "),
+                    expected_amount_usd=d.amount_usd)
             else:
                 result = deliver_subscription(
                     db, sub, t, triggered_by="approval", is_test=False, note=d.note,
@@ -4374,8 +4461,10 @@ def approve_draft(draft_id: int, authorization: Optional[str] = Header(default=N
             d.status = "pending"      # release the claim so it can be retried
             db.commit()
             raise
+        if result.get("already_sent"):
+            result["ok"] = True  # accepted durable history recovered after an interrupted approval
         if not result.get("ok"):
-            d.status = "pending"      # release the claim; nothing was sent
+            d.status = "held" if result.get("uncertain") else "pending"
             db.commit()
             raise HTTPException(422, result.get("error", "send failed"))
         d.status = "sent"
@@ -5591,6 +5680,21 @@ def send_pipeline(authorization: Optional[str] = Header(default=None)):
         pending_auto = sum(int(c) for m, c in pend_rows if (m or "approval") == "auto")
         pending_approval = sum(int(c) for m, c in pend_rows if (m or "approval") != "auto")
         pending = pending_auto + pending_approval
+        from ..models import OfftakerInvoice, BillingEmailDispatch
+        held_invoices = db.scalars(select(OfftakerInvoice).where(
+            OfftakerInvoice.tenant_id == t.id, OfftakerInvoice.status != "accepted")
+            .order_by(OfftakerInvoice.period_start, OfftakerInvoice.id)).all()
+        holds = [{"invoice_id": row.id, "subscription_id": row.subscription_id,
+                  "period": row.period_key, "status": row.status,
+                  "amount_cents": row.amount_cents, "reason": row.last_error or "Awaiting invoice delivery"}
+                 for row in held_invoices]
+        dispatch_holds = [{"id": row.id, "kind": row.kind, "status": row.status,
+                           "attempts": row.attempts, "reason": row.error,
+                           "retry_at": row.retry_at.isoformat() if row.retry_at else None}
+                          for row in db.scalars(select(BillingEmailDispatch).where(
+                              BillingEmailDispatch.tenant_id == t.id,
+                              BillingEmailDispatch.status != "accepted"))]
+
 
     total = len(rows)
     last_period = max((r.last_sent_period_end for r in rows
@@ -5615,6 +5719,11 @@ def send_pipeline(authorization: Optional[str] = Header(default=None)):
 
     now = datetime.utcnow()
 
+    def _next_daily(hour, minute):
+        from datetime import timedelta
+        candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        return candidate if candidate > now else candidate + timedelta(days=1)
+
     def _split(cadence: str) -> dict:
         subs = [r for r in rows if (r.cadence or "monthly") == cadence]
         auto = sum(1 for r in subs if (r.delivery_mode or "approval") == "auto")
@@ -5624,6 +5733,7 @@ def send_pipeline(authorization: Optional[str] = Header(default=None)):
     return {
         "ok": True,
         "total_enabled": total,
+        "holds": holds, "dispatch_holds": dispatch_holds,
         "last": {
             "period_end": last_period,
             "period_month": (last_period or "")[:7] or None,
@@ -5637,9 +5747,9 @@ def send_pipeline(authorization: Optional[str] = Header(default=None)):
                      "waiting": waiting},
         "default_delivery_mode": default_mode,
         "mode_split": {"auto": auto_all, "approval": approval_all},
-        "next_monthly": {"fires_at": _next_month_first(now).isoformat(),
+        "next_monthly": {"fires_at": _next_daily(9, 0).isoformat(),
                          **_split("monthly")},
-        "next_quarterly": {"fires_at": _next_quarter_first(now).isoformat(),
+        "next_quarterly": {"fires_at": _next_daily(9, 15).isoformat(),
                            **_split("quarterly")},
         "paused": bool(getattr(tenant, "sending_paused", False)),
     }
@@ -5966,7 +6076,9 @@ def offtaker_pay_link(token: str):
         return HTMLResponse(_PAY_PAGE.format(
             title="Online payment isn't available right now",
             body=_html_escape(res.get("reason") or ""),
-            foot=f"You can still pay {op} directly using the details on your invoice."),
+            foot=("Please wait for confirmation before making another payment."
+                  if res.get("processing") else
+                  "Please confirm the payment status before trying again.")),
             status_code=409, headers=_NO_STORE)
     return HTMLResponse(_PAY_PAGE.format(
         title="We couldn't find that invoice link",
@@ -6460,3 +6572,123 @@ def monthly_report_download(report_id: int,
             media_type=("application/vnd.openxmlformats-officedocument"
                         ".spreadsheetml.sheet"),
             headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+class PaymentPolicyPatch(BaseModel):
+    model_config = {"extra": "forbid"}
+    policy: str
+
+
+def _payment_policy_payload(tenant):
+    return {"ok": True, "policy": tenant.offtaker_payment_policy or "online_required",
+            "audit": tenant.offtaker_payment_policy_audit or []}
+
+
+@router.get("/payment-policy")
+def get_payment_policy(authorization: Optional[str] = Header(default=None)):
+    t = tenant_from_session(authorization)
+    return _payment_policy_payload(t)
+
+
+@router.patch("/payment-policy")
+def update_payment_policy(body: PaymentPolicyPatch,
+                          authorization: Optional[str] = Header(default=None)):
+    from ..models import Tenant
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    if body.policy not in {"online_required", "offline"}:
+        raise HTTPException(400, "policy must be online_required or offline")
+    with SessionLocal() as db:
+        _lock_roster(db, t.id)
+        tenant = db.get(Tenant, t.id)
+        previous = tenant.offtaker_payment_policy or "online_required"
+        if previous != body.policy:
+            tenant.offtaker_payment_policy_audit = [*(tenant.offtaker_payment_policy_audit or []), {
+                "from": previous, "to": body.policy, "at": datetime.utcnow().isoformat() + "Z",
+                "actor": f"tenant:{t.id}:{t.contact_email or ''}"}]
+            tenant.offtaker_payment_policy = body.policy
+        db.commit()
+        return _payment_policy_payload(tenant)
+
+
+class OfflinePaymentBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    amount_cents: int = Field(strict=True)
+    request_key: str
+    received_on: date
+    note: str
+    method: str = "check"
+
+
+@router.post("/invoices/{invoice_id}/offline-payments")
+def create_offline_payment(invoice_id: int, body: OfflinePaymentBody,
+                           authorization: Optional[str] = Header(default=None)):
+    from .payments import record_offline_payment
+    from ..models import Tenant
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    if (t.offtaker_payment_policy or "online_required") != "offline":
+        raise HTTPException(409, "Enable offline collection before recording an offline payment")
+    if body.amount_cents <= 0 or body.amount_cents > 100_000_000:
+        raise HTTPException(400, "amount_cents must be between 1 and 100000000")
+    if not 8 <= len(body.request_key) <= 120:
+        raise HTTPException(400, "request_key must be 8–120 characters")
+    if body.received_on > date.today():
+        raise HTTPException(400, "received_on cannot be in the future")
+    if not body.note.strip() or len(body.note) > 2000:
+        raise HTTPException(400, "Include a payment reference, up to 2000 characters")
+    if body.method not in {"check", "cash", "bank_transfer"}:
+        raise HTTPException(400, "method must be check, cash, or bank_transfer")
+    with SessionLocal() as db:
+        _lock_roster(db, t.id)
+        current_tenant = db.get(Tenant, t.id)
+        if current_tenant.offtaker_payment_policy != "offline":
+            raise HTTPException(409, "Enable offline collection before recording an offline payment")
+        try:
+            result = record_offline_payment(db, tenant_id=t.id, invoice_id=invoice_id,
+                amount_cents=body.amount_cents, request_key=body.request_key,
+                actor=f"tenant:{t.id}:{t.contact_email or ''}", received_on=body.received_on,
+                note=body.note.strip(), method=body.method)
+            db.commit()
+            return result
+        except ValueError as exc:
+            db.rollback()
+            raise HTTPException(404 if str(exc) == "Invoice not found" else 409, str(exc))
+
+
+@router.get("/issued-invoices")
+def list_issued_invoices(authorization: Optional[str] = Header(default=None)):
+    from .invoice_ledger import list_invoice_balances
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        rows = list_invoice_balances(db, t.id)
+        names = dict(db.execute(select(BillingReportSubscription.id,
+            BillingReportSubscription.customer_name).where(
+            BillingReportSubscription.tenant_id == t.id)).all())
+        return {"ok": True, "invoices": [dict(row, id=row["invoice_id"],
+            customer_name=names.get(row["subscription_id"])) for row in rows]}
+
+
+class DispatchReconcileBody(BaseModel):
+    receipt_id: str
+
+
+@router.post("/dispatches/{dispatch_id}/reconcile")
+def reconcile_dispatch(dispatch_id: int, body: DispatchReconcileBody,
+                       authorization: Optional[str] = Header(default=None)):
+    """Verify an uncertain email against provider evidence without retransmitting."""
+    import re
+    from .dispatch import reconcile_provider_receipt
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,100}", body.receipt_id):
+        raise HTTPException(400, "Enter the provider email ID")
+    try:
+        return reconcile_provider_receipt(tenant_id=t.id, dispatch_id=dispatch_id,
+            receipt_id=body.receipt_id, actor=f"tenant:{t.id}:{t.contact_email or ''}")
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+    except Exception:
+        raise HTTPException(503, "Provider verification unavailable; the dispatch remains held")

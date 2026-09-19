@@ -4796,13 +4796,15 @@ def _insert_daily_generation_race_safe(db, *, tenant_id: str, array_id: int,
                 return True
             return False
         if source == "utility_meter":
-            # Mirrors _persist_meter_accounts non-race branch.
-            if not generation_sources.is_measured(row.source):
-                row.kwh = kwh
-                row.source = source
-                row.uploaded_at = now()
-                return True
-            return False
+            # Utility captures are measured, too. Reuse the normal update
+            # policy after the concurrent insert: utility values may climb,
+            # positive vendor readings remain protected, stale zeros may fill.
+            from .production_fallback import apply_utility_day
+            action = apply_utility_day(
+                db, tenant_id=tenant_id, array_id=array_id, day=day,
+                utility_kwh=kwh, utility_source=source,
+            )
+            return action in ("updated", "gap_filled")
         if source == "bill_prorate":
             if row.source is None or row.source == "bill_prorate":
                 row.kwh = kwh
@@ -5263,6 +5265,7 @@ def _inverter_capture_for_tenant(tenant: Tenant, provider: str, body: "InverterC
             _np_sum = sum(float(c.nameplate_kw) for c in _site_invs if c.nameplate_kw)
 
             inv_persisted = 0
+            rejected_inverter_days = set()
             for ci in (site.inverters or []):
                 serial = str(ci.serial or "").strip()
                 if not serial:
@@ -5422,18 +5425,25 @@ def _inverter_capture_for_tenant(tenant: Tenant, provider: str, body: "InverterC
                     return kwh <= inv_ceiling
 
                 want: dict = {}
+                if (ci.energy_today_kwh is not None and
+                        (ci.energy_today_kwh < 0 or not _inv_plausible(float(ci.energy_today_kwh)))):
+                    rejected_inverter_days.add(today)
                 if (ci.energy_today_kwh is not None and ci.energy_today_kwh >= 0
                         and _inv_plausible(float(ci.energy_today_kwh))):
                     want[today] = float(ci.energy_today_kwh)
                 for pt in (ci.daily or []):
-                    if pt.kwh is None or pt.kwh < 0:
+                    if pt.kwh is None:
                         continue
                     try:
                         dd = date.fromisoformat(str(pt.date)[:10])
                     except (TypeError, ValueError):
                         continue
                     v = float(pt.kwh)
+                    if v < 0:
+                        rejected_inverter_days.add(dd)
+                        continue
                     if not _inv_plausible(v):
+                        rejected_inverter_days.add(dd)
                         log.warning(
                             "inverter-capture: dropping implausible per-inverter "
                             "daily kWh %.0f for inverter %s day %s (ceiling %.0f = "
@@ -5483,7 +5493,10 @@ def _inverter_capture_for_tenant(tenant: Tenant, provider: str, body: "InverterC
             if provider == "fronius" and want_arr and _db_invs:
                 _rebalance_fronius_inverter_dailies(
                     db, tenant_id=tenant.id, array_id=arr.id,
-                    site_days=want_arr, inv_rows=_db_invs,
+                    # A rejected reading must remain absent. Rebalancing this
+                    # day would manufacture a replacement and alter valid peers.
+                    site_days={d: k for d, k in want_arr.items() if d not in rejected_inverter_days},
+                    inv_rows=_db_invs,
                 )
 
             # ── Inverse rollup: InverterDaily history → array DailyGeneration ──
@@ -6008,10 +6021,10 @@ def _persist_meter_accounts(
                             parse_status="parsed",
                         ))
                     else:
-                        # Never lower a captured generation figure (climbs only).
-                        newg = int(round(float(period_gen)))
-                        if bill.kwh_generated is None or newg > bill.kwh_generated:
-                            bill.kwh_generated = newg
+                        from .bill_revisions import apply_bill_revision
+                        apply_bill_revision(bill, {"kwh_generated": period_gen,
+                            "kwh_sent_to_grid": parsed.get("kwh_sent_to_grid")},
+                            source="meter_closed_period", evidence={"period_end": str(period_end)})
                         if bill.period_start is None and period_start is not None:
                             bill.period_start = datetime.combine(period_start, dtime.min)
                     # The meter capture is an EXTENSION path (the GMP server pull is

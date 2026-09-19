@@ -25,7 +25,7 @@ import logging
 
 import stripe
 from fastapi import APIRouter, Header, HTTPException, Request
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from .db import SessionLocal
 from .models import Tenant, StripeEvent, now
@@ -325,27 +325,13 @@ def _process_offtaker_invoice_paid(sess: dict) -> dict:
         from .billing.payments import mark_payment_paid
         result = mark_payment_paid(db, session_dict=sess)
 
-    if result.get("ok") and not result.get("duplicate") and not result.get("not_paid_yet"):
-        amt = (result.get("amount_cents") or 0) / 100
-        fee = (result.get("fee_cents") or 0) / 100
-        notify = result.pop("notify", None) or {}
-        try:
-            from .billing.payments import send_payment_received_emails
-            email_res = send_payment_received_emails(notify)
-            result["emails"] = email_res
-        except Exception as e:  # noqa: BLE001 — never fail the webhook on mail
-            logger.warning("offtaker payment emails failed: %s", e)
-            result["emails"] = {"sent": False, "error": str(e)[:200]}
-        send_internal_alert(
-            f"💵 Offtaker invoice paid: ${amt:,.2f}",
-            f"Tenant: {result.get('tenant')}\n"
-            f"Subscription: {result.get('subscription_id')}\n"
-            f"Payment id: {result.get('payment_id')}\n"
-            f"Amount: ${amt:,.2f}\n"
-            f"Platform fee: ${fee:,.2f}\n"
-            f"Session: {sess.get('id')}\n"
-            f"Emails: {result.get('emails')}"
-        )
+    notify = result.pop("notify", None)
+    if notify:
+        from .billing.payments import send_payment_received_emails
+        result["emails"] = send_payment_received_emails(notify)
+        required = [k for k in ("offtaker", "owner") if notify.get(k + "_email")]
+        if any(not result["emails"].get(k) for k in required):
+            raise RuntimeError("Payment receipt dispatch pending; retry event")
     return result
 
 
@@ -379,6 +365,12 @@ def _process_checkout_async_failed(sess: dict) -> dict:
             "fresh Checkout Session."
         )
     return result
+
+
+def _process_application_fee_refunded(fee: dict) -> dict:
+    from .billing.payments import mark_application_fee_refunded
+    with SessionLocal() as db:
+        return mark_application_fee_refunded(db, fee_dict=fee)
 
 
 def _process_charge_refunded(charge: dict) -> dict:
@@ -716,14 +708,30 @@ async def stripe_webhook(request: Request, stripe_signature: str | None = Header
     event_id = event["id"]
     event_type = event["type"]
 
-    # Idempotency: skip if we've already processed this event
+    # Atomic processing claim. An in-flight duplicate must be retried, not
+    # acknowledged as complete. Stale claims recover through idempotent handlers.
+    from sqlalchemy.exc import IntegrityError
+    from datetime import timedelta
     with SessionLocal() as db:
+        if db.get(StripeEvent, event_id) is None:
+            try:
+                db.add(StripeEvent(event_id=event_id, event_type=event_type, status="received"))
+                db.commit()
+            except IntegrityError:
+                db.rollback()
         existing = db.get(StripeEvent, event_id)
-        if existing and existing.status == "processed":
+        if existing.status in ("processed", "ignored"):
             return {"ok": True, "duplicate": True, "event_id": event_id}
-        if not existing:
-            db.add(StripeEvent(event_id=event_id, event_type=event_type, status="received"))
-            db.commit()
+        claimed_at = now()
+        eligible = ((StripeEvent.status.in_(("received", "error"))) |
+                    ((StripeEvent.status == "processing") &
+                     (StripeEvent.processed_at < claimed_at - timedelta(minutes=5))))
+        claimed = db.execute(update(StripeEvent).where(
+            StripeEvent.event_id == event_id, eligible
+        ).values(status="processing", processed_at=claimed_at)).rowcount
+        db.commit()
+        if not claimed:
+            raise HTTPException(503, "Event processing; retry later")
 
     handlers = {
         "checkout.session.completed": _process_checkout_completed,
@@ -742,6 +750,7 @@ async def stripe_webhook(request: Request, stripe_signature: str | None = Header
         "checkout.session.async_payment_succeeded": _process_checkout_completed,
         "checkout.session.async_payment_failed": _process_checkout_async_failed,
         "charge.refunded": _process_charge_refunded,
+        "application_fee.refunded": _process_application_fee_refunded,
     }
     handler = handlers.get(event_type)
 
@@ -759,10 +768,11 @@ async def stripe_webhook(request: Request, stripe_signature: str | None = Header
         # Stripe SDK v15 removed .get() from StripeObject. Convert to a plain
         # dict so all handler functions can safely use dict.get().
         data_obj = raw_obj.to_dict() if hasattr(raw_obj, "to_dict") else dict(raw_obj)
+        data_obj["_stripe_account"] = (event.to_dict() if hasattr(event, "to_dict") else dict(event)).get("account")
         result = handler(data_obj)
         with SessionLocal() as db:
             ev = db.get(StripeEvent, event_id)
-            if ev:
+            if ev and ev.status == "processing" and ev.processed_at == claimed_at:
                 ev.status = "processed"
                 ev.processed_at = now()
                 ev.tenant_id = result.get("tenant") or result.get("tenant_activated") or result.get("tenant_canceled")
@@ -772,7 +782,7 @@ async def stripe_webhook(request: Request, stripe_signature: str | None = Header
         logger.exception("Webhook handler failed for %s", event_type)
         with SessionLocal() as db:
             ev = db.get(StripeEvent, event_id)
-            if ev:
+            if ev and ev.status == "processing" and ev.processed_at == claimed_at:
                 ev.status = "error"
                 ev.note = f"{type(e).__name__}: {e}"[:500]
                 db.commit()

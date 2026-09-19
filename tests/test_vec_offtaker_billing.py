@@ -51,10 +51,10 @@ def _seed(*, with_generation: bool, daily_kwh: float = 100.0,
                               nickname="West Glover VEC")
         db.add(acct); db.flush()
         if with_generation:
-            # A full month of metered generation (10 days × daily_kwh).
-            for d in range(1, 11):
+            # A complete May; retain the original 10 × daily_kwh monthly total.
+            for d in range(1, 32):
                 db.add(DailyGeneration(tenant_id=tid, array_id=arr.id,
-                                       day=date(2026, 5, d), kwh=daily_kwh,
+                                       day=date(2026, 5, d), kwh=daily_kwh * 10 / 31,
                                        source="smarthub"))
         db.commit()
         return tid, arr.id, acct.id

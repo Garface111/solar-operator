@@ -444,6 +444,7 @@ def test_final_warning_also_respects_the_capture_mode_gate():
 
     with SessionLocal() as db:
         t = _make_tenant(db, suffix="finalcloud", capture_mode="cloud")
+        tenant_id, tenant_email = t.id, t.contact_email
         db.flush()
         _make_session(
             db, t.id,
@@ -455,8 +456,11 @@ def test_final_warning_also_respects_the_capture_mode_gate():
          patch("api.notify.send_internal_alert") as mock_alert:
         gmp_final_expiry_warnings()
 
-    mock_notify.assert_not_called()
-    mock_alert.assert_called_once()
+    # The scheduler scans all tenants, including device-mode fixtures from
+    # earlier tests. Assert this cloud tenant receives no device instructions.
+    assert not [c for c in mock_notify.call_args_list if c.kwargs.get("to") == tenant_email]
+    mine = [c for c in mock_alert.call_args_list if tenant_id in str(c.args)]
+    assert len(mine) == 1
 
 
 # ─── the honest replacement: connect Cloud Capture, or stay silent if it's ──

@@ -771,6 +771,8 @@ def resolve_offtaker_excess_credit(db, utility_account_id: int, target_label: Op
                    if provider else None)
                or DEFAULT_CREDIT_RATE)
         rate, source = round(ref, 6), "reference"
+    if not (CREDIT_RATE_LO < rate < CREDIT_RATE_HI):
+        return None  # corrupt cash/excess evidence must never create an invoice
     credit = round(excess * rate, 2)
     ps = bill.period_start.date() if bill.period_start else None
     pe = bill.period_end.date() if bill.period_end else None

@@ -35,7 +35,7 @@ def _mint(monkeypatch, calls, amount=100.0):
     t = _tenant()
     sid = _sub(t.id)
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_fake")
-    with patch("api.billing.payments.stripe.checkout.Session.create",
+    with patch("api.billing.payments.stripe.checkout.Session.retrieve", return_value={"status": "expired"}), patch("api.billing.payments.stripe.checkout.Session.create",
                side_effect=_fake_create(calls)):
         with SessionLocal() as db:
             res = pay.create_offtaker_payment(
@@ -69,7 +69,7 @@ def test_resend_reuses_the_same_durable_link_even_after_expiry(monkeypatch):
     with SessionLocal() as db:
         db.get(OfftakerPayment, r1["payment_id"]).status = "expired"
         db.commit()
-    with patch("api.billing.payments.stripe.checkout.Session.create",
+    with patch("api.billing.payments.stripe.checkout.Session.retrieve", return_value={"status": "expired"}), patch("api.billing.payments.stripe.checkout.Session.create",
                side_effect=_fake_create(calls)):
         with SessionLocal() as db:
             r2 = pay.create_offtaker_payment(
@@ -93,7 +93,7 @@ def test_legacy_open_row_without_token_is_never_reused(monkeypatch):
         db.commit()
     calls: list = []
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_fake")
-    with patch("api.billing.payments.stripe.checkout.Session.create",
+    with patch("api.billing.payments.stripe.checkout.Session.retrieve", return_value={"status": "expired"}), patch("api.billing.payments.stripe.checkout.Session.create",
                side_effect=_fake_create(calls)):
         with SessionLocal() as db:
             res = pay.create_offtaker_payment(
@@ -132,8 +132,8 @@ def test_click_after_stripe_window_lapsed_remints_on_the_same_row(client, monkey
         row.checkout_expires_at = datetime.utcnow() - timedelta(hours=1)   # day three
         row.status = "expired"
         db.commit()
-    expire = MagicMock()
-    with patch("api.billing.payments.stripe.checkout.Session.expire", expire), \
+    expire = MagicMock(return_value={"status": "expired"})
+    with patch("api.billing.payments.stripe.checkout.Session.retrieve", return_value={"status": "expired"}), patch("api.billing.payments.stripe.checkout.Session.expire", expire), \
             patch("api.billing.payments.stripe.checkout.Session.create",
                   side_effect=_fake_create(calls)):
         r = client.get(_PAY + token, follow_redirects=False)
@@ -156,8 +156,11 @@ def test_click_with_stale_open_session_expires_the_old_one_first(client, monkeyp
         db.get(OfftakerPayment, res["payment_id"]).checkout_expires_at = (
             datetime.utcnow() + timedelta(minutes=5))   # inside the refresh grace
         db.commit()
-    expire = MagicMock()
-    with patch("api.billing.payments.stripe.checkout.Session.expire", expire), \
+    expire = MagicMock(return_value={"status": "expired"})
+    with patch("api.billing.payments.stripe.checkout.Session.retrieve",
+               return_value=_Sess(id="cs_test_1", status="open", payment_status="unpaid")), \
+            patch("api.billing.payments.stripe.checkout.Session.expire", expire), \
+\
             patch("api.billing.payments.stripe.checkout.Session.create",
                   side_effect=_fake_create(calls)):
         r = client.get(_PAY + token, follow_redirects=False)

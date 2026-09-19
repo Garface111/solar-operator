@@ -39,12 +39,12 @@ def _seed_two_arrays():
         a1 = Array(tenant_id=tid, name="Maple Grove", region="VT")
         a2 = Array(tenant_id=tid, name="Fair Haven", region="VT")
         db.add_all([a1, a2]); db.flush()
-        # June 2026: A1 = 1000 kWh, A2 = 2000 kWh (4 days each, summing to those).
-        for d in range(1, 5):
+        # Complete June 2026: A1 = 1000 kWh, A2 = 2000 kWh.
+        for d in range(1, 31):
             db.add(DailyGeneration(tenant_id=tid, array_id=a1.id, day=date(2026, 6, d),
-                                   kwh=250.0, source="csv"))
+                                   kwh=1000.0 / 30, source="csv"))
             db.add(DailyGeneration(tenant_id=tid, array_id=a2.id, day=date(2026, 6, d),
-                                   kwh=500.0, source="csv"))
+                                   kwh=2000.0 / 30, source="csv"))
         db.commit()
         return tid, a1.id, a2.id
 

@@ -28,6 +28,7 @@ def _make_tenant() -> tuple[str, str]:
             contact_email=f"{tid}@operator.test",
             tenant_key="sol_live_" + secrets.token_urlsafe(12),
             plan="standard", active=True, product="array_operator",
+            offtaker_payment_policy="offline",
         ))
         db.commit()
     return tid, f"Bearer {mint_session_for_tenant(tid)}"
@@ -44,7 +45,7 @@ def _upload(client, auth, fixture="fairlee.xlsx", **form):
 # ─── /match ─────────────────────────────────────────────────────────────────
 
 def test_match_preview_saves_nothing(client):
-    _, auth = _make_tenant()
+    tid, auth = _make_tenant()
     data = (FIX / "norwich.xlsx").read_bytes()
     r = client.post("/v1/array-operator/billing/match",
                     files={"file": ("norwich.xlsx", data, "application/octet-stream")},
@@ -56,7 +57,7 @@ def test_match_preview_saves_nothing(client):
     assert body["match"]["billing_model"] == "percent_of_array"
     # nothing persisted
     with SessionLocal() as db:
-        assert db.execute(select(BillingReportSubscription)).first() is None
+        assert db.execute(select(BillingReportSubscription).where(BillingReportSubscription.tenant_id == tid)).first() is None
 
 
 def test_match_requires_auth(client):
@@ -81,7 +82,7 @@ def test_create_subscription_links_client_and_defaults_to_me(client):
     with SessionLocal() as db:
         c = db.execute(select(Client).where(Client.tenant_id == tid)).scalar_one()
         assert c.name == "Town of Fairlee"
-        s = db.execute(select(BillingReportSubscription)).scalar_one()
+        s = db.execute(select(BillingReportSubscription).where(BillingReportSubscription.tenant_id == tid)).scalar_one()
         assert s.source_workbook  # workbook bytes stored
         assert s.client_id == c.id
 
@@ -243,13 +244,20 @@ def _make_array_with_generation(tid: str, kwh_per_day: float = 100.0,
         today = date.today()
         first_this = today.replace(day=1)
         anchor = (first_this - timedelta(days=1)).replace(day=1)  # 1st of last month
-        for i in range(days):
+        # Spread the requested monthly total over every day, including the 31st
+        # and leap day. Keep callers' original monetary assertions unchanged.
+        import calendar
+        month_days = calendar.monthrange(anchor.year, anchor.month)[1]
+        daily_kwh = kwh_per_day * days / month_days
+        for i in range(month_days):
             d = anchor + timedelta(days=i)
-            if d.month != anchor.month:
-                break
             db.add(DailyGeneration(tenant_id=tid, array_id=aid, day=d,
-                                   kwh=kwh_per_day, source="csv"))
+                                   kwh=daily_kwh, source="csv"))
         db.commit()
+        from api.billing.delivery import _array_period_kwh
+        total, start, end, label, source = _array_period_kwh(db, aid)
+        assert total == round(kwh_per_day * days, 1)
+        assert start == anchor and end.day == month_days
     return aid
 
 
@@ -604,6 +612,18 @@ def test_invoice_template_defaults_on_and_toggles_both_ways(client):
 # ─── scheduler ──────────────────────────────────────────────────────────────
 
 
+def _prepare_closed_offline_schedule(sub_id):
+    """Scheduled fixtures predate their bill and deliberately use offline collection."""
+    from datetime import datetime
+    from api.billing.delivery import build_match
+    with SessionLocal() as db:
+        sub = db.get(BillingReportSubscription, sub_id)
+        match = build_match(sub)
+        sub.created_at = datetime.fromisoformat(match.computed_invoice["period_end"]).replace(day=1)
+        db.get(Tenant, sub.tenant_id).offtaker_payment_policy = "offline"
+        db.commit()
+
+
 def test_scheduler_monthly_billing_delivers(client, monkeypatch):
     """The scheduler job picks up THIS tenant's enabled monthly sub. With
     delivery_mode='auto' it sends straight to the recipient. (Asserts on our own
@@ -615,7 +635,8 @@ def test_scheduler_monthly_billing_delivers(client, monkeypatch):
                      delivery_mode="auto", send_mode="to_me").json()["subscription"]["id"]
 
     monkeypatch.setattr("api.notify._send_via_resend", lambda **kw: True)
-    result = scheduler.deliver_billing_reports("monthly")
+    _prepare_closed_offline_schedule(sub_id)
+    result = scheduler.deliver_billing_reports("monthly", tenant_id=tid)
     assert sub_id in result["sent"]
     assert sub_id not in result["failed"]
     # And it stamped the schedule on our sub.
@@ -642,7 +663,8 @@ def test_offtaker_send_bccs_the_operator(client, monkeypatch):
         return True
 
     monkeypatch.setattr("api.notify._send_via_resend", fake_send)
-    result = scheduler.deliver_billing_reports("monthly")
+    _prepare_closed_offline_schedule(sub_id)
+    result = scheduler.deliver_billing_reports("monthly", tenant_id=tid)
     assert sub_id in result["sent"]
     to_list = captured["to"] if isinstance(captured["to"], list) else [captured["to"]]
     assert "offtaker@example.test" in to_list      # the customer is the To
@@ -668,7 +690,8 @@ def test_offtaker_email_is_white_labeled_to_the_operator(client, monkeypatch):
         return True
 
     monkeypatch.setattr("api.notify._send_via_resend", fake_send)
-    assert sub_id in scheduler.deliver_billing_reports("monthly")["sent"]
+    _prepare_closed_offline_schedule(sub_id)
+    assert sub_id in scheduler.deliver_billing_reports("monthly", tenant_id=tid)["sent"]
     # No Array Operator branding anywhere the offtaker sees:
     assert "Array Operator" not in cap["html"]
     # The sky-hero skin's background IMAGE is served from arrayoperator.com; an
@@ -887,18 +910,20 @@ def test_kwh_source_prefers_gmp_else_falls_back(client):
         DailyGeneration, GmpDailyGeneration
     from datetime import date, timedelta
 
+    import calendar
     tid, auth = _make_tenant()
     # Array with a month of DailyGeneration (the fallback source).
     today = date.today()
     anchor = (today.replace(day=1) - timedelta(days=1)).replace(day=1)
+    month_days = calendar.monthrange(anchor.year, anchor.month)[1]
     with SessionLocal() as db:
         c = ClientM(tenant_id=tid, name="Src Co", active=True); db.add(c); db.flush()
         arr = Array(tenant_id=tid, name="Src Array", client_id=c.id, fuel_type="solar")
         db.add(arr); db.flush()
         aid = arr.id
-        for i in range(28):
+        for i in range(month_days):
             db.add(DailyGeneration(tenant_id=tid, array_id=aid,
-                                   day=anchor + timedelta(days=i), kwh=50.0, source="csv"))
+                                   day=anchor + timedelta(days=i), kwh=1400.0 / month_days, source="csv"))
         db.commit()
 
     sid = _create_manual(client, auth, customer_name="Src Cust", array_id=aid,
@@ -917,11 +942,11 @@ def test_kwh_source_prefers_gmp_else_falls_back(client):
         ua = UtilityAccount(tenant_id=tid, array_id=aid, provider="gmp",
                             account_number="GMP-TEST-1", enabled=True)
         db.add(ua); db.flush()
-        for i in range(28):
+        for i in range(month_days):
             db.add(GmpDailyGeneration(
                 tenant_id=tid, account_id=ua.id, account_number="GMP-TEST-1",
                 array_id=aid, day=gmp_anchor + timedelta(days=i),
-                kwh=70.0, interval_count=96, source="gmp_api"))
+                kwh=1960.0 / month_days, interval_count=96, source="gmp_api"))
         db.commit()
 
     b = _math(client, auth, sid)
@@ -1053,3 +1078,24 @@ def test_auto_attach_vec_bill_for_smarthub_bound_offtaker(client):
             assert vec, [p.name for p in paths]
             assert not any(p.name.startswith("gmp_utility_bill_") for p in paths)
             assert vec[0].read_bytes() == b"%PDF-1.4\nVEC Glover bill\n"
+
+
+def test_partial_generation_explicitly_holds_invoice_preview(client):
+    """Completeness is a real gate, independent of the pricing fixture totals."""
+    from sqlalchemy import delete
+    from api.billing.delivery import build_match
+    tid, auth = _make_tenant()
+    aid = _make_array_with_generation(tid, kwh_per_day=100, days=30)
+    sid = _create_manual(client, auth, customer_name="Partial coverage",
+        array_id=aid, allocation_pct="0.4").json()["subscription"]["id"]
+    with SessionLocal() as db:
+        sub = db.get(BillingReportSubscription, sid)
+        complete = build_match(sub)
+        assert complete.computed_invoice["generation_complete"] is True
+        latest = db.execute(select(DailyGeneration.day).where(
+            DailyGeneration.array_id == aid).order_by(DailyGeneration.day.desc())).scalars().first()
+        db.execute(delete(DailyGeneration).where(DailyGeneration.array_id == aid,
+            DailyGeneration.day == latest))
+        db.commit()
+        partial = build_match(sub)
+        assert partial.computed_invoice["generation_complete"] is False

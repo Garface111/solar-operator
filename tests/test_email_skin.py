@@ -201,19 +201,19 @@ def test_send_welcome_smoke():
 
 # ── Array Operator (light "day") theme ────────────────────────────────────────
 
-def test_ao_theme_uses_light_day_palette():
+def test_ao_theme_uses_light_sky_palette():
     html = render_email_skin(
         preheader="p", intro_line="Y", body_html="<p>Z</p>",
         product="array_operator",
     )
-    # AO day tokens present (utility blue on cool slate); old dark tokens gone.
-    for c in ("#f6f8fb", "#ffffff", "#2563eb"):
-        assert c in html, f"AO day color {c} missing"
+    # SKY redesign (0200f9a0), matching public/theme-sky.css; old dark tokens gone.
+    for c in ("#56B4F0", "#ffffff", "#2196F3"):
+        assert c in html, f"AO sky color {c} missing"
     for c in ("#0a0e14", "#11161f", "#3fd68a", "#7ff0bb"):
         assert c not in html, f"old AO dark color {c} should be gone"
     assert "#faf8f5" not in html  # not the NEPOOL cream page bg
     assert "light only" in html   # forces light so clients can't invert it
-    assert "Array Operator · arrayoperator.com" in html
+    assert 'Array Operator · <a href="https://arrayoperator.com"' in html
     assert "NEPOOL Operator · nepooloperator.com" not in html
 
 
@@ -231,7 +231,7 @@ def test_ao_cta_uses_blue():
         cta={"label": "Sign in", "url": "https://arrayoperator.com/login?token=x"},
         product="array_operator",
     )
-    assert "#2563eb" in html       # utility-blue CTA bg
+    assert 'bgcolor="#2196F3"' in html  # SKY action blue, including Outlook fallback
     assert "#ffffff" in html       # white CTA text
     assert "#3fd68a" not in html   # no leftover octarine-green
 

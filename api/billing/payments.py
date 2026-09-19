@@ -19,7 +19,9 @@ from datetime import datetime
 from typing import Any, Optional
 
 import stripe
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.orm import object_session
+from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 
 logger = logging.getLogger(__name__)
 
@@ -126,12 +128,10 @@ def application_fee_cents(amount_cents: int,
 def dollars_to_cents(amount: Any) -> int:
     """Round half-up to whole cents. Rejects negative / non-numeric → 0."""
     try:
-        x = float(amount)
-    except (TypeError, ValueError):
+        x = Decimal(str(amount))
+        return int((x * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP)) if x.is_finite() and x > 0 else 0
+    except (InvalidOperation, TypeError, ValueError):
         return 0
-    if x <= 0:
-        return 0
-    return int(round(x * 100))
 
 
 def _stripe_ready() -> bool:
@@ -150,7 +150,7 @@ def connect_ready(tenant) -> bool:
 
 def link_existing_connect_account(db, tenant) -> dict:
     """If this tenant has no stripe_connect_account_id yet, find a matching
-    Express account on our platform (by metadata.tenant_id or contact email)
+    Express account on our platform by metadata.tenant_id
     and attach it. Fixes the 'I finished Stripe KYC but pay links never mint'
     case when the owner set up Connect under a different session/tenant row
     or the DB write didn't land on the tenant they're sending from.
@@ -160,7 +160,6 @@ def link_existing_connect_account(db, tenant) -> dict:
     if not _stripe_ready():
         return {"ok": False, "error": "Stripe not configured"}
     tid = str(getattr(tenant, "id", "") or "")
-    email = (getattr(tenant, "contact_email", None) or "").strip().lower()
     try:
         # Page through platform connected accounts (small platforms = fine).
         starting_after = None
@@ -176,11 +175,7 @@ def link_existing_connect_account(db, tenant) -> dict:
             for a in data:
                 ad = a if isinstance(a, dict) else a.to_dict() if hasattr(a, "to_dict") else dict(a)
                 meta = ad.get("metadata") or {}
-                a_email = (ad.get("email") or "").strip().lower()
                 if tid and meta.get("tenant_id") == tid:
-                    matched = ad
-                    break
-                if email and a_email and a_email == email:
                     matched = ad
                     break
             if matched:
@@ -192,6 +187,14 @@ def link_existing_connect_account(db, tenant) -> dict:
         if not matched:
             return {"ok": True, "linked": False, "account_id": None}
         acct_id = matched.get("id")
+        # Email is not tenant identity. Also reject an account already attached
+        # elsewhere even when its Stripe metadata was changed independently.
+        from ..models import Tenant
+        owner = db.execute(select(Tenant.id).where(
+            Tenant.stripe_connect_account_id == acct_id,
+            Tenant.id != tenant.id)).scalars().first()
+        if not acct_id or owner is not None:
+            return {"ok": False, "error": "Connect account ownership conflict"}
         enabled = bool(matched.get("charges_enabled"))
         tenant.stripe_connect_account_id = acct_id
         tenant.stripe_connect_charges_enabled = enabled
@@ -463,22 +466,49 @@ def _mint_checkout_session(*, tenant, row, customer_email: Optional[str],
         expires_at=expires_at,
         **extra,
     )
-    try:
-        session = stripe.checkout.Session.create(**create_kwargs)
-    except stripe.error.InvalidRequestError as e:
-        # A pinned method the charging account cannot take yet (e.g. ACH before
-        # its capability is active) must not cost the offtaker the pay button:
-        # fall back to Stripe's automatic methods for that account.
-        _msg = str(e).lower()
-        if create_kwargs.get("payment_method_types") and (
-                getattr(e, "param", None) == "payment_method_types"
-                or "payment_method" in _msg or "payment method" in _msg):
-            logger.warning("Checkout rejected pinned payment methods %s on %s (%s) — "
-                           "retrying with automatic methods", pmt, acct, e)
-            create_kwargs.pop("payment_method_types", None)
-            session = stripe.checkout.Session.create(**create_kwargs)
+    # Persist the exact request BEFORE Stripe. Retrying an uncertain creation
+    # replays the same key and bytes, never a second collectible session.
+    db = object_session(row)
+    if db is not None:
+        _lock_payment(db, row)
+        if row.status in ("superseded", "paid", "refunded"):
+            raise ValueError("Invoice is no longer collectible")
+        if not row.checkout_request:
+            row.checkout_requested_at = datetime.utcnow()
+            row.checkout_request = dict(create_kwargs, idempotency_key=
+                f"offtaker:{row.id}:checkout:{int(row.checkout_generation or 0)}")
+            db.commit()
+        _lock_payment(db, row)
+        if row.status in ("superseded", "paid", "refunded"):
+            raise ValueError("Invoice is no longer collectible")
+        create_kwargs = dict(row.checkout_request)
+        expires_at = create_kwargs["expires_at"]
+        acct = create_kwargs.get("stripe_account")
+        model = "direct" if acct else "destination"
+        if row.stripe_checkout_session_id:
+            session = stripe.checkout.Session.retrieve(row.stripe_checkout_session_id, **_stripe_kw(row))
         else:
-            raise
+            # Stripe retains keys at least 24h; beyond that reconciliation is
+            # required. Never risk replay after the provider forgets the key.
+            if (datetime.utcnow() - row.checkout_requested_at).total_seconds() >= 23 * 3600:
+                raise ValueError("Uncertain Checkout creation requires reconciliation")
+            try:
+                session = stripe.checkout.Session.create(**create_kwargs)
+            except stripe.error.InvalidRequestError as exc:
+                if create_kwargs.get("payment_method_types") and getattr(exc, "param", None) == "payment_method_types":
+                    # Validation rejection proves no Session was created.
+                    # Freeze a distinct request/key before the safe fallback.
+                    fallback = dict(create_kwargs)
+                    fallback.pop("payment_method_types")
+                    fallback["idempotency_key"] += ":automatic"
+                    row.checkout_request = fallback
+                    db.commit()
+                    return _mint_checkout_session(tenant=tenant, row=row,
+                        customer_email=customer_email, period_label=period_label)
+                raise
+    else:
+        create_kwargs["idempotency_key"] = f"offtaker:{row.id}:checkout:{int(getattr(row, 'checkout_generation', 0) or 0)}"
+        session = stripe.checkout.Session.create(**create_kwargs)
     sess_id = session["id"] if isinstance(session, dict) else session.id
     url = session["url"] if isinstance(session, dict) else session.url
     pi = session.get("payment_intent") if isinstance(session, dict) else getattr(session, "payment_intent", None)
@@ -491,6 +521,40 @@ def _mint_checkout_session(*, tenant, row, customer_email: Optional[str],
             "account": acct if model == "direct" else None}
 
 
+def _lock_payment(db, row):
+    """Acquire a write lock on SQLite and PostgreSQL, then discard stale ORM state."""
+    from ..models import OfftakerPayment
+    db.execute(update(OfftakerPayment).where(OfftakerPayment.id == row.id)
+               .values(id=OfftakerPayment.id).execution_options(synchronize_session=False))
+    db.refresh(row)
+
+
+def _retire_payment(db, row):
+    """Retire only after Stripe proves there is no payment in flight."""
+    _lock_payment(db, row)
+    if row.status in ("paid", "refunded"):
+        raise ValueError("Settled invoices require a credit or adjustment")
+    if row.checkout_request and not row.stripe_checkout_session_id:
+        raise ValueError("Uncertain Checkout creation must be reconciled before revision")
+    if row.stripe_checkout_session_id:
+        session = stripe.checkout.Session.retrieve(row.stripe_checkout_session_id, **_stripe_kw(row))
+        sd = session.to_dict() if hasattr(session, "to_dict") else dict(session)
+        if sd.get("payment_status") == "paid" or sd.get("status") == "complete":
+            raise ValueError("Payment is settled or processing; revision is held")
+        if sd.get("status") == "open":
+            expired = stripe.checkout.Session.expire(row.stripe_checkout_session_id, **_stripe_kw(row))
+            ed = expired.to_dict() if hasattr(expired, "to_dict") else dict(expired)
+            if ed.get("status") != "expired":
+                raise ValueError("Could not prove old Checkout was expired")
+        elif sd.get("status") != "expired":
+            raise ValueError("Old Checkout state is unknown")
+    row.status = "superseded"
+    row.active_key = None
+    row.pay_token = None
+    row.pay_url = None
+    db.flush()
+
+
 def create_offtaker_payment(db, *, tenant, sub, match,
                             force: bool = False) -> dict:
     """Create (or reuse) an OfftakerPayment + Checkout Session for this invoice.
@@ -501,7 +565,7 @@ def create_offtaker_payment(db, *, tenant, sub, match,
     Never raises into the delivery path — Stripe / DB failures become ok=False
     so the classic invoice email still goes out.
     """
-    from ..models import OfftakerPayment
+    from ..models import OfftakerPayment, BillingReportSubscription
 
     if not payments_enabled():
         return {"ok": False, "skipped": True, "error": "pay-links disabled"}
@@ -539,43 +603,69 @@ def create_offtaker_payment(db, *, tenant, sub, match,
     cust = (match.customer or {}).get("name") or sub.customer_name or "Offtaker"
     operator = getattr(tenant, "company_name", None) or getattr(tenant, "name", None) or "your solar provider"
 
+    # Serialize competing first creates and revisions on a durable parent row.
+    db.execute(update(BillingReportSubscription).where(
+        BillingReportSubscription.id == sub.id,
+        BillingReportSubscription.tenant_id == tenant.id).values(
+        id=BillingReportSubscription.id).execution_options(synchronize_session=False))
     # Reuse the row for the same period+amount (idempotent re-sends). With a
     # durable link the SAME url keeps working across re-sends, and an expired
     # Session is no reason for a new row — the click re-mints it.
-    if not force:
-        existing = db.execute(
-            select(OfftakerPayment).where(
-                OfftakerPayment.subscription_id == sub.id,
-                OfftakerPayment.period_key == period_key,
-                OfftakerPayment.status.in_(("open", "paid", "expired")),
-            ).order_by(OfftakerPayment.id.desc())
-        ).scalars().first()
-        if existing and existing.status == "paid":
-            return {
-                "ok": True, "already_paid": True,
-                "payment_id": existing.id,
-                "pay_url": existing.pay_url,
-                "amount_cents": existing.amount_cents,
-                "fee_cents": existing.fee_cents,
-            }
-        if (existing and existing.status in ("open", "expired")
-                and existing.amount_cents == amount_cents
-                and existing.pay_url and existing.pay_token):
-            # A legacy row (no token) carries the raw Session url, which is
-            # dead within a day — never hand that out again; mint fresh below.
-            return {
-                "ok": True, "reused": True,
-                "payment_id": existing.id,
-                "pay_url": existing.pay_url,
-                "amount_cents": existing.amount_cents,
-                "fee_cents": existing.fee_cents,
-            }
+    existing_rows = db.execute(
+        select(OfftakerPayment).where(
+            OfftakerPayment.subscription_id == sub.id,
+            OfftakerPayment.period_key == period_key,
+            OfftakerPayment.status != "superseded",
+        ).order_by(OfftakerPayment.id.desc())
+    ).scalars().all()
+    if len(existing_rows) > 1:
+        return {"ok": False, "error": "Multiple historical payment obligations require reconciliation"}
+    existing = existing_rows[0] if existing_rows else None
+    if (existing and existing.checkout_request and not existing.stripe_checkout_session_id
+            and existing.checkout_requested_at
+            and (datetime.utcnow() - existing.checkout_requested_at).total_seconds() >= 23 * 3600):
+        return {"ok": False, "error": "Uncertain Checkout creation requires reconciliation"}
+    if existing and existing.status in ("paid", "refunded"):
+        if existing.amount_cents != amount_cents:
+            return {"ok": False, "error": "Settled invoice revision requires a credit or adjustment"}
+        return {
+            "ok": True, "already_paid": True,
+            "payment_id": existing.id,
+            "pay_url": existing.pay_url,
+            "amount_cents": existing.amount_cents,
+            "fee_cents": existing.fee_cents,
+        }
+    if (existing and existing.status in ("open", "expired", "failed")
+            and existing.amount_cents == amount_cents
+            and existing.pay_url and existing.pay_token):
+        # A legacy row (no token) carries the raw Session url, which is
+        # dead within a day — never hand that out again; mint fresh below.
+        return {
+            "ok": True, "reused": True,
+            "payment_id": existing.id,
+            "pay_url": existing.pay_url,
+            "amount_cents": existing.amount_cents,
+            "fee_cents": existing.fee_cents,
+        }
+
+    if existing and existing.amount_cents == amount_cents and existing.checkout_request and not existing.stripe_checkout_session_id:
+        db.commit()
+        result = resolve_pay_link(db, existing.pay_token)
+        return {"ok": result.get("action") == "redirect", "payment_id": existing.id,
+                "pay_url": existing.pay_url, "error": result.get("reason")}
+    if existing:
+        try:
+            _retire_payment(db, existing)
+        except Exception as exc:
+            db.rollback()
+            return {"ok": False, "error": str(exc)[:300]}
 
     # Persist the row first so we have a stable payment_id in metadata even if
     # Stripe succeeds and the process dies before a second write.
     row = OfftakerPayment(
         tenant_id=tenant.id,
         subscription_id=sub.id,
+        active_key=f"{sub.id}:{period_key}",
         invoice_number=inv_no[:40],
         period_key=period_key[:40],
         amount_cents=amount_cents,
@@ -586,7 +676,9 @@ def create_offtaker_payment(db, *, tenant, sub, match,
         pay_token=secrets.token_urlsafe(24),
     )
     db.add(row)
-    db.flush()  # get row.id without committing yet
+    db.flush()
+    row.pay_url = durable_pay_url(tenant, row.pay_token)
+    db.commit()  # durable identity exists before any provider action
 
     period_label = ""
     ci = match.computed_invoice or {}
@@ -622,7 +714,6 @@ def create_offtaker_payment(db, *, tenant, sub, match,
     except Exception as e:  # noqa: BLE001
         logger.exception("offtaker Checkout Session failed for sub=%s", sub.id)
         try:
-            row.status = "failed"
             row.error = str(e)[:500]
             db.commit()
         except Exception:  # noqa: BLE001
@@ -660,11 +751,36 @@ def mark_payment_paid(db, *, session_dict: dict) -> dict:
         return {"ignored": "offtaker payment row not found",
                 "payment_id": payment_id, "session": sess_id}
 
-    if row.status == "paid":
-        return {"ok": True, "duplicate": True, "payment_id": row.id,
+    _lock_payment(db, row)
+    # Account context is attached by the verified webhook envelope or by our
+    # authenticated account-scoped retrieve. Never trust session metadata for it.
+    expected_account = (row.checkout_request or {}).get("stripe_account", row.stripe_account_id)
+    if session_dict.get("_stripe_account") != expected_account:
+        return {"ignored": "Stripe account mismatch", "payment_id": row.id}
+    if session_dict.get("amount_total") != row.amount_cents:
+        return {"ignored": "Payment amount mismatch", "payment_id": row.id}
+    if str(session_dict.get("currency") or "").lower() != row.currency.lower():
+        return {"ignored": "Payment currency mismatch", "payment_id": row.id}
+    if not row.stripe_checkout_session_id and row.checkout_request:
+        tenant = db.get(Tenant, row.tenant_id)
+        sub = db.get(BillingReportSubscription, row.subscription_id)
+        recovered = _mint_checkout_session(tenant=tenant, row=row,
+            customer_email=getattr(sub, "client_email", None))
+        row.stripe_checkout_session_id = recovered["id"]
+        row.stripe_account_id = recovered["account"]
+        row.checkout_expires_at = datetime.utcfromtimestamp(recovered["expires_at"])
+        db.flush()
+    # Metadata is not sufficient: this event must identify the tracked Session.
+    if not sess_id or sess_id != row.stripe_checkout_session_id:
+        return {"ignored": "checkout session does not match payment", "payment_id": row.id}
+    if row.status in ("refunded", "superseded"):
+        return {"ok": True, "duplicate": True, "unchanged": row.status, "payment_id": row.id,
                 "tenant": row.tenant_id}
+    if row.status == "paid" and row.receipt_payload:
+        return {"ok": True, "duplicate": True, "payment_id": row.id,
+                "tenant": row.tenant_id, "notify": row.receipt_payload}
 
-    if session_dict.get("payment_status") not in (None, "paid", "no_payment_required"):
+    if session_dict.get("payment_status") != "paid":
         # Still open / unpaid — don't flip.
         if session_dict.get("payment_status") != "paid":
             return {"ok": True, "not_paid_yet": True,
@@ -678,19 +794,6 @@ def mark_payment_paid(db, *, session_dict: dict) -> dict:
     row.paid_at = datetime.utcnow()
     if isinstance(pi, str):
         row.stripe_payment_intent_id = pi
-    # Capture the actual amount_total if Stripe adjusted (shouldn't, but honest).
-    total = session_dict.get("amount_total")
-    if isinstance(total, int) and total > 0:
-        row.amount_cents = total
-    db.commit()
-
-    # Rebuild default ledger so "Collected $" / paid date show for this period.
-    try:
-        from .invoice_ledger import sync_payment_into_ledger
-        sync_payment_into_ledger(db, row)
-    except Exception:  # noqa: BLE001
-        logger.warning("ledger sync after paid failed for payment %s", row.id, exc_info=True)
-
     # Snapshot notify recipients while we have the session open.
     tenant = db.get(Tenant, row.tenant_id)
     sub = db.get(BillingReportSubscription, row.subscription_id)
@@ -700,6 +803,8 @@ def mark_payment_paid(db, *, session_dict: dict) -> dict:
         or (getattr(sub, "client_email", None) if sub else None)
     )
     notify = {
+        "tenant_id": row.tenant_id,
+        "payment_id": row.id,
         "offtaker_email": offtaker_email,
         "offtaker_name": row.customer_name or (getattr(sub, "customer_name", None) if sub else None),
         "owner_email": getattr(tenant, "contact_email", None) if tenant else None,
@@ -713,6 +818,13 @@ def mark_payment_paid(db, *, session_dict: dict) -> dict:
         "fee_cents": row.fee_cents,
         "product": getattr(tenant, "product", "array_operator") if tenant else "array_operator",
     }
+    row.receipt_payload = notify
+    db.commit()  # settlement and notification obligation land atomically
+    try:
+        from .invoice_ledger import sync_payment_into_ledger
+        sync_payment_into_ledger(db, row)
+    except Exception:
+        logger.warning("ledger sync failed for payment %s", row.id, exc_info=True)
     return {
         "ok": True,
         "payment_id": row.id,
@@ -745,6 +857,7 @@ def resolve_pay_link(db, token: str) -> dict:
     ).scalars().first()
     if row is None:
         return {"action": "not_found"}
+    _lock_payment(db, row)
     tenant = db.get(Tenant, row.tenant_id)
     operator = ((getattr(tenant, "company_name", None) or getattr(tenant, "name", None))
                 if tenant else None) or "your solar provider"
@@ -753,7 +866,7 @@ def resolve_pay_link(db, token: str) -> dict:
             "customer_name": row.customer_name}
     if row.status == "paid":
         return {"action": "paid", "paid_at": row.paid_at, **base}
-    if row.status == "refunded":
+    if row.status in ("refunded", "superseded"):
         return {"action": "unavailable",
                 "reason": "This invoice was refunded, so nothing is due on it.", **base}
     if tenant is None:
@@ -775,28 +888,49 @@ def resolve_pay_link(db, token: str) -> dict:
     now = datetime.utcnow()
     sid = row.stripe_checkout_session_id
     exp = row.checkout_expires_at
-    if (row.status == "open" and sid and exp
-            and (exp - now).total_seconds() > CHECKOUT_REFRESH_GRACE_SECONDS):
+    # Always reconcile the last Session, even after our local expiry timestamp.
+    # A completed ACH Checkout may remain unpaid for days; it is NOT expired.
+    # A timeout/failed expiry gives no proof that a second charge is safe.
+    if sid and row.status not in ("paid", "refunded", "superseded"):
         try:
             sess = stripe.checkout.Session.retrieve(sid, **_stripe_kw(row))
             sd = sess.to_dict() if hasattr(sess, "to_dict") else dict(sess)
-            if sd.get("status") == "open" and sd.get("url"):
-                return {"action": "redirect", "url": sd["url"], **base}
-            if sd.get("payment_status") == "paid":
-                # The webhook can lag a click; settle it from the source.
-                mark_payment_paid(db, session_dict=sd)
-                db.refresh(row)
+        except Exception:  # noqa: BLE001
+            logger.warning("pay-link: unable to establish Session state for %s", sid,
+                           exc_info=True)
+            return {"action": "unavailable",
+                    "reason": "Payment status is temporarily unavailable. Please try again later.", **base}
+        if sd.get("payment_status") == "paid":
+            sd["_stripe_account"] = row.stripe_account_id
+            mark_payment_paid(db, session_dict=sd)
+            db.refresh(row)
+            if row.status == "paid":
                 return {"action": "paid", "paid_at": row.paid_at, **base}
-        except Exception:  # noqa: BLE001
-            logger.warning("pay-link: Session.retrieve failed for %s — re-minting",
-                           sid, exc_info=True)
-
-    # Stale / expired / failed / unreadable → a fresh Session on the same row.
-    if sid and row.status == "open":
-        try:
-            stripe.checkout.Session.expire(sid, **_stripe_kw(row))  # never two live links
-        except Exception:  # noqa: BLE001
-            pass
+            return {"action": "unavailable", "reason": "Payment reconciliation is pending.", **base}
+        if sd.get("status") == "complete" and row.status != "failed":
+            return {"action": "unavailable", "processing": True,
+                    "reason": "Your payment is processing. Please do not pay again.", **base}
+        if sd.get("status") == "open":
+            if exp and (exp - now).total_seconds() > CHECKOUT_REFRESH_GRACE_SECONDS and sd.get("url"):
+                return {"action": "redirect", "url": sd["url"], **base}
+            try:
+                expired = stripe.checkout.Session.expire(sid, **_stripe_kw(row))
+                ed = expired.to_dict() if hasattr(expired, "to_dict") else dict(expired)
+                if ed.get("status") != "expired":
+                    raise ValueError("Expiry not confirmed")
+            except Exception:  # noqa: BLE001
+                return {"action": "unavailable",
+                        "reason": "Payment status is changing. Please try again later.", **base}
+        elif sd.get("status") != "expired" and row.status != "failed":
+            return {"action": "unavailable",
+                    "reason": "Payment status is temporarily unavailable. Please try again later.", **base}
+    if sid:
+        row.stripe_checkout_session_id = None
+        row.stripe_payment_intent_id = None
+        row.checkout_generation = int(row.checkout_generation or 0) + 1
+        row.checkout_request = None
+        row.checkout_requested_at = None
+        db.commit()
     sub = db.get(BillingReportSubscription, row.subscription_id)
     try:
         minted = _mint_checkout_session(
@@ -827,10 +961,14 @@ def _row_for_session(db, session_dict: dict):
     sess_id = session_dict.get("id")
     if not sess_id:
         return None
-    return db.execute(
-        select(OfftakerPayment).where(
-            OfftakerPayment.stripe_checkout_session_id == sess_id)
-    ).scalars().first()
+    row = db.execute(select(OfftakerPayment).where(
+        OfftakerPayment.stripe_checkout_session_id == sess_id)).scalars().first()
+    if row is not None:
+        _lock_payment(db, row)
+        if (session_dict.get("_stripe_account") != row.stripe_account_id
+                or row.stripe_checkout_session_id != sess_id):
+            return None
+    return row
 
 
 def mark_payment_expired(db, *, session_dict: dict) -> dict:
@@ -859,8 +997,8 @@ def mark_payment_async_failed(db, *, session_dict: dict) -> dict:
     if row is None:
         return {"ignored": "no matching offtaker payment",
                 "session": session_dict.get("id")}
-    if row.status == "paid":
-        return {"ok": True, "unchanged": "paid", "payment_id": row.id,
+    if row.status in ("paid", "refunded", "superseded"):
+        return {"ok": True, "unchanged": row.status, "payment_id": row.id,
                 "tenant": row.tenant_id}
     row.status = "failed"
     row.error = "bank payment failed after checkout"
@@ -868,6 +1006,43 @@ def mark_payment_async_failed(db, *, session_dict: dict) -> dict:
     return {"ok": True, "failed": True, "payment_id": row.id, "tenant": row.tenant_id,
             "invoice_number": row.invoice_number, "amount_cents": row.amount_cents,
             "customer_name": row.customer_name, "subscription_id": row.subscription_id}
+
+
+def _recover_payment_intent(db, pi, account):
+    """Refund may precede Checkout success. Resolve verified provider objects,
+    never metadata alone, so out-of-order delivery cannot drop a reversal."""
+    from ..models import OfftakerPayment
+    if not _stripe_ready():
+        raise RuntimeError("Stripe unavailable for out-of-order refund reconciliation")
+    scope = {"stripe_account": account} if account else {}
+    intent = stripe.PaymentIntent.retrieve(pi, **scope)
+    intent = intent.to_dict() if hasattr(intent, "to_dict") else dict(intent)
+    meta = intent.get("metadata") or {}
+    if meta.get("kind") != "offtaker_invoice":
+        return None
+    try:
+        row = db.get(OfftakerPayment, int(meta.get("payment_id")))
+    except (TypeError, ValueError):
+        return None
+    if row is None:
+        raise RuntimeError("Offtaker payment identity not persisted yet")
+    _lock_payment(db, row)
+    expected_account = (row.checkout_request or {}).get("stripe_account", row.stripe_account_id)
+    if expected_account != account:
+        raise ValueError("Refund account mismatch")
+    if not row.stripe_checkout_session_id:
+        raise RuntimeError("Checkout creation must be reconciled before refund")
+    session = stripe.checkout.Session.retrieve(row.stripe_checkout_session_id, **scope)
+    session = session.to_dict() if hasattr(session, "to_dict") else dict(session)
+    session_pi = session.get("payment_intent")
+    if isinstance(session_pi, dict):
+        session_pi = session_pi.get("id")
+    if (session_pi != pi or intent.get("amount") != row.amount_cents
+            or intent.get("currency") != row.currency):
+        raise ValueError("Refund intent does not match tracked invoice")
+    row.stripe_payment_intent_id = pi
+    db.flush()
+    return row
 
 
 def mark_payment_refunded(db, *, charge_dict: dict) -> dict:
@@ -884,18 +1059,41 @@ def mark_payment_refunded(db, *, charge_dict: dict) -> dict:
         select(OfftakerPayment).where(OfftakerPayment.stripe_payment_intent_id == pi)
     ).scalars().first()
     if row is None:
+        row = _recover_payment_intent(db, pi, charge_dict.get("_stripe_account"))
+    if row is None:
         return {"ignored": "no offtaker payment for this charge", "payment_intent": pi}
+    _lock_payment(db, row)
+    if charge_dict.get("_stripe_account") != row.stripe_account_id:
+        return {"ignored": "Stripe account mismatch"}
+    if charge_dict.get("currency") and charge_dict["currency"].lower() != row.currency.lower():
+        return {"ignored": "Refund currency mismatch"}
+    if charge_dict.get("amount") is not None and charge_dict["amount"] != row.amount_cents:
+        return {"ignored": "Refund charge amount mismatch"}
     try:
-        refunded_cents = int(charge_dict.get("amount_refunded") or 0)
+        observed = int(charge_dict.get("amount_refunded") or 0)
     except (TypeError, ValueError):
-        refunded_cents = 0
-    full = bool(charge_dict.get("refunded")) or (
-        refunded_cents > 0 and refunded_cents >= int(row.amount_cents or 0))
-    if full:
-        row.status = "refunded"
-        row.error = f"refunded {refunded_cents}¢"[:500]
-    else:
-        row.error = f"partially refunded {refunded_cents}¢ of {row.amount_cents}¢"[:500]
+        return {"ignored": "Invalid refund amount"}
+    if observed <= 0 or observed > row.amount_cents:
+        return {"ignored": "Invalid refund amount"}
+    refunded_cents = max(int(row.refunded_cents or 0), observed)
+    row.refunded_cents = refunded_cents
+    from ..models import OfftakerRefund
+    for refund in (charge_dict.get("refunds") or {}).get("data", []):
+        rid = refund.get("id")
+        if not rid:
+            continue
+        recorded = db.execute(select(OfftakerRefund).where(
+            OfftakerRefund.stripe_refund_id == rid)).scalars().first()
+        if recorded is None:
+            db.add(OfftakerRefund(payment_id=row.id, stripe_refund_id=rid,
+                amount_cents=int(refund.get("amount") or 0),
+                status=refund.get("status") or "succeeded"))
+        elif recorded.status != "succeeded":
+            recorded.status = refund.get("status") or recorded.status
+    full = refunded_cents >= int(row.amount_cents or 0)
+    # A refund can race ahead of Checkout's paid event; it is settlement evidence.
+    row.status = "refunded" if full else "paid"
+    row.error = f"refunded {refunded_cents} cents"
     db.commit()
     try:
         from .invoice_ledger import sync_payment_into_ledger
@@ -917,7 +1115,13 @@ def send_payment_received_emails(notify: dict) -> dict:
     """
     if not notify:
         return {"sent": False}
-    from ..notify import _send_via_resend
+    from .dispatch import send_email_once
+    def _send_via_resend(**email):
+        audience = "offtaker" if email["to"] == notify.get("offtaker_email") and email["subject"].startswith("Payment received") else "owner"
+        result = send_email_once(tenant_id=notify["tenant_id"],
+            key=f"payment:{notify['payment_id']}:receipt:{audience}", email=email,
+            kind="payment_receipt")
+        return bool(result.get("ok"))
     from ..email_skin import render_email_skin, render_email_skin_text
     from ..branding import app_url, brand_name
 
@@ -990,7 +1194,7 @@ def send_payment_received_emails(notify: dict) -> dict:
             f'<table width="100%" style="font-size:14px;border-collapse:collapse;margin:12px 0;">'
             f'<tr><td style="padding:6px 0;opacity:.65;">Amount paid</td>'
             f'<td style="padding:6px 0;text-align:right;font-weight:700;color:#047857;">{amt_s}</td></tr>'
-            f'<tr><td style="padding:6px 0;opacity:.65;">Your net (after {fee_bps()/100:.2g}% fee)</td>'
+            f'<tr><td style="padding:6px 0;opacity:.65;">After platform fee (before Stripe fees)</td>'
             f'<td style="padding:6px 0;text-align:right;">${net:,.2f}</td></tr>'
             + (f'<tr><td style="padding:6px 0;opacity:.65;">Invoice</td>'
                f'<td style="padding:6px 0;text-align:right;">{_esc(inv)}</td></tr>' if inv else "")
@@ -1014,7 +1218,7 @@ def send_payment_received_emails(notify: dict) -> dict:
             body_text=(
                 f"{offtaker} just paid their solar credit invoice online.\n\n"
                 f"Amount paid: {amt_s}\n"
-                f"Your net (after {fee_bps()/100:.2g}% fee): ${net:,.2f}\n"
+                f"After platform fee (before Stripe fees): ${net:,.2f}\n"
                 + (f"Invoice: {inv}\n" if inv else "")
                 + f"\nOpen Reports: {dash}\n"
                 f"Funds land in your connected bank per Stripe's payout schedule."
@@ -1060,3 +1264,111 @@ def sync_connect_from_account_event(db, account: dict) -> dict:
         "charges_enabled": enabled,
         "changed": old != enabled,
     }
+
+
+def record_offline_payment(db, *, tenant_id, invoice_id, amount_cents, request_key,
+                           actor, received_on, note, method="check"):
+    """Record a tenant-authorized receipt without risking parallel online collection."""
+    from datetime import date
+    from sqlalchemy import func
+    from ..models import OfftakerInvoice, OfftakerSettlement, OfftakerPayment
+    if type(amount_cents) is not int or amount_cents <= 0:
+        raise ValueError("Receipt amount must be positive integer cents")
+    if (not isinstance(request_key, str) or not request_key.strip() or len(request_key) > 120
+            or not isinstance(actor, str) or not actor.strip() or len(actor) > 200
+            or not isinstance(note, str) or not note.strip()):
+        raise ValueError("Request key, actor, and settlement evidence are required")
+    if type(received_on) is not date or received_on > date.today():
+        raise ValueError("Receipt date must not be in the future")
+    if method not in ("check", "cash", "bank_transfer"):
+        raise ValueError("Unsupported offline receipt method")
+    claimed = db.execute(update(OfftakerInvoice).where(
+        OfftakerInvoice.id == invoice_id, OfftakerInvoice.tenant_id == tenant_id
+    ).values(id=OfftakerInvoice.id).execution_options(synchronize_session=False)).rowcount
+    if not claimed:
+        raise ValueError("Invoice not found")
+    invoice = db.get(OfftakerInvoice, invoice_id)
+    db.refresh(invoice)
+    existing = db.scalar(select(OfftakerSettlement).where(
+        OfftakerSettlement.tenant_id == tenant_id, OfftakerSettlement.request_key == request_key))
+    if existing:
+        if (existing.invoice_id, existing.amount_cents, existing.received_on, existing.method,
+            existing.actor, existing.note) != (invoice_id, amount_cents, received_on, method, actor, note):
+            raise ValueError("Receipt request key conflicts with an existing receipt")
+        return {"ok": True, "duplicate": True, "settlement_id": existing.id}
+    if invoice.status != "accepted":
+        raise ValueError("Only issued invoices can receive offline payments")
+    paid = db.scalar(select(func.coalesce(func.sum(OfftakerSettlement.amount_cents), 0)).where(
+        OfftakerSettlement.invoice_id == invoice_id)) or 0
+    if paid + amount_cents > invoice.amount_cents:
+        raise ValueError("Receipt exceeds invoice balance")
+    if invoice.payment_id:
+        online = db.get(OfftakerPayment, invoice.payment_id)
+        if online and online.status != "superseded":
+            _retire_payment(db, online)
+    receipt = OfftakerSettlement(tenant_id=tenant_id, invoice_id=invoice_id,
+        subscription_id=invoice.subscription_id, request_key=request_key,
+        amount_cents=amount_cents, actor=actor, received_on=received_on,
+        note=note, method=method)
+    db.add(receipt)
+    db.commit()
+    return {"ok": True, "settlement_id": receipt.id, "collected_cents": paid + amount_cents,
+            "outstanding_cents": invoice.amount_cents - paid - amount_cents}
+
+
+def mark_application_fee_refunded(db, *, fee_dict: dict) -> dict:
+    """Validate application-fee ownership against its charge before recording a refund."""
+    from ..models import OfftakerPayment, Tenant
+    fee_id, charge_id, account = fee_dict.get("id"), fee_dict.get("charge"), fee_dict.get("account")
+    if isinstance(charge_id, dict):
+        charge_id = charge_id.get("id")
+    if not all(isinstance(v, str) and v for v in (fee_id, charge_id, account)):
+        return {"ignored": "Fee refund missing fee, charge, or account identity"}
+    if not _stripe_ready():
+        raise RuntimeError("Stripe not configured for fee reconciliation")
+    # A direct charge lives on the operator; legacy destination charges live
+    # on the platform. Only a proven missing resource permits that fallback.
+    scope = account
+    try:
+        charge = stripe.Charge.retrieve(charge_id, stripe_account=scope)
+    except stripe.error.InvalidRequestError as exc:
+        if getattr(exc, "code", None) != "resource_missing":
+            raise
+        scope = None
+        charge = stripe.Charge.retrieve(charge_id)
+    charge = charge.to_dict() if hasattr(charge, "to_dict") else dict(charge)
+    attached_fee = charge.get("application_fee")
+    if isinstance(attached_fee, dict):
+        attached_fee = attached_fee.get("id")
+    if charge.get("id") != charge_id or attached_fee != fee_id:
+        return {"ignored": "Fee does not belong to charge"}
+    pi = charge.get("payment_intent")
+    if isinstance(pi, dict):
+        pi = pi.get("id")
+    row = db.scalar(select(OfftakerPayment).where(OfftakerPayment.stripe_payment_intent_id == pi)) if pi else None
+    if row is None and pi:
+        row = _recover_payment_intent(db, pi, scope)
+    if row is None:
+        return {"ignored": "No matching offtaker payment"}
+    _lock_payment(db, row)
+    tenant = db.get(Tenant, row.tenant_id)
+    if (row.stripe_account_id != scope or
+            (scope is None and getattr(tenant, "stripe_connect_account_id", None) != account)):
+        return {"ignored": "Fee account does not own payment"}
+    if (charge.get("amount") != row.amount_cents or
+            charge.get("currency") != row.currency or
+            fee_dict.get("currency") != row.currency or
+            fee_dict.get("amount") != row.fee_cents):
+        return {"ignored": "Fee currency or amount mismatch"}
+    if row.stripe_application_fee_id and row.stripe_application_fee_id != fee_id:
+        return {"ignored": "Fee identity mismatch"}
+    amount = fee_dict.get("amount_refunded")
+    if type(amount) is not int or amount < 0 or amount > row.fee_cents:
+        return {"ignored": "Invalid fee refund amount"}
+    row.stripe_application_fee_id = fee_id
+    row.fee_refunded_cents = max(int(row.fee_refunded_cents or 0), amount)
+    db.commit()
+    from .invoice_ledger import sync_payment_into_ledger
+    sync_payment_into_ledger(db, row)
+    return {"ok": True, "tenant": row.tenant_id, "payment_id": row.id,
+            "fee_refunded_cents": row.fee_refunded_cents}

@@ -32,6 +32,7 @@ import re
 
 from sqlalchemy import select
 from datetime import date, datetime, timedelta
+from calendar import monthrange
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -59,9 +60,14 @@ COLUMNS: list[tuple[str, str, int]] = [
     ("billed_usd",     "Billed $",        13),
     ("paid",           "Paid?",           10),
     ("paid_date",      "Paid date",       13),
-    ("collected_usd",  "Collected $",     13),
+    ("collected_usd",  "After platform fee $", 22),
+    ("gross_collected_usd", "Gross collected $", 17),
+    ("refunded_usd", "Refunded $", 14),
+    ("outstanding_usd", "Outstanding $", 16),
     ("invoice_number", "Invoice #",       18),
     ("sent_date",      "Invoice sent",    14),
+    ("invoice_status", "Invoice status", 18),
+    ("exception_reason", "Exception / hold reason", 56),
 ]
 
 
@@ -107,97 +113,94 @@ def _array_name(db, sub) -> Optional[str]:
         return None
 
 
+def _invoice_month(inv):
+    if str(inv.period_key or "").startswith("trueup:"):
+        return None
+    if inv.period_end:
+        return inv.period_end.strftime("%Y-%m")
+    key = str(inv.period_key or "")
+    return key[:7] if re.fullmatch(r"\d{4}-\d{2}(?:-\d{2})?", key) else None
+
+
 def collect_rows(db, tenant, period_key: str) -> list[dict]:
-    """One row per offtaker billed in `period_key` (YYYY-MM), name-sorted.
-
-    An offtaker that was NOT billed this period is omitted rather than shown
-    with blanks — the sheet answers "what went out this cycle", and a dormant
-    subscription in the list would read as a missed invoice.
-    """
-    from sqlalchemy import select
-    from ..models import BillingReportSubscription
+    """Issued history plus every currently expected offtaker and its exceptions."""
+    from ..models import BillingReportSubscription, OfftakerInvoice
     from . import invoice_ledger
-
-    subs = db.execute(
-        select(BillingReportSubscription).where(
-            BillingReportSubscription.tenant_id == tenant.id,
-            BillingReportSubscription.deleted_at.is_(None),
-        )
-    ).scalars().all()
-
-    rows: list[dict] = []
+    invoices = db.execute(select(OfftakerInvoice).where(
+        OfftakerInvoice.tenant_id == tenant.id)).scalars().all()
+    by_sub = {i.subscription_id: i for i in invoices if _invoice_month(i) == period_key}
+    year, month = map(int, period_key.split("-"))
+    period_end = date(year, month, monthrange(year, month)[1])
+    subs = db.execute(select(BillingReportSubscription).where(
+        BillingReportSubscription.tenant_id == tenant.id)).scalars().all()
+    rows = []
     for sub in subs:
-        if _period_of(sub) != period_key:
+        inv = by_sub.get(sub.id)
+        payments = [p for p in invoice_ledger.list_payment_rows(db, sub)
+                    if (p.get("period_label") or "")[:7] == period_key]
+        stamped = _period_of(sub) == period_key
+        created = sub.created_at.date() if sub.created_at else None
+        expected = (sub.deleted_at is None and sub.enabled
+                    and (created is None or created <= period_end)
+                    and (sub.cadence != "quarterly" or month % 3 == 0))
+        if not (inv or payments or stamped or expected):
             continue
-        try:
-            rows.append(_row_for(db, sub, period_key, invoice_ledger))
-        except Exception:  # noqa: BLE001
-            # One malformed subscription must never sink the whole report; the
-            # offtaker still appears, flagged, so a gap is visible not silent.
-            logger.exception("monthly report: row failed for sub %s", getattr(sub, "id", "?"))
-            rows.append({
-                "offtaker": getattr(sub, "customer_name", None) or "(unknown)",
-                "email": _recipients(sub),
-                "paid": "Unknown",
-                "_error": True,
-            })
-
+        pay = payments[0] if payments else None
+        accepted = inv is not None and inv.status == "accepted"
+        legacy = inv is None and (stamped or pay is not None)
+        snapshot = (inv.snapshot or {}) if inv else {}
+        billed = inv.amount_cents / 100 if accepted else None
+        kwh = inv.customer_kwh if accepted else None
+        sent = inv.sent_at if accepted else None
+        number = inv.invoice_number if accepted else None
+        if legacy:
+            billed = getattr(sub, "last_sent_amount_usd", None) if stamped else None
+            if billed is None and pay:
+                billed = pay.get("amount_usd")
+            kwh = getattr(sub, "last_sent_customer_kwh", None) if stamped else None
+            sent = sub.last_sent_at if stamped else None
+            number = sub.last_invoice_number if stamped else (pay or {}).get("invoice_number")
+        status = inv.status if inv else ("legacy issued" if legacy else "unsent")
+        reason = None
+        if not accepted and not legacy:
+            reason = (inv.last_error if inv else None) or (
+                "Scheduled sending paused" if getattr(tenant, "sending_paused", False) else
+                "Awaiting operator approval" if sub.delivery_mode == "approval" else
+                "No accepted invoice recorded; review source data and delivery queue")
+        paid_at = None
+        if pay and pay.get("paid_at"):
+            try:
+                paid_at = datetime.fromisoformat(str(pay["paid_at"]).replace("Z", "+00:00")).date()
+            except (TypeError, ValueError):
+                pass
+        balance = invoice_ledger.invoice_balance(db, inv) if accepted else None
+        paid = bool(pay and pay.get("status") == "paid")
+        paid_label = ("Yes" if paid else pay.get("status_label") or "No") if pay else "Not tracked"
+        collected = (pay or {}).get("collected_usd")
+        if balance is not None:
+            paid = balance["outstanding_cents"] == 0
+            paid_label = ("Refunded" if balance["refunded_cents"] else
+                          "No payment due" if inv.amount_cents == 0 else
+                          "Yes" if paid else
+                          "Partial payment" if balance["gross_collected_cents"] else "Awaiting payment")
+            collected = balance["after_platform_fee_cents"] / 100
+        rows.append({
+            "offtaker": snapshot.get("customer_name") or (snapshot.get("customer") or {}).get("name") or sub.customer_name or "(unnamed)",
+            "email": snapshot.get("client_email") or (snapshot.get("customer") or {}).get("email") or _recipients(sub),
+            "array": snapshot.get("array_name") or _array_name(db, sub),
+            "generation_kwh": round(float(kwh), 2) if kwh is not None else None,
+            "billed_usd": round(float(billed), 2) if billed is not None else None,
+            "paid": paid_label,
+            "paid_date": paid_at, "collected_usd": collected,
+            "gross_collected_usd": balance["gross_collected_cents"] / 100 if balance else None,
+            "refunded_usd": balance["refunded_cents"] / 100 if balance else None,
+            "outstanding_usd": balance["outstanding_cents"] / 100 if balance else None,
+            "invoice_number": number, "sent_date": sent.date() if sent else None,
+            "invoice_status": status, "exception_reason": reason,
+            "_paid": paid,
+        })
     rows.sort(key=lambda r: (r.get("offtaker") or "").lower())
     return rows
-
-
-def _row_for(db, sub, period_key: str, invoice_ledger) -> dict:
-    # Payment state for THIS period, from the same source the per-offtaker
-    # ledger uses. Newest-first, so the first match is the live one.
-    pay = None
-    for p in invoice_ledger.list_payment_rows(db, sub):
-        if (p.get("period_label") or "")[:7] == period_key:
-            pay = p
-            break
-
-    # Billed $: what we stamped at send; the payment row is the fallback for
-    # sends that predate the stamp.
-    billed = getattr(sub, "last_sent_amount_usd", None)
-    if billed is None and pay:
-        billed = pay.get("amount_usd")
-
-    # kWh: stamped at send, else recomputed through the ledger's own helper.
-    kwh = getattr(sub, "last_sent_customer_kwh", None)
-    if kwh is None:
-        try:
-            kwh = invoice_ledger._generation_for_period(db, sub, period_key)
-        except Exception:  # noqa: BLE001
-            kwh = None
-
-    sent_at = getattr(sub, "last_sent_at", None)
-    paid_at = None
-    if pay and pay.get("paid_at"):
-        try:
-            paid_at = datetime.fromisoformat(str(pay["paid_at"]).rstrip("Z"))
-        except (TypeError, ValueError):
-            paid_at = None
-
-    if pay:
-        paid_label = "Yes" if pay.get("status") == "paid" else (pay.get("status_label") or "No")
-    else:
-        # No pay-link exists (Connect not connected, or invoiced offline). Say
-        # so rather than implying non-payment.
-        paid_label = "Not tracked"
-
-    return {
-        "offtaker": getattr(sub, "customer_name", None) or "(unnamed)",
-        "email": _recipients(sub),
-        "array": _array_name(db, sub),
-        "generation_kwh": round(float(kwh), 2) if kwh is not None else None,
-        "billed_usd": round(float(billed), 2) if billed is not None else None,
-        "paid": paid_label,
-        "paid_date": paid_at.date() if paid_at else None,
-        "collected_usd": (pay or {}).get("collected_usd"),
-        "invoice_number": (getattr(sub, "last_invoice_number", None)
-                           or (pay or {}).get("invoice_number")),
-        "sent_date": sent_at.date() if sent_at else None,
-        "_paid": bool(pay and pay.get("status") == "paid"),
-    }
 
 
 def summarize(rows: list[dict]) -> dict:
@@ -208,6 +211,7 @@ def summarize(rows: list[dict]) -> dict:
     return {
         "offtaker_count": len(rows),
         "paid_count": sum(1 for r in rows if r.get("_paid")),
+        "exception_count": sum(1 for r in rows if r.get("exception_reason")),
         "total_kwh": _sum("generation_kwh"),
         "total_billed_usd": _sum("billed_usd"),
         "total_collected_usd": _sum("collected_usd"),
@@ -258,7 +262,7 @@ def build_workbook(tenant, period_key: str, rows: list[dict],
         for i, (field, _h, _w) in enumerate(COLUMNS, start=1):
             c = ws.cell(row=r, column=i, value=row.get(field))
             c.border = Border(bottom=rule)
-            if field in ("billed_usd", "collected_usd"):
+            if field in ("billed_usd", "collected_usd", "gross_collected_usd", "refunded_usd", "outstanding_usd"):
                 c.number_format = money
             elif field == "generation_kwh":
                 c.number_format = "#,##0.00"
@@ -381,102 +385,60 @@ def lag_days_for(tenant) -> int:
         return DEFAULT_LAG_DAYS
 
 
-def due_period(db, tenant, now: Optional[datetime] = None) -> Optional[dict]:
-    """The period whose summary is due, or None.
+def _period_anchors(db, tenant):
+    from ..models import BillingReportSubscription, OfftakerInvoice, OfftakerPayment, OfftakerMonthlyReport
+    anchors = {}
+    def add(key, stamp):
+        if key and stamp and (key not in anchors or stamp > anchors[key]):
+            anchors[key] = stamp
+    for inv in db.execute(select(OfftakerInvoice).where(OfftakerInvoice.tenant_id == tenant.id)).scalars():
+        add(_invoice_month(inv), inv.sent_at or inv.created_at)
+    for sub in db.execute(select(BillingReportSubscription).where(BillingReportSubscription.tenant_id == tenant.id)).scalars():
+        add(_period_of(sub), sub.last_sent_at)
+    for pay in db.execute(select(OfftakerPayment).where(OfftakerPayment.tenant_id == tenant.id)).scalars():
+        key = str(pay.period_key or "")
+        if re.fullmatch(r"\d{4}-\d{2}(?:-\d{2})?", key):
+            add(key[:7], pay.created_at)
+    # A failed report remains discoverable even after the source subscription changes.
+    for report in db.execute(select(OfftakerMonthlyReport).where(OfftakerMonthlyReport.tenant_id == tenant.id)).scalars():
+        add(report.period_key, report.anchor_sent_at or report.created_at)
+    return anchors
 
-    Due means: every enabled subscription that billed the period has been sent,
-    the newest of those sends is at least `lag_days` old, and no report row for
-    that (tenant, period) exists yet. Returns the anchor so the caller can
-    record WHY it fired.
-    """
-    from sqlalchemy import select
-    from ..models import BillingReportSubscription, OfftakerMonthlyReport
 
+def due_period(db, tenant, now: Optional[datetime] = None, *, excluded=()) -> Optional[dict]:
+    from ..models import OfftakerMonthlyReport
     now = now or datetime.utcnow()
-    subs = db.execute(
-        select(BillingReportSubscription).where(
-            BillingReportSubscription.tenant_id == tenant.id,
-            BillingReportSubscription.deleted_at.is_(None),
-            BillingReportSubscription.last_sent_at.isnot(None),
-        )
-    ).scalars().all()
-    if not subs:
-        return None
-
-    # Group the sends by the period they billed; consider the newest period
-    # that has fully aged. Older unsent periods are not resurrected — a report
-    # that never fired stays unfired rather than arriving months late.
-    by_period: dict[str, datetime] = {}
-    for s in subs:
-        pk = _period_of(s)
-        if not pk:
+    lag = timedelta(days=lag_days_for(tenant))
+    for pk, anchor in sorted(_period_anchors(db, tenant).items()):
+        if pk in excluded:
             continue
-        sent = s.last_sent_at
-        if pk not in by_period or sent > by_period[pk]:
-            by_period[pk] = sent
-    if not by_period:
-        return None
-
-    lag = lag_days_for(tenant)
-    for pk in sorted(by_period, reverse=True):
-        anchor = by_period[pk]
-        if now < anchor + timedelta(days=lag):
-            continue  # still inside the quiet window
-        already = db.execute(
-            select(OfftakerMonthlyReport).where(
-                OfftakerMonthlyReport.tenant_id == tenant.id,
-                OfftakerMonthlyReport.period_key == pk,
-            )
-        ).scalars().first()
-        # Exactly-once on DELIVERY, not on attempt. A row whose send failed
-        # (sent_at NULL, error set) is retryable — otherwise one bad address
-        # or a transient mailer error silently costs that month's summary
-        # forever, with no operator-visible way to recover it.
-        if already is not None and already.sent_at is not None:
-            return None  # newest aged period already delivered → nothing due
-        return {"period_key": pk, "anchor_sent_at": anchor,
-                "due_at": anchor + timedelta(days=lag)}
+        if now < anchor + lag:
+            continue
+        report = db.execute(select(OfftakerMonthlyReport).where(
+            OfftakerMonthlyReport.tenant_id == tenant.id,
+            OfftakerMonthlyReport.period_key == pk)).scalars().first()
+        if report and report.sent_at:
+            continue
+        return {"period_key": pk, "anchor_sent_at": anchor, "due_at": anchor + lag}
     return None
 
 
 def next_due_at(db, tenant) -> Optional[dict]:
-    """What the UI shows: when the next summary is expected, and for what."""
-    from sqlalchemy import select
-    from ..models import BillingReportSubscription, OfftakerMonthlyReport
-
-    subs = db.execute(
-        select(BillingReportSubscription).where(
-            BillingReportSubscription.tenant_id == tenant.id,
-            BillingReportSubscription.deleted_at.is_(None),
-            BillingReportSubscription.last_sent_at.isnot(None),
-        )
-    ).scalars().all()
-    if not subs:
-        return None
-    by_period: dict[str, datetime] = {}
-    for s in subs:
-        pk = _period_of(s)
-        if not pk:
-            continue
-        if pk not in by_period or s.last_sent_at > by_period[pk]:
-            by_period[pk] = s.last_sent_at
-    if not by_period:
-        return None
-    pk = max(by_period)
-    done = db.execute(
-        select(OfftakerMonthlyReport).where(
+    from ..models import OfftakerMonthlyReport
+    anchors = _period_anchors(db, tenant)
+    for pk, anchor in sorted(anchors.items()):
+        report = db.execute(select(OfftakerMonthlyReport).where(
             OfftakerMonthlyReport.tenant_id == tenant.id,
-            OfftakerMonthlyReport.period_key == pk,
-        )
-    ).scalars().first()
-    if done is not None and done.sent_at is not None:
-        return {"period_key": pk, "already_sent": True,
-                "sent_at": done.sent_at.isoformat() + "Z"}
-    lag = lag_days_for(tenant)
-    return {"period_key": pk, "already_sent": False,
-            "anchor_sent_at": by_period[pk].isoformat() + "Z",
-            "due_at": (by_period[pk] + timedelta(days=lag)).isoformat() + "Z",
-            "lag_days": lag}
+            OfftakerMonthlyReport.period_key == pk)).scalars().first()
+        if report and report.sent_at:
+            continue
+        return {"period_key": pk, "already_sent": False,
+                "anchor_sent_at": anchor.isoformat() + "Z",
+                "due_at": (anchor + timedelta(days=lag_days_for(tenant))).isoformat() + "Z",
+                "lag_days": lag_days_for(tenant)}
+    if anchors:
+        return {"period_key": max(anchors), "already_sent": True}
+    return None
 
 
 # ── build + send ───────────────────────────────────────────────────────────
@@ -508,7 +470,7 @@ def send_report(db, tenant, period_key: str, *, anchor_sent_at=None,
     can't be retried into a second email."""
     from sqlalchemy.exc import IntegrityError
     from ..models import OfftakerMonthlyReport
-    from ..notify import _send_via_resend
+    from .dispatch import send_email_once
 
     built = generate(db, tenant, period_key)
     s = built["summary"]
@@ -545,19 +507,13 @@ def send_report(db, tenant, period_key: str, *, anchor_sent_at=None,
             logger.info("monthly report: %s %s already delivered — not re-sending",
                         tenant.id, period_key)
             return {"ok": False, "duplicate": True, "period_key": period_key}
-        # Refresh the failed row in place with this attempt's numbers.
-        prior.anchor_sent_at = anchor_sent_at or prior.anchor_sent_at
-        prior.recipient = to or None
-        prior.trigger = trigger
-        prior.offtaker_count = s["offtaker_count"]
-        prior.paid_count = s["paid_count"]
-        prior.total_kwh = s["total_kwh"]
-        prior.total_billed_usd = s["total_billed_usd"]
-        prior.total_collected_usd = s["total_collected_usd"]
-        prior.filename = built["filename"]
-        prior.xlsx_bytes = built["xlsx"]
-        prior.error = None
+        # Freeze the original workbook and recipients across retries.
         row = prior
+        built["filename"] = row.filename
+        built["xlsx"] = row.xlsx_bytes
+        to_list = parse_recipients(row.recipient) or to_list
+        to = format_recipients(to_list)
+        s = {k: getattr(row, k) for k in ("offtaker_count", "paid_count", "total_kwh", "total_billed_usd", "total_collected_usd")}
         db.commit()
     else:
         db.add(row)
@@ -579,20 +535,16 @@ def send_report(db, tenant, period_key: str, *, anchor_sent_at=None,
     subject = f"Offtaker billing summary — {period_key}"
     body = _email_body(tenant, period_key, s, built)
     try:
-        ok = _send_via_resend(
-            # One email addressed to everyone (not N separate sends): the
-            # operator and whoever they added should see the same thread, and
-            # the mailer takes a list natively.
-            to=(to_list[0] if len(to_list) == 1 else to_list),
-            subject=subject, html=body["html"], text=body["text"],
-            # Resend wants base64 TEXT, not raw bytes (see notify._send_via_resend
-            # callers: every one b64-encodes before handing the dict over).
-            attachments=[{
-                "filename": built["filename"],
-                "content": base64.b64encode(built["xlsx"]).decode(),
-            }],
-            product="array_operator",
-        )
+        result = send_email_once(
+            tenant_id=tenant.id, key=f"monthly-report:{period_key}", kind="monthly_report",
+            email={"to": to_list[0] if len(to_list) == 1 else to_list,
+                   "subject": subject, "html": body["html"], "text": body["text"],
+                   "attachments": [{"filename": built["filename"],
+                                    "content": base64.b64encode(built["xlsx"]).decode()}],
+                   "product": "array_operator"})
+        ok = result.get("ok", False)
+        if not ok:
+            row.error = result.get("error") or ("Delivery uncertain; reconciliation required" if result.get("uncertain") else "Delivery already in progress")
     except Exception as e:  # noqa: BLE001
         logger.exception("monthly report: send failed for %s %s", tenant.id, period_key)
         row.error = str(e)[:500]
@@ -603,7 +555,7 @@ def send_report(db, tenant, period_key: str, *, anchor_sent_at=None,
     if ok:
         row.sent_at = datetime.utcnow()
     else:
-        row.error = "mailer refused the send"
+        row.error = row.error or "mailer refused the send"
     db.commit()
     return {"ok": bool(ok), "period_key": period_key, "report_id": row.id,
             "recipient": to, **s}
@@ -616,7 +568,7 @@ def _email_body(tenant, period_key: str, s: dict, built: Optional[dict] = None) 
     lines = [
         f"Offtaker billing summary for {period_key}.",
         "",
-        f"Offtakers invoiced: {s.get('offtaker_count', 0)}",
+        f"Offtakers expected / recorded: {s.get('offtaker_count', 0)}",
     ]
     if billed is not None:
         lines.append(f"Total billed: ${billed:,.2f}")
@@ -625,14 +577,14 @@ def _email_body(tenant, period_key: str, s: dict, built: Optional[dict] = None) 
     lines.append(f"Paid: {s.get('paid_count', 0)}  ·  Outstanding: {unpaid}")
     lines += ["", "The attached spreadsheet lists every offtaker, their email, "
                   "what their array generated, what they were billed, and "
-                  "whether they have paid."]
+                  "whether they have paid. Collected totals subtract platform fees and refunds; Stripe processing fees and bank payouts are not verified."]
     text = "\n".join(lines)
 
     rows_html = "".join(
         f'<tr><td style="padding:4px 14px 4px 0;opacity:.65;">{k}</td>'
         f'<td style="padding:4px 0;font-weight:600;">{v}</td></tr>'
         for k, v in [
-            ("Offtakers invoiced", s.get("offtaker_count", 0)),
+            ("Offtakers expected / recorded", s.get("offtaker_count", 0)),
             ("Total billed", f"${billed:,.2f}" if billed is not None else "—"),
             ("Total collected", f"${collected:,.2f}" if collected is not None else "—"),
             ("Paid", s.get("paid_count", 0)),
@@ -683,17 +635,20 @@ def run_due_reports(now: Optional[datetime] = None) -> dict:
             if getattr(t, "offtaker_report_enabled", True) is False:
                 continue
             try:
-                due = due_period(db, t, now=now)
-                if not due:
-                    continue
-                res = send_report(db, t, due["period_key"],
-                                  anchor_sent_at=due["anchor_sent_at"],
-                                  trigger="scheduled",
-                                  recipient=recipients_for(t))
-                if res.get("ok"):
-                    sent += 1
-                    logger.info("monthly offtaker report sent: %s %s (%s offtakers)",
-                                t.id, due["period_key"], res.get("offtaker_count"))
+                attempted = set()
+                while True:
+                    due = due_period(db, t, now=now, excluded=attempted)
+                    if not due:
+                        break
+                    attempted.add(due["period_key"])
+                    res = send_report(db, t, due["period_key"],
+                                      anchor_sent_at=due["anchor_sent_at"],
+                                      trigger="scheduled",
+                                      recipient=recipients_for(t))
+                    if res.get("ok"):
+                        sent += 1
+                    elif not res.get("duplicate"):
+                        errors += 1
             except Exception:  # noqa: BLE001
                 errors += 1
                 logger.exception("monthly offtaker report failed for tenant %s", t.id)

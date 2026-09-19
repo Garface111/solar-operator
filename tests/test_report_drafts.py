@@ -26,7 +26,7 @@ def _make_tenant() -> tuple[str, str]:
             id=tid, name="Draft Test Operator",
             contact_email=f"{tid}@operator.test",
             tenant_key="sol_live_" + secrets.token_urlsafe(12),
-            plan="standard", active=True, product="array_operator",
+            plan="standard", active=True, product="array_operator", offtaker_payment_policy="offline",
         ))
         db.commit()
     return tid, f"Bearer {mint_session_for_tenant(tid)}"
@@ -263,7 +263,9 @@ def test_scheduled_approval_mode_drafts_and_notifies_operator(client, monkeypatc
     monkeypatch.setattr("api.notify._send_via_resend",
                         lambda **kw: sent.append(kw) or True)
     from api.scheduler import deliver_billing_reports
-    res = deliver_billing_reports("monthly")
+    from tests.test_billing_delivery import _prepare_closed_offline_schedule
+    _prepare_closed_offline_schedule(sub_id)
+    res = deliver_billing_reports("monthly", tenant_id=tid)
     assert sub_id in res["drafted"], res
     assert sub_id not in res["sent"]
     # No email in this run went to MY customer (approval mode never sends to them).
@@ -286,7 +288,9 @@ def test_scheduled_auto_mode_sends_to_customer(client, monkeypatch):
     monkeypatch.setattr("api.notify._send_via_resend",
                         lambda **kw: captured.update(kw) or True)
     from api.scheduler import deliver_billing_reports
-    res = deliver_billing_reports("monthly")
+    from tests.test_billing_delivery import _prepare_closed_offline_schedule
+    _prepare_closed_offline_schedule(sub_id)
+    res = deliver_billing_reports("monthly", tenant_id=tid)
     assert sub_id in res["sent"], res
     assert sub_id not in res["drafted"]
     # Went to the customer; no draft created.

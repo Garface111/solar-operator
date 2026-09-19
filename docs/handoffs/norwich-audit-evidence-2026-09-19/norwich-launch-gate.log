@@ -1,0 +1,104 @@
+FFFFFFF                                                                  [100%]
+=================================== FAILURES ===================================
+________________ test_historical_summary_survives_next_invoice _________________
+tests/norwich_launch_gate.py:27: in test_historical_summary_survives_next_invoice
+    assert len(rows)==1, "June invoice disappeared after July was sent"
+E   AssertionError: June invoice disappeared after July was sent
+E   assert 0 == 1
+E    +  where 0 = len([])
+_______________ test_partial_refund_reduces_reported_collections _______________
+tests/norwich_launch_gate.py:39: in test_partial_refund_reduces_reported_collections
+    assert values[0]["collected_usd"]<=60, values
+E   AssertionError: [{'id': 2, 'period_key': '2026-06-30', 'period_label': '2026-06', 'invoice_number': 'JUNE', ...}]
+E   assert 99.5 <= 60
+____________________ test_partial_vec_month_is_not_billable ____________________
+tests/norwich_launch_gate.py:47: in test_partial_vec_month_is_not_billable
+    assert result.computed_invoice["has_utility_bill"] is False, "Ten days of May were treated as a billable month"
+E   AssertionError: Ten days of May were treated as a billable month
+E   assert True is False
+__________ test_overallocated_batch_does_not_partially_create_roster ___________
+tests/norwich_launch_gate.py:57: in test_overallocated_batch_does_not_partially_create_roster
+    assert len(created)==0, f"Invalid 105% batch created {len(created)} live rows: {response.text}"
+E   AssertionError: Invalid 105% batch created 2 live rows: {"ok":true,"created":2,"created_rows":[{"offtaker_name":"Owner 0","subscription_id":3},{"offtaker_name":"Owner 1","subscription_id":4}],"skipped":[],"failed":[{"offtaker_name":"Owner 2","error":"This would over-allocate the meter to 105% — offtakers sharing one utility account can't sum past 100% or the meter's excess is billed twice. It's already at 70%."}]}
+E   assert 2 == 0
+E    +  where 2 = len([<api.models.BillingReportSubscription object at 0x72f1b269ba70>, <api.models.BillingReportSubscription object at 0x72f1b269bb30>])
+______________ test_quarterly_trueup_uses_actual_invoiced_budget _______________
+tests/norwich_launch_gate.py:73: in test_quarterly_trueup_uses_actual_invoiced_budget
+    assert result.total_budgeted==400, result.to_dict()
+E   AssertionError: {'ok': True, 'window_start': '2025-09-01', 'window_end': '2026-08-31', 'period_labels': ['2025-09', '2025-10', '2025-11', '2025-12', '2026-01', '2026-02', ...], ...}
+E   assert 1200.0 == 400
+E    +  where 1200.0 = TrueupSettlement(ok=True, window_start=datetime.date(2025, 9, 1), window_end=datetime.date(2026, 8, 31), period_labels...harge_usd=0.0, credit_usd=600.0, months_included=12, error=None, customer_name='Town of Test', budget_amount_usd=100.0).total_budgeted
+__________________ test_concurrent_send_paths_only_send_once ___________________
+tests/norwich_launch_gate.py:100: in test_concurrent_send_paths_only_send_once
+    assert len(sends)==1, f"Concurrent paths sent {len(sends)} invoices: {outcomes}"
+E   AssertionError: Concurrent paths sent 2 invoices: [{'ok': True, 'to': ['ten_0333be06adb4@operator.test'], 'cc': [], 'bcc': [], 'attachments': [], 'invoice_number': '2026-05', 'amount_owed': 865.19, 'triggered_by': 'manual', 'test': False, 'pay_url': None, 'payment_id': None, 'fee_cents': None, 'pay_skip_reason': 'pay link not created', 'resend_email_id': None, 'email_copy_override_id': None, 'delivery_status': 'accepted'}, {'ok': True, 'to': ['ten_0333be06adb4@operator.test'], 'cc': [], 'bcc': [], 'attachments': [], 'invoice_number': '2026-05', 'amount_owed': 865.19, 'triggered_by': 'manual', 'test': False, 'pay_url': None, 'payment_id': None, 'fee_cents': None, 'pay_skip_reason': 'pay link not created', 'resend_email_id': None, 'email_copy_override_id': None, 'delivery_status': 'accepted'}]
+E   assert 2 == 1
+E    +  where 2 = len([{'to': 'ten_0333be06adb4@operator.test', 'subject': 'Your solar credit invoice — Norwich Fire District (2026-05)', 'h... 4,292 kWh\nSolar credit value due: $865.19\n\nQuestions? Just reply to this email.\n\n—\nBilling Test Operator', ...}])
+_______________ test_crash_after_mail_acceptance_does_not_resend _______________
+tests/norwich_launch_gate.py:116: in test_crash_after_mail_acceptance_does_not_resend
+    assert len(sends)==1, f"Retry after a commit failure sent {len(sends)} invoices"
+E   AssertionError: Retry after a commit failure sent 2 invoices
+E   assert 2 == 1
+E    +  where 2 = len([{'to': 'ten_3845d518bce1@operator.test', 'subject': 'Your solar credit invoice — Norwich Fire District (2026-05)', 'h... 4,292 kWh\nSolar credit value due: $865.19\n\nQuestions? Just reply to this email.\n\n—\nBilling Test Operator', ...}])
+=============================== warnings summary ===============================
+tests/norwich_launch_gate.py: 59 warnings
+  /root/offtaker-audit-2026-09-19/api/models.py:71: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+tests/norwich_launch_gate.py::test_partial_refund_reduces_reported_collections
+  /root/offtaker-audit-2026-09-19/api/billing/invoice_ledger.py:272: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    sub.tracker_updated_at = datetime.utcnow()
+
+tests/norwich_launch_gate.py::test_overallocated_batch_does_not_partially_create_roster
+  /root/offtaker-audit-2026-09-19/api/app.py:559: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
+tests/norwich_launch_gate.py::test_overallocated_batch_does_not_partially_create_roster
+  /root/solar-operator/venv/lib/python3.12/site-packages/fastapi/applications.py:4495: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    return self.router.on_event(event_type)
+
+tests/norwich_launch_gate.py::test_overallocated_batch_does_not_partially_create_roster
+tests/norwich_launch_gate.py::test_overallocated_batch_does_not_partially_create_roster
+tests/norwich_launch_gate.py::test_concurrent_send_paths_only_send_once
+tests/norwich_launch_gate.py::test_crash_after_mail_acceptance_does_not_resend
+  /root/offtaker-audit-2026-09-19/api/billing/delivery.py:42: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    after = after or datetime.utcnow()
+
+tests/norwich_launch_gate.py::test_concurrent_send_paths_only_send_once
+tests/norwich_launch_gate.py::test_concurrent_send_paths_only_send_once
+tests/norwich_launch_gate.py::test_concurrent_send_paths_only_send_once
+tests/norwich_launch_gate.py::test_concurrent_send_paths_only_send_once
+tests/norwich_launch_gate.py::test_crash_after_mail_acceptance_does_not_resend
+tests/norwich_launch_gate.py::test_crash_after_mail_acceptance_does_not_resend
+tests/norwich_launch_gate.py::test_crash_after_mail_acceptance_does_not_resend
+tests/norwich_launch_gate.py::test_crash_after_mail_acceptance_does_not_resend
+  /root/offtaker-audit-2026-09-19/api/email_copy_overrides.py:40: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+tests/norwich_launch_gate.py::test_concurrent_send_paths_only_send_once
+tests/norwich_launch_gate.py::test_concurrent_send_paths_only_send_once
+tests/norwich_launch_gate.py::test_crash_after_mail_acceptance_does_not_resend
+tests/norwich_launch_gate.py::test_crash_after_mail_acceptance_does_not_resend
+  /root/offtaker-audit-2026-09-19/api/billing/delivery.py:2520: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/norwich_launch_gate.py::test_historical_summary_survives_next_invoice
+FAILED tests/norwich_launch_gate.py::test_partial_refund_reduces_reported_collections
+FAILED tests/norwich_launch_gate.py::test_partial_vec_month_is_not_billable
+FAILED tests/norwich_launch_gate.py::test_overallocated_batch_does_not_partially_create_roster
+FAILED tests/norwich_launch_gate.py::test_quarterly_trueup_uses_actual_invoiced_budget
+FAILED tests/norwich_launch_gate.py::test_concurrent_send_paths_only_send_once
+FAILED tests/norwich_launch_gate.py::test_crash_after_mail_acceptance_does_not_resend
+7 failed, 78 warnings in 3.54s

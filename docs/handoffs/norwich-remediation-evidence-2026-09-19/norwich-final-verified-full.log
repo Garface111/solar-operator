@@ -1,0 +1,1406 @@
+........................................................................ [  2%]
+........................................................................ [  5%]
+........................................................................ [  8%]
+........................................................................ [ 10%]
+........................................................................ [ 13%]
+........................................................................ [ 16%]
+........................................................................ [ 18%]
+........................................................................ [ 21%]
+........................................................................ [ 24%]
+........................................................................ [ 26%]
+........................................................................ [ 29%]
+........................................................................ [ 32%]
+........................................................................ [ 34%]
+........................................................................ [ 37%]
+........................................................................ [ 40%]
+........................................................................ [ 42%]
+........................................................................ [ 45%]
+........................................................................ [ 48%]
+........................................................................ [ 50%]
+........................................................................ [ 53%]
+........................................................................ [ 56%]
+........................................................................ [ 58%]
+........................................................................ [ 61%]
+........................................................................ [ 64%]
+........................................................................ [ 66%]
+........................................................................ [ 69%]
+........................................................................ [ 72%]
+........................................................................ [ 74%]
+........................................................................ [ 77%]
+........................................................................ [ 80%]
+........................................................................ [ 82%]
+........................................................................ [ 85%]
+........................................................................ [ 88%]
+........................................................................ [ 90%]
+........................................................................ [ 93%]
+........................................................................ [ 96%]
+........................................................................ [ 98%]
+...................................                                      [100%]
+=============================== warnings summary ===============================
+api/app.py:559
+  /root/offtaker-audit-2026-09-19/api/app.py:559: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
+../solar-operator/venv/lib/python3.12/site-packages/fastapi/applications.py:4495
+  /root/solar-operator/venv/lib/python3.12/site-packages/fastapi/applications.py:4495: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    return self.router.on_event(event_type)
+
+tests/test_account_array_link.py: 41 warnings
+tests/test_account_monthly_aggregation_prorate.py: 15 warnings
+tests/test_account_name.py: 7 warnings
+tests/test_account_namesplit.py: 2 warnings
+tests/test_add_payment_method.py: 6 warnings
+tests/test_ai_pro_webhook.py: 3 warnings
+tests/test_all_set.py: 18 warnings
+tests/test_alsoenergy_connect.py: 11 warnings
+tests/test_alsoenergy_discover_client.py: 12 warnings
+tests/test_annual_trueup.py: 4 warnings
+tests/test_ao_genreports_pricing.py: 146 warnings
+tests/test_ao_plan_line_migration.py: 59 warnings
+tests/test_array_exclude_and_rate_source.py: 7 warnings
+tests/test_array_fuel_crud.py: 12 warnings
+tests/test_array_inverter_rename.py: 37 warnings
+tests/test_array_master_pack.py: 34 warnings
+tests/test_array_merge.py: 85 warnings
+tests/test_array_nameplate_se_peak.py: 14 warnings
+tests/test_array_owners.py: 390 warnings
+tests/test_array_owners_delete.py: 22 warnings
+tests/test_array_owners_inverter_delete.py: 33 warnings
+tests/test_array_rename_reuses_deleted_name.py: 14 warnings
+tests/test_array_soft_delete_visibility.py: 33 warnings
+tests/test_array_tracker.py: 30 warnings
+tests/test_audit_offtaker_fixes.py: 27 warnings
+tests/test_autocreate_naming.py: 31 warnings
+tests/test_autolink_siblings.py: 12 warnings
+tests/test_autopop.py: 109 warnings
+tests/test_bill_adapter_autopilot.py: 49 warnings
+tests/test_bill_credit_rate_default.py: 3 warnings
+tests/test_bill_discovery_engine.py: 14 warnings
+tests/test_bill_to_daily.py: 43 warnings
+tests/test_billable_count.py: 30 warnings
+tests/test_billing_delivery.py: 703 warnings
+tests/test_billing_money_math.py: 339 warnings
+tests/test_billing_pool_leak.py: 6 warnings
+tests/test_billing_trends.py: 20 warnings
+tests/test_capture_debt_coop_stream.py: 24 warnings
+tests/test_capture_timeline.py: 62 warnings
+tests/test_capture_trifecta.py: 95 warnings
+tests/test_cc_on_reports.py: 46 warnings
+tests/test_chat_turn_ordering.py: 21 warnings
+tests/test_chint_unmerge.py: 11 warnings
+tests/test_claude_cli.py: 4 warnings
+tests/test_client_frequency_cleanup.py: 8 warnings
+tests/test_client_name_reuse.py: 20 warnings
+tests/test_clients_api.py: 29 warnings
+tests/test_clients_endpoint.py: 12 warnings
+tests/test_cloud_capture_eager_client.py: 86 warnings
+tests/test_cmp_cloud_capture.py: 11 warnings
+tests/test_config_encryption.py: 46 warnings
+tests/test_coop_session_realert.py: 24 warnings
+tests/test_cross_product_link_fanout.py: 41 warnings
+tests/test_cross_tenant_live_borrow.py: 17 warnings
+tests/test_daily_coverage_endpoint.py: 163 warnings
+tests/test_daily_generation_ingest.py: 69 warnings
+tests/test_daily_series.py: 45 warnings
+tests/test_daily_upsert_race.py: 38 warnings
+tests/test_dead_register_power_honesty.py: 37 warnings
+tests/test_deferred_billing_setup_mode.py: 24 warnings
+tests/test_demo_magic_link.py: 125 warnings
+tests/test_demo_seed.py: 249 warnings
+tests/test_demo_tenant.py: 6 warnings
+tests/test_digest_utility_output.py: 28 warnings
+tests/test_discovered_utilities.py: 21 warnings
+tests/test_discovery_pool.py: 38 warnings
+tests/test_draft_period_selector.py: 261 warnings
+tests/test_ea_ops_tools.py: 39 warnings
+tests/test_email_copy_overrides.py: 5 warnings
+tests/test_email_template_api.py: 18 warnings
+tests/test_energy_agent_array_shadow.py: 1 warning
+tests/test_energy_agent_offline_stub_loop.py: 3 warnings
+tests/test_escalate_stale_repairs_scheduled.py: 26 warnings
+tests/test_event_emissions.py: 23 warnings
+tests/test_eversource_cloud_capture.py: 9 warnings
+tests/test_fleet_credit_memo_equivalence.py: 276 warnings
+tests/test_fleet_credit_rate_excludes_demo.py: 84 warnings
+tests/test_fleet_report.py: 122 warnings
+tests/test_forecast_actual_cross_check.py: 104 warnings
+tests/test_forecast_expected_ratio.py: 58 warnings
+tests/test_freshness_scorecard.py: 35 warnings
+tests/test_fronius_connect.py: 15 warnings
+tests/test_fronius_lagging_live.py: 20 warnings
+tests/test_generation_crosscheck.py: 46 warnings
+tests/test_generation_reports_enable.py: 19 warnings
+tests/test_generation_watchdog.py: 29 warnings
+tests/test_gmcs_writer.py: 94 warnings
+tests/test_gmcs_writer_prefers_gmp.py: 136 warnings
+tests/test_gmcs_writer_prorate.py: 50 warnings
+tests/test_gmcs_writer_solarpunk_colors.py: 15 warnings
+tests/test_gmcs_writer_vendor_fallback.py: 429 warnings
+tests/test_gmp_backfill_retry.py: 9 warnings
+tests/test_gmp_bill_pdf_capture.py: 10 warnings
+tests/test_gmp_commissioning_date.py: 12 warnings
+tests/test_gmp_daily_bulk.py: 46 warnings
+tests/test_gmp_freshness_watchdog.py: 29 warnings
+tests/test_gmp_generation_export.py: 130 warnings
+tests/test_gmp_hourly_parse_and_export.py: 9 warnings
+tests/test_gmp_refresh.py: 42 warnings
+tests/test_gmp_trends_integration.py: 33 warnings
+tests/test_harvester_lockout_guard.py: 374 warnings
+tests/test_harvester_session_jar_reset.py: 29 warnings
+tests/test_has_active_credential.py: 13 warnings
+tests/test_honest_rate_and_adder.py: 39 warnings
+tests/test_identity.py: 87 warnings
+tests/test_import_stress.py: 22 warnings
+tests/test_inbound_tenant_isolation.py: 77 warnings
+tests/test_ingest_hierarchical.py: 3 warnings
+tests/test_ingest_owner_email_self_addresses.py: 2 warnings
+tests/test_ingest_provenance.py: 33 warnings
+tests/test_inverter_capture_nuclear.py: 130 warnings
+tests/test_inverter_fleet.py: 95 warnings
+tests/test_inverter_history.py: 97 warnings
+tests/test_inverter_outage_log.py: 2713 warnings
+tests/test_inverter_stress.py: 81 warnings
+tests/test_inverters.py: 130 warnings
+tests/test_invoice_archive.py: 19 warnings
+tests/test_invoice_excess_labels.py: 4 warnings
+tests/test_invoice_ledger.py: 70 warnings
+tests/test_lane_c_data_honesty.py: 49 warnings
+tests/test_linked_sources.py: 7 warnings
+tests/test_locus_connect_client.py: 11 warnings
+tests/test_market_vacancy.py: 220 warnings
+tests/test_migrate_nepool_tenant.py: 371 warnings
+tests/test_morning_digest.py: 73 warnings
+tests/test_multi_array_allocation.py: 126 warnings
+tests/test_multi_login_autocreate.py: 103 warnings
+tests/test_norwich_300_dispatch.py: 3500 warnings
+tests/test_norwich_backlog.py: 101 warnings
+tests/test_norwich_data_guards.py: 27 warnings
+tests/test_norwich_dispatch_recovery.py: 39 warnings
+tests/test_norwich_frozen_evidence.py: 31 warnings
+tests/test_norwich_independent_audit.py: 126 warnings
+tests/test_norwich_launch_gate.py: 94 warnings
+tests/test_norwich_payment_lifecycle.py: 230 warnings
+tests/test_norwich_payment_policy_routes.py: 3 warnings
+tests/test_norwich_reporting_recovery.py: 77 warnings
+tests/test_norwich_scale_and_isolation.py: 1307 warnings
+tests/test_offtaker_credit_reference.py: 21 warnings
+tests/test_offtaker_delivery_truth.py: 48 warnings
+tests/test_offtaker_email_letter_fallback.py: 22 warnings
+tests/test_offtaker_email_template.py: 41 warnings
+tests/test_offtaker_pay_link_durable.py: 194 warnings
+tests/test_offtaker_payments.py: 55 warnings
+tests/test_offtaker_upload.py: 67 warnings
+tests/test_offtaker_utility_bill.py: 86 warnings
+tests/test_onboarding.py: 114 warnings
+tests/test_onboarding_status_gate.py: 11 warnings
+tests/test_ops_inbox_noise.py: 12 warnings
+tests/test_partial_bill_dedup.py: 31 warnings
+tests/test_password_auth.py: 35 warnings
+tests/test_paused_no_card_gating.py: 16 warnings
+tests/test_payment_method_detached.py: 7 warnings
+tests/test_peer_analysis.py: 51 warnings
+tests/test_per_offtaker_template.py: 29 warnings
+tests/test_perf_verification_routes.py: 6 warnings
+tests/test_placeholder_adoption.py: 56 warnings
+tests/test_poller.py: 23 warnings
+tests/test_portal_access.py: 42 warnings
+tests/test_production_endpoint.py: 392 warnings
+tests/test_production_fallback.py: 30 warnings
+tests/test_production_fallback_bulk.py: 528 warnings
+tests/test_production_history.py: 1391 warnings
+tests/test_prospectus.py: 228 warnings
+tests/test_pull_status.py: 24 warnings
+tests/test_qb_export_send_gate.py: 51 warnings
+tests/test_quarterly_offtaker_billing.py: 132 warnings
+tests/test_quarterly_progress.py: 49 warnings
+tests/test_quarterly_summary_xlsx.py: 32 warnings
+tests/test_rate_schedule.py: 19 warnings
+tests/test_reactivate.py: 22 warnings
+tests/test_realmath_invoice.py: 79 warnings
+tests/test_rec_writer.py: 58 warnings
+tests/test_reconcile_bills.py: 157 warnings
+tests/test_reconciliation_gmp_feed.py: 102 warnings
+tests/test_repair_contact_removal.py: 92 warnings
+tests/test_repair_ops.py: 199 warnings
+tests/test_repair_owner_loop.py: 190 warnings
+tests/test_report_arrays_vendor_filter.py: 358 warnings
+tests/test_report_drafts.py: 132 warnings
+tests/test_report_eligibility.py: 58 warnings
+tests/test_report_has_data.py: 28 warnings
+tests/test_reporting_quarter_lag.py: 21 warnings
+tests/test_reports_endpoint.py: 68 warnings
+tests/test_reports_meta_api.py: 11 warnings
+tests/test_resend_report.py: 28 warnings
+tests/test_resend_webhook.py: 44 warnings
+tests/test_resume_from_pause.py: 19 warnings
+tests/test_retired_inverter_no_escalation.py: 48 warnings
+tests/test_sandbox_array_reassign.py: 69 warnings
+tests/test_sandbox_contact_email.py: 4 warnings
+tests/test_security_hardening.py: 5 warnings
+tests/test_seed_demo.py: 561 warnings
+tests/test_send_pipeline.py: 36 warnings
+tests/test_session_persistence.py: 97 warnings
+tests/test_setup_wizard.py: 16 warnings
+tests/test_signoff_source.py: 7 warnings
+tests/test_skip_residential.py: 59 warnings
+tests/test_sma_consent.py: 31 warnings
+tests/test_smarthub_daily_gen_upsert.py: 91 warnings
+tests/test_smarthub_dispatch.py: 70 warnings
+tests/test_solaredge_adapter.py: 1 warning
+tests/test_solaredge_daily_pull_upsert.py: 53 warnings
+tests/test_solaredge_location_backfill.py: 617 warnings
+tests/test_solaredge_setup_endpoint.py: 36 warnings
+tests/test_sse_endpoint.py: 2 warnings
+tests/test_sse_pubsub.py: 11 warnings
+tests/test_stale_bill_warning.py: 22 warnings
+tests/test_stripe_webhook_sig.py: 6 warnings
+tests/test_submeter_routing.py: 38 warnings
+tests/test_summary_vendor_account_col.py: 8 warnings
+tests/test_sweep_preserves_foreign_incidents.py: 1 warning
+tests/test_sync_refreshes_heartbeat.py: 33 warnings
+tests/test_telemetry_ping.py: 8 warnings
+tests/test_template_fit_warning.py: 19 warnings
+tests/test_template_repro_crosstab.py: 2 warnings
+tests/test_template_upload_honesty.py: 22 warnings
+tests/test_trial_cancel.py: 2 warnings
+tests/test_trial_finalization.py: 12 warnings
+tests/test_trial_lifecycle_emails.py: 3 warnings
+tests/test_trial_reminder_dedup.py: 6 warnings
+tests/test_trial_zero_arrays.py: 5 warnings
+tests/test_usage_report.py: 21 warnings
+tests/test_utility_meter_capture_match.py: 176 warnings
+tests/test_vacancy_prefetch_equivalence.py: 2006 warnings
+tests/test_vault_hardening.py: 19 warnings
+tests/test_vec_autopop.py: 83 warnings
+tests/test_vec_bill_parse.py: 24 warnings
+tests/test_vec_bill_sync.py: 52 warnings
+tests/test_vec_offtaker_billing.py: 109 warnings
+tests/test_vec_sync.py: 79 warnings
+tests/test_vendor_capture_location.py: 14 warnings
+tests/test_vendor_feed_durability.py: 24 warnings
+tests/test_verification.py: 14 warnings
+tests/test_vip_watch.py: 133 warnings
+tests/test_warranty_claims.py: 93 warnings
+tests/test_writer_daily_generation_takes_precedence.py: 117 warnings
+  /root/offtaker-audit-2026-09-19/api/models.py:71: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+tests/test_account_monthly_aggregation_prorate.py::test_offset0_cross_month_splits_into_april_and_may
+tests/test_account_monthly_aggregation_prorate.py::test_offset1_cross_month_shifts_buckets_by_one_month
+tests/test_account_monthly_aggregation_prorate.py::test_kwh_conservation_across_pro_rate_and_offset
+tests/test_production_endpoint.py::test_production_returns_ok_shape
+tests/test_production_endpoint.py::test_production_months_count
+tests/test_production_endpoint.py::test_production_offset_months_applied
+tests/test_production_endpoint.py::test_excluded_array_absent_from_production
+tests/test_production_endpoint.py::test_yoy_null_without_prior_year
+tests/test_production_endpoint.py::test_by_array_sums_to_month_total
+  /root/offtaker-audit-2026-09-19/api/account.py:4641: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    today = datetime.utcnow()
+
+tests/test_ao_genreports_pricing.py: 6 warnings
+tests/test_audit_offtaker_fixes.py: 1 warning
+tests/test_billing_delivery.py: 15 warnings
+tests/test_cc_on_reports.py: 3 warnings
+tests/test_draft_period_selector.py: 4 warnings
+tests/test_email_copy_overrides.py: 19 warnings
+tests/test_generation_crosscheck.py: 6 warnings
+tests/test_norwich_300_dispatch.py: 900 warnings
+tests/test_norwich_backlog.py: 6 warnings
+tests/test_norwich_dispatch_recovery.py: 3 warnings
+tests/test_norwich_frozen_evidence.py: 6 warnings
+tests/test_norwich_independent_audit.py: 3 warnings
+tests/test_norwich_launch_gate.py: 6 warnings
+tests/test_norwich_scale_and_isolation.py: 301 warnings
+tests/test_offtaker_delivery_truth.py: 5 warnings
+tests/test_offtaker_email_letter_fallback.py: 2 warnings
+tests/test_offtaker_email_template.py: 7 warnings
+tests/test_qb_export_send_gate.py: 3 warnings
+tests/test_quarterly_offtaker_billing.py: 3 warnings
+tests/test_report_drafts.py: 38 warnings
+tests/test_resend_report.py: 5 warnings
+  /root/offtaker-audit-2026-09-19/api/email_copy_overrides.py:40: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+tests/test_array_owners.py::test_fleet_trends_excludes_deleted_and_excluded_arrays
+  /root/offtaker-audit-2026-09-19/tests/test_array_owners.py:1389: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    db.get(_A, gone).deleted_at = _dt2.datetime.utcnow()
+
+tests/test_array_soft_delete_visibility.py::test_include_deleted_returns_soft_deleted
+  /root/offtaker-audit-2026-09-19/tests/test_array_soft_delete_visibility.py:73: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now_ts = datetime.utcnow()
+
+tests/test_array_soft_delete_visibility.py::test_default_hides_soft_deleted
+  /root/offtaker-audit-2026-09-19/tests/test_array_soft_delete_visibility.py:98: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    _make_array(tid, c_id, "Hidden Array", deleted_at=datetime.utcnow() - timedelta(days=1))
+
+tests/test_array_soft_delete_visibility.py::test_restore_freshly_deleted
+  /root/offtaker-audit-2026-09-19/tests/test_array_soft_delete_visibility.py:116: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now_ts = datetime.utcnow()
+
+tests/test_array_soft_delete_visibility.py::test_restore_freshly_deleted
+tests/test_array_soft_delete_visibility.py::test_restore_idempotent_when_active
+tests/test_array_soft_delete_visibility.py::test_restore_expired_returns_410
+tests/test_array_soft_delete_visibility.py::test_restore_cross_tenant_returns_404
+  /root/offtaker-audit-2026-09-19/api/account.py:4958: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now_ts = datetime.utcnow()
+
+tests/test_array_soft_delete_visibility.py::test_restore_expired_returns_410
+  /root/offtaker-audit-2026-09-19/tests/test_array_soft_delete_visibility.py:160: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    old_ts = datetime.utcnow() - timedelta(days=HARD_DELETE_GRACE_DAYS + 1)
+
+tests/test_array_soft_delete_visibility.py::test_restore_cross_tenant_returns_404
+  /root/offtaker-audit-2026-09-19/tests/test_array_soft_delete_visibility.py:179: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    deleted_at=datetime.utcnow() - timedelta(hours=1))
+
+tests/test_array_soft_delete_visibility.py::test_canvas_excludes_soft_deleted_array
+  /root/offtaker-audit-2026-09-19/tests/test_array_soft_delete_visibility.py:198: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now_ts = datetime.utcnow()
+
+tests/test_array_soft_delete_visibility.py: 3 warnings
+tests/test_email_template_api.py: 5 warnings
+tests/test_email_template_tags.py: 7 warnings
+tests/test_sandbox_contact_email.py: 2 warnings
+tests/test_signoff_source.py: 4 warnings
+  /root/offtaker-audit-2026-09-19/api/email_templates.py:206: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    ref = ref or datetime.utcnow().date()
+
+tests/test_array_soft_delete_visibility.py::test_soft_deleted_orphan_account_not_unclassified
+  /root/offtaker-audit-2026-09-19/tests/test_array_soft_delete_visibility.py:233: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now_ts = datetime.utcnow()
+
+tests/test_array_tracker.py::test_full_lifecycle
+tests/test_array_tracker.py::test_full_lifecycle
+tests/test_array_tracker.py::test_cross_tenant_isolation
+tests/test_array_tracker.py::test_auto_workbook_column_per_array_row_per_month
+tests/test_array_tracker.py::test_auto_workbook_new_array_becomes_new_column
+tests/test_array_tracker.py::test_auto_workbook_new_array_becomes_new_column
+tests/test_array_tracker.py::test_auto_workbook_excludes_soft_deleted_array
+  /root/offtaker-audit-2026-09-19/api/array_tracker.py:281: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "tracker": _auto_status_dict(grid, datetime.utcnow())}
+
+tests/test_array_tracker.py::test_full_lifecycle
+tests/test_array_tracker.py::test_cross_tenant_isolation
+  /root/offtaker-audit-2026-09-19/api/array_tracker.py:316: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    ten.tracker_updated_at = datetime.utcnow()
+
+tests/test_array_tracker.py::test_full_lifecycle
+  /root/offtaker-audit-2026-09-19/api/array_tracker.py:368: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    ten.tracker_updated_at = datetime.utcnow()
+
+tests/test_array_tracker.py::test_auto_workbook_excludes_soft_deleted_array
+  /root/offtaker-audit-2026-09-19/tests/test_array_tracker.py:325: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    d.deleted_at = datetime.utcnow()
+
+tests/test_audit_offtaker_fixes.py: 3 warnings
+tests/test_billing_delivery.py: 28 warnings
+tests/test_billing_trends.py: 4 warnings
+tests/test_generation_crosscheck.py: 1 warning
+tests/test_norwich_300_dispatch.py: 300 warnings
+tests/test_norwich_data_guards.py: 2 warnings
+tests/test_norwich_dispatch_recovery.py: 2 warnings
+tests/test_norwich_frozen_evidence.py: 3 warnings
+tests/test_norwich_independent_audit.py: 2 warnings
+tests/test_norwich_launch_gate.py: 4 warnings
+tests/test_norwich_scale_and_isolation.py: 301 warnings
+tests/test_offtaker_delivery_truth.py: 3 warnings
+tests/test_offtaker_upload.py: 3 warnings
+tests/test_quarterly_offtaker_billing.py: 4 warnings
+tests/test_report_drafts.py: 14 warnings
+tests/test_submeter_routing.py: 4 warnings
+  /root/offtaker-audit-2026-09-19/api/billing/delivery.py:42: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    after = after or datetime.utcnow()
+
+tests/test_autocreate_naming.py: 9 warnings
+tests/test_autopop.py: 34 warnings
+tests/test_capture_timeline.py: 17 warnings
+tests/test_capture_trifecta.py: 30 warnings
+tests/test_clients_api.py: 6 warnings
+tests/test_cloud_capture_eager_client.py: 6 warnings
+tests/test_discovered_utilities.py: 5 warnings
+tests/test_identity.py: 21 warnings
+tests/test_multi_login_autocreate.py: 34 warnings
+tests/test_placeholder_adoption.py: 18 warnings
+tests/test_session_persistence.py: 35 warnings
+tests/test_skip_residential.py: 21 warnings
+tests/test_smarthub_dispatch.py: 21 warnings
+tests/test_sse_pubsub.py: 3 warnings
+tests/test_sync_refreshes_heartbeat.py: 9 warnings
+tests/test_vec_autopop.py: 27 warnings
+tests/test_vec_bill_sync.py: 2 warnings
+tests/test_vec_sync.py: 24 warnings
+  /root/offtaker-audit-2026-09-19/api/capture_events.py:101: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "created_at": datetime.utcnow(),
+
+tests/test_autocreate_naming.py: 1 warning
+tests/test_cloud_capture_eager_client.py: 8 warnings
+tests/test_discovered_utilities.py: 3 warnings
+tests/test_lane_c_data_honesty.py: 1 warning
+tests/test_smarthub_dispatch.py: 5 warnings
+tests/test_solaredge_daily_pull_upsert.py: 1 warning
+tests/test_solaredge_location_backfill.py: 1 warning
+tests/test_vec_autopop.py: 7 warnings
+tests/test_vec_bill_sync.py: 1 warning
+tests/test_vec_offtaker_billing.py: 1 warning
+tests/test_vec_sync.py: 7 warnings
+tests/test_vendor_capture_location.py: 1 warning
+  /root/offtaker-audit-2026-09-19/api/worker.py:625: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "ran_at": datetime.utcnow().isoformat() + "Z",
+
+tests/test_bill_adapter_autopilot.py::test_vec_raw_nisc_overview_maps_through_harvester
+tests/test_bill_discovery_engine.py::test_vec_shaped_capture_maps_bills
+  /root/offtaker-audit-2026-09-19/api/harvester/vendors/smarthub.py:36: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    d = datetime.utcfromtimestamp(ts / 1000.0 if ts > 1e11 else ts)
+
+tests/test_bill_adapter_autopilot.py::test_synthesis_from_generation_json_payload
+tests/test_bill_discovery_engine.py::test_offline_synthesis_from_generation_json
+tests/test_bill_discovery_engine.py::test_activate_adapter_starts_bill_capture
+  /root/offtaker-audit-2026-09-19/api/auto_adapters.py:361: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = dt.datetime.utcnow().isoformat(timespec="seconds")
+
+tests/test_bill_discovery_engine.py::test_activate_adapter_starts_bill_capture
+  /root/offtaker-audit-2026-09-19/api/auto_adapters.py:378: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    (dt.datetime.utcnow().isoformat(timespec="seconds"), fp))
+
+tests/test_billable_count.py::test_delete_array_reconciles_with_billable_count
+  /root/offtaker-audit-2026-09-19/api/account.py:4904: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now_ts = datetime.utcnow()
+
+tests/test_billing_delivery.py::test_delete_is_soft
+  /root/offtaker-audit-2026-09-19/api/billing/routes.py:3042: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    sub.deleted_at = datetime.utcnow()
+
+tests/test_billing_delivery.py::test_preview_invoice_pdf_streams
+  /root/solar-operator/venv/lib/python3.12/site-packages/reportlab/lib/rl_safe_eval.py:12: DeprecationWarning: ast.NameConstant is deprecated and will be removed in Python 3.14; use ast.Constant instead
+    haveNameConstant = hasattr(ast,'NameConstant')
+
+tests/test_billing_delivery.py: 4 warnings
+tests/test_norwich_300_dispatch.py: 300 warnings
+tests/test_norwich_backlog.py: 2 warnings
+tests/test_norwich_dispatch_recovery.py: 1 warning
+tests/test_norwich_frozen_evidence.py: 2 warnings
+tests/test_norwich_launch_gate.py: 2 warnings
+tests/test_offtaker_delivery_truth.py: 1 warning
+tests/test_qb_export_send_gate.py: 1 warning
+tests/test_quarterly_offtaker_billing.py: 1 warning
+tests/test_report_drafts.py: 4 warnings
+  /root/offtaker-audit-2026-09-19/api/billing/delivery.py:2340: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "prepared_at": datetime.utcnow().isoformat() + "Z",
+
+tests/test_billing_delivery.py: 4 warnings
+tests/test_norwich_300_dispatch.py: 349 warnings
+tests/test_norwich_backlog.py: 3 warnings
+tests/test_norwich_dispatch_recovery.py: 6 warnings
+tests/test_norwich_frozen_evidence.py: 2 warnings
+tests/test_norwich_launch_gate.py: 3 warnings
+tests/test_norwich_payment_lifecycle.py: 6 warnings
+tests/test_norwich_reporting_recovery.py: 4 warnings
+tests/test_offtaker_delivery_truth.py: 1 warning
+tests/test_offtaker_payments.py: 2 warnings
+tests/test_qb_export_send_gate.py: 2 warnings
+tests/test_quarterly_offtaker_billing.py: 2 warnings
+tests/test_report_drafts.py: 5 warnings
+  /root/offtaker-audit-2026-09-19/api/billing/dispatch.py:55: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_billing_delivery.py::test_send_now_live_to_client_stamps_schedule
+  /root/offtaker-audit-2026-09-19/api/billing/dispatch.py:37: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row = BillingEmailRateGate(id="resend-billing", next_at=datetime.utcnow())
+
+tests/test_billing_delivery.py: 4 warnings
+tests/test_norwich_300_dispatch.py: 344 warnings
+tests/test_norwich_backlog.py: 3 warnings
+tests/test_norwich_dispatch_recovery.py: 14 warnings
+tests/test_norwich_frozen_evidence.py: 2 warnings
+tests/test_norwich_launch_gate.py: 2 warnings
+tests/test_norwich_payment_lifecycle.py: 3 warnings
+tests/test_norwich_reporting_recovery.py: 2 warnings
+tests/test_offtaker_delivery_truth.py: 1 warning
+tests/test_offtaker_payments.py: 2 warnings
+tests/test_qb_export_send_gate.py: 2 warnings
+tests/test_quarterly_offtaker_billing.py: 2 warnings
+tests/test_report_drafts.py: 5 warnings
+  /root/offtaker-audit-2026-09-19/api/billing/dispatch.py:44: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_billing_delivery.py: 4 warnings
+tests/test_norwich_300_dispatch.py: 344 warnings
+tests/test_norwich_backlog.py: 3 warnings
+tests/test_norwich_dispatch_recovery.py: 4 warnings
+tests/test_norwich_frozen_evidence.py: 2 warnings
+tests/test_norwich_launch_gate.py: 2 warnings
+tests/test_norwich_payment_lifecycle.py: 3 warnings
+tests/test_norwich_reporting_recovery.py: 2 warnings
+tests/test_offtaker_delivery_truth.py: 1 warning
+tests/test_offtaker_payments.py: 2 warnings
+tests/test_qb_export_send_gate.py: 2 warnings
+tests/test_quarterly_offtaker_billing.py: 2 warnings
+tests/test_report_drafts.py: 5 warnings
+  /root/offtaker-audit-2026-09-19/api/billing/dispatch.py:76: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_billing_delivery.py: 4 warnings
+tests/test_norwich_300_dispatch.py: 300 warnings
+tests/test_norwich_backlog.py: 2 warnings
+tests/test_norwich_dispatch_recovery.py: 1 warning
+tests/test_norwich_frozen_evidence.py: 2 warnings
+tests/test_norwich_launch_gate.py: 2 warnings
+tests/test_offtaker_delivery_truth.py: 1 warning
+tests/test_qb_export_send_gate.py: 1 warning
+tests/test_quarterly_offtaker_billing.py: 1 warning
+tests/test_report_drafts.py: 4 warnings
+  /root/offtaker-audit-2026-09-19/api/billing/issuance.py:111: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    stamp = datetime.utcnow()
+
+tests/test_billing_delivery.py::test_invoice_template_defaults_on_and_toggles_both_ways
+tests/test_template_upload_honesty.py::test_tenant_wide_upload_behaves_identically
+tests/test_template_upload_honesty.py::test_tenant_wide_upload_behaves_identically
+  /root/offtaker-audit-2026-09-19/api/billing/routes.py:4749: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    tpl.updated_at = datetime.utcnow()
+
+tests/test_billing_delivery.py::test_invoice_template_defaults_on_and_toggles_both_ways
+tests/test_billing_delivery.py::test_invoice_template_defaults_on_and_toggles_both_ways
+  /root/offtaker-audit-2026-09-19/api/billing/routes.py:4696: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    tpl.updated_at = datetime.utcnow()
+
+tests/test_cancellation_email.py::test_cancellation_email_mentions_30_day_window
+tests/test_cancellation_email.py::test_cancellation_email_mentions_permanent_deletion
+tests/test_cancellation_email.py::test_cancellation_email_purge_date_30_days_out
+  /root/offtaker-audit-2026-09-19/api/notify.py:950: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    base = cancel_date if cancel_date is not None else datetime.utcnow()
+
+tests/test_cancellation_email.py::test_cancellation_email_purge_date_30_days_out
+  /root/offtaker-audit-2026-09-19/tests/test_cancellation_email.py:52: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    before = datetime.utcnow()
+
+tests/test_cancellation_email.py::test_cancellation_email_purge_date_30_days_out
+  /root/offtaker-audit-2026-09-19/tests/test_cancellation_email.py:54: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    after = datetime.utcnow()
+
+tests/test_capture_debt_coop_stream.py::test_stale_coop_flagged_without_a_session
+tests/test_capture_debt_coop_stream.py::test_fresh_coop_not_flagged
+tests/test_capture_debt_coop_stream.py::test_coop_with_no_generation_not_flagged
+tests/test_capture_debt_coop_stream.py::test_non_smarthub_provider_ignored
+tests/test_capture_debt_coop_stream.py::test_discovered_sh_provider_flagged
+  /root/offtaker-audit-2026-09-19/api/capture_debt.py:65: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    today = today or datetime.utcnow().date()
+
+tests/test_chat_turn_ordering.py: 2 warnings
+tests/test_ea_ops_tools.py: 1 warning
+tests/test_energy_agent_mind.py: 22 warnings
+tests/test_energy_agent_offline_stub_loop.py: 30 warnings
+tests/test_escalate_stale_repairs_scheduled.py: 2 warnings
+tests/test_ingest_owner_email_self_addresses.py: 2 warnings
+tests/test_production_history.py: 3 warnings
+tests/test_repair_contact_removal.py: 3 warnings
+tests/test_repair_ops.py: 11 warnings
+tests/test_repair_owner_loop.py: 18 warnings
+tests/test_retired_inverter_no_escalation.py: 1 warning
+  /root/offtaker-audit-2026-09-19/api/energy_agent.py:528: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+tests/test_client_name_reuse.py::test_deleted_client_name_is_reusable
+tests/test_client_name_reuse.py::test_recreate_from_known_login_resurrects_its_world
+tests/test_client_name_reuse.py::test_undo_renames_when_name_was_retaken
+tests/test_event_emissions.py::test_update_and_delete_client_emit_clients_changed
+  /root/offtaker-audit-2026-09-19/api/account.py:4231: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now_ts = datetime.utcnow()
+
+tests/test_client_name_reuse.py::test_undo_renames_when_name_was_retaken
+  /root/offtaker-audit-2026-09-19/api/account.py:5161: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now_ts = datetime.utcnow()
+
+tests/test_coop_session_realert.py::test_dead_session_alerts_once_then_dedups_inside_the_realert_window
+tests/test_coop_session_realert.py::test_dead_session_re_alerts_after_the_realert_window_passes
+tests/test_coop_session_realert.py::test_cloud_tenant_gets_the_internal_alert_but_not_the_extension_email
+tests/test_coop_session_realert.py::test_cloud_tenant_without_a_credential_gets_the_connect_email
+  /root/offtaker-audit-2026-09-19/tests/test_coop_session_realert.py:55: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    captured_at=datetime.utcnow() - timedelta(days=_COOP_STALE_DAYS + 5),
+
+tests/test_coop_session_realert.py: 6 warnings
+tests/test_gmp_refresh.py: 13 warnings
+  /root/offtaker-audit-2026-09-19/api/scheduler.py:1338: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now_ = datetime.utcnow()
+
+tests/test_coop_session_realert.py::test_dead_session_re_alerts_after_the_realert_window_passes
+  /root/offtaker-audit-2026-09-19/tests/test_coop_session_realert.py:100: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    state.last_alerted_at = datetime.utcnow() - timedelta(days=_COOP_REALERT_DAYS + 1)
+
+tests/test_db_pool_hardening.py::test_pool_watchdog_registered
+  /root/offtaker-audit-2026-09-19/api/scheduler.py:1678: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    next_run_time=datetime.utcnow() + timedelta(seconds=90),
+
+tests/test_db_pool_hardening.py::test_pool_watchdog_registered
+  /root/offtaker-audit-2026-09-19/api/scheduler.py:1981: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    next_run_time=datetime.utcnow() + timedelta(minutes=3),
+
+tests/test_db_pool_hardening.py::test_pool_watchdog_registered
+  /root/offtaker-audit-2026-09-19/api/scheduler.py:1989: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    next_run_time=datetime.utcnow() + timedelta(seconds=45),
+
+tests/test_db_pool_hardening.py::test_pool_watchdog_registered
+  /root/offtaker-audit-2026-09-19/api/scheduler.py:2104: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    next_run_time=datetime.utcnow() + timedelta(seconds=45),
+
+tests/test_db_pool_hardening.py::test_pool_watchdog_registered
+  /root/offtaker-audit-2026-09-19/api/scheduler.py:2112: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    next_run_time=datetime.utcnow() + timedelta(seconds=60),
+
+tests/test_db_pool_hardening.py::test_pool_watchdog_registered
+  /root/offtaker-audit-2026-09-19/api/scheduler.py:2119: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    next_run_time=datetime.utcnow() + timedelta(minutes=3),
+
+tests/test_db_pool_hardening.py::test_pool_watchdog_registered
+  /root/offtaker-audit-2026-09-19/api/scheduler.py:2127: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    next_run_time=datetime.utcnow() + timedelta(seconds=90),
+
+tests/test_deferred_billing_setup_mode.py: 2 warnings
+tests/test_norwich_payment_lifecycle.py: 1 warning
+tests/test_onboarding.py: 5 warnings
+tests/test_payment_method_detached.py: 2 warnings
+tests/test_reactivate.py: 2 warnings
+tests/test_resume_from_pause.py: 2 warnings
+  /root/offtaker-audit-2026-09-19/api/stripe_webhook.py:770: DeprecationWarning: Deprecated. The public interface will be removed in a future version.
+    data_obj = raw_obj.to_dict() if hasattr(raw_obj, "to_dict") else dict(raw_obj)
+
+tests/test_deferred_billing_setup_mode.py: 2 warnings
+tests/test_norwich_payment_lifecycle.py: 1 warning
+tests/test_onboarding.py: 5 warnings
+tests/test_payment_method_detached.py: 2 warnings
+tests/test_reactivate.py: 2 warnings
+tests/test_resume_from_pause.py: 2 warnings
+  /root/offtaker-audit-2026-09-19/api/stripe_webhook.py:771: DeprecationWarning: Deprecated. The public interface will be removed in a future version.
+    data_obj["_stripe_account"] = (event.to_dict() if hasattr(event, "to_dict") else dict(event)).get("account")
+
+tests/test_deferred_billing_setup_mode.py::test_webhook_setup_mode_stores_pm_and_trial
+  /root/offtaker-audit-2026-09-19/tests/test_deferred_billing_setup_mode.py:141: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expected = datetime.utcnow() + timedelta(days=14)
+
+tests/test_email_copy_overrides.py::test_scheduled_future_start
+  /root/offtaker-audit-2026-09-19/tests/test_email_copy_overrides.py:70: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    future = datetime.utcnow() + timedelta(days=7)
+
+tests/test_email_copy_overrides.py::test_scheduled_future_start
+  /root/offtaker-audit-2026-09-19/tests/test_email_copy_overrides.py:86: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    ov2.starts_at = datetime.utcnow() - timedelta(hours=1)
+
+tests/test_energy_agent_long_term_mind.py: 35 warnings
+tests/test_energy_agent_mind.py: 255 warnings
+tests/test_energy_agent_offline_stub_loop.py: 28 warnings
+tests/test_escalate_stale_repairs_scheduled.py: 2 warnings
+tests/test_ingest_owner_email_self_addresses.py: 1 warning
+tests/test_repair_contact_removal.py: 3 warnings
+tests/test_repair_ops.py: 12 warnings
+tests/test_repair_owner_loop.py: 18 warnings
+tests/test_retired_inverter_no_escalation.py: 1 warning
+tests/test_voice_steer.py: 4 warnings
+  /root/offtaker-audit-2026-09-19/api/energy_agent_mind.py:35: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+tests/test_feature_suggestion_dedupe.py: 6 warnings
+tests/test_feature_suggestion_status.py: 4 warnings
+  /root/offtaker-audit-2026-09-19/api/feature_suggestions.py:120: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+tests/test_feature_suggestion_dedupe.py: 9 warnings
+tests/test_feature_suggestion_status.py: 3 warnings
+  /root/offtaker-audit-2026-09-19/api/feature_suggestions.py:338: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    week_ago = datetime.utcnow() - timedelta(days=7)
+
+tests/test_feature_suggestion_dedupe.py::test_recently_reviewed_repeats_collapse_but_old_ones_expire
+  /root/offtaker-audit-2026-09-19/tests/test_feature_suggestion_dedupe.py:78: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    reviewed_at=datetime.utcnow() - timedelta(days=1))
+
+tests/test_feature_suggestion_dedupe.py::test_recently_reviewed_repeats_collapse_but_old_ones_expire
+  /root/offtaker-audit-2026-09-19/tests/test_feature_suggestion_dedupe.py:83: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    reviewed_at=datetime.utcnow() - timedelta(days=8))
+
+tests/test_gmp_backfill_retry.py::test_transient_window_failure_recovers_on_retry
+tests/test_gmp_backfill_retry.py::test_persistent_window_failure_is_marked_partial_not_ok
+  /root/offtaker-audit-2026-09-19/tests/test_gmp_backfill_retry.py:38: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expires_at=datetime.utcnow() + timedelta(days=30))
+
+tests/test_gmp_bill_pdf_capture.py::test_capture_persists_pdf_bytes_and_read_seam_returns_them
+tests/test_gmp_bill_pdf_capture.py::test_capture_rejects_non_pdf_auth_redirect
+  /root/offtaker-audit-2026-09-19/api/worker.py:437: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    recent = bool(bill.period_end) and (datetime.utcnow().date() - bill.period_end.date()).days <= 45
+
+tests/test_gmp_bill_pdf_capture.py::test_capture_persists_pdf_bytes_and_read_seam_returns_them
+tests/test_gmp_bill_pdf_capture.py::test_capture_rejects_non_pdf_auth_redirect
+  /root/offtaker-audit-2026-09-19/api/worker.py:476: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    ts = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+
+tests/test_gmp_freshness_watchdog.py::test_scan_flags_stale_not_fresh
+tests/test_gmp_freshness_watchdog.py::test_scan_flags_stale_not_fresh
+tests/test_gmp_freshness_watchdog.py::test_tenant_freshness_days
+tests/test_gmp_freshness_watchdog.py::test_inactive_tenant_skipped
+tests/test_gmp_freshness_watchdog.py::test_watchdog_alerts_once_then_dedups_daily_then_clears_on_recovery
+tests/test_gmp_freshness_watchdog.py::test_scan_skips_demo_and_scrubbed_tenants
+tests/test_gmp_freshness_watchdog.py::test_scan_skips_demo_and_scrubbed_tenants
+tests/test_gmp_freshness_watchdog.py::test_scan_skips_demo_and_scrubbed_tenants
+  /root/offtaker-audit-2026-09-19/tests/test_gmp_freshness_watchdog.py:38: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    pulled_at=datetime.utcnow() - timedelta(days=days_ago)))
+
+tests/test_gmp_freshness_watchdog.py: 83 warnings
+  /root/offtaker-audit-2026-09-19/api/jobs/gmp_freshness_watchdog.py:62: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    days = (datetime.utcnow() - last).days if last is not None else None
+
+tests/test_gmp_freshness_watchdog.py::test_watchdog_alerts_once_then_dedups_daily_then_clears_on_recovery
+tests/test_gmp_freshness_watchdog.py::test_watchdog_alerts_once_then_dedups_daily_then_clears_on_recovery
+tests/test_gmp_freshness_watchdog.py::test_watchdog_alerts_once_then_dedups_daily_then_clears_on_recovery
+tests/test_gmp_freshness_watchdog.py::test_watchdog_alerts_once_then_dedups_daily_then_clears_on_recovery
+  /root/offtaker-audit-2026-09-19/api/jobs/gmp_freshness_watchdog.py:115: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now_ = datetime.utcnow()
+
+tests/test_gmp_freshness_watchdog.py::test_watchdog_alerts_once_then_dedups_daily_then_clears_on_recovery
+  /root/offtaker-audit-2026-09-19/tests/test_gmp_freshness_watchdog.py:106: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    st.last_alerted_at = datetime.utcnow() - timedelta(days=_REALERT_DAYS + 1)
+
+tests/test_gmp_freshness_watchdog.py::test_watchdog_alerts_once_then_dedups_daily_then_clears_on_recovery
+  /root/offtaker-audit-2026-09-19/tests/test_gmp_freshness_watchdog.py:72: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    bill.pulled_at = datetime.utcnow() - timedelta(days=days_ago)
+
+tests/test_gmp_harvester_order.py::test_gmp_scrape_emits_sync_before_meter_capture
+  /root/offtaker-audit-2026-09-19/api/harvester/vendors/gmp.py:102: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "capturedAt": datetime.utcnow().isoformat() + "Z",
+
+tests/test_gmp_hourly_parse_and_export.py::test_get_hourly_series_sums_meters_and_filters_window
+tests/test_gmp_hourly_parse_and_export.py::test_get_hourly_series_sums_meters_and_filters_window
+  /root/offtaker-audit-2026-09-19/tests/test_gmp_hourly_parse_and_export.py:102: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    fetched_at=datetime.utcnow(),
+
+tests/test_gmp_hourly_parse_and_export.py::test_get_hourly_series_sums_meters_and_filters_window
+  /root/offtaker-audit-2026-09-19/tests/test_gmp_hourly_parse_and_export.py:114: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    fetched_at=datetime.utcnow(),
+
+tests/test_gmp_hourly_parse_and_export.py::test_build_generation_workbook_hourly_detail
+  /root/offtaker-audit-2026-09-19/tests/test_gmp_hourly_parse_and_export.py:154: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    fetched_at=datetime.utcnow(),
+
+tests/test_gmp_refresh.py::test_refresh_success_returns_tuple
+tests/test_gmp_refresh.py::test_scheduler_picks_up_expiring_sessions
+tests/test_gmp_refresh.py::test_scheduler_updates_fields_on_success
+tests/test_gmp_refresh.py::test_scheduler_skips_null_refresh_token
+  /root/offtaker-audit-2026-09-19/api/gmp_refresh.py:54: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
+
+tests/test_gmp_refresh.py::test_refresh_success_returns_tuple
+  /root/offtaker-audit-2026-09-19/tests/test_gmp_refresh.py:76: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expected = datetime.utcnow() + timedelta(seconds=1_814_400)
+
+tests/test_gmp_refresh.py::test_scheduler_picks_up_expiring_sessions
+  /root/offtaker-audit-2026-09-19/tests/test_gmp_refresh.py:115: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    sess = _make_session(db, t.id, expires_at=datetime.utcnow() + timedelta(days=2))
+
+tests/test_gmp_refresh.py: 13 warnings
+  /root/offtaker-audit-2026-09-19/api/scheduler.py:994: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    cutoff = datetime.utcnow() + timedelta(days=7)
+
+tests/test_gmp_refresh.py::test_scheduler_picks_up_expiring_sessions
+tests/test_gmp_refresh.py::test_scheduler_updates_fields_on_success
+tests/test_gmp_refresh.py::test_scheduler_skips_null_refresh_token
+  /root/offtaker-audit-2026-09-19/api/scheduler.py:1044: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    sess.captured_at = datetime.utcnow()
+
+tests/test_gmp_refresh.py::test_scheduler_picks_up_expiring_sessions
+tests/test_gmp_refresh.py::test_scheduler_updates_fields_on_success
+tests/test_gmp_refresh.py::test_scheduler_skips_null_refresh_token
+  /root/offtaker-audit-2026-09-19/api/scheduler.py:1045: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    sess.last_refresh_at = datetime.utcnow()
+
+tests/test_gmp_refresh.py: 15 warnings
+  /root/offtaker-audit-2026-09-19/api/scheduler.py:1190: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    cutoff = datetime.utcnow() + timedelta(days=days_ahead)
+
+tests/test_gmp_refresh.py: 111 warnings
+  /root/offtaker-audit-2026-09-19/api/scheduler.py:1218: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    if exp is not None and exp < datetime.utcnow() - timedelta(hours=24):
+
+tests/test_gmp_refresh.py::test_scheduler_updates_fields_on_success
+  /root/offtaker-audit-2026-09-19/tests/test_gmp_refresh.py:137: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expires_at=datetime.utcnow() + timedelta(days=1),
+
+tests/test_gmp_refresh.py::test_scheduler_updates_fields_on_success
+  /root/offtaker-audit-2026-09-19/tests/test_gmp_refresh.py:151: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    assert updated.expires_at > datetime.utcnow() + timedelta(days=20)
+
+tests/test_gmp_refresh.py::test_scheduler_notifies_after_3_failures
+  /root/offtaker-audit-2026-09-19/tests/test_gmp_refresh.py:166: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expires_at=datetime.utcnow() + timedelta(days=1),
+
+tests/test_gmp_refresh.py: 10 warnings
+  /root/offtaker-audit-2026-09-19/api/scheduler.py:1140: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    tenant.gmp_reauth_alert_at = datetime.utcnow()
+
+tests/test_gmp_refresh.py::test_scheduler_skips_null_refresh_token
+  /root/offtaker-audit-2026-09-19/tests/test_gmp_refresh.py:206: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expires_at=datetime.utcnow() + timedelta(days=1),
+
+tests/test_gmp_refresh.py: 70 warnings
+  /root/offtaker-audit-2026-09-19/api/scheduler.py:1229: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    days_left = max(0.0, (exp - datetime.utcnow()).total_seconds() / 86400)
+
+tests/test_gmp_refresh.py: 11 warnings
+  /root/offtaker-audit-2026-09-19/api/scheduler.py:1252: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    state.last_alerted_at = datetime.utcnow()
+
+tests/test_gmp_refresh.py::test_scheduler_does_not_renotify_after_threshold_crossed
+  /root/offtaker-audit-2026-09-19/tests/test_gmp_refresh.py:235: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expires_at=datetime.utcnow() + timedelta(days=1),
+
+tests/test_gmp_refresh.py: 59 warnings
+  /root/offtaker-audit-2026-09-19/api/scheduler.py:1231: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    datetime.utcnow() - state.last_alerted_at < timedelta(days=_GMP_FINAL_WARN_REALERT_DAYS):
+
+tests/test_gmp_refresh.py::test_scheduler_notifies_exactly_once_on_threshold_crossing
+  /root/offtaker-audit-2026-09-19/tests/test_gmp_refresh.py:273: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expires_at=datetime.utcnow() + timedelta(days=1), failures=2)
+
+tests/test_gmp_refresh.py::test_scheduler_dedup_emails_per_tenant_across_dup_sessions
+  /root/offtaker-audit-2026-09-19/tests/test_gmp_refresh.py:304: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    base = datetime.utcnow()
+
+tests/test_gmp_refresh.py: 40 warnings
+  /root/offtaker-audit-2026-09-19/api/scheduler.py:1077: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    _cooldown_ok = (_last_alert is None) or (datetime.utcnow() - _last_alert >= timedelta(days=7))
+
+tests/test_gmp_refresh.py::test_cloud_tenant_does_not_get_the_extension_email
+  /root/offtaker-audit-2026-09-19/tests/test_gmp_refresh.py:359: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    db, t.id, expires_at=datetime.utcnow() + timedelta(days=1), failures=2,
+
+tests/test_gmp_refresh.py::test_unset_capture_mode_also_withholds_the_email
+  /root/offtaker-audit-2026-09-19/tests/test_gmp_refresh.py:387: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    db, t.id, expires_at=datetime.utcnow() + timedelta(days=1), failures=2,
+
+tests/test_gmp_refresh.py::test_device_tenant_still_gets_the_email
+  /root/offtaker-audit-2026-09-19/tests/test_gmp_refresh.py:414: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    db, t.id, expires_at=datetime.utcnow() + timedelta(days=1), failures=2,
+
+tests/test_gmp_refresh.py::test_final_warning_also_respects_the_capture_mode_gate
+  /root/offtaker-audit-2026-09-19/tests/test_gmp_refresh.py:451: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expires_at=datetime.utcnow() + timedelta(days=_GMP_FINAL_WARN_DAYS - 1),
+
+tests/test_gmp_refresh.py::test_cloud_tenant_without_a_credential_gets_the_connect_email
+  /root/offtaker-audit-2026-09-19/tests/test_gmp_refresh.py:480: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    db, t.id, expires_at=datetime.utcnow() + timedelta(days=1), failures=2,
+
+tests/test_gmp_refresh.py::test_cloud_tenant_with_a_real_credential_gets_neither_email
+  /root/offtaker-audit-2026-09-19/tests/test_gmp_refresh.py:519: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    db, t.id, expires_at=datetime.utcnow() + timedelta(days=1), failures=2,
+
+tests/test_gmp_refresh.py::test_final_warning_also_sends_the_connect_email_when_no_credential_exists
+  /root/offtaker-audit-2026-09-19/tests/test_gmp_refresh.py:547: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expires_at=datetime.utcnow() + timedelta(days=_GMP_FINAL_WARN_DAYS - 1),
+
+tests/test_gmp_refresh.py::test_no_duplicate_email_when_threshold_crossing_and_final_warning_coincide
+  /root/offtaker-audit-2026-09-19/tests/test_gmp_refresh.py:578: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expires_at=datetime.utcnow() + timedelta(days=_GMP_FINAL_WARN_DAYS - 1),
+
+tests/test_identity.py::test_merge_returns_undo_token
+tests/test_identity.py::test_merge_undo_restores_src_client_and_arrays
+tests/test_identity.py::test_merge_undo_token_single_use
+  /root/offtaker-audit-2026-09-19/api/account.py:3536: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now_ts = datetime.utcnow()
+
+tests/test_identity.py::test_merge_undo_restores_src_client_and_arrays
+tests/test_identity.py::test_merge_undo_token_single_use
+tests/test_identity.py::test_merge_undo_token_single_use
+  /root/offtaker-audit-2026-09-19/api/account.py:3670: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now_ts = datetime.utcnow()
+
+tests/test_inverter_stress.py::test_connect_account_name_collides_with_soft_deleted_array
+  /root/offtaker-audit-2026-09-19/tests/test_inverter_stress.py:334: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    _make_array(tid, "Solar Barn", deleted_at=datetime.utcnow())
+
+tests/test_inverters.py: 371 warnings
+tests/test_sma_consent.py: 96 warnings
+tests/test_sma_token_rotation.py: 4 warnings
+  /root/offtaker-audit-2026-09-19/api/inverters/sma.py:141: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+tests/test_inverters.py: 10 warnings
+tests/test_locus_auth_errors.py: 1 warning
+  /root/offtaker-audit-2026-09-19/api/adapters/locus.py:122: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+tests/test_inverters_enphase.py::test_validate_success
+tests/test_inverters_enphase.py::test_validate_success
+tests/test_inverters_enphase.py::test_fetch_live_parses_current_power
+tests/test_inverters_enphase.py::test_fetch_daily_wh_to_kwh_and_dates
+tests/test_inverters_enphase.py::test_discover_sites_account_level
+tests/test_inverters_enphase.py::test_refresh_token_rotation_written_back
+  /root/offtaker-audit-2026-09-19/api/inverters/enphase.py:64: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+tests/test_inverters_enphase.py::test_fetch_live_parses_current_power
+tests/test_inverters_enphase.py::test_refresh_token_rotation_written_back
+  /root/offtaker-audit-2026-09-19/api/inverters/enphase.py:203: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    as_of = datetime.utcfromtimestamp(lr).isoformat() + "Z"
+
+tests/test_invoice_ledger.py: 6 warnings
+tests/test_norwich_independent_audit.py: 9 warnings
+tests/test_norwich_launch_gate.py: 1 warning
+tests/test_offtaker_pay_link_durable.py: 13 warnings
+tests/test_offtaker_payments.py: 3 warnings
+  /root/offtaker-audit-2026-09-19/api/billing/invoice_ledger.py:298: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    sub.tracker_updated_at = datetime.utcnow()
+
+tests/test_invoice_ledger.py::test_sync_payment_updates_byo_generation_sheet
+  /root/offtaker-audit-2026-09-19/api/billing/sheet_tracker.py:1349: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    sub.tracker_updated_at = datetime.utcnow()
+
+tests/test_morning_digest.py::test_all_stale_fleet_holds_digest_and_notifies_once
+  /root/offtaker-audit-2026-09-19/api/jobs/morning_fleet_digest.py:1718: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    tenant.digest_hold_notified_at = datetime.utcnow()
+
+tests/test_morning_digest.py::test_fresh_data_resumes_digest_and_clears_hold
+tests/test_morning_digest.py::test_mixed_fleet_still_sends_with_stale_note
+tests/test_morning_digest.py::test_dead_utility_session_leads_and_names_the_right_site
+  /root/offtaker-audit-2026-09-19/api/jobs/morning_fleet_digest.py:752: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_morning_digest.py::test_dead_utility_session_leads_and_names_the_right_site
+  /root/offtaker-audit-2026-09-19/tests/test_morning_digest.py:589: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    first_flagged_at=digest.datetime.utcnow() - timedelta(days=1)))
+
+tests/test_norwich_300_dispatch.py::test_300_dispatch_reject_retry_concurrent_replay
+tests/test_norwich_payment_policy_routes.py::test_policy_default_optin_audit_and_tenant_isolation
+tests/test_norwich_payment_policy_routes.py::test_offline_route_requires_policy_and_derives_identity
+  /root/offtaker-audit-2026-09-19/api/billing/routes.py:6607: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "from": previous, "to": body.policy, "at": datetime.utcnow().isoformat() + "Z",
+
+tests/test_norwich_300_dispatch.py: 30 warnings
+tests/test_norwich_backlog.py: 1 warning
+tests/test_norwich_dispatch_recovery.py: 1 warning
+  /root/offtaker-audit-2026-09-19/api/billing/dispatch.py:111: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.retry_at = None if ok or uncertain else datetime.utcnow() + timedelta(seconds=max(float(notify._send_failure.get().get("retry_after") or 0), min(86400, 60 * 2 ** (attempts - 1))))
+
+tests/test_norwich_300_dispatch.py::test_300_dispatch_reject_retry_concurrent_replay
+  /root/offtaker-audit-2026-09-19/tests/test_norwich_300_dispatch.py:109: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    BillingEmailDispatch.status == "failed").values(retry_at=datetime.utcnow()-timedelta(seconds=1)))
+
+tests/test_norwich_dispatch_recovery.py::test_real_sdk_rate_limit_is_retryable_and_obeys_provider_delay
+  /root/offtaker-audit-2026-09-19/tests/test_norwich_dispatch_recovery.py:82: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    assert row.status=="failed" and row.retry_at >= datetime.utcnow()+timedelta(seconds=170)
+
+tests/test_norwich_dispatch_recovery.py::test_real_sdk_rate_limit_is_retryable_and_obeys_provider_delay
+  /root/offtaker-audit-2026-09-19/tests/test_norwich_dispatch_recovery.py:83: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.retry_at=datetime.utcnow()-timedelta(seconds=1);db.commit()
+
+tests/test_norwich_dispatch_recovery.py::test_real_sdk_rate_limit_is_retryable_and_obeys_provider_delay
+  /root/offtaker-audit-2026-09-19/api/billing/dispatch.py:120: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_norwich_independent_audit.py: 8 warnings
+tests/test_norwich_payment_lifecycle.py: 8 warnings
+tests/test_offtaker_pay_link_durable.py: 13 warnings
+tests/test_offtaker_payments.py: 2 warnings
+  /root/offtaker-audit-2026-09-19/api/billing/payments.py:477: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.checkout_requested_at = datetime.utcnow()
+
+tests/test_norwich_independent_audit.py: 8 warnings
+tests/test_norwich_payment_lifecycle.py: 11 warnings
+tests/test_offtaker_pay_link_durable.py: 14 warnings
+tests/test_offtaker_payments.py: 2 warnings
+  /root/offtaker-audit-2026-09-19/api/billing/payments.py:493: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    if (datetime.utcnow() - row.checkout_requested_at).total_seconds() >= 23 * 3600:
+
+tests/test_norwich_independent_audit.py: 8 warnings
+tests/test_norwich_payment_lifecycle.py: 5 warnings
+tests/test_offtaker_pay_link_durable.py: 11 warnings
+tests/test_offtaker_payments.py: 2 warnings
+  /root/offtaker-audit-2026-09-19/api/billing/payments.py:695: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    row.checkout_expires_at = datetime.utcfromtimestamp(minted["expires_at"])
+
+tests/test_norwich_independent_audit.py: 3 warnings
+tests/test_norwich_payment_lifecycle.py: 5 warnings
+tests/test_offtaker_pay_link_durable.py: 4 warnings
+  /root/offtaker-audit-2026-09-19/api/billing/payments.py:888: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_norwich_independent_audit.py::test_stale_paid_checkout_is_reconciled_before_replacement
+  /root/offtaker-audit-2026-09-19/tests/test_norwich_independent_audit.py:59: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    db.get(OfftakerPayment,res["payment_id"]).checkout_expires_at=datetime.utcnow()-timedelta(days=1)
+
+tests/test_norwich_independent_audit.py::test_stale_paid_checkout_is_reconciled_before_replacement
+tests/test_norwich_payment_lifecycle.py::test_concurrent_paid_events_and_receipt_retries_deduplicate
+tests/test_norwich_payment_lifecycle.py::test_refunds_are_monotonic_deduplicated_and_reduce_net
+tests/test_norwich_payment_lifecycle.py::test_payment_receipt_provider_accept_then_process_crash_holds_replay
+tests/test_norwich_payment_lifecycle.py::test_application_fee_refund_requires_charge_ownership_and_is_monotonic
+tests/test_norwich_payment_lifecycle.py::test_invoice_balance_refund_is_not_new_debt_and_net_is_unknown
+tests/test_norwich_payment_lifecycle.py::test_partial_refund_before_paid_retains_receipt_obligation
+tests/test_offtaker_payments.py::test_mark_payment_paid_idempotent
+  /root/offtaker-audit-2026-09-19/api/billing/payments.py:794: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.paid_at = datetime.utcnow()
+
+tests/test_norwich_payment_lifecycle.py::test_crash_after_provider_creation_replays_exact_request
+tests/test_norwich_payment_lifecycle.py::test_database_crash_after_checkout_creation_replays_same_key
+tests/test_norwich_payment_lifecycle.py::test_concurrent_refresh_mints_only_one_new_session
+tests/test_norwich_payment_lifecycle.py::test_concurrent_refresh_mints_only_one_new_session
+tests/test_offtaker_pay_link_durable.py::test_click_after_stripe_window_lapsed_remints_on_the_same_row
+tests/test_offtaker_pay_link_durable.py::test_click_with_stale_open_session_expires_the_old_one_first
+  /root/offtaker-audit-2026-09-19/api/billing/payments.py:948: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    row.checkout_expires_at = datetime.utcfromtimestamp(minted["expires_at"])
+
+tests/test_norwich_payment_lifecycle.py::test_unknown_creation_beyond_provider_retention_is_held
+  /root/offtaker-audit-2026-09-19/tests/test_norwich_payment_lifecycle.py:77: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.checkout_requested_at = datetime.utcnow() - timedelta(days=2)
+
+tests/test_norwich_payment_lifecycle.py::test_concurrent_refresh_mints_only_one_new_session
+  /root/offtaker-audit-2026-09-19/tests/test_norwich_payment_lifecycle.py:329: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.checkout_expires_at=datetime.utcnow()-timedelta(days=1)
+
+tests/test_norwich_reporting_recovery.py::test_monthly_send_uses_one_stable_dispatch_identity_and_frozen_workbook
+tests/test_norwich_reporting_recovery.py::test_monthly_send_uses_one_stable_dispatch_identity_and_frozen_workbook
+tests/test_norwich_reporting_recovery.py::test_concurrent_summary_calls_share_durable_claim
+tests/test_norwich_reporting_recovery.py::test_concurrent_summary_calls_share_durable_claim
+tests/test_norwich_reporting_recovery.py::test_summary_commit_failure_after_acceptance_never_resends
+tests/test_norwich_reporting_recovery.py::test_summary_commit_failure_after_acceptance_never_resends
+  /root/offtaker-audit-2026-09-19/api/billing/monthly_report.py:244: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    ws["A3"] = ("Generated " + datetime.utcnow().strftime("%Y-%m-%d") +
+
+tests/test_norwich_reporting_recovery.py::test_concurrent_summary_calls_share_durable_claim
+tests/test_norwich_reporting_recovery.py::test_summary_commit_failure_after_acceptance_never_resends
+tests/test_norwich_reporting_recovery.py::test_summary_commit_failure_after_acceptance_never_resends
+  /root/offtaker-audit-2026-09-19/api/billing/monthly_report.py:556: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.sent_at = datetime.utcnow()
+
+tests/test_offtaker_pay_link_durable.py::test_create_mints_durable_url_token_and_expiry
+  /root/offtaker-audit-2026-09-19/tests/test_offtaker_pay_link_durable.py:62: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    left = (row.checkout_expires_at - datetime.utcnow()).total_seconds()
+
+tests/test_offtaker_pay_link_durable.py::test_click_after_stripe_window_lapsed_remints_on_the_same_row
+  /root/offtaker-audit-2026-09-19/tests/test_offtaker_pay_link_durable.py:132: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    row.checkout_expires_at = datetime.utcnow() - timedelta(hours=1)   # day three
+
+tests/test_offtaker_pay_link_durable.py::test_click_after_stripe_window_lapsed_remints_on_the_same_row
+  /root/offtaker-audit-2026-09-19/tests/test_offtaker_pay_link_durable.py:148: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    assert (row.checkout_expires_at - datetime.utcnow()).total_seconds() > 22 * 3600
+
+tests/test_offtaker_pay_link_durable.py::test_click_with_stale_open_session_expires_the_old_one_first
+  /root/offtaker-audit-2026-09-19/tests/test_offtaker_pay_link_durable.py:157: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    datetime.utcnow() + timedelta(minutes=5))   # inside the refresh grace
+
+tests/test_offtaker_pay_link_durable.py::test_async_failed_marks_unpaid_and_full_refund_flips_paid
+  /root/offtaker-audit-2026-09-19/tests/test_offtaker_pay_link_durable.py:255: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    paid_at=datetime.utcnow(), period_key="2026-07-31")
+
+tests/test_offtaker_payments.py::test_list_payments_endpoint
+  /root/offtaker-audit-2026-09-19/tests/test_offtaker_payments.py:321: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    paid_at=datetime.utcnow(),
+
+tests/test_onboarding.py::test_complete_sends_magic_link_and_finishes
+tests/test_onboarding.py::test_complete_with_password_sets_hash_and_allows_password_login
+tests/test_password_auth.py::TestMagicLinkTarget::test_array_operator_magic_link_targets_arrayoperator_login
+tests/test_password_auth.py::TestMagicLinkTarget::test_nepool_magic_link_targets_nepool_accounts
+tests/test_password_auth.py::TestMagicLinkProductScoping::test_nepool_request_with_dual_email_targets_nepool
+tests/test_password_auth.py::TestMagicLinkProductScoping::test_array_operator_request_with_dual_email_targets_ao
+tests/test_password_auth.py::TestMagicLinkProductScoping::test_product_blind_request_keeps_legacy_fallback
+  /root/offtaker-audit-2026-09-19/api/account.py:564: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    expires = datetime.utcnow() + timedelta(seconds=LOGIN_LINK_TTL_SECONDS)
+
+tests/test_onboarding.py::test_complete_with_password_sets_hash_and_allows_password_login
+  /root/solar-operator/venv/lib/python3.12/site-packages/passlib/utils/__init__.py:854: DeprecationWarning: 'crypt' is deprecated and slated for removal in Python 3.13
+    from crypt import crypt as _crypt
+
+tests/test_ops_inbox_noise.py::test_commit_stamps_the_pending_ids
+tests/test_ops_inbox_noise.py::test_flush_never_raises_on_garbage
+  /root/offtaker-audit-2026-09-19/api/db.py:408: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    {"n": _dt.utcnow(), "ids": ids})
+
+tests/test_ops_inbox_noise.py::test_commit_stamps_the_pending_ids
+tests/test_ops_inbox_noise.py::test_flush_never_raises_on_garbage
+  /root/solar-operator/venv/lib/python3.12/site-packages/sqlalchemy/engine/default.py:941: DeprecationWarning: The default datetime adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+tests/test_perf_verification_routes.py::test_summary_empty_fleet_honest
+  /root/offtaker-audit-2026-09-19/api/perf_verification/engine.py:289: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    today = today or datetime.utcnow().date()
+
+tests/test_perf_verification_routes.py::test_report_json_period
+  /root/offtaker-audit-2026-09-19/api/perf_verification/engine.py:420: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    today = today or datetime.utcnow().date()
+
+tests/test_permanent_login_token.py::test_permanent_predicate_far_future
+  /root/offtaker-audit-2026-09-19/tests/test_permanent_login_token.py:13: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    assert _login_token_is_permanent(_Row(datetime.utcnow() + timedelta(days=400)))
+
+tests/test_permanent_login_token.py::test_permanent_predicate_far_future
+tests/test_permanent_login_token.py::test_permanent_predicate_far_future
+tests/test_permanent_login_token.py::test_permanent_predicate_normal_magic_link
+tests/test_permanent_login_token.py::test_permanent_predicate_normal_magic_link
+  /root/offtaker-audit-2026-09-19/api/account.py:665: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return exp >= datetime.utcnow() + timedelta(days=360)
+
+tests/test_permanent_login_token.py::test_permanent_predicate_far_future
+  /root/offtaker-audit-2026-09-19/tests/test_permanent_login_token.py:14: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    assert _login_token_is_permanent(_Row(datetime.utcnow() + timedelta(days=365 * 50)))
+
+tests/test_permanent_login_token.py::test_permanent_predicate_normal_magic_link
+  /root/offtaker-audit-2026-09-19/tests/test_permanent_login_token.py:18: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    assert not _login_token_is_permanent(_Row(datetime.utcnow() + timedelta(minutes=15)))
+
+tests/test_permanent_login_token.py::test_permanent_predicate_normal_magic_link
+  /root/offtaker-audit-2026-09-19/tests/test_permanent_login_token.py:19: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    assert not _login_token_is_permanent(_Row(datetime.utcnow() + timedelta(days=30)))
+
+tests/test_portal_access.py: 10 warnings
+  /root/offtaker-audit-2026-09-19/api/app.py:814: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    out = {"ok": True, "at": datetime.utcnow().isoformat(), "cloud_capture": cloud_capture}
+
+tests/test_preview_endpoints.py::test_upload_requires_admin_key
+tests/test_preview_endpoints.py::test_upload_extracts_dist
+tests/test_preview_endpoints.py::test_upload_returns_preview_url
+tests/test_preview_endpoints.py::test_upload_overwrites_existing_bundle
+tests/test_preview_endpoints.py::test_upload_overwrites_existing_bundle
+  /usr/lib/python3.12/tarfile.py:2301: DeprecationWarning: Python 3.14 will, by default, filter extracted tar archives and reject files or modify their metadata. Use the filter argument to control this behavior.
+    warnings.warn(
+
+tests/test_qb_export_send_gate.py::test_draft_not_recreated_after_period_sent
+tests/test_quarterly_offtaker_billing.py::test_complete_quarter_drafts_the_quarter
+tests/test_report_drafts.py::test_scheduled_approval_mode_drafts_and_notifies_operator
+  /root/offtaker-audit-2026-09-19/api/billing/delivery.py:2861: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_quarterly_summary_xlsx.py: 10 warnings
+  /root/offtaker-audit-2026-09-19/tests/test_quarterly_summary_xlsx.py:63: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    derived_at=datetime.utcnow(),
+
+tests/test_quarterly_summary_xlsx.py::test_build_quarterly_summary_format
+tests/test_quarterly_summary_xlsx.py::test_build_quarterly_summary_format
+tests/test_quarterly_summary_xlsx.py::test_quarterly_summary_endpoint
+tests/test_quarterly_summary_xlsx.py::test_quarterly_summary_endpoint
+  /root/offtaker-audit-2026-09-19/tests/test_quarterly_summary_xlsx.py:82: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    derived_at=datetime.utcnow(),
+
+tests/test_report_arrays_vendor_filter.py: 20 warnings
+  /root/offtaker-audit-2026-09-19/tests/test_report_arrays_vendor_filter.py:67: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    deleted_at=datetime.utcnow()))
+
+tests/test_report_drafts.py::test_generate_draft_collapses_preexisting_duplicate_pendings
+  /root/offtaker-audit-2026-09-19/api/billing/routes.py:4240: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    dup.dismissed_at = datetime.utcnow()
+
+tests/test_report_drafts.py::test_approve_sends_and_attaches_gmp_pdf
+tests/test_report_drafts.py::test_approve_twice_409
+tests/test_report_drafts.py::test_edited_email_note_rides_the_approved_send
+  /root/offtaker-audit-2026-09-19/api/billing/routes.py:4471: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    d.sent_at = datetime.utcnow()
+
+tests/test_report_drafts.py::test_dismiss_draft
+  /root/offtaker-audit-2026-09-19/api/billing/routes.py:4515: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    d.dismissed_at = datetime.utcnow()
+
+tests/test_report_eligibility.py::test_has_report_clients_counts_only_live_active
+tests/test_report_eligibility.py::test_scheduler_picks_migrated_ao_tenant_and_excludes_the_rest
+  /root/offtaker-audit-2026-09-19/tests/test_report_eligibility.py:67: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    deleted_at=(datetime.utcnow() if deleted else None))
+
+tests/test_report_eligibility.py::test_delivery_receipt_reaches_migrated_ao_and_stamps_the_rest
+  /root/offtaker-audit-2026-09-19/tests/test_report_eligibility.py:234: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    aged = datetime.utcnow() - timedelta(hours=3)    # past the 90-min window
+
+tests/test_reports_endpoint.py::TestReportsEmpty::test_most_recent_quarter_is_first
+  /root/offtaker-audit-2026-09-19/tests/test_reports_endpoint.py:125: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    today = datetime.utcnow()
+
+tests/test_reports_endpoint.py::TestRegenerate::test_regenerate_all_clients
+tests/test_reports_endpoint.py::TestRegenerate::test_regenerate_specific_client
+tests/test_reports_endpoint.py::TestRegenerate::test_regenerate_with_quarter
+tests/test_reports_endpoint.py::TestRegenerate::test_regenerate_wrong_client_returns_404
+  /root/offtaker-audit-2026-09-19/api/account.py:5795: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    generated_at = datetime.utcnow()
+
+tests/test_resend_report.py::TestResendReport::test_success_updates_last_delivery_at
+  /root/offtaker-audit-2026-09-19/tests/test_resend_report.py:97: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    before = datetime.utcnow()
+
+tests/test_sandbox_array_reassign.py::test_array_reassign_null_unclassifies
+tests/test_sandbox_array_reassign.py::test_login_origin_cleared_on_detach
+  /root/offtaker-audit-2026-09-19/api/sandbox.py:578: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now_ts = _dt.utcnow()
+
+tests/test_send_pipeline.py::test_pipeline_rollup_math
+tests/test_send_pipeline.py::test_pause_switch_roundtrip_and_scheduler_gate
+  /root/offtaker-audit-2026-09-19/api/billing/routes.py:5720: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_send_pipeline.py::test_pipeline_rollup_math
+  /root/offtaker-audit-2026-09-19/tests/test_send_pipeline.py:89: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_smarthub_adapter.py::test_authenticate_extracts_token_and_expiry
+tests/test_smarthub_adapter.py::test_authenticate_wec_host
+  /root/offtaker-audit-2026-09-19/api/adapters/smarthub.py:182: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "expires_at": datetime.utcnow() + timedelta(seconds=_SESSION_TIMEOUT_SECONDS),
+
+tests/test_smarthub_adapter.py::test_authenticate_extracts_token_and_expiry
+  /root/offtaker-audit-2026-09-19/tests/test_smarthub_adapter.py:98: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    delta = (session["expires_at"] - datetime.utcnow()).total_seconds()
+
+tests/test_smarthub_adapter.py: 64 warnings
+  /root/offtaker-audit-2026-09-19/api/adapters/smarthub.py:391: DeprecationWarning: datetime.datetime.utcfromtimestamp() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.fromtimestamp(timestamp, datetime.UTC).
+    day = datetime.utcfromtimestamp(x / 1000.0).date()
+
+tests/test_smarthub_daily_gen_upsert.py::test_pull_daily_generation_idempotent
+tests/test_smarthub_daily_gen_upsert.py::test_pull_daily_generation_idempotent
+tests/test_smarthub_daily_gen_upsert.py::test_pull_sets_source_smarthub
+tests/test_smarthub_daily_gen_upsert.py::test_pull_empty_generation_ok
+  /root/offtaker-audit-2026-09-19/api/jobs/smarthub_pull.py:77: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    "expires_at": datetime.utcnow() + timedelta(minutes=5),
+
+tests/test_sweep_preserves_foreign_incidents.py::test_sweep_clears_recovered_inverters_but_keeps_foreign_incidents
+  /root/offtaker-audit-2026-09-19/tests/test_sweep_preserves_foreign_incidents.py:35: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    old = datetime.utcnow() - timedelta(days=5)
+
+tests/test_sweep_preserves_foreign_incidents.py::test_sweep_clears_recovered_inverters_but_keeps_foreign_incidents
+  /root/offtaker-audit-2026-09-19/api/inverter_alert_sweep.py:55: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    return datetime.utcnow()
+
+tests/test_sync_refreshes_heartbeat.py::test_sync_sets_heartbeat_when_previously_never_seen
+  /root/offtaker-audit-2026-09-19/tests/test_sync_refreshes_heartbeat.py:71: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    assert datetime.utcnow() - t.extension_heartbeat_at < timedelta(minutes=1)
+
+tests/test_sync_refreshes_heartbeat.py::test_sync_moves_stale_heartbeat_forward
+  /root/offtaker-audit-2026-09-19/tests/test_sync_refreshes_heartbeat.py:77: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    stale = datetime.utcnow() - timedelta(days=3)
+
+tests/test_sync_refreshes_heartbeat.py::test_sync_moves_stale_heartbeat_forward
+  /root/offtaker-audit-2026-09-19/tests/test_sync_refreshes_heartbeat.py:84: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    assert datetime.utcnow() - t.extension_heartbeat_at < timedelta(minutes=1)
+
+tests/test_sync_refreshes_heartbeat.py::test_sync_refreshes_heartbeat_even_with_no_matching_client
+  /root/offtaker-audit-2026-09-19/tests/test_sync_refreshes_heartbeat.py:90: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    stale = datetime.utcnow() - timedelta(days=5)
+
+tests/test_sync_refreshes_heartbeat.py::test_sync_refreshes_heartbeat_even_with_no_matching_client
+  /root/offtaker-audit-2026-09-19/tests/test_sync_refreshes_heartbeat.py:101: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    assert datetime.utcnow() - t.extension_heartbeat_at < timedelta(minutes=1)
+
+tests/test_telemetry_ping.py::test_ping_creates_one_row_per_minute
+tests/test_telemetry_ping.py::test_ping_creates_one_row_per_minute
+  /root/offtaker-audit-2026-09-19/api/telemetry.py:77: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_telemetry_ping.py::test_time_on_site_is_distinct_minutes
+  /root/offtaker-audit-2026-09-19/tests/test_telemetry_ping.py:91: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    base = datetime.utcnow().replace(second=0, microsecond=0)
+
+tests/test_template_upload_honesty.py::test_pdf_upload_warns_and_is_not_marked_usable
+tests/test_template_upload_honesty.py::test_pdf_upload_does_not_take_over_from_a_working_template
+tests/test_template_upload_honesty.py::test_pdf_upload_does_not_take_over_from_a_working_template
+tests/test_template_upload_honesty.py::test_good_xlsx_uploads_clean_and_goes_live
+tests/test_template_upload_honesty.py::test_status_reports_renderable_so_the_ui_can_tell_the_truth
+  /root/offtaker-audit-2026-09-19/api/billing/routes.py:5000: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    tpl.updated_at = datetime.utcnow()
+
+tests/test_trial_cancel.py::test_cancel_trial_detaches_pm_and_deactivates
+  /root/offtaker-audit-2026-09-19/tests/test_trial_cancel.py:35: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    trial_ends_at=datetime.utcnow() + timedelta(days=3),
+
+tests/test_trial_finalization.py::test_finalize_creates_subscription_for_tenant_with_arrays
+tests/test_trial_finalization.py::test_finalize_pauses_tenant_with_no_card
+tests/test_trial_finalization.py::test_finalize_skips_future_trials
+  /root/offtaker-audit-2026-09-19/tests/test_trial_finalization.py:32: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    trial_ends_at=datetime.utcnow() + timedelta(days=trial_offset_days),
+
+tests/test_trial_finalization.py::test_finalize_creates_subscription_for_tenant_with_arrays
+tests/test_trial_finalization.py::test_finalize_pauses_tenant_with_no_card
+tests/test_trial_finalization.py::test_finalize_skips_future_trials
+tests/test_trial_lifecycle_emails.py::test_scheduler_calls_trial_charge_failed_on_stripe_error
+tests/test_trial_zero_arrays.py::test_first_run_extends_trial_and_sends_email
+tests/test_trial_zero_arrays.py::test_second_run_bills_minimum_when_still_no_arrays
+tests/test_trial_zero_arrays.py::test_zero_arrays_no_card_still_extends_first
+tests/test_trial_zero_arrays.py::test_zero_arrays_no_card_pauses_after_extension
+tests/test_trial_zero_arrays.py::test_first_run_does_not_extend_when_already_extended
+  /root/offtaker-audit-2026-09-19/api/scheduler.py:749: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    cutoff = datetime.utcnow()
+
+tests/test_trial_lifecycle_emails.py::test_scheduler_calls_trial_charge_failed_on_stripe_error
+  /root/offtaker-audit-2026-09-19/tests/test_trial_lifecycle_emails.py:172: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    trial_ends_at=datetime.utcnow() - timedelta(hours=1),
+
+tests/test_trial_reminder_dedup.py::test_reminder_fires_once_then_not_again
+tests/test_trial_reminder_dedup.py::test_reminder_fires_once_then_not_again
+tests/test_trial_reminder_dedup.py::test_reminder_not_stamped_on_send_failure
+tests/test_trial_reminder_dedup.py::test_urgent_tenant_gets_one_email_per_sweep_not_two
+tests/test_trial_reminder_dedup.py::test_urgent_tenant_gets_one_email_per_sweep_not_two
+tests/test_trial_reminder_dedup.py::test_urgent_tenant_gets_one_email_per_sweep_not_two
+  /root/offtaker-audit-2026-09-19/api/scheduler.py:911: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now = datetime.utcnow()
+
+tests/test_trial_reminder_dedup.py::test_reminder_fires_once_then_not_again
+tests/test_trial_reminder_dedup.py::test_urgent_tenant_gets_one_email_per_sweep_not_two
+tests/test_trial_reminder_dedup.py::test_urgent_tenant_gets_one_email_per_sweep_not_two
+tests/test_trial_reminder_dedup.py::test_urgent_tenant_gets_one_email_per_sweep_not_two
+tests/test_trial_reminder_dedup.py::test_urgent_tenant_gets_one_email_per_sweep_not_two
+  /root/offtaker-audit-2026-09-19/api/scheduler.py:933: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    setattr(t, stage_field, datetime.utcnow())
+
+tests/test_trial_zero_arrays.py::test_first_run_extends_trial_and_sends_email
+tests/test_trial_zero_arrays.py::test_second_run_bills_minimum_when_still_no_arrays
+tests/test_trial_zero_arrays.py::test_zero_arrays_no_card_still_extends_first
+tests/test_trial_zero_arrays.py::test_zero_arrays_no_card_pauses_after_extension
+tests/test_trial_zero_arrays.py::test_first_run_does_not_extend_when_already_extended
+  /root/offtaker-audit-2026-09-19/tests/test_trial_zero_arrays.py:33: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    trial_ends_at=datetime.utcnow() - timedelta(hours=1),
+
+tests/test_trial_zero_arrays.py::test_first_run_extends_trial_and_sends_email
+  /root/offtaker-audit-2026-09-19/tests/test_trial_zero_arrays.py:61: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    diff = (t.trial_ends_at - datetime.utcnow()).total_seconds()
+
+tests/test_utility_meter_capture_match.py::test_capture_revives_soft_deleted_array_instead_of_500
+  /root/offtaker-audit-2026-09-19/tests/test_utility_meter_capture_match.py:133: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    fuel_type="solar", deleted_at=datetime.utcnow())
+
+tests/test_vault_hardening.py::test_cloud_capture_status_never_decrypts_vault_on_web
+  /root/offtaker-audit-2026-09-19/api/cloud_capture.py:271: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    month_start = datetime.utcnow().replace(
+
+tests/test_vip_watch.py::test_vip_stale_vendors_ignores_fresh_capture
+  /root/offtaker-audit-2026-09-19/tests/test_vip_watch.py:77: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now_ = datetime.utcnow()
+
+tests/test_vip_watch.py::test_vip_stale_vendors_flags_past_the_minute_bar_in_daylight
+  /root/offtaker-audit-2026-09-19/tests/test_vip_watch.py:86: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now_ = datetime.utcnow()
+
+tests/test_vip_watch.py::test_vip_stale_vendors_never_fires_at_night
+  /root/offtaker-audit-2026-09-19/tests/test_vip_watch.py:97: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now_ = datetime.utcnow()
+
+tests/test_vip_watch.py::test_sweep_alerts_once_then_dedups_then_clears_on_recovery
+  /root/offtaker-audit-2026-09-19/tests/test_vip_watch.py:113: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now_ = datetime.utcnow()
+
+tests/test_vip_watch.py::test_sweep_alerts_once_then_dedups_then_clears_on_recovery
+tests/test_vip_watch.py::test_sweep_alerts_once_then_dedups_then_clears_on_recovery
+tests/test_vip_watch.py::test_sweep_alerts_once_then_dedups_then_clears_on_recovery
+tests/test_vip_watch.py::test_sweep_excludes_demo_tenants
+tests/test_vip_watch.py::test_sweep_uses_one_universal_bar_no_tiers
+  /root/offtaker-audit-2026-09-19/api/vip_watch.py:144: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now_ = datetime.utcnow()
+
+tests/test_vip_watch.py::test_sweep_alerts_once_then_dedups_then_clears_on_recovery
+  /root/offtaker-audit-2026-09-19/tests/test_vip_watch.py:142: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    inv.last_power_at = datetime.utcnow()
+
+tests/test_vip_watch.py::test_sweep_excludes_demo_tenants
+  /root/offtaker-audit-2026-09-19/tests/test_vip_watch.py:158: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now_ = datetime.utcnow()
+
+tests/test_vip_watch.py::test_sweep_uses_one_universal_bar_no_tiers
+  /root/offtaker-audit-2026-09-19/tests/test_vip_watch.py:173: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+    now_ = datetime.utcnow()
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+2699 passed, 33234 warnings in 405.56s (0:06:45)

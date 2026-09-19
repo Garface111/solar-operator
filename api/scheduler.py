@@ -473,7 +473,7 @@ def deliver_quarterly_reports():
     return _deliver_clients_with_frequency("quarterly")
 
 
-def _unconfirmed_rate_should_hold(db, sub) -> bool:
+def _unconfirmed_rate_should_hold(db, sub, *, period_label=None) -> bool:
     """True when this offtaker's invoice would price at a rate NOBODY ENTERED.
 
     Ford, 2026-08-12 (the HCT/Colleen mis-bill): every rate override was blank, so
@@ -488,14 +488,12 @@ def _unconfirmed_rate_should_hold(db, sub) -> bool:
     send, where no one is looking. Entering the rate is the confirmation and lifts
     the hold on the next run; there is no separate acknowledgement to chase.
 
-    Fail-OPEN, like its sibling below: any error means don't hold. Blast radius when
-    it shipped was 1 live auto-send offtaker (23 others are approval-mode and
-    unaffected)."""
+    A failed verification holds unattended delivery for operator review."""
     try:
         from .billing.delivery import build_manual_match
         if getattr(sub, "source_workbook", None):
             return False          # workbook subs price from the operator's own sheet
-        match = build_manual_match(sub)
+        match = build_manual_match(sub, period_label=period_label) if period_label else build_manual_match(sub)
         ci = (match.computed_invoice or {}) if match else {}
         if not ci:
             return False
@@ -503,11 +501,11 @@ def _unconfirmed_rate_should_hold(db, sub) -> bool:
         if ci.get("rate_is_operator_entered") is not False:
             return False
         return bool((ci.get("net_rate_per_kwh") or 0) > 0)
-    except Exception:  # noqa: BLE001 — a safety check must never break the run
-        return False
+    except Exception:  # noqa: BLE001 — hold for operator review
+        return True
 
 
-def _auto_send_should_hold(db, sub) -> bool:
+def _auto_send_should_hold(db, sub, *, period_label=None) -> bool:
     """True when an offtaker's invoice carries a GENUINE "doesn't match GMP"
     allocation flag — the same reconcile signal the operator sees in the pipeline.
 
@@ -517,23 +515,20 @@ def _auto_send_should_hold(db, sub) -> bool:
     period-timing gaps) are already reclassified to non-mismatch statuses upstream, so
     they never hold — only a real reconciled delta does.
 
-    Fail-OPEN: any error computing the reconcile returns False (don't hold). An
-    inconclusive check must not halt the pipeline — today's auto-send fires with no
-    check at all, so this only ever ADDS a hold for the known-flagged. Manual/approval
-    sends never reach here, so a human "Approve & send" can always override."""
+    Verification errors hold unattended sends for operator review."""
     try:
         from .billing.reconcile_bills import reconcile_subscription, is_gmp_offtaker
         # Bill audit / auto-send hold is GMP group-net-metering only.
         if not is_gmp_offtaker(db, sub):
             return False
-        rec = reconcile_subscription(db, sub)
-    except Exception:  # noqa: BLE001 — never let the safety check break the run
-        return False
+        rec = reconcile_subscription(db, sub, period_label=period_label) if period_label else reconcile_subscription(db, sub)
+    except Exception:  # noqa: BLE001 — hold for operator review
+        return True
     alloc = rec.get("allocation") or {}
-    return alloc.get("status") == "mismatch"
+    return alloc.get("status") in ("mismatch", "error")
 
 
-def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
+def deliver_billing_reports(cadence: str, *, trueup_only: bool = False, tenant_id: str | None = None) -> dict:
     """Array Operator automatic billing reports — deliver every enabled
     BillingReportSubscription whose cadence matches (or, for the annual run,
     every sub with annual_trueup set).
@@ -565,6 +560,8 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
             .where(BillingReportSubscription.enabled == True)  # noqa: E712
             .where(BillingReportSubscription.deleted_at.is_(None))
         )
+        if tenant_id is not None:
+            q = q.where(BillingReportSubscription.tenant_id == tenant_id)
         if trueup_only:
             q = q.where(BillingReportSubscription.annual_trueup == True)  # noqa: E712
         else:
@@ -575,7 +572,27 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
             if (t.active or t.subscription_status in ("comped", "trialing"))
         ]
 
+        from .billing.backlog import queue_closed_periods, record_hold
+        work = []
         for sid in candidates:
+            sub = db.get(BillingReportSubscription, sid)
+            tenant = db.get(Tenant, sub.tenant_id) if sub else None
+            if sub is None or tenant is None:
+                continue
+            if getattr(tenant, "sending_paused", False):
+                skipped.append(sid)
+                continue
+            if trueup_only:
+                work.append((sid, None))
+            else:
+                try:
+                    work.extend((sid, period) for period in queue_closed_periods(db, sub))
+                except Exception:
+                    db.rollback()
+                    held.append(sid)
+                    logger.exception("Billing history discovery held for subscription %s", sid)
+
+        for sid, period in work:
             sub = db.get(BillingReportSubscription, sid)
             tenant = db.get(Tenant, sub.tenant_id) if sub else None
             if sub is None or tenant is None:
@@ -621,7 +638,8 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
                     # they review it — a scheduled send must not push a known-wrong invoice
                     # under the operator's name. A human "Approve & send" is unaffected. The
                     # next scheduled run re-checks, so a resolved flag sends automatically.
-                    if _auto_send_should_hold(db, sub):
+                    if _auto_send_should_hold(db, sub, period_label=period):
+                        record_hold(db, sub, period, "Allocation mismatch requires operator review")
                         held.append(sid)
                         logger.info(
                             "auto-send HELD for sub %s — invoice doesn't match GMP's bill "
@@ -631,7 +649,8 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
                     # entered. An inferred bill rate is fine to draft and fine to
                     # send by hand — it is not fine to mail unattended under the
                     # operator's name. See _unconfirmed_rate_should_hold.
-                    if _unconfirmed_rate_should_hold(db, sub):
+                    if _unconfirmed_rate_should_hold(db, sub, period_label=period):
+                        record_hold(db, sub, period, "Rate is not confirmed by the operator")
                         held.append(sid)
                         logger.info(
                             "auto-send HELD for sub %s — rate was inferred from the "
@@ -640,9 +659,11 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
                         continue
                     result = deliver_subscription(
                         db, sub, tenant,
-                        triggered_by=f"sched-billing-{cadence}")
+                        triggered_by=f"sched-billing-{cadence}", period_label=period)
                     if result.get("ok"):
                         sent.append(sid)
+                    elif result.get("held"):
+                        held.append(sid)
                     elif result.get("skipped"):
                         skipped.append(sid)   # waiting on bill / already sent — benign
                     else:
@@ -650,14 +671,18 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False) -> dict:
                 else:
                     result = draft_subscription(
                         db, sub, tenant,
-                        triggered_by=f"sched-draft-{cadence}")
+                        triggered_by=f"sched-draft-{cadence}", period_label=period)
                     if result.get("ok"):
                         drafted.append(sid)
+                    elif result.get("held"):
+                        held.append(sid)
                     elif result.get("skipped"):
                         skipped.append(sid)
                     else:
                         failed.append(sid)
                 if not result.get("ok"):
+                    if period:
+                        record_hold(db, sub, period, result.get("error") or "Delivery pending")
                     logger.info("billing delivery %s sub %s: %s",
                                 "skipped" if result.get("skipped") else "FAILED",
                                 sid, result.get("error"))
@@ -1816,12 +1841,12 @@ def start():
     # for annual true-ups — all 09:00 UTC, matching the NEPOOL cadence above.
     scheduler.add_job(
         deliver_monthly_billing_reports,
-        CronTrigger(day=1, hour=9, minute=0),
+        CronTrigger(hour=9, minute=0),
         id="deliver_billing_monthly", replace_existing=True,
     )
     scheduler.add_job(
         deliver_quarterly_billing_reports,
-        CronTrigger(month="1,4,7,10", day=1, hour=9, minute=0),
+        CronTrigger(hour=9, minute=15),
         id="deliver_billing_quarterly", replace_existing=True,
     )
     scheduler.add_job(
@@ -1841,6 +1866,11 @@ def start():
         CronTrigger(hour=3, minute=15),
         id="synthetic_gmp_monitor", replace_existing=True,
     )
+    from .billing.dispatch import retry_due_dispatches
+    scheduler.add_job(retry_due_dispatches, CronTrigger(minute="*"),
+                      id="billing_outbox_retry", replace_existing=True,
+                      max_instances=1, coalesce=True, misfire_grace_time=60)
+
     # Daily at 03:00 UTC: pull daily generation for ALL inverter connections
     # (every vendor), iterating InverterConnection rows + legacy solaredge arrays.
     # Rate-limit: 300 req/day per SolarEdge token; N arrays = N requests, well

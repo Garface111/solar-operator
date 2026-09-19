@@ -58,7 +58,8 @@ def test_compute_annual_trueup_charge_when_actual_exceeds_budget():
         client_email="a@b.com",
     )
     # 12 months at $120 actual vs $100 budget → $240 underpaid
-    with patch("api.billing.trueup._period_figures") as fig:
+    issued = {label: 10000 for label in trueup_window(date(2026, 9, 1))[2]}
+    with patch("api.billing.trueup._issued_budgets", return_value=issued), patch("api.billing.trueup._period_figures") as fig:
         def _row(sub, lab):
             from api.billing.trueup import MonthTrueup
             return MonthTrueup(period_label=lab, budgeted_usd=100.0,
@@ -84,7 +85,8 @@ def test_compute_annual_trueup_credit_when_overpaid():
         allocation_pct=0.1,
         client_email="a@b.com",
     )
-    with patch("api.billing.trueup._period_figures") as fig:
+    issued = {label: 10000 for label in trueup_window(date(2026, 9, 1))[2]}
+    with patch("api.billing.trueup._issued_budgets", return_value=issued), patch("api.billing.trueup._period_figures") as fig:
         def _row(sub, lab):
             from api.billing.trueup import MonthTrueup
             return MonthTrueup(period_label=lab, budgeted_usd=100.0,

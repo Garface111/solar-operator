@@ -52,27 +52,30 @@ def test_select_measured_meter_beats_inverter():
     assert "solaredge" not in got["sources"]
 
 
-def test_select_measured_ignores_bill_prorate_and_utility_meter():
-    """Estimates (bill_prorate, utility_meter) never count as measured."""
-    # Estimates alone → unavailable
-    alone = select_measured_for_day([
-        {"kwh": 100.0, "source": "bill_prorate"},
-        {"kwh": 90.0, "source": "utility_meter"},
-    ])
+def test_select_measured_ignores_bill_prorate_but_accepts_real_utility_capture():
+    """Only monthly bill smears are estimates; utility_meter is a real daily export."""
+    alone = select_measured_for_day([{"kwh": 100.0, "source": "bill_prorate"}])
     assert alone["boundary"] == BOUNDARY_UNAVAILABLE
     assert alone["kwh"] is None
     assert alone["sources"] == []
 
-    # Estimates present with inverter → still inverter (estimates ignored)
     with_inv = select_measured_for_day([
+        {"kwh": 100.0, "source": "bill_prorate"},
+        {"kwh": 42.0, "source": "enphase"},
+    ])
+    assert with_inv["boundary"] == BOUNDARY_INVERTER
+    assert with_inv["kwh"] == 42.0
+    assert with_inv["sources"] == ["enphase"]
+
+    with_meter = select_measured_for_day([
         {"kwh": 100.0, "source": "bill_prorate"},
         {"kwh": 42.0, "source": "enphase"},
         {"kwh": 90.0, "source": "utility_meter"},
     ])
-    assert with_inv["boundary"] == BOUNDARY_INVERTER
-    assert with_inv["kwh"] == 42.0
-    assert "bill_prorate" not in with_inv["sources"]
-    assert "utility_meter" not in with_inv["sources"]
+    assert with_meter["boundary"] == BOUNDARY_METER
+    assert with_meter["kwh"] == 90.0
+    assert with_meter["sources"] == ["utility_meter"]
+    assert with_meter["used_estimate"] is False
 
 
 def test_select_measured_unavailable_when_empty():

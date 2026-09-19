@@ -109,6 +109,7 @@ def test_daily_pull_stamps_peak_power_when_location_already_set():
 
 def test_daily_pull_skips_site_details_when_loc_and_peak_present():
     tid = "ten_" + secrets.token_hex(6)
+    site_id = int(secrets.token_hex(6), 16)
     with SessionLocal() as db:
         db.add(Tenant(
             id=tid, name="SE Full", contact_email=f"{tid}@t.test",
@@ -123,7 +124,7 @@ def test_daily_pull_skips_site_details_when_loc_and_peak_present():
         db.flush()
         db.add(InverterConnection(
             array_id=arr.id, vendor="solaredge",
-            config={"api_key": "fake_key", "site_id": 99999, "peak_power_kw": 45.0},
+            config={"api_key": "fake_key", "site_id": site_id, "peak_power_kw": 45.0},
             status="ok",
         ))
         arr_id = arr.id
@@ -133,7 +134,9 @@ def test_daily_pull_skips_site_details_when_loc_and_peak_present():
         {"day": date(2026, 6, 30), "kwh": 10.0},
     ]), patch("api.jobs.inverter_pull._se.site_details") as mock_details:
         pull_all_inverters(days_back=1)
-        mock_details.assert_not_called()
+        # Unrelated arrays from prior fixtures still need their backfill.
+        assert not [c for c in mock_details.call_args_list
+                    if len(c.args) > 1 and c.args[1] == site_id]
 
     arr = _array(arr_id)
     assert arr.latitude == 1.0

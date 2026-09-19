@@ -64,8 +64,12 @@ def main():
 
     with engine.begin() as conn:
         added = []
+        if not column_exists(conn, "offtaker_invoices", "render_snapshot"):
+            conn.execute(text("ALTER TABLE offtaker_invoices ADD COLUMN render_snapshot JSON"))
         # Add columns to tenants
         statements = [
+            ("offtaker_payment_policy", "ALTER TABLE tenants ADD COLUMN offtaker_payment_policy VARCHAR(24) NOT NULL DEFAULT 'online_required'"),
+            ("offtaker_payment_policy_audit", "ALTER TABLE tenants ADD COLUMN offtaker_payment_policy_audit JSON"),
             ("stripe_customer_id",     "ALTER TABLE tenants ADD COLUMN stripe_customer_id VARCHAR(64)"),
             ("stripe_subscription_id", "ALTER TABLE tenants ADD COLUMN stripe_subscription_id VARCHAR(64)"),
             ("subscription_status",    "ALTER TABLE tenants ADD COLUMN subscription_status VARCHAR(32)"),
@@ -1544,6 +1548,20 @@ def main():
                 print(f"  (index skipped: {_e})")
         # 2026-09 durable pay links: the invoice carries /pay/{token}; the click
         # mints or refreshes the Checkout Session (Stripe expires them at 24h).
+        for field, sql_type in (
+            ("stripe_application_fee_id", "VARCHAR(100)"),
+            ("active_key", "VARCHAR(100)"),
+            ("refunded_cents", "INTEGER DEFAULT 0"),
+            ("fee_refunded_cents", "INTEGER DEFAULT 0"),
+            ("checkout_generation", "INTEGER DEFAULT 0"),
+            ("checkout_request", "JSON"),
+            ("checkout_requested_at", "TIMESTAMP"),
+            ("receipt_payload", "JSON"),
+        ):
+            if not column_exists(conn, "offtaker_payments", field):
+                conn.execute(text(f"ALTER TABLE offtaker_payments ADD COLUMN {field} {sql_type}"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_offtaker_application_fee ON offtaker_payments (stripe_application_fee_id)"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_offtaker_active_key ON offtaker_payments (active_key)"))
         if not column_exists(conn, "offtaker_payments", "pay_token"):
             conn.execute(text(
                 "ALTER TABLE offtaker_payments ADD COLUMN pay_token VARCHAR(48)"))

@@ -202,6 +202,9 @@ class Tenant(Base):
     # capped $5) and the platform keeps only its application fee; "destination"
     # — legacy: charge on the platform, funds transferred, the PLATFORM eats
     # Stripe's fee. NULL → AO_OFFTAKER_CHARGE_MODEL env (default "direct").
+    offtaker_payment_policy: Mapped[str] = mapped_column(String(24), nullable=False,
+        default="online_required", server_default="online_required")
+    offtaker_payment_policy_audit: Mapped[list | None] = mapped_column(JSON, nullable=True)
     offtaker_charge_model: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     # Customer prefs (controlled via /account portal)
@@ -1992,6 +1995,14 @@ class OfftakerPayment(Base):
     # account for DIRECT charges; NULL = the platform (legacy destination
     # charges). Every later Stripe call about this row must address it.
     stripe_account_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    stripe_application_fee_id: Mapped[str | None] = mapped_column(String(100), nullable=True, unique=True)
+    active_key: Mapped[str | None] = mapped_column(String(100), nullable=True, unique=True)
+    refunded_cents: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    fee_refunded_cents: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    checkout_generation: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    checkout_request: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    checkout_requested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    receipt_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # open | paid | expired | failed | refunded
     status: Mapped[str] = mapped_column(
         String(16), default="open", server_default="open", nullable=False, index=True)
@@ -2004,6 +2015,17 @@ class OfftakerPayment(Base):
     __table_args__ = (
         Index("ix_offtaker_pay_sub_period", "subscription_id", "period_key"),
     )
+
+
+class OfftakerRefund(Base):
+    """Observed refund transactions; cumulative charge snapshots control totals."""
+    __tablename__ = "offtaker_refunds"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    payment_id: Mapped[int] = mapped_column(Integer, ForeignKey("offtaker_payments.id"), index=True)
+    stripe_refund_id: Mapped[str] = mapped_column(String(100), unique=True)
+    amount_cents: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(24), default="succeeded")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 
 class OfftakerMonthlyReport(Base):
@@ -2791,3 +2813,70 @@ class SessionPing(Base):
         UniqueConstraint("tenant_id", "minute_bucket", name="uq_session_ping_tenant_minute"),
         Index("ix_session_ping_tenant_day", "tenant_id", "day"),
     )
+
+
+class OfftakerInvoice(Base):
+    """Immutable issued obligation; acceptance survives caller transaction failure."""
+    __tablename__ = "offtaker_invoices"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    subscription_id: Mapped[int] = mapped_column(Integer, ForeignKey("billing_report_subscriptions.id"), index=True)
+    period_key: Mapped[str] = mapped_column(String(80))
+    period_start: Mapped[date | None] = mapped_column(Date, nullable=True)
+    period_end: Mapped[date | None] = mapped_column(Date, nullable=True)
+    invoice_number: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    amount_cents: Mapped[int] = mapped_column(Integer, default=0)
+    credit_applied_cents: Mapped[int] = mapped_column(Integer, default=0)
+    customer_kwh: Mapped[float | None] = mapped_column(Float, nullable=True)
+    snapshot: Mapped[dict] = mapped_column(JSON, default=dict)
+    render_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="prepared", index=True)
+    payment_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("offtaker_payments.id"), nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    applied_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+    __table_args__ = (UniqueConstraint("tenant_id", "subscription_id", "period_key", name="uq_offtaker_invoice_period"),)
+
+
+class BillingEmailDispatch(Base):
+    """Permanent delivery deduplication and frozen payload; ambiguous sends are held."""
+    __tablename__ = "billing_email_dispatches"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    key: Mapped[str] = mapped_column(String(220))
+    kind: Mapped[str] = mapped_column(String(40), default="invoice")
+    email: Mapped[dict] = mapped_column(JSON)
+    status: Mapped[str] = mapped_column(String(20), default="prepared", index=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    retry_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    resend_email_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+    __table_args__ = (UniqueConstraint("tenant_id", "key", name="uq_billing_dispatch_key"),)
+
+
+class OfftakerSettlement(Base):
+    """Audited, immutable offline receipts against an issued obligation."""
+    __tablename__ = "offtaker_settlements"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), index=True)
+    invoice_id: Mapped[int] = mapped_column(Integer, ForeignKey("offtaker_invoices.id"), index=True)
+    subscription_id: Mapped[int] = mapped_column(Integer, ForeignKey("billing_report_subscriptions.id"), index=True)
+    request_key: Mapped[str] = mapped_column(String(120))
+    amount_cents: Mapped[int] = mapped_column(Integer)
+    received_on: Mapped[date] = mapped_column(Date)
+    actor: Mapped[str] = mapped_column(String(200))
+    method: Mapped[str] = mapped_column(String(24))
+    note: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    __table_args__ = (UniqueConstraint("tenant_id", "request_key", name="uq_offtaker_settlement_request"),)
+
+
+class BillingEmailRateGate(Base):
+    """Shared billing transport pace across web and worker processes."""
+    __tablename__ = "billing_email_rate_gates"
+    id: Mapped[str] = mapped_column(String(40), primary_key=True)
+    next_at: Mapped[datetime] = mapped_column(DateTime, default=now)

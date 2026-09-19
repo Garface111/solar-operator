@@ -133,7 +133,7 @@ def test_upsert_vec_bill_creates_climbs_and_adds_new_period():
         assert b.is_net_metered is True
         assert b.period_end.date() == date(2026, 6, 21)
 
-    # (b) Re-running with a LOWER kwh/credit (same period) does NOT lower it.
+    # (b) Corrected evidence supersedes the same period and retains prior values.
     with SessionLocal() as db:
         ua = db.get(UtilityAccount, acct_id)
         _upsert_vec_bill(db, ua, _parsed(kwh=5000, credit=900.00))
@@ -142,9 +142,10 @@ def test_upsert_vec_bill_creates_climbs_and_adds_new_period():
         rows = db.execute(select(Bill).where(Bill.account_id == acct_id)).scalars().all()
         assert len(rows) == 1, "same period must not spawn a 2nd Bill"
         b = rows[0]
-        assert b.kwh_sent_to_grid == 10200.0   # climb-only: unchanged
-        assert b.solar_credit_usd == 1847.83
-        assert b.kwh_generated == 10200
+        assert b.kwh_sent_to_grid == 5000.0
+        assert b.solar_credit_usd == 900.0
+        assert b.kwh_generated == 5000
+        assert b.raw_json["_ao_evidence_revisions"][-1]["before"]["solar_credit_usd"] == 1847.83
 
     # (c) A NEW period creates a SECOND Bill.
     with SessionLocal() as db:

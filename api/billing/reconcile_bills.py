@@ -347,7 +347,7 @@ def _allocation_check(
     return out
 
 
-def reconcile_subscription(db: Session, sub: BillingReportSubscription) -> dict:
+def reconcile_subscription(db: Session, sub: BillingReportSubscription, *, period_label=None) -> dict:
     """Compare one offtaker's invoice production figures against GMP bills.
 
     Returns {customer_name, sub_id, arrays:[{array_id, array_name, our_kwh,
@@ -362,7 +362,7 @@ def reconcile_subscription(db: Session, sub: BillingReportSubscription) -> dict:
     from .delivery import build_match, _normalized_allocations
 
     try:
-        match = build_match(sub)
+        match = build_match(sub, period_label=period_label) if period_label else build_match(sub)
     except Exception:  # never let one bad sub break the report
         match = None
 

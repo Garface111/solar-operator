@@ -1,0 +1,25 @@
+/root/offtaker-audit-2026-09-19/api/migrate.py:660: DeprecationWarning: datetime.datetime.utcnow() is deprecated and scheduled for removal in a future version. Use timezone-aware objects to represent datetimes in UTC: datetime.datetime.now(datetime.UTC).
+  ), {"cutoff": datetime.utcnow() - timedelta(days=7)})
+=== NEPOOL Operator schema migration ===
+✓ Base.metadata.create_all done (new tables created if missing)
+✓ All tenant columns already present — no schema changes
+  ↪ V1 quarterly-default backfill: 0 recent tenant(s) monthly→quarterly
+  ↪ signoff footer cleanup: no tenants had the old default stored
+  ✓ capture_events indexes ensured
+  ✓ daily_generation table + indexes ensured
+  ✓ inverter_connections table + index ensured
+  ✓ billing_report_subscriptions table + indexes ensured
+  ✓ table rate_schedule
+  ✓ table gmp_usage_raw
+  ✓ table gmp_daily_generation
+  ✓ table report_deliveries
+  ✓ table portal_login_status
+  ✓ table sma_consents
+  ✓ table offtaker_payments
+  ✓ table service_contacts
+  ✓ table array_service_assignments
+  ✓ table repair_tickets
+  ✓ table repair_checkins
+  ✓ table agent_documents
+  ✓ table email_copy_overrides
+=== Migration complete ===

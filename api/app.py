@@ -1696,19 +1696,10 @@ async def sync(request: Request, authorization: str | None = Header(default=None
                     # independently of consumption (a net-meter credit account reads
                     # ~0 consumption). Climb-only — only raise / set when None.
                     if _nm is not None:
-                        _sent = _nm.get("kwh_sent_to_grid")
-                        if _sent is not None and (exists.kwh_sent_to_grid is None
-                                                  or float(_sent) > exists.kwh_sent_to_grid):
-                            exists.kwh_sent_to_grid = float(_sent)
-                        _gen = _nm.get("kwh_generated")
-                        if _gen is not None:
-                            _geni = int(round(float(_gen)))
-                            if exists.kwh_generated is None or _geni > exists.kwh_generated:
-                                exists.kwh_generated = _geni
-                        _cred = _nm.get("solar_credit_usd")
-                        if _cred is not None and (exists.solar_credit_usd is None
-                                                  or float(_cred) > exists.solar_credit_usd):
-                            exists.solar_credit_usd = float(_cred)
+                        from .bill_revisions import apply_bill_revision
+                        import hashlib
+                        apply_bill_revision(exists, _nm, source="vec_pdf",
+                            evidence={"pdf_sha256": hashlib.sha256(_pdf_raw).hexdigest() if _pdf_raw else None})
                         exists.is_net_metered = True
                         exists.parse_status = "parsed"
                         if _ps and not exists.period_start:

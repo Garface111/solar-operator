@@ -129,6 +129,13 @@ def build_match(sub, period_label: Optional[str] = None) -> BillingMatch:
         generation. Both produce the same BillingMatch shape so every downstream
         consumer (invoice/summary renderers, delivery, drafts) is unchanged.
     """
+    if period_label and getattr(sub, "id", None):
+        from .issuance import load_frozen
+        from .backlog import canonical_period
+        frozen = load_frozen(sub.tenant_id, sub.id,
+            canonical_period(period_label, getattr(sub, "cadence", "monthly")))
+        if frozen is not None:
+            return frozen
     # Bill from the GMP bill (percent-of-array: allocation_pct × the bill's generation)
     # whenever the operator has EXPLICITLY configured it — both a linked utility account
     # AND a share are set. That explicit config OVERRIDES a stored workbook (which would
@@ -144,6 +151,31 @@ def build_match(sub, period_label: Optional[str] = None) -> BillingMatch:
         m = build_manual_match(sub, period_label=period_label)
     else:
         m = match_billing_workbook(bytes(sub.source_workbook), allow_llm=False)
+        if period_label:
+            from .backlog import canonical_period, bounds
+            from .matcher import compute_invoice, Period
+            key = canonical_period(period_label, getattr(sub, "cadence", "monthly"))
+            selected = [p for p in m.periods if p.end and canonical_period(p.end.isoformat(), getattr(sub, "cadence", "monthly")) == key]
+            expected_count = 3 if key and "Q" in key else 1
+            if not key or len({p.end.strftime("%Y-%m") for p in selected}) != expected_count or any(not p.start for p in selected):
+                m.matched = False
+                m.latest_period = None
+                m.warnings.append("The workbook lacks complete dated rows for the requested billing period")
+                return m
+            selected.sort(key=lambda p: p.end)
+            parts = [compute_invoice(p.customer_kwh, p.tariff, p.adder, m.billing_rate,
+                                     m.billing_model, m.template.get("fixed_amount")) for p in selected]
+            ci = dict(parts[-1])
+            for name in ("kwh", "net_value", "incentive_value", "solar_value", "billed_value", "solar_savings", "amount_owed"):
+                ci[name] = round(sum(v[name] for v in parts), 2)
+            ci.update(invoice_number=key, period_start=selected[0].start.isoformat(),
+                      period_end=selected[-1].end.isoformat(), month=key)
+            m.latest_period = Period(month=key, start=selected[0].start, end=selected[-1].end,
+                array_kwh=sum(p.array_kwh or 0 for p in selected), customer_kwh=ci["kwh"],
+                tariff=selected[-1].tariff, adder=selected[-1].adder,
+                value=ci["solar_value"], bill=ci["billed_value"], savings=ci["solar_savings"])
+            m.computed_invoice = ci
+
     # Sequential invoice numbering: when the operator set a starting number, the
     # running counter (invoice_number_next) replaces the default period-date number
     # on the rendered invoice. The counter is advanced on a real send (deliver).
@@ -177,6 +209,22 @@ def build_match(sub, period_label: Optional[str] = None) -> BillingMatch:
                 ci["credit_applied"] = applied
                 ci["pending_credit_remaining"] = remaining
                 ci["amount_owed"] = new_due
+    # An issued/reserved period is immutable, including its original credit.
+    if m is not None and getattr(sub, "id", None) and m.computed_invoice:
+        from ..db import SessionLocal
+        from ..models import OfftakerInvoice
+        from sqlalchemy import select
+        from .issuance import restore
+        key = _period_guard_label(m.computed_invoice.get("period_end"), getattr(sub, "cadence", None))
+        if key:
+            with SessionLocal() as history_db:
+                frozen = history_db.scalar(select(OfftakerInvoice).where(
+                    OfftakerInvoice.tenant_id == sub.tenant_id,
+                    OfftakerInvoice.subscription_id == sub.id,
+                    OfftakerInvoice.period_key == key))
+                if frozen and frozen.snapshot:
+                    return restore(frozen.snapshot)
+
     return m
 
 
@@ -273,6 +321,10 @@ def resolve_discount_pricing(sub, *, period_end=None, region=None,
             return float(sub_net), "customer"
         if g_net is not None and g_net > 0:
             return float(g_net), "global"
+        if sub_flat is not None and sub_flat > 0:
+            return float(sub_flat), "legacy_flat_customer"
+        if g_flat is not None and g_flat > 0:
+            return float(g_flat), "legacy_flat_global"
         memo_key = (_provider, _region, _fc, period_end)
         auto = rate_memo.get(memo_key) if rate_memo is not None else None
         if auto is None:
@@ -283,10 +335,6 @@ def resolve_discount_pricing(sub, *, period_end=None, region=None,
         if auto.source in ("schedule", "schedule_provisional"):
             net_note = auto.note
             return auto.rate, "auto_" + auto.source
-        if sub_flat is not None and sub_flat > 0:
-            return float(sub_flat), "legacy_flat_customer"
-        if g_flat is not None and g_flat > 0:
-            return float(g_flat), "legacy_flat_global"
         # auto returned the VT default — use it and keep its provenance.
         net_note = auto.note
         return auto.rate, "vt_default"
@@ -392,90 +440,71 @@ def resolve_rate_per_kwh(sub) -> tuple[Optional[float], str]:
     return p["effective_rate"], src
 
 
-def _array_period_kwh(db, array_id: int) -> tuple[Optional[float], Optional[date], Optional[date], Optional[str], Optional[str]]:
-    """The array's most recent full-month generation: (array_kwh, start, end,
-    month_label, dom_source). Prefers DailyGeneration; falls back to Bill.kwh_generated.
-    dom_source ∈ 'daily_csv' (metered/uploaded) | 'bill_prorate' (estimate-dominated
-    month) | 'utility_bill' (a real bill) | None. Returns (None,)*5 when no data yet."""
+def _complete_generation(rows, target_label=None):
+    """Only a full, closed calendar month of finite daily evidence is invoiceable."""
+    import calendar
+    import math
+    grouped = {}
+    for day, kwh, source in rows:
+        grouped.setdefault(day.strftime("%Y-%m"), []).append((day, kwh, source))
+    for label in sorted(grouped, reverse=True):
+        if target_label and label != target_label:
+            continue
+        y, m = map(int, label.split("-"))
+        start, end = date(y, m, 1), date(y, m, calendar.monthrange(y, m)[1])
+        if end >= date.today():
+            continue
+        month = grouped[label]
+        if len(month) != end.day or {r[0].day for r in month} != set(range(1, end.day + 1)):
+            continue
+        if any(k is None or not math.isfinite(float(k)) or float(k) < 0 for _, k, _ in month):
+            continue
+        total = sum(float(k) for _, k, _ in month)
+        prorate = sum(float(k) for _, k, src in month if src == "bill_prorate")
+        src = "bill_prorate" if total > 0 and prorate >= .5 * total else month[0][2]
+        return round(total, 1), start, end, label, src
+    return (None,) * 5
+
+
+def _array_period_kwh(db, array_id: int, target_label=None):
     from ..models import DailyGeneration, Bill, UtilityAccount
-
-    # Prefer DailyGeneration: pick the latest (year, month) that has rows. Track the
-    # SOURCE so provenance is honest (audit #8): a month dominated by 'bill_prorate'
-    # (a flat-smeared utility bill) is an ESTIMATE, not metered/uploaded data.
-    rows = db.execute(
-        select(DailyGeneration.day, DailyGeneration.kwh, DailyGeneration.source)
-        .where(DailyGeneration.array_id == array_id)
-        .order_by(DailyGeneration.day.desc())
-    ).all()
-    if rows:
-        latest_day = rows[0].day
-        y, m = latest_day.year, latest_day.month
-        month_rows = [r for r in rows if r.day.year == y and r.day.month == m]
-        total = sum(float(r.kwh or 0) for r in month_rows)
-        days = sorted(r.day for r in month_rows)
-        label = latest_day.strftime("%Y-%m")
-        prorate = sum(float(r.kwh or 0) for r in month_rows
-                      if (r.source or "") == "bill_prorate")
-        dom = "bill_prorate" if (total > 0 and prorate >= 0.5 * total) else "daily_csv"
-        return round(total, 1), days[0], days[-1], label, dom
-
-    # Fallback: the array's bills (kwh_generated) for the most recent period — a real
-    # utility-bill figure (provenance 'utility_bill', not the prorated daily estimate).
-    bill = db.execute(
-        select(Bill)
-        .join(UtilityAccount, Bill.account_id == UtilityAccount.id)
-        .where(UtilityAccount.array_id == array_id,
-               Bill.kwh_generated.isnot(None),
-               Bill.period_end.isnot(None))
-        .order_by(Bill.period_end.desc())
-    ).scalars().first()
-    if bill is not None:
+    import calendar
+    import math
+    rows = db.execute(select(DailyGeneration.day, DailyGeneration.kwh, DailyGeneration.source)
+        .where(DailyGeneration.array_id == array_id)).all()
+    result = _complete_generation([(r.day, r.kwh, "bill_prorate" if r.source == "bill_prorate" else "daily_csv") for r in rows], target_label)
+    if result[0] is not None:
+        return result
+    # A settled full-month statement is independent complete evidence.
+    bills = db.execute(select(Bill).join(UtilityAccount, Bill.account_id == UtilityAccount.id)
+        .where(UtilityAccount.array_id == array_id, Bill.kwh_generated.isnot(None),
+               Bill.period_end.isnot(None)).order_by(Bill.period_end.desc(), Bill.id.desc())).scalars()
+    for bill in bills:
         ps = bill.period_start.date() if bill.period_start else None
         pe = bill.period_end.date() if bill.period_end else None
-        label = pe.strftime("%Y-%m") if pe else None
-        return round(float(bill.kwh_generated), 1), ps, pe, label, "utility_bill"
-    return None, None, None, None, None
+        if not ps or not pe or pe >= date.today() or ps.day != 1 or (ps.year, ps.month) != (pe.year, pe.month):
+            continue
+        if pe.day != calendar.monthrange(pe.year, pe.month)[1]:
+            continue
+        label = pe.strftime("%Y-%m")
+        if target_label and label != target_label:
+            continue
+        kwh = float(bill.kwh_generated)
+        if math.isfinite(kwh) and kwh >= 0:
+            return round(kwh, 1), ps, pe, label, "utility_bill"
+    return (None,) * 5
 
 
-def _array_period_kwh_sourced(
-    db, array_id: int
-) -> tuple[Optional[float], Optional[date], Optional[date], Optional[str], Optional[str]]:
-    """Source-agnostic period generation for an array, with provenance.
-
-    Precedence (per Ford's call + the GMP_DAILY_READ_CONTRACT):
-      1. GMP daily-read contract (api/reports/gmp_daily_read) — the authoritative
-         metered source. We call its functions only; we never touch the gmp_*
-         tables/ORM directly (storage stays the data-sponge agent's).
-      2. DailyGeneration / Bill (the legacy path) when GMP has no coverage yet
-         (e.g. backfill not run / GMP auth blocked).
-
-    Returns (kwh, start, end, label, kwh_source) where kwh_source is one of
-    'gmp_api' | 'daily_csv' | None. Mirrors _array_period_kwh's "latest month
-    present" semantics so downstream math is unchanged regardless of source.
-    """
-    # 1) Try the GMP contract first. Defensive: a provisional module / empty
-    #    tables must degrade to the fallback, never raise into invoice math.
+def _array_period_kwh_sourced(db, array_id: int, target_label=None):
     try:
         from ..reports import gmp_daily_read as gdr
-        months = gdr.get_monthly_totals(array_id, db=db)
-        if months:
-            latest = months[-1]                       # ascending → last = newest
-            y, m = latest["year"], latest["month"]
-            series = [r for r in gdr.get_daily_series(array_id, db=db)
-                      if r["day"].year == y and r["day"].month == m]
-            if series:
-                days = sorted(r["day"] for r in series)
-                return (round(float(latest["kwh"]), 1), days[0], days[-1],
-                        f"{y:04d}-{m:02d}", "gmp_api")
-    except Exception:  # noqa: BLE001 — provisional contract / missing tables
-        logger.warning("GMP daily-read unavailable for array %s; falling back",
-                       array_id, exc_info=True)
-
-    # 2) Legacy fallback: DailyGeneration → Bill, with honest provenance from
-    #    _array_period_kwh (daily_csv = metered/uploaded, bill_prorate = estimate-
-    #    dominated month, utility_bill = a real bill) instead of a blanket 'daily_csv'.
-    kwh, start, end, label, dom = _array_period_kwh(db, array_id)
-    return kwh, start, end, label, (dom if kwh is not None else None)
+        rows = gdr.get_daily_series(array_id, db=db)
+        result = _complete_generation([(r["day"], r["kwh"], "gmp_api") for r in rows], target_label)
+        if result[0] is not None:
+            return result
+    except Exception:
+        logger.warning("GMP daily-read unavailable for array %s; falling back", array_id, exc_info=True)
+    return _array_period_kwh(db, array_id, target_label=target_label)
 
 
 # Honest operator-set rate sources for a VEC/SmartHub offtaker. A VEC invoice may
@@ -501,7 +530,7 @@ _OPERATOR_ENTERED_RATE_SOURCES = frozenset(
 )
 
 
-def _build_smarthub_offtaker_match(sub, operator, warnings) -> BillingMatch:
+def _build_smarthub_offtaker_match(sub, operator, warnings, period_label=None) -> BillingMatch:
     """VEC/SmartHub offtaker: price the offtaker's allocation_pct of the array's
     MEASURED generation at an OPERATOR-ENTERED net rate. SmartHub bills carry no
     excess+credit, so we REQUIRE an operator rate (per-offtaker or operator-global)
@@ -524,7 +553,7 @@ def _build_smarthub_offtaker_match(sub, operator, warnings) -> BillingMatch:
         # Bill fallback — honest provenance in gen_src). VEC daily generation is
         # populated from the SmartHub net-export pull (api/adapters/smarthub).
         if arr_id is not None:
-            gen_kwh, start, end, label, gen_src = _array_period_kwh_sourced(db, arr_id)
+            gen_kwh, start, end, label, gen_src = _array_period_kwh_sourced(db, arr_id, target_label=period_label)
         else:
             gen_kwh = None
             start = end = None
@@ -1113,7 +1142,7 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
         # SmartHub with NO parsed bill yet → model-A fallback (operator rate).
         # SmartHub WITH a parsed bill → fall through to the bill-priced GMP block.
         if _is_sh and not _sh_has_bill:
-            return _build_smarthub_offtaker_match(sub, operator, warnings)
+            return _build_smarthub_offtaker_match(sub, operator, warnings, period_label=period_label)
         # QUARTERLY cadence aggregates the FULL quarter of settled bills (#6). A
         # month-targeted period_label (sheet-tracker backfill) keeps the single-
         # month math; a 'YYYY-Qn' label pins a specific historical quarter.
@@ -1304,6 +1333,9 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
             # shares this fleet rate (overrides each sub-account bill rate).
             net_rate, net_source = float(_master), "global"
             net_note = "your master solar credit rate"
+        elif pricing["net_source"] == "legacy_flat_global":
+            net_rate, net_source = pricing["net_rate"], "legacy_flat_global"
+            net_note = "your legacy flat rate"
         elif rate_source == "reference":
             net_rate, net_source = (credit_rate or 0.0), "gmp_credit_reference"
             net_note = ("the solar credit rate for comparable months — this period's "
@@ -1354,6 +1386,9 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
             default_net_rate = float(_master)
             default_net_source = "global"
             default_net_note = "your master solar credit rate"
+        elif pricing["net_source"] == "legacy_flat_global":
+            net_rate, net_source = pricing["net_rate"], "legacy_flat_global"
+            net_note = "your legacy flat rate"
         elif rate_source == "reference":
             default_net_rate = credit_rate
             default_net_source = "gmp_credit_reference"
@@ -1523,7 +1558,7 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
                 aid = al["array_id"]
                 apct = al["allocation_pct"]
                 arr = db.get(Array, aid)
-                a_kwh, a_start, a_end, a_label, a_src = _array_period_kwh_sourced(db, aid)
+                a_kwh, a_start, a_end, a_label, a_src = _array_period_kwh_sourced(db, aid, target_label=period_label)
                 if a_kwh is None:
                     warnings.append(f"No generation data yet for "
                                     f"{(arr.name if arr else 'array ' + str(aid))} — "
@@ -1573,6 +1608,7 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
         computed["month"] = label
         computed["project_total_kwh"] = total_array_kwh
         computed["array_kwh"] = total_array_kwh
+        computed["generation_complete"] = len(labels) == len(allocs) and len(set(labels)) == 1
         computed["array_breakdown"] = breakdown   # one line per array
         computed["net_rate_per_kwh"] = round(net_rate, 6)
         computed["discount_pct"] = round(discount, 6)
@@ -1605,7 +1641,7 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
             arr = db.get(Array, sub.array_id)
             array_name = arr.name if arr else None
             array_kwh, start, end, label, kwh_source = _array_period_kwh_sourced(
-                db, sub.array_id)
+                db, sub.array_id, target_label=period_label)
     if array_kwh is None:
         warnings.append("No generation data for this array yet — invoice shows $0 "
                         "until production lands.")
@@ -1635,6 +1671,7 @@ def build_manual_match(sub, period_label: Optional[str] = None) -> BillingMatch:
     computed["period_start"] = start.isoformat() if start else None
     computed["period_end"] = end.isoformat() if end else None
     computed["month"] = label
+    computed["generation_complete"] = label is not None
     computed["project_total_kwh"] = array_kwh
     computed["array_kwh"] = array_kwh
     # Discount-model fields for the UI/invoice (auditable savings story):
@@ -2043,6 +2080,8 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
         DEFAULT_OFFTAKER_SUBJECT_TEMPLATE, DEFAULT_OFFTAKER_BODY_TEMPLATE,
         build_offtaker_context, render_merge, html_to_text,
     )
+    if is_test:
+        pay_url = None  # A preview must never solicit payment.
     inv = match.computed_invoice or {}
     cust = match.customer.get("name") or sub.customer_name or "your array"
     period = ""
@@ -2057,7 +2096,7 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
         'color:#92400e;padding:10px 14px;border-radius:10px;margin:0 0 16px;font-size:13px;'
         'line-height:1.45;">'
         '<b>Test send</b> — this went to you, not the customer. '
-        'The Pay button below is real (same as offtakers will see).</p>' if is_test else "")
+        'No payment is requested for this test copy.</p>' if is_test else "")
 
     # ── The LETTER: the tenant's mass template, rendered per offtaker ────────
     # (Ford, 2026-07-03: "the email should automatically say hi <offtaker name>
@@ -2244,6 +2283,8 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
         wordmark=operator,
         product="array_operator",
     )
+    if is_test:
+        body_text = "TEST COPY — no payment requested.\n\n" + body_text
     text = render_email_skin_text(
         headline="Your solar credit invoice",
         intro_line=(period or cust),
@@ -2255,13 +2296,70 @@ def _email_html(match: BillingMatch, sub, is_test: bool,
     return subject, html, text
 
 
+_FROZEN_PAY_PLACEHOLDER = "https://invoice.invalid/frozen-payment-link"
+
+
+def _prepare_invoice_evidence(match, sub, tenant, *, invoice_date=None, note=None,
+                              gmp_pdf_override=None, trueup=False):
+    """Called inside freeze's transaction after final credit/number allocation.
+
+    Render once before payment-provider failures. Both email variants and exact
+    invoice/utility attachments remain unchanged on every subsequent retry.
+    """
+    to, cc, problems = resolve_recipients(sub, tenant)
+    if not to:
+        raise ValueError("; ".join(problems) or "No invoice recipient configured")
+    op_email = sub.operator_email or getattr(tenant, "contact_email", None)
+    bcc = [op_email] if op_email and op_email not in to and op_email not in cc else []
+    # A durable payment URL is not available until Checkout has been prepared;
+    # the immutable attachment directs the recipient to the email's Pay button.
+    match.template = dict(match.template or {})
+    match.template["payable_to"] = "Payment instructions are in the invoice email."
+    with tempfile.TemporaryDirectory(prefix="ao-frozen-") as tmp:
+        paths = generate_files(match, list(sub.formats or ["pdf"]),
+            False if trueup else sub.include_summary, pathlib.Path(tmp),
+            invoice_date=invoice_date or date.today(), sub=sub,
+            gmp_pdf_override=gmp_pdf_override, pay_url=None)
+        attachments = [_b64(p) for p in paths]
+    product = getattr(tenant, "product", "array_operator")
+    op_name = _operator_company_name(tenant.id) or getattr(tenant, "name", None)
+    sender = getattr(tenant, "send_from_email", None) or _platform_from_email(product)
+    from_addr = f'"{op_name}" <{sender}>' if op_name else sender
+    variants = {}
+    for variant, url in (("offline", None), ("online", _FROZEN_PAY_PLACEHOLDER)):
+        subject, html, text = _email_html(match, sub, False, note=note,
+            attachment_names=[p["filename"] for p in attachments], pay_url=url)
+        variants[variant] = dict(to=to[0] if len(to) == 1 else to, cc=cc or None,
+            bcc=bcc or None, subject=subject, html=html, text=text,
+            from_addr=from_addr,
+            reply_to=getattr(tenant, "contact_email", None), product=product)
+    eco = _offtaker_email_fields(tenant.id, subscription_id=sub.id)
+    import hashlib
+    return {"variants": variants, "attachments": attachments,
+        "artifact_sha256": {a["filename"]: hashlib.sha256(base64.b64decode(a["content"])).hexdigest() for a in attachments},
+        "prepared_at": datetime.utcnow().isoformat() + "Z",
+        "email_copy_override_id": eco.get("email_copy_override_id")}
+
+
+def _frozen_email_payload(invoice_id, pay_url):
+    from .issuance import rendered_evidence
+    evidence = rendered_evidence(invoice_id)
+    payload = dict(evidence["variants"]["online" if pay_url else "offline"])
+    payload["attachments"] = evidence["attachments"]
+    if pay_url:
+        payload["html"] = payload["html"].replace(_FROZEN_PAY_PLACEHOLDER, pay_url)
+        payload["text"] = payload["text"].replace(_FROZEN_PAY_PLACEHOLDER, pay_url)
+    return payload, evidence
+
+
 def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None,
                          triggered_by: str = "manual", is_test: bool = False,
                          note: Optional[str] = None,
                          expected_period_label: Optional[str] = None,
                          expected_amount_usd: Optional[float] = None,
                          gmp_pdf_override: Optional[bytes] = None,
-                         force: bool = False) -> dict:
+                         force: bool = False,
+                         period_label: Optional[str] = None) -> dict:
     """Generate + email one subscription's report. Stamps schedule fields on
     success. Returns a structured result dict (never raises for the common
     failure cases — surfaces them in the result instead).
@@ -2280,13 +2378,26 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
     `force=True` bypasses the exactly-once-per-period guard for a deliberate
     operator re-send."""
     from ..notify import _send_via_resend
+    from ..models import Tenant
+    tenant = db.get(Tenant, tenant.id)
+    if tenant is None or sub.tenant_id != tenant.id or sub.deleted_at:
+        return {"ok": False, "held": True, "error": "Subscription is not available for this tenant"}
+    db.refresh(tenant)
+    if triggered_by.startswith("sched") and (tenant.sending_paused or not sub.enabled):
+        return {"ok": False, "held": True, "error": "Scheduled billing is paused"}
+
 
     try:
-        match = build_match(sub)
+        if period_label is None and expected_period_label:
+            import re
+            dates = re.findall(r"\d{4}-\d{2}-\d{2}", expected_period_label)
+            if dates:
+                period_label = dates[-1][:7]
+        match = build_match(sub, period_label=period_label) if period_label else build_match(sub)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"workbook unreadable: {e}"}
     if not match.matched or not match.latest_period:
-        return {"ok": False, "error": "no current billing period in the stored workbook"}
+        return {"ok": False, "held": True, "error": "No complete source evidence for this billing period"}
 
     # ── Guard: don't send a period the operator didn't review (#3) ────────────
     # approve_draft rebuilds the invoice fresh here; if a newer utility bill landed
@@ -2294,6 +2405,10 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
     # DIFFERENT period than the one reviewed. When the caller pins the reviewed
     # period, refuse (and prompt to regenerate) rather than sending the drift.
     _ci = match.computed_invoice or {}
+    if not is_test and (not _ci.get("period_start") or not _ci.get("period_end")):
+        return {"ok": False, "held": True, "error": "A real invoice requires dated billing coverage"}
+    if _ci.get("generation_complete") is False and getattr(sub, "utility_account_id", None) is not None:
+        return {"ok": False, "held": True, "error": "Generation does not cover the complete billing period"}
     cur_period_label = None
     if _ci.get("period_start") or _ci.get("period_end"):
         cur_period_label = f"{_ci.get('period_start') or '—'} → {_ci.get('period_end') or '—'}"
@@ -2361,7 +2476,7 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
     # but this period's bill hasn't landed, OR never bound at all (only telemetry
     # available) — SKIP and wait, test or not. Workbook subscriptions are exempt.
     _ci_guard = match.computed_invoice or {}
-    if not getattr(sub, "source_workbook", None):
+    if not getattr(match, "_frozen_invoice_id", None) and not getattr(sub, "source_workbook", None):
         _src = _ci_guard.get("kwh_source")
         _has_bill = _ci_guard.get("has_utility_bill") is True
         # Is the bound account a VEC/SmartHub one? (Its measured-generation source
@@ -2402,13 +2517,40 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
             return {"ok": False, "skipped": True, "error": _reason,
                     "kwh_source": _src}
 
+    invoice_id = None
+    if not is_test:
+        from .issuance import freeze, reconcile
+        # Release any caller read transaction before the independent durable write.
+        db.commit()
+        try:
+            invoice_id, match, invoice_status = freeze(
+                tenant_id=tenant.id, subscription_id=sub.id, key=_cur_guard,
+                match=match, expected_amount=expected_amount_usd,
+                prepare=lambda frozen: _prepare_invoice_evidence(frozen, sub, tenant,
+                    invoice_date=invoice_date, note=note, gmp_pdf_override=gmp_pdf_override))
+            _ci = match.computed_invoice or {}
+            recovery = reconcile(invoice_id)
+            if recovery.get("ok"):
+                db.refresh(sub)
+                return {"ok": False, "already_sent": True, "skipped": True,
+                        "invoice_id": invoice_id, "error": "This immutable invoice was already accepted",
+                        "invoice_number": _ci.get("invoice_number"), "amount_owed": _ci.get("amount_owed")}
+            if recovery.get("uncertain"):
+                return {"ok": False, "held": True, "uncertain": True, "invoice_id": invoice_id,
+                        "error": "A prior send may have succeeded; reconcile delivery before retrying"}
+            db.refresh(sub)
+        except Exception as exc:
+            return {"ok": False, "held": True, "error": str(exc)}
+
     # For a real (non-test) send honor the slider; a test always goes to_me.
     if is_test:
         op = sub.operator_email or getattr(tenant, "contact_email", None)
         to, cc, problems = ([op] if op else []), [], (
             [] if op else ["No operator email on file for the test send."])
     else:
-        to, cc, problems = resolve_recipients(sub, tenant)
+        envelope, _ = _frozen_email_payload(invoice_id, None)
+        to = envelope["to"] if isinstance(envelope["to"], list) else [envelope["to"]]
+        cc, problems = envelope.get("cc") or [], []
     if not to:
         return {"ok": False, "error": "; ".join(problems) or "no recipients"}
 
@@ -2424,14 +2566,14 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
     # platform application fee) when the owner has Connect ready. Best-effort —
     # a Stripe failure never blocks the classic invoice email.
     #
-    # ALSO mint on test sends so the operator sees the same Pay button the
-    # offtaker will (screenshot 2026-07-13: test send had no pay link because
-    # we previously gated on not is_test).
+    # A test copy must never create a collectible invoice or mutate the ledger.
+    # Payment integration is exercised separately with Stripe test credentials.
     pay_url = None
     payment_id = None
     fee_cents = None
     pay_skip_reason = None
-    if (getattr(tenant, "product", None) or "nepool") == "array_operator":
+    if (not is_test and (getattr(tenant, "product", None) or "nepool") == "array_operator"
+            and getattr(tenant, "offtaker_payment_policy", "online_required") != "offline"):
         try:
             from . import payments as _pay
             # Refresh / auto-link Connect before minting so a just-finished bank
@@ -2461,49 +2603,79 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
             logger.exception("offtaker pay-link creation crashed for sub=%s",
                              getattr(sub, "id", "?"))
 
-    _eco_fields: dict = {}
-    with tempfile.TemporaryDirectory(prefix="ao-bill-") as tmp:
-        try:
-            paths = generate_files(match, formats, sub.include_summary,
-                                   pathlib.Path(tmp), invoice_date=invoice_date,
-                                   sub=sub, gmp_pdf_override=gmp_pdf_override,
-                                   pay_url=pay_url)
-        except Exception as e:  # noqa: BLE001
-            logger.exception("billing render failed")
-            return {"ok": False, "error": f"render failed: {e}"}
-        attachments = [_b64(p) for p in paths]
-        # Snapshot override id before send so one-shot overrides can expire.
-        _eco_fields = _offtaker_email_fields(
-            getattr(tenant, "id", None) or getattr(sub, "tenant_id", None),
-            subscription_id=getattr(sub, "id", None),
-        )
-        subject, html, text = _email_html(match, sub, is_test, note=note,
-                                          attachment_names=[p.name for p in paths],
-                                          pay_url=pay_url)
+    if not is_test:
+        db.commit()  # release payment/subscription locks before the durable issue write
+        from .issuance import attach_payment
+        attach_payment(invoice_id, payment_id)
 
-        # White-label the sender: the offtaker sees the OPERATOR, not Array
-        # Operator. Send under the operator's name — from their own verified
-        # sending domain if they configured one, else the platform's sending
-        # address carrying their display name — and route replies to the operator.
-        product = getattr(tenant, "product", "array_operator")
-        op_name = _operator_company_name(getattr(tenant, "id", None)) or getattr(tenant, "name", None)
-        op_email = getattr(tenant, "contact_email", None)
-        if getattr(tenant, "send_from_email", None):
-            from_addr = (f'"{op_name}" <{tenant.send_from_email}>' if op_name else tenant.send_from_email)
-        elif op_name:
-            from_addr = f'"{op_name}" <{_platform_from_email(product)}>'
-        else:
-            from_addr = None
+    if (not is_test and (getattr(tenant, "product", None) or "nepool") == "array_operator"
+            and getattr(tenant, "offtaker_payment_policy", "online_required") != "offline"
+            and float(_ci.get("amount_owed") or 0) > 0 and not pay_url):
+        from .issuance import hold
+        reason = "Online payment is required: " + str(pay_skip_reason or "payment link unavailable")
+        hold(invoice_id, reason)
+        return {"ok": False, "held": True, "invoice_id": invoice_id, "error": reason}
 
-        ok = _send_via_resend(
-            to=to[0] if len(to) == 1 else to, subject=subject, html=html, text=text,
-            attachments=attachments, cc=cc or None, bcc=bcc or None, from_addr=from_addr,
-            reply_to=(op_email or None), product=product,
-        )
-        # Capture Resend id immediately after send (bool return is back-compat;
-        # id lives on the function attr / last_resend_id helper).
-        from ..notify import last_resend_id as _last_resend_id
-        resend_email_id = _last_resend_id() if ok else None
+    if not is_test:
+        from .dispatch import send_email_once
+        email_payload, evidence = _frozen_email_payload(invoice_id, pay_url)
+        dispatch_result = send_email_once(tenant_id=tenant.id, key=f"invoice:{invoice_id}", email=email_payload)
+        ok = dispatch_result.get("ok", False)
+        resend_email_id = dispatch_result.get("resend_email_id") if ok else None
+        paths = [pathlib.Path(a["filename"]) for a in email_payload["attachments"]]
+        to = email_payload["to"] if isinstance(email_payload["to"], list) else [email_payload["to"]]
+        cc, bcc = email_payload.get("cc") or [], email_payload.get("bcc") or []
+        _eco_fields = evidence
+    else:
+        _eco_fields: dict = {}
+        with tempfile.TemporaryDirectory(prefix="ao-bill-") as tmp:
+            try:
+                paths = generate_files(match, formats, sub.include_summary,
+                                       pathlib.Path(tmp), invoice_date=invoice_date,
+                                       sub=sub, gmp_pdf_override=gmp_pdf_override,
+                                       pay_url=pay_url)
+            except Exception as e:  # noqa: BLE001
+                logger.exception("billing render failed")
+                return {"ok": False, "error": f"render failed: {e}"}
+            attachments = [_b64(p) for p in paths]
+            # Snapshot override id before send so one-shot overrides can expire.
+            _eco_fields = _offtaker_email_fields(
+                getattr(tenant, "id", None) or getattr(sub, "tenant_id", None),
+                subscription_id=getattr(sub, "id", None),
+            )
+            subject, html, text = _email_html(match, sub, is_test, note=note,
+                                              attachment_names=[p.name for p in paths],
+                                              pay_url=pay_url)
+
+            # White-label the sender: the offtaker sees the OPERATOR, not Array
+            # Operator. Send under the operator's name — from their own verified
+            # sending domain if they configured one, else the platform's sending
+            # address carrying their display name — and route replies to the operator.
+            product = getattr(tenant, "product", "array_operator")
+            op_name = _operator_company_name(getattr(tenant, "id", None)) or getattr(tenant, "name", None)
+            op_email = getattr(tenant, "contact_email", None)
+            if getattr(tenant, "send_from_email", None):
+                from_addr = (f'"{op_name}" <{tenant.send_from_email}>' if op_name else tenant.send_from_email)
+            elif op_name:
+                from_addr = f'"{op_name}" <{_platform_from_email(product)}>'
+            else:
+                from_addr = None
+
+            email_payload = dict(
+                to=to[0] if len(to) == 1 else to, subject=subject, html=html, text=text,
+                attachments=attachments, cc=cc or None, bcc=bcc or None, from_addr=from_addr,
+                reply_to=(op_email or None), product=product)
+            dispatch_result = {}
+            if is_test:
+                ok = _send_via_resend(**email_payload)
+            else:
+                from .dispatch import send_email_once
+                dispatch_result = send_email_once(tenant_id=tenant.id, key=f"invoice:{invoice_id}", email=email_payload)
+                ok = dispatch_result.get("ok", False)
+            # Capture Resend id immediately after send (bool return is back-compat;
+            # id lives on the function attr / last_resend_id helper).
+            from ..notify import last_resend_id as _last_resend_id
+            resend_email_id = (dispatch_result.get("resend_email_id") if not is_test else _last_resend_id()) if ok else None
 
     result = {"ok": bool(ok), "to": to, "cc": cc, "bcc": bcc,
               "attachments": [p.name for p in paths],
@@ -2517,57 +2689,17 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
               "email_copy_override_id": (_eco_fields or {}).get("email_copy_override_id")}
     if ok:
         result["delivery_status"] = "accepted"
-    if ok and not is_test:
-        now = datetime.utcnow()
-        sub.last_sent_at = now
-        sub.last_invoice_number = result["invoice_number"]
-        # Dollars of the invoice just sent — the send-pipeline dashboard sums
-        # these for the delivered-$ roll-up (never rebuilt per-sub at read time).
-        try:
-            sub.last_sent_amount_usd = (float(result["amount_owed"])
-                                        if result.get("amount_owed") is not None else None)
-        except (TypeError, ValueError):
-            sub.last_sent_amount_usd = None
-        # kWh of the invoice just sent — the sibling of the dollars above. The
-        # monthly offtaker summary reports what was INVOICED; recomputing
-        # generation weeks later can disagree once a bill is re-captured or an
-        # allocation is edited, and a report is a record, not an estimate.
-        try:
-            _ci_kwh = (_ci or {}).get("kwh")
-            sub.last_sent_customer_kwh = (float(_ci_kwh)
-                                          if _ci_kwh is not None else None)
-        except (TypeError, ValueError):
-            sub.last_sent_customer_kwh = None
-        # Record the period just sent so the exactly-once guard (#5) can block a
-        # duplicate send of the same billing period (late bill / ops re-run).
-        if cur_period_key:
-            sub.last_sent_period_end = cur_period_key
-        # Debit banked true-up credit only after a successful non-test send.
-        try:
-            applied = float((_ci or {}).get("credit_applied") or 0.0)
-        except (TypeError, ValueError):
-            applied = 0.0
-        if applied > 0:
-            prev = float(getattr(sub, "pending_credit_usd", None) or 0.0)
-            sub.pending_credit_usd = round(max(0.0, prev - applied), 2)
-            result["credit_applied"] = applied
+    if not is_test:
+        from .issuance import finish
+        finish(invoice_id, dispatch_result, payment_id=payment_id)
+        db.refresh(sub)
+        result["invoice_id"] = invoice_id
+        result["uncertain"] = dispatch_result.get("uncertain", False)
+        result["retry_at"] = dispatch_result.get("retry_at")
+        if ok:
+            result["credit_applied"] = float(_ci.get("credit_applied") or 0)
             result["pending_credit_usd"] = sub.pending_credit_usd
-        # Sequential numbering: this number is now used — advance the counter so the
-        # next invoice gets start+1, start+2, …
-        if getattr(sub, "invoice_number_next", None) is not None:
-            sub.invoice_number_next = sub.invoice_number_next + 1
-        sub.next_send_at = next_send_at(sub.cadence, now)
-        # Expire one-shot / max_sends email-copy overrides after a real send.
-        try:
-            from .. import email_copy_overrides as _eco
-            _eco.record_send(db, result.get("email_copy_override_id"))
-        except Exception:  # noqa: BLE001
-            logger.exception("email_copy_override record_send failed")
-        # Delivery-truth: stamp Resend id so webhook can match by email_id.
-        # Do NOT set last_delivered_at here — that requires email.delivered.
-        if resend_email_id:
-            sub.last_resend_email_id = str(resend_email_id)[:64]
-        db.commit()
+            db.commit()
     # is_test: return resend_email_id in result (above) but never stamp delivery
     # fields on the subscription row.
     if not ok:
@@ -2624,7 +2756,7 @@ def _operator_review_email(sub, tenant, draft) -> tuple[str, str, str]:
     return subject, html, text
 
 
-def draft_subscription(db, sub, tenant, *, triggered_by: str = "scheduled") -> dict:
+def draft_subscription(db, sub, tenant, *, triggered_by: str = "scheduled", period_label: Optional[str] = None) -> dict:
     """Approval-mode handling for a due scheduled period: create (or reuse) a
     pending ReportDraft from the stored workbook and email the OPERATOR a
     'ready to review' note. The report lands in their inbox — they open it,
@@ -2637,11 +2769,11 @@ def draft_subscription(db, sub, tenant, *, triggered_by: str = "scheduled") -> d
     from ..notify import _send_via_resend
 
     try:
-        match = build_match(sub)
+        match = build_match(sub, period_label=period_label) if period_label else build_match(sub)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"workbook unreadable: {e}"}
     if not match.matched or not match.latest_period:
-        return {"ok": False, "error": "no current billing period in the stored workbook"}
+        return {"ok": False, "held": True, "error": "No complete source evidence for this billing period"}
 
     ci = match.computed_invoice or {}
 
@@ -2679,6 +2811,15 @@ def draft_subscription(db, sub, tenant, *, triggered_by: str = "scheduled") -> d
                           "on the next utility bill before drafting again."),
                 "triggered_by": triggered_by}
 
+    from ..models import OfftakerInvoice
+    historical = db.scalar(select(OfftakerInvoice).where(
+        OfftakerInvoice.subscription_id == sub.id,
+        OfftakerInvoice.period_key == _pe_guard,
+        OfftakerInvoice.status.in_(["accepted", "sending", "uncertain"])))
+    if historical:
+        return {"ok": False, "already_sent": historical.status == "accepted", "held": True,
+                "error": "This billing period is already issued or awaiting delivery reconciliation"}
+
     inv_no = ci.get("invoice_number")
     period_label = None
     if ci.get("period_start") or ci.get("period_end"):
@@ -2694,6 +2835,8 @@ def draft_subscription(db, sub, tenant, *, triggered_by: str = "scheduled") -> d
     # (e.g. a bumped sequence or a different period_end), which let a regenerated
     # draft DUPLICATE for the same period; period_label (period_start → period_end)
     # is stable for a given billing period, so we update the one draft in place.
+    from sqlalchemy import update
+    db.execute(update(type(sub)).where(type(sub).id == sub.id).values(id=type(sub).id))
     existing = None
     if period_label is not None:
         existing = db.execute(
@@ -2729,9 +2872,10 @@ def draft_subscription(db, sub, tenant, *, triggered_by: str = "scheduled") -> d
             if getattr(tenant, "send_from_email", None):
                 nm = getattr(tenant, "send_from_name", None) or getattr(tenant, "company_name", None)
                 from_addr = f'"{nm}" <{tenant.send_from_email}>' if nm else tenant.send_from_email
-            notified = bool(_send_via_resend(
-                to=op, subject=subject, html=html, text=text,
-                from_addr=from_addr, product="array_operator"))
+            from .dispatch import send_email_once
+            notified = bool(send_email_once(tenant_id=tenant.id, key=f"draft:{draft.id}", kind="review",
+                email=dict(to=op, subject=subject, html=html, text=text,
+                           from_addr=from_addr, product="array_operator")).get("ok"))
         except Exception:  # noqa: BLE001
             notified = False
     return {"ok": True, "drafted": True, "draft_id": draft.id,
@@ -2744,7 +2888,8 @@ def draft_subscription(db, sub, tenant, *, triggered_by: str = "scheduled") -> d
 def deliver_trueup_subscription(
     db, sub, tenant, *, as_of: Optional[date] = None,
     triggered_by: str = "sched-billing-trueup", is_test: bool = False,
-    force: bool = False,
+    force: bool = False, expected_period_label: Optional[str] = None,
+    expected_amount_usd: Optional[float] = None,
 ) -> dict:
     """Year-end budget true-up: charge the underpayment or bank a credit.
 
@@ -2755,24 +2900,46 @@ def deliver_trueup_subscription(
     """
     from .trueup import compute_annual_trueup, build_trueup_match
     from ..notify import _send_via_resend
+    from ..models import Tenant
+    tenant = db.get(Tenant, tenant.id)
+    if tenant is None or sub.tenant_id != tenant.id or sub.deleted_at:
+        return {"ok": False, "held": True, "error": "Subscription is not available for this tenant"}
+    db.refresh(tenant)
+    if triggered_by.startswith("sched") and (tenant.sending_paused or not sub.enabled):
+        return {"ok": False, "held": True, "error": "Scheduled billing is paused"}
+
 
     if not getattr(sub, "annual_trueup", False) and not force:
         return {"ok": False, "skipped": True,
                 "error": "annual_trueup is not enabled for this offtaker"}
 
-    settlement = compute_annual_trueup(sub, as_of=as_of)
-    if not settlement.ok:
-        # Already settled this window → benign skip; missing budget/months → skip.
-        return {"ok": False, "skipped": True, "error": settlement.error,
-                "trueup": settlement.to_dict()}
+    from .issuance import load_frozen
+    from .trueup import trueup_window
+    window_end = trueup_window(as_of)[1]
+    if expected_period_label:
+        import re
+        dates = re.findall(r"\d{4}-\d{2}-\d{2}", expected_period_label)
+        if dates:
+            window_end = date.fromisoformat(dates[-1])
+    match = load_frozen(tenant.id, sub.id, f"trueup:{window_end.isoformat()}")
+    if match is not None:
+        from types import SimpleNamespace
+        frozen_settlement = match.computed_invoice["trueup"]
+        settlement = SimpleNamespace(window_end=window_end, to_dict=lambda: frozen_settlement)
+    else:
+        settlement = compute_annual_trueup(sub, as_of=as_of)
+        if not settlement.ok:
+            # Already settled this window → benign skip; missing budget/months → skip.
+            return {"ok": False, "skipped": True, "error": settlement.error,
+                    "trueup": settlement.to_dict()}
 
-    operator = (
-        _operator_company_name(getattr(tenant, "id", None))
-        or getattr(tenant, "company_name", None)
-        or getattr(tenant, "name", None)
-        or "Array Operator"
-    )
-    match = build_trueup_match(sub, settlement, operator=operator)
+        operator = (
+            _operator_company_name(getattr(tenant, "id", None))
+            or getattr(tenant, "company_name", None)
+            or getattr(tenant, "name", None)
+            or "Array Operator"
+        )
+        match = build_trueup_match(sub, settlement, operator=operator)
     ci = match.computed_invoice or {}
     cur_period_key = f"trueup:{settlement.window_end.isoformat()}"
     # Exactly-once for the TRUE-UP lives on its own column. Writing the true-up
@@ -2789,18 +2956,45 @@ def deliver_trueup_subscription(
                 "error": f"True-up for {settlement.window_end.isoformat()} already sent",
                 "trueup": settlement.to_dict()}
 
+    window_label = f"{ci.get('period_start')} → {ci.get('period_end')}"
+    if expected_period_label is not None and expected_period_label != window_label:
+        return {"ok": False, "period_changed": True, "error": "True-up window changed since approval"}
+    if expected_amount_usd is not None and abs(float(ci.get("amount_owed") or 0) - float(expected_amount_usd)) >= .005:
+        return {"ok": False, "amount_changed": True, "error": "True-up amount changed since approval"}
+    invoice_id = None
+    if not is_test:
+        from .issuance import freeze, reconcile
+        db.commit()
+        try:
+            invoice_id, match, _ = freeze(tenant_id=tenant.id, subscription_id=sub.id,
+                key=cur_period_key, match=match, expected_amount=expected_amount_usd,
+                prepare=lambda frozen: _prepare_invoice_evidence(frozen, sub, tenant,
+                    note=frozen.computed_invoice.get("trueup_note"), trueup=True))
+            ci = match.computed_invoice or {}
+            recovery = reconcile(invoice_id)
+            if recovery.get("ok") or recovery.get("uncertain"):
+                return {"ok": False, "already_sent": recovery.get("ok"), "uncertain": recovery.get("uncertain"),
+                        "error": "True-up already sent or requires delivery reconciliation", "invoice_id": invoice_id}
+            db.refresh(sub)
+        except Exception as exc:
+            return {"ok": False, "held": True, "error": str(exc)}
+
     # Recipients — same rules as regular delivery. Test mode forces to operator.
     if is_test:
         op = sub.operator_email or getattr(tenant, "contact_email", None)
         to, cc, problems = ([op] if op else [], [],
                             [] if op else ["No operator email on file."])
     else:
-        to, cc, problems = resolve_recipients(sub, tenant)
+        envelope, _ = _frozen_email_payload(invoice_id, None)
+        to = envelope["to"] if isinstance(envelope["to"], list) else [envelope["to"]]
+        cc, problems = envelope.get("cc") or [], []
     if problems and not to:
         return {"ok": False, "error": "; ".join(problems)}
     if not to:
         return {"ok": False, "error": "no recipient email configured"}
 
+    op_bcc = sub.operator_email or getattr(tenant, "contact_email", None)
+    bcc = [op_bcc] if op_bcc and not is_test and op_bcc not in to and op_bcc not in cc else []
     invoice_date = date.today()
     formats = list(sub.formats or ["pdf"])
     pay_url = None
@@ -2808,7 +3002,8 @@ def deliver_trueup_subscription(
     fee_cents = None
     pay_skip_reason = None
     # Only mint a pay link when there is a real charge.
-    if float(ci.get("amount_owed") or 0) >= 0.50:
+    if (not is_test and float(ci.get("amount_owed") or 0) >= 0.50
+            and getattr(tenant, "offtaker_payment_policy", "online_required") != "offline"):
         try:
             from . import payments as _pay
             pay_res = _pay.create_offtaker_payment(
@@ -2823,42 +3018,71 @@ def deliver_trueup_subscription(
             pay_skip_reason = str(exc)[:200]
             logger.warning("trueup pay-link failed sub=%s: %s", sub.id, exc)
 
-    with tempfile.TemporaryDirectory(prefix="ao-trueup-") as tmp:
-        try:
-            paths = generate_files(
-                match, formats, False, pathlib.Path(tmp),
-                invoice_date=invoice_date, sub=sub, pay_url=pay_url)
-        except Exception as e:  # noqa: BLE001
-            logger.exception("trueup render failed")
-            return {"ok": False, "error": f"render failed: {e}"}
-        attachments = [_b64(p) for p in paths]
-        subject, html, text = _email_html(
-            match, sub, is_test, note=ci.get("trueup_note"),
-            attachment_names=[p.name for p in paths], pay_url=pay_url)
+    if not is_test:
+        db.commit()
+        from .issuance import attach_payment
+        attach_payment(invoice_id, payment_id)
 
-        product = getattr(tenant, "product", "array_operator")
-        op_name = _operator_company_name(getattr(tenant, "id", None)) or getattr(tenant, "name", None)
-        op_email = getattr(tenant, "contact_email", None)
-        if getattr(tenant, "send_from_email", None):
-            from_addr = (f'"{op_name}" <{tenant.send_from_email}>' if op_name
-                         else tenant.send_from_email)
-        elif op_name:
-            from_addr = f'"{op_name}" <{_platform_from_email(product)}>'
-        else:
-            from_addr = None
+    if (not is_test and getattr(tenant, "offtaker_payment_policy", "online_required") != "offline"
+            and float(ci.get("amount_owed") or 0) > 0 and not pay_url):
+        from .issuance import hold
+        reason = "Online payment is required: " + str(pay_skip_reason or "payment link unavailable")
+        hold(invoice_id, reason)
+        return {"ok": False, "held": True, "invoice_id": invoice_id, "error": reason}
 
-        ok = _send_via_resend(
-            to=to[0] if len(to) == 1 else to, subject=subject, html=html, text=text,
-            attachments=attachments, cc=cc or None, bcc=None,
-            from_addr=from_addr, reply_to=(op_email or None), product=product)
-        from ..notify import last_resend_id as _last_resend_id
-        resend_email_id = _last_resend_id() if ok else None
+    if not is_test:
+        from .dispatch import send_email_once
+        email_payload, evidence = _frozen_email_payload(invoice_id, pay_url)
+        dispatch_result = send_email_once(tenant_id=tenant.id, key=f"invoice:{invoice_id}", email=email_payload, kind="trueup")
+        ok = dispatch_result.get("ok", False)
+        resend_email_id = dispatch_result.get("resend_email_id") if ok else None
+        paths = [pathlib.Path(a["filename"]) for a in email_payload["attachments"]]
+        to = email_payload["to"] if isinstance(email_payload["to"], list) else [email_payload["to"]]
+        cc, bcc = email_payload.get("cc") or [], email_payload.get("bcc") or []
+    else:
+        with tempfile.TemporaryDirectory(prefix="ao-trueup-") as tmp:
+            try:
+                paths = generate_files(
+                    match, formats, False, pathlib.Path(tmp),
+                    invoice_date=invoice_date, sub=sub, pay_url=pay_url)
+            except Exception as e:  # noqa: BLE001
+                logger.exception("trueup render failed")
+                return {"ok": False, "error": f"render failed: {e}"}
+            attachments = [_b64(p) for p in paths]
+            subject, html, text = _email_html(
+                match, sub, is_test, note=ci.get("trueup_note"),
+                attachment_names=[p.name for p in paths], pay_url=pay_url)
+
+            product = getattr(tenant, "product", "array_operator")
+            op_name = _operator_company_name(getattr(tenant, "id", None)) or getattr(tenant, "name", None)
+            op_email = getattr(tenant, "contact_email", None)
+            if getattr(tenant, "send_from_email", None):
+                from_addr = (f'"{op_name}" <{tenant.send_from_email}>' if op_name
+                             else tenant.send_from_email)
+            elif op_name:
+                from_addr = f'"{op_name}" <{_platform_from_email(product)}>'
+            else:
+                from_addr = None
+
+            email_payload = dict(
+                to=to[0] if len(to) == 1 else to, subject=subject, html=html, text=text,
+                attachments=attachments, cc=cc or None, bcc=bcc or None,
+                from_addr=from_addr, reply_to=(op_email or None), product=product)
+            dispatch_result = {}
+            if is_test:
+                ok = _send_via_resend(**email_payload)
+            else:
+                from .dispatch import send_email_once
+                dispatch_result = send_email_once(tenant_id=tenant.id, key=f"invoice:{invoice_id}", email=email_payload, kind="trueup")
+                ok = dispatch_result.get("ok", False)
+            from ..notify import last_resend_id as _last_resend_id
+            resend_email_id = (dispatch_result.get("resend_email_id") if not is_test else _last_resend_id()) if ok else None
 
     result = {
         # No BCC on the true-up send (see the _send_via_resend call above). This
         # used to read an unbound name and crash AFTER the email had gone out,
         # so nothing below was stamped and every retry re-sent the settlement.
-        "ok": bool(ok), "to": to, "cc": cc, "bcc": None,
+        "ok": bool(ok), "to": to, "cc": cc, "bcc": bcc,
         "attachments": [p.name for p in paths],
         "invoice_number": ci.get("invoice_number"),
         "amount_owed": ci.get("amount_owed"),
@@ -2869,28 +3093,16 @@ def deliver_trueup_subscription(
         "resend_email_id": resend_email_id if ok else None,
         "is_trueup": True,
     }
-    if ok and not is_test:
-        now = datetime.utcnow()
-        sub.last_sent_at = now
-        sub.last_invoice_number = result["invoice_number"]
-        try:
-            sub.last_sent_amount_usd = float(result["amount_owed"] or 0)
-        except (TypeError, ValueError):
-            sub.last_sent_amount_usd = 0.0
-        sub.last_trueup_window_end = settlement.window_end
-        # Bank credit when they overpaid; charge already billed above.
-        if settlement.credit_usd > 0:
-            prev = float(getattr(sub, "pending_credit_usd", None) or 0.0)
-            sub.pending_credit_usd = round(prev + settlement.credit_usd, 2)
-            result["pending_credit_usd"] = sub.pending_credit_usd
-        if getattr(sub, "invoice_number_next", None) is not None:
-            sub.invoice_number_next = sub.invoice_number_next + 1
-        # Don't advance monthly next_send_at off the true-up cadence — true-up
-        # is a side schedule. Leave next_send_at alone.
-        db.commit()
+    if not is_test:
+        from .issuance import finish
+        finish(invoice_id, dispatch_result, payment_id=payment_id)
+        db.refresh(sub)
+        result["invoice_id"] = invoice_id
+        result["uncertain"] = dispatch_result.get("uncertain", False)
+        result["pending_credit_usd"] = sub.pending_credit_usd
+    if ok:
         result["delivery_status"] = "accepted"
-    elif ok:
-        result["delivery_status"] = "accepted"
+
     return result
 
 
@@ -2931,6 +3143,8 @@ def draft_trueup_subscription(
         f"{settlement.window_end.isoformat()}"
     )
 
+    from sqlalchemy import update
+    db.execute(update(type(sub)).where(type(sub).id == sub.id).values(id=type(sub).id))
     existing = db.execute(
         select(ReportDraft).where(
             ReportDraft.subscription_id == sub.id,
@@ -2962,9 +3176,10 @@ def draft_trueup_subscription(
                       or getattr(tenant, "company_name", None))
                 from_addr = (f'"{nm}" <{tenant.send_from_email}>' if nm
                              else tenant.send_from_email)
-            notified = bool(_send_via_resend(
-                to=op, subject=subject, html=html, text=text,
-                from_addr=from_addr, product="array_operator"))
+            from .dispatch import send_email_once
+            notified = bool(send_email_once(tenant_id=tenant.id, key=f"draft:{draft.id}", kind="review",
+                email=dict(to=op, subject=subject, html=html, text=text,
+                           from_addr=from_addr, product="array_operator")).get("ok"))
         except Exception:  # noqa: BLE001
             notified = False
     return {

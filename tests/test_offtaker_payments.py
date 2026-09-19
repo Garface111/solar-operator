@@ -245,6 +245,7 @@ def test_mark_payment_paid_idempotent(monkeypatch):
         "payment_status": "paid",
         "payment_intent": "pi_paid_1",
         "amount_total": 10_000,
+        "currency": "usd",
         "metadata": {
             "kind": "offtaker_invoice",
             "payment_id": str(pid),
@@ -356,7 +357,7 @@ def test_email_html_includes_pay_cta():
     assert "#10b981" not in html  # no emerald CTA — match site sky blue
 
 
-def test_email_html_test_banner_mentions_real_pay_button():
+def test_email_html_test_banner_never_solicits_payment():
     from api.billing.delivery import _email_html
     match = _FakeMatch()
     sub = SimpleNamespace(
@@ -371,13 +372,14 @@ def test_email_html_test_banner_mentions_real_pay_button():
             match, sub, is_test=True,
             pay_url="https://checkout.stripe.com/c/pay/cs_test")
     assert "Test send" in html
-    assert "Pay invoice securely" in html
-    assert "same as offtakers will see" in html
+    assert "Pay invoice securely" not in html
+    assert "No payment is requested" in html
+    assert "https://checkout.stripe.com/c/pay/cs_test" not in html
 
 
-def test_link_existing_connect_account_by_email(monkeypatch):
+def test_link_existing_connect_account_by_tenant_metadata(monkeypatch):
     t = _tenant(stripe_connect_account_id=None, stripe_connect_charges_enabled=False)
-    # Override contact email to a known value for matching
+    # Matching is by trusted tenant identity, never a shared email address
     with SessionLocal() as db:
         tenant = db.get(Tenant, t.id)
         tenant.contact_email = "owner@linktest.example"
@@ -386,11 +388,11 @@ def test_link_existing_connect_account_by_email(monkeypatch):
         db.commit()
 
     fake_acct = {
-        "id": "acct_linked_by_email",
+        "id": "acct_linked_by_tenant",
         "email": "owner@linktest.example",
         "charges_enabled": True,
         "details_submitted": True,
-        "metadata": {},
+        "metadata": {"tenant_id": t.id},
     }
 
     class _Page(dict):
@@ -404,7 +406,7 @@ def test_link_existing_connect_account_by_email(monkeypatch):
             res = pay.link_existing_connect_account(db, tenant)
             db.refresh(tenant)
             assert res["ok"] and res["linked"]
-            assert tenant.stripe_connect_account_id == "acct_linked_by_email"
+            assert tenant.stripe_connect_account_id == "acct_linked_by_tenant"
             assert tenant.stripe_connect_charges_enabled is True
 
 
@@ -428,6 +430,8 @@ def test_send_payment_received_emails_calls_resend():
     # at call time, so patch the notify module attribute.
     with patch("api.notify._send_via_resend", side_effect=fake_send):
         res = pay.send_payment_received_emails({
+            "tenant_id": _tenant().id,
+            "payment_id": 987654,
             "offtaker_email": "off@example.com",
             "offtaker_name": "Town of Test",
             "owner_email": "owner@example.com",
