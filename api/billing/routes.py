@@ -6603,6 +6603,7 @@ class OfflinePaymentBody(BaseModel):
 def create_offline_payment(invoice_id: int, body: OfflinePaymentBody,
                            authorization: Optional[str] = Header(default=None)):
     from .payments import record_offline_payment
+    from ..models import Tenant
     t = tenant_from_session(authorization)
     require_not_demo(t)
     if (t.offtaker_payment_policy or "online_required") != "offline":
@@ -6618,6 +6619,10 @@ def create_offline_payment(invoice_id: int, body: OfflinePaymentBody,
     if body.method not in {"check", "cash", "bank_transfer"}:
         raise HTTPException(400, "method must be check, cash, or bank_transfer")
     with SessionLocal() as db:
+        _lock_roster(db, t.id)
+        current_tenant = db.get(Tenant, t.id)
+        if current_tenant.offtaker_payment_policy != "offline":
+            raise HTTPException(409, "Enable offline collection before recording an offline payment")
         try:
             result = record_offline_payment(db, tenant_id=t.id, invoice_id=invoice_id,
                 amount_cents=body.amount_cents, request_key=body.request_key,
