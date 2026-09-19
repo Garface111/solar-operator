@@ -82,7 +82,7 @@ def test_300_dispatch_reject_retry_concurrent_replay(client, monkeypatch):
                 return False
             accepted[recipient] += 1
             notify._send_outcome.set("accepted")
-            notify._resend_receipt.set("synthetic-" + key)
+            notify._resend_receipt.set("synthetic-" + key[-32:])
             return True
     monkeypatch.setattr(notify, "_send_via_resend", transport)
 

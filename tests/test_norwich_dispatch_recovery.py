@@ -117,3 +117,31 @@ def test_invoice_payment_link_survives_crash_before_finish(client,monkeypatch):
         inv=db.get(OfftakerInvoice,iid)
         assert inv.status=="accepted" and inv.payment_id==pid
     assert len(sends)==1
+
+
+def test_provider_evidence_reconciles_uncertain_send_without_retransmit(client,monkeypatch):
+    import resend
+    from api import notify
+    tid,auth=_make_tenant();other,bad_auth=_make_tenant()
+    email={"to":"fixture@example.test","subject":"Frozen invoice","html":"Frozen amount","text":"Frozen amount"}
+    with SessionLocal() as db:
+        row=BillingEmailDispatch(tenant_id=tid,key="uncertain-proof",kind="invoice",email=email,status="uncertain",attempts=1)
+        db.add(row);db.commit();did=row.id
+    reads=[]
+    evidence={**email,"id":"receipt-fixture","tags":[{"name":"billing_dispatch","value":str(did)}],"last_event":"sent"}
+    def get(**kw): reads.append(kw);return evidence
+    monkeypatch.setattr(resend.Emails,"get",get)
+    monkeypatch.setattr(notify,"_send_via_resend",lambda **kw:pytest.fail("Reconciliation must never transmit"))
+    url=f"/v1/array-operator/billing/dispatches/{did}/reconcile"
+    assert client.post(url,headers={"Authorization":bad_auth},json={"receipt_id":"receipt-fixture"}).status_code==404
+    assert not reads
+    evidence["html"]="Wrong invoice"
+    assert client.post(url,headers={"Authorization":auth},json={"receipt_id":"receipt-fixture"}).status_code==409
+    with SessionLocal() as db: assert db.get(BillingEmailDispatch,did).status=="uncertain"
+    evidence["html"]=email["html"]
+    response=client.post(url,headers={"Authorization":auth},json={"receipt_id":"receipt-fixture"})
+    assert response.status_code==200,response.text
+    with SessionLocal() as db:
+        row=db.get(BillingEmailDispatch,did)
+        assert row.status=="accepted" and row.resend_email_id=="receipt-fixture"
+        assert tid in row.error

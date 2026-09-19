@@ -84,8 +84,13 @@ def test_pipeline_rollup_math(client):
         assert d["next_monthly"]["auto"] == 2
         assert d["next_monthly"]["approval"] == 1
         assert d["next_quarterly"]["scheduled"] == 1
-        # next fire dates are 1sts at 09:00 UTC
-        assert d["next_monthly"]["fires_at"].endswith("-01T09:00:00")
+        # Recovery sweeps run daily; monthly and quarterly retain separate times.
+        from datetime import timedelta
+        now = datetime.utcnow()
+        for cadence, clock in (("monthly", "T09:00:00"), ("quarterly", "T09:15:00")):
+            fire = datetime.fromisoformat(d["next_" + cadence]["fires_at"])
+            assert now - timedelta(seconds=5) < fire <= now + timedelta(days=1)
+            assert d["next_" + cadence]["fires_at"].endswith(clock)
         assert d["paused"] is False
     finally:
         _cleanup(tid)
@@ -103,7 +108,7 @@ def test_pause_switch_roundtrip_and_scheduler_gate(client):
         # The scheduler's billing run must SKIP every sub of a paused tenant
         # (benign skips, no sends, no drafts).
         from api.scheduler import deliver_billing_reports
-        res = deliver_billing_reports("monthly")
+        res = deliver_billing_reports("monthly", tenant_id=tid)
         with SessionLocal() as db:
             mine = {s.id for s in db.query(BillingReportSubscription).filter(
                 BillingReportSubscription.tenant_id == tid)}

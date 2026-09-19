@@ -6667,3 +6667,28 @@ def list_issued_invoices(authorization: Optional[str] = Header(default=None)):
             BillingReportSubscription.tenant_id == t.id)).all())
         return {"ok": True, "invoices": [dict(row, id=row["invoice_id"],
             customer_name=names.get(row["subscription_id"])) for row in rows]}
+
+
+class DispatchReconcileBody(BaseModel):
+    receipt_id: str
+
+
+@router.post("/dispatches/{dispatch_id}/reconcile")
+def reconcile_dispatch(dispatch_id: int, body: DispatchReconcileBody,
+                       authorization: Optional[str] = Header(default=None)):
+    """Verify an uncertain email against provider evidence without retransmitting."""
+    import re
+    from .dispatch import reconcile_provider_receipt
+    t = tenant_from_session(authorization)
+    require_not_demo(t)
+    if not re.fullmatch(r"[A-Za-z0-9_-]{8,100}", body.receipt_id):
+        raise HTTPException(400, "Enter the provider email ID")
+    try:
+        return reconcile_provider_receipt(tenant_id=t.id, dispatch_id=dispatch_id,
+            receipt_id=body.receipt_id, actor=f"tenant:{t.id}:{t.contact_email or ''}")
+    except LookupError as exc:
+        raise HTTPException(404, str(exc))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+    except Exception:
+        raise HTTPException(503, "Provider verification unavailable; the dispatch remains held")

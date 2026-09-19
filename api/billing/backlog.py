@@ -12,7 +12,7 @@ from ..models import OfftakerInvoice, OfftakerPayment, ReportDraft
 
 
 def canonical_period(value, cadence="monthly"):
-    value = str(value or "")
+    value = str(value or "").split("T", 1)[0]
     if re.fullmatch(r"\d{4}-Q[1-4]", value):
         return value
     match = re.search(r"(\d{4})-(\d{2})(?:-\d{2})?$", value)
@@ -53,7 +53,16 @@ def queue_closed_periods(db, sub, *, today=None):
             if result.get("ok") or result.get("uncertain"):
                 blocked_ids.add(inv.id)
                 db.refresh(inv)
-    by_key = {i.period_key:i for i in invoices if not i.period_key.startswith("trueup:")}
+    by_key = {}
+    for invoice in invoices:
+        if invoice.period_key.startswith("trueup:"):
+            continue
+        # Older imported records may carry a display label; dated issuance
+        # evidence supplies the month without discarding the original row.
+        key = canonical_period(invoice.period_key) or canonical_period(invoice.period_end)
+        if key is None:
+            raise ValueError(f"Invoice {invoice.id} lacks a canonical billing period; reconcile its history")
+        by_key[key] = invoice
     legacy_payments = {canonical_period(p.period_key,cadence) for p in db.scalars(
         select(OfftakerPayment).where(OfftakerPayment.tenant_id == sub.tenant_id,
         OfftakerPayment.subscription_id == sub.id))}
@@ -68,7 +77,7 @@ def queue_closed_periods(db, sub, *, today=None):
         first = canonical_period(earliest.isoformat(),cadence)
     pending = {canonical_period(d.period_label,cadence) for d in db.scalars(select(ReportDraft).where(
         ReportDraft.tenant_id == sub.tenant_id, ReportDraft.subscription_id == sub.id,
-        ReportDraft.status == "pending"))}
+        ReportDraft.status == "pending", ~ReportDraft.period_label.like("True-up %")))}
     current = bounds(first)[0]
     retry = []
     while current < today:

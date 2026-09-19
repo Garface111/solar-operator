@@ -126,6 +126,12 @@ def finish(invoice_id, result, *, payment_id=None):
                     sub.next_send_at = next_send_at(sub.cadence, stamp)
                 if result.get("resend_email_id"):
                     sub.last_resend_email_id = result["resend_email_id"]
+                override_id = (row.render_snapshot or {}).get("email_copy_override_id")
+                if override_id:
+                    from ..models import EmailCopyOverride
+                    from ..email_copy_overrides import record_send
+                    db.scalar(select(EmailCopyOverride).where(EmailCopyOverride.id == override_id).with_for_update())
+                    record_send(db, override_id)
                 row.applied_at = stamp
         db.commit()
 

@@ -585,7 +585,12 @@ def deliver_billing_reports(cadence: str, *, trueup_only: bool = False, tenant_i
             if trueup_only:
                 work.append((sid, None))
             else:
-                work.extend((sid, period) for period in queue_closed_periods(db, sub))
+                try:
+                    work.extend((sid, period) for period in queue_closed_periods(db, sub))
+                except Exception:
+                    db.rollback()
+                    held.append(sid)
+                    logger.exception("Billing history discovery held for subscription %s", sid)
 
         for sid, period in work:
             sub = db.get(BillingReportSubscription, sid)

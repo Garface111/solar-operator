@@ -55,7 +55,8 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
                      reply_to: str | None = None,
                      headers: dict | None = None,
                      product: str = "nepool",
-                     log_failures: bool = True, idempotency_key: str | None = None) -> bool:
+                     log_failures: bool = True, idempotency_key: str | None = None,
+                     tags: list[dict] | None = None) -> bool:
     """Returns True on success, False otherwise. Uses the official Resend
     SDK so we play nice with their Cloudflare bot rules.
 
@@ -137,6 +138,8 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
         params["headers"] = {k: v for k, v in headers.items() if v}
     if attachments:
         params["attachments"] = attachments
+    if tags:
+        params["tags"] = tags
 
     try:
         _send_outcome.set("unknown")
@@ -202,7 +205,8 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
                      reply_to: str | None = None,
                      headers: dict | None = None,
                      product: str = "nepool",
-                     log_failures: bool = True, idempotency_key: str | None = None) -> bool:
+                     log_failures: bool = True, idempotency_key: str | None = None,
+                     tags: list[dict] | None = None) -> bool:
     """Pre-flight, send, then archive + monitor.
 
     Archiving can never affect the send. The pre-flight CAN stop one — but only
@@ -262,6 +266,7 @@ def _send_via_resend(to: str, subject: str, html: str, text: str | None = None,
         cc=cc, bcc=bcc, from_addr=from_addr, reply_to=reply_to, headers=headers,
         product=product, log_failures=log_failures,
         **({"idempotency_key": idempotency_key} if idempotency_key else {}),
+        **({"tags": tags} if tags else {}),
     )
     receipt = _resend_receipt.get()
     outcome = _send_outcome.get()

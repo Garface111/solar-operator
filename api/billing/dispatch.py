@@ -49,6 +49,7 @@ def send_email_once(*, tenant_id: str, key: str, email: dict, kind="invoice") ->
                     "resend_email_id": row.resend_email_id, "error": row.error or row.status,
                     "retry_at": row.retry_at.isoformat() if row.retry_at else None}
         payload, attempts = dict(row.email), row.attempts
+    payload["tags"] = [{"name": "billing_dispatch", "value": str(row_id)}]
     stable_key = "billing-" + hashlib.sha256(f"{tenant_id}:{key}".encode()).hexdigest()
     notify._send_outcome.set("not_sent")
     notify._send_failure.set({})
@@ -80,7 +81,7 @@ def retry_due_dispatches(limit=100):
             BillingEmailDispatch.status.in_(["prepared", "failed"]),
             BillingEmailDispatch.attempts < 8,
             or_(BillingEmailDispatch.retry_at.is_(None), BillingEmailDispatch.retry_at <= now))
-            .order_by(BillingEmailDispatch.created_at).limit(limit)).all()
+            .order_by(BillingEmailDispatch.created_at).execution_options(yield_per=100))
         pending = []
         for row in rows:
             tenant = db.get(Tenant, row.tenant_id)
@@ -92,6 +93,8 @@ def retry_due_dispatches(limit=100):
                 if not sub or sub.deleted_at or not sub.enabled:
                     continue
             pending.append((row.tenant_id, row.key, row.email, row.kind))
+            if len(pending) >= limit:
+                break
     outcomes = []
     for tenant_id, key, email, kind in pending:
         try:
@@ -103,3 +106,48 @@ def retry_due_dispatches(limit=100):
         except Exception as exc:
             outcomes.append({"key": key, "ok": False, "error": str(exc)})
     return outcomes
+
+
+def reconcile_provider_receipt(*, tenant_id, dispatch_id, receipt_id, actor):
+    """An operator supplies a provider ID; authenticated provider evidence decides.
+
+    This endpoint never sends an email or clears an uncertain claim for retry.
+    """
+    from .. import notify
+    import resend
+    with SessionLocal() as db:
+        row = db.scalar(select(BillingEmailDispatch).where(
+            BillingEmailDispatch.id == dispatch_id, BillingEmailDispatch.tenant_id == tenant_id))
+        if row is None:
+            raise LookupError("Dispatch not found")
+        expected = dict(row.email)
+        key = row.key
+    resend.api_key = notify.RESEND_API_KEY
+    observed = resend.Emails.get(email_id=receipt_id)
+    tags = {v.get("name"):v.get("value") for v in observed.get("tags", [])}
+    if observed.get("id") != receipt_id or tags.get("billing_dispatch") != str(dispatch_id):
+        raise ValueError("Provider receipt does not identify this dispatch")
+    def addresses(value):
+        if not value: return []
+        return sorted([value] if isinstance(value, str) else value)
+    if any(addresses(observed.get(k)) != addresses(expected.get(k)) for k in ("to", "cc", "bcc")):
+        raise ValueError("Provider receipt recipients differ from the frozen invoice")
+    if any((observed.get(k) or "") != (expected.get(k) or "") for k in ("subject", "html", "text")):
+        raise ValueError("Provider receipt content differs from the frozen invoice")
+    if observed.get("last_event") not in ("sent", "delivered", "delivery_delayed", "bounced", "complained", "opened", "clicked", "suppressed"):
+        raise ValueError("Provider has not accepted this email for delivery")
+    with SessionLocal() as db:
+        row = db.scalar(select(BillingEmailDispatch).where(
+            BillingEmailDispatch.id == dispatch_id, BillingEmailDispatch.tenant_id == tenant_id).with_for_update())
+        if row.resend_email_id and row.resend_email_id != receipt_id:
+            raise ValueError("Dispatch already references a different provider receipt")
+        row.status = "accepted"
+        row.resend_email_id = receipt_id
+        row.error = f"Provider evidence reconciled by {actor}"
+        row.retry_at = None
+        db.commit()
+    result = {"ok": True, "resend_email_id": receipt_id, "reconciled": True}
+    if key.startswith("invoice:"):
+        from .issuance import finish
+        finish(int(key.split(":")[1]), result)
+    return result

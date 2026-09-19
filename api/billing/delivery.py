@@ -2699,8 +2699,6 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
         if ok:
             result["credit_applied"] = float(_ci.get("credit_applied") or 0)
             result["pending_credit_usd"] = sub.pending_credit_usd
-            from .. import email_copy_overrides as _eco
-            _eco.record_send(db, result.get("email_copy_override_id"))
             db.commit()
     # is_test: return resend_email_id in result (above) but never stamp delivery
     # fields on the subscription row.
