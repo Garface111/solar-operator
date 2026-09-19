@@ -44,7 +44,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
 log = logging.getLogger("energy_agent.claude_cli")
 
@@ -426,6 +426,34 @@ def _run_once(system: str, prompt: str, model: str | None, timeout: float) -> tu
         return "", f"{model or 'default'}: {str(msg)[:300]}"
     reply = (data.get("result") if isinstance(data, dict) else proc.stdout) or ""
     return str(reply).strip(), ""
+
+
+def ask_text(prompt: str, *, system: str | None = None,
+             max_tokens: int | None = None) -> Optional[str]:
+    """One prompt in, the assistant's text out — or None if the CLI can't serve it.
+
+    The thin path for call sites that want an answer rather than a tool-calling
+    turn (schema mapping, header detection, extraction). Never raises: a
+    disabled backend, a tripped breaker, a busy gate or a bad reply all return
+    None so the caller can fall back to its metered path without a try/except
+    at every site.
+    """
+    if not enabled():
+        return None
+    try:
+        res = call([{"role": "user", "content": prompt}], [],
+                   max_tokens=max_tokens) or {}
+    except Exception as e:  # noqa: BLE001
+        log.info("claude_cli.ask_text unavailable: %s", e)
+        return None
+    msg = res.get("message") or {}
+    content = msg.get("content")
+    if isinstance(content, list):
+        # Defensive: block-style content if the contract ever changes shape.
+        content = "".join(b.get("text", "") for b in content
+                          if isinstance(b, dict))
+    text = (content or "").strip() if isinstance(content, str) else ""
+    return text or None
 
 
 def call(messages: list[dict], tools: list, *, max_tokens: int | None = None) -> dict:

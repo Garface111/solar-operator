@@ -951,13 +951,25 @@ def _llm_fallback(file_bytes: bytes) -> BillingMatch:
 
         anthropic_key = os.getenv("ANTHROPIC_API_KEY")
         openai_key = os.getenv("OPENAI_API_KEY")
-        if not (anthropic_key or openai_key):
+        try:
+            from .. import claude_cli
+            cli_ok = claude_cli.enabled()
+        except Exception:  # noqa: BLE001
+            claude_cli, cli_ok = None, False
+        if not (cli_ok or anthropic_key or openai_key):
             return BillingMatch(matched=False, confidence=0.0, source="none",
-                                warnings=["Schema not recognized and no LLM key configured."])
+                                warnings=["Schema not recognized and no LLM backend configured."])
 
         text = _xlsx_to_text(file_bytes)[:60_000]
         content = ""
-        if anthropic_key:
+        # CLI first — it runs on the subscription seat, so this survives the
+        # metered key running out of credit (Ford 2026-09-19).
+        if cli_ok:
+            content = claude_cli.ask_text(f"{_LLM_PROMPT}\n\n{text}",
+                                          max_tokens=2048) or ""
+            if content and not content.lstrip().startswith("{"):
+                content = "{" + content
+        if not content and anthropic_key:
             resp = httpx.post(
                 "https://api.anthropic.com/v1/messages",
                 headers={"x-api-key": anthropic_key,
@@ -973,7 +985,7 @@ def _llm_fallback(file_bytes: bytes) -> BillingMatch:
             resp.raise_for_status()
             body = resp.json()
             content = "{" + "".join(b.get("text", "") for b in body.get("content", []))
-        else:
+        elif not content and openai_key:
             resp = httpx.post(
                 "https://api.openai.com/v1/chat/completions",
                 headers={"Authorization": f"Bearer {openai_key}",
