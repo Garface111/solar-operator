@@ -42,8 +42,10 @@ def test_history_and_held_rows_survive_later_subscription_changes():
 
 
 def test_unsent_subscription_is_visible():
-    t = _tenant(); _sub(t.id)
+    t = _tenant(); sid = _sub(t.id)
     with SessionLocal() as db:
+        db.get(BillingReportSubscription,sid).created_at=datetime(2026,6,1)
+        db.commit()
         rows = monthly_report.collect_rows(db, db.get(Tenant, t.id), "2026-06")
         assert len(rows) == 1
         assert rows[0]["invoice_status"] == "unsent"
@@ -189,3 +191,14 @@ def test_offline_settlement_appears_in_monthly_cash_and_balance():
         assert row["gross_collected_usd"] == 60
         assert row["outstanding_usd"] == 40
         assert row["paid"] == "Partial payment"
+
+
+def test_history_does_not_invent_expectations_before_onboarding_or_between_quarters():
+    t=_tenant();monthly=_sub(t.id);quarterly=_sub(t.id,cadence="quarterly")
+    with SessionLocal() as db:
+        db.get(BillingReportSubscription,monthly).created_at=datetime(2026,9,1)
+        db.get(BillingReportSubscription,quarterly).created_at=datetime(2026,1,1)
+        db.commit()
+        assert monthly_report.collect_rows(db,db.get(Tenant,t.id),"2026-08") == []
+        rows=monthly_report.collect_rows(db,db.get(Tenant,t.id),"2026-06")
+        assert len(rows)==1 and rows[0]["invoice_status"]=="unsent"

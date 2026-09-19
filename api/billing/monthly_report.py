@@ -32,6 +32,7 @@ import re
 
 from sqlalchemy import select
 from datetime import date, datetime, timedelta
+from calendar import monthrange
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -128,6 +129,8 @@ def collect_rows(db, tenant, period_key: str) -> list[dict]:
     invoices = db.execute(select(OfftakerInvoice).where(
         OfftakerInvoice.tenant_id == tenant.id)).scalars().all()
     by_sub = {i.subscription_id: i for i in invoices if _invoice_month(i) == period_key}
+    year, month = map(int, period_key.split("-"))
+    period_end = date(year, month, monthrange(year, month)[1])
     subs = db.execute(select(BillingReportSubscription).where(
         BillingReportSubscription.tenant_id == tenant.id)).scalars().all()
     rows = []
@@ -136,7 +139,10 @@ def collect_rows(db, tenant, period_key: str) -> list[dict]:
         payments = [p for p in invoice_ledger.list_payment_rows(db, sub)
                     if (p.get("period_label") or "")[:7] == period_key]
         stamped = _period_of(sub) == period_key
-        expected = sub.deleted_at is None and sub.enabled
+        created = sub.created_at.date() if sub.created_at else None
+        expected = (sub.deleted_at is None and sub.enabled
+                    and (created is None or created <= period_end)
+                    and (sub.cadence != "quarterly" or month % 3 == 0))
         if not (inv or payments or stamped or expected):
             continue
         pay = payments[0] if payments else None
