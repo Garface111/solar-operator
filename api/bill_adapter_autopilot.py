@@ -66,7 +66,7 @@ class PlatformPlan:
     family: str                     # gmp | smarthub | eversource | cmp | unknown
     bill_pull: str                  # how bills land
     auth_model: str                 # jwt | cookie_browser | unknown
-    automatic: bool                 # True when we can harvest without a new hand adapter
+    automatic: bool                 # Collector exists; NOT proof of usable bills or invoice readiness
     action: str                     # arm_known | synthesize | needs_har
     detail: str
     login_host: Optional[str] = None
@@ -152,7 +152,7 @@ def classify_login(provider: str, login_host: Optional[str] = None) -> PlatformP
             detail=(
                 "A shared NISC SmartHub adapter is available for the billing API "
                 "(billing/history/overview + billPdfService). Each utility and meter needs qualification; family compatibility alone is not invoice readiness. Examples: "
-                f"VEC, WEC, and ~600 co-ops. host={host or 'set login_host on credential'}."
+                f"VEC, WEC. host={host or 'set login_host on credential'}."
             ),
             login_host=host or None,
             adapter_module="api.harvester.vendors.smarthub",
@@ -212,7 +212,7 @@ def on_credential_saved(
     if plan.action == "arm_known":
         result["armed"] = True
         result["detail"] = (
-            f"Armed {plan.family} bill pull for {plan.provider}. "
+            f"Armed {plan.family} collection for {plan.provider}. "
             f"Auth={plan.auth_model}. {plan.detail}"
         )
         log.info(
