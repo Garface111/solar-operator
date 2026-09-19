@@ -14,7 +14,7 @@ SAFETY (never lock a customer out of their own utility):
   * At most ONE password login attempt per discovery job.
   * Hard abort on MFA / CAPTCHA / bot-wall page text (no retries).
   * Max wall clock, max navigations, max network captures.
-  * Does NOT write bills into production until synthesis validates.
+  * Never writes bills or approves adapters from synthesized discovery samples.
   * Does NOT run when harvest_fails already indicate a lockout pause.
   * Known families skip the browser path by default (already have adapters).
 
@@ -365,6 +365,49 @@ def _trigger_harvest_async(tenant_id: str, provider: str, username_lc: str) -> d
     return {"ok": True, "queued": True}
 
 
+def _stored_capture_url(value: str) -> str:
+    """Keep endpoint identity without credentials, query strings or fragments."""
+    try:
+        parsed = urlparse(value or "")
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            return ""
+        host = parsed.hostname
+        if ":" in host:
+            host = f"[{host}]"
+        port = f":{parsed.port}" if parsed.port else ""
+        return f"{parsed.scheme}://{host}{port}{parsed.path}"[:300]
+    except (TypeError, ValueError):
+        return ""
+
+
+def _stored_capture_sample(body) -> str:
+    """Persist only JSON with secret-bearing fields removed recursively."""
+    def secret(key):
+        normalized = re.sub(r"[^a-z0-9]", "", str(key).lower())
+        return any(word in normalized for word in (
+            "password", "passwd", "token", "authorization", "cookie", "secret",
+            "session", "apikey", "credential",
+        )) or normalized in {"pwd", "auth", "jwt"}
+
+    def scrub(value):
+        if isinstance(value, dict):
+            # Also handle HAR-style {name: "Authorization", value: "Bearer ..."}.
+            named_secret = secret(value.get("name", "")) or secret(value.get("key", ""))
+            return {key: "[REDACTED]" if secret(key) or (named_secret and key == "value")
+                    else scrub(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [scrub(item) for item in value]
+        return value
+
+    try:
+        parsed = json.loads(body) if isinstance(body, str) else body
+        if not isinstance(parsed, (dict, list)):
+            return "[non-JSON sample omitted]"
+        return json.dumps(scrub(parsed), ensure_ascii=True)[:65536]
+    except (TypeError, ValueError, RecursionError):
+        return "[non-JSON sample omitted]"
+
+
 def _finalize_job(job_id: int, result: dict) -> dict[str, Any]:
     with SessionLocal() as db:
         job = db.get(BillDiscoveryJob, job_id)
@@ -379,17 +422,21 @@ def _finalize_job(job_id: int, result: dict) -> dict[str, Any]:
         job.captures_count = len(captures)
         compact = []
         for c in captures[:MAX_CAPTURES]:
+            sample = _stored_capture_sample(c.get("body"))
             compact.append({
-                "url": (c.get("url") or "")[:300],
+                "url": _stored_capture_url(c.get("url")),
                 "status": c.get("status"),
                 "content_type": (c.get("content_type") or "")[:80],
                 "bytes": c.get("bytes") or 0,
-                "body_preview": (c.get("body") or "")[:400],
-                "body_sample": (c.get("body") or "")[:65536],
+                "body_preview": sample[:400],
+                "body_sample": sample,
             })
         job.captures_json = json.dumps(compact)
         syn = result.get("synthesis")
         if syn:
+            syn = dict(syn)
+            if "_source_url" in syn:
+                syn["_source_url"] = _stored_capture_url(syn["_source_url"])
             job.synthesis_json = json.dumps(syn)
             job.fingerprint = syn.get("fingerprint")
         job.finished_at = now()

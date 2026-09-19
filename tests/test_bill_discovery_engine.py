@@ -275,3 +275,39 @@ def test_enqueue_unknown_queues_explore():
     assert job["status"] in ("queued", "running", "failed", "aborted_safe")
     assert job["action"] == "explore"
     assert job["id"]
+
+
+def test_stored_discovery_samples_redact_secrets_but_preserve_billing():
+    from api.bill_discovery_engine import _finalize_job
+    init_db()
+    tid = "ten_redact_" + secrets.token_hex(3)
+    with SessionLocal() as db:
+        db.add(Tenant(id=tid, tenant_key="sol_" + secrets.token_hex(8), name="Redact",
+                      contact_email=f"{tid}@t.test", active=True, product="array_operator"))
+        db.commit()
+    job = enqueue_discovery(tenant_id=tid, provider="acme_power", username="owner@x.com")
+    secrets_by_key = {key: "SENSITIVE_" + key for key in (
+        "password", "access_token", "refreshToken", "id_token", "Authorization",
+        "Cookie", "Set-Cookie", "sessionId", "session_secret", "apiKey", "jwt")}
+    body = json.dumps({"account_number": "123456", "amount": 206.98,
+                       "nested": [secrets_by_key],
+                       "headers": [{"name": "Authorization", "value": "SENSITIVE_header"}]})
+    unsafe_url = "https://SENSITIVE_user:SENSITIVE_pass@portal.example/bills?token=SENSITIVE_query#SENSITIVE_fragment"
+    _finalize_job(job["id"], {"status": "failed", "captures": [
+        {"url": unsafe_url, "body": body, "content_type": "application/json"},
+        {"url": unsafe_url, "body": "<html>SENSITIVE_html</html>", "content_type": "text/html"},
+        {"url": unsafe_url, "body": '{"password":"SENSITIVE_broken"', "content_type": "application/json"},
+    ], "synthesis": {"ok": False, "_source_url": unsafe_url}})
+    with SessionLocal() as db:
+        stored = db.get(BillDiscoveryJob, job["id"])
+        assert "SENSITIVE_" not in stored.captures_json
+        assert "SENSITIVE_" not in stored.synthesis_json
+        captures = json.loads(stored.captures_json)
+        assert all(c["url"] == "https://portal.example/bills" for c in captures)
+        sample = json.loads(captures[0]["body_sample"])
+        assert sample["account_number"] == "123456"
+        assert sample["amount"] == 206.98
+        assert all(v == "[REDACTED]" for v in sample["nested"][0].values())
+        assert sample["headers"][0]["value"] == "[REDACTED]"
+        assert captures[1]["body_sample"] == "[non-JSON sample omitted]"
+        assert captures[2]["body_preview"] == "[non-JSON sample omitted]"
