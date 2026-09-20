@@ -1523,6 +1523,16 @@ def prune_harvest_runs_job() -> dict:
         return {"deleted": 0, "error": "exception"}
 
 
+def prune_runtime_diagnostics_job() -> dict:
+    """Keep debug retention bounded while preserving all billing/source records."""
+    from .data_retention import prune_runtime_diagnostics
+    try:
+        return prune_runtime_diagnostics(apply=True)
+    except Exception:
+        logger.exception("runtime diagnostic retention failed")
+        return {"deleted": 0, "error": "exception"}
+
+
 def _prewarm_reconcile() -> None:
     """Keep the bill-audit reconcile sweep cache HOT so the offtaker-invoicing
     "Doesn't match GMP" KPI + Bill-audit view load INSTANTLY instead of waiting
@@ -1765,6 +1775,12 @@ def start():
         prune_harvest_runs_job,
         CronTrigger(hour=4, minute=25),
         id="prune_harvest_runs", replace_existing=True,
+    )
+    # Disposable capture traces and finished pull-job diagnostics only.
+    scheduler.add_job(
+        prune_runtime_diagnostics_job, CronTrigger(hour=4, minute=40),
+        id="prune_runtime_diagnostics", replace_existing=True,
+        max_instances=1, coalesce=True,
     )
     # Every 30 min: precompute the fleet forecast per tenant so the Analysis tab
     # serves an instant snapshot instead of computing (geocode + Open-Meteo) on the

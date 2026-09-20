@@ -31,36 +31,50 @@ SAFE_ACCOUNT_KEYS = frozenset({"account_number", "nickname", "customer_number", 
 
 
 def _safe_excerpt(raw_payload: dict) -> dict:
-    """Return a JSON-safe, privacy-scrubbed, size-capped excerpt of raw_payload.
+    """Strict scalar allowlist and UTF-8 byte cap for disposable diagnostics."""
+    if not isinstance(raw_payload, dict):
+        return {}
+    safe = {}
+    truncated = False
 
-    - Drops auth.* entirely (contains apiToken / refreshToken).
-    - Strips accounts[].extra.
-    - Truncates accounts_summary from the end until the JSON fits in
-      PAYLOAD_MAX_BYTES so the DB row stays small.
-    """
-    safe: dict = {}
+    def scalar(value, limit=256):
+        nonlocal truncated
+        if not isinstance(value, (str, int, float, bool)):
+            truncated = True
+            return None
+        value = str(value)
+        truncated |= len(value) > limit
+        return value[:limit]
+
     if "provider" in raw_payload:
-        safe["provider"] = raw_payload["provider"]
-    if "user" in raw_payload:
-        # Portal profile (email, display name, username) — not auth tokens.
-        safe["user"] = dict(raw_payload.get("user") or {})
-    if "accounts" in raw_payload:
+        value = scalar(raw_payload["provider"], 64)
+        if value is not None: safe["provider"] = value
+    user = raw_payload.get("user")
+    if isinstance(user, dict):
+        allowed = {"email", "username", "name", "display_name", "displayName", "first_name", "last_name"}
+        safe["user"] = {key:value for key,raw in user.items() if key in allowed
+                        and (value := scalar(raw)) is not None}
+        truncated |= bool(set(user) - allowed)
+    accounts = raw_payload.get("accounts")
+    if isinstance(accounts, list):
+        safe["account_count"] = len(accounts)
         safe["accounts_summary"] = [
-            {k: v for k, v in a.items() if k in SAFE_ACCOUNT_KEYS}
-            for a in (raw_payload.get("accounts") or [])
+            {key:value for key,raw in account.items() if key in SAFE_ACCOUNT_KEYS
+             and (value := scalar(raw)) is not None}
+            for account in accounts[:20] if isinstance(account, dict)
         ]
-    # auth.* is never included (apiToken, refreshToken are bearer credentials).
-
-    encoded = json.dumps(safe, default=str)
-    if len(encoded.encode()) > PAYLOAD_MAX_BYTES:
-        accounts = safe.get("accounts_summary", [])
-        while accounts:
-            accounts = accounts[:-1]
-            candidate = {**safe, "accounts_summary": accounts, "_truncated": True}
-            if len(json.dumps(candidate, default=str).encode()) <= PAYLOAD_MAX_BYTES:
-                break
-        safe["accounts_summary"] = accounts
+        truncated |= len(accounts) > 20
+    if truncated: safe["_truncated"] = True
+    # A large profile alone used to escape the cap after all accounts were cut.
+    while len(json.dumps(safe).encode("utf-8")) > PAYLOAD_MAX_BYTES:
         safe["_truncated"] = True
+        if safe.get("accounts_summary"):
+            safe["accounts_summary"].pop()
+        elif safe.get("user"):
+            safe["user"].pop(next(reversed(safe["user"])))
+        else:
+            safe = {"_truncated": True}
+            break
     return safe
 
 
