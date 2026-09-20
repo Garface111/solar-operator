@@ -105,10 +105,14 @@ def test_cross_process_lock_prevents_duplicate_work(legacy_source):
     tid, identity = legacy_source
     code = ("import json; from api.source_compaction import compact_legacy_raw; "
             f"print(json.dumps(compact_legacy_raw(apply=True,tenant_id={tid!r})))")
+    # Other legacy test modules set DATABASE_URL during collection after the
+    # shared engine is initialized. The child must use the engine under test.
+    child_env = os.environ.copy()
+    child_env["DATABASE_URL"] = engine.url.render_as_string(hide_password=False)
     with compaction.compaction_lock() as acquired:
         assert acquired
         child = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
-                               env=os.environ.copy(), timeout=15, check=True)
+                               env=child_env, timeout=15, check=True)
         assert json.loads(child.stdout)["skipped"] == "already_running"
         with SessionLocal() as db:
             assert db.get(GmpUsageRaw, identity).raw_csv is not None
