@@ -110,13 +110,44 @@ def _ao_key() -> str:
     return (os.getenv("STRIPE_AO_SECRET_KEY") or "").strip()
 
 
+_SAME_ACCOUNT: dict = {}   # (so_key, ao_key) -> bool, resolved once per process
+
+
+def _same_platform_account() -> bool:
+    """True when STRIPE_AO_SECRET_KEY and STRIPE_SECRET_KEY are two keys to
+    the SAME Stripe account (2026-09-20: they were). Then there is one
+    platform, not two — no migration, no duplicate Express accounts — and the
+    name on Stripe's pages is that account's public business name."""
+    so, ao = _so_key(), _ao_key()
+    if not so or not ao:
+        return False
+    if so == ao:
+        return True
+    k = (so, ao)
+    if k in _SAME_ACCOUNT:
+        return _SAME_ACCOUNT[k]
+    try:
+        a = stripe.Account.retrieve(api_key=so)
+        b = stripe.Account.retrieve(api_key=ao)
+        same = bool(a and b and a["id"] == b["id"])
+    except Exception as e:  # noqa: BLE001
+        logger.warning("platform account compare failed: %s", e)
+        return False
+    _SAME_ACCOUNT[k] = same
+    if same:
+        logger.info("STRIPE_AO_SECRET_KEY addresses the same Stripe account as STRIPE_SECRET_KEY (%s)", a["id"])
+    return same
+
+
 def platform_for(tenant) -> str:
     p = (getattr(tenant, "stripe_connect_platform", None) or "").strip()
     if p in PLATFORM_LABELS:
         return p
     if getattr(tenant, "stripe_connect_account_id", None):
         return PLATFORM_SOLAR          # connected before the split → legacy platform
-    return PLATFORM_EA if _ao_key() else PLATFORM_SOLAR
+    if _ao_key() and not _same_platform_account():
+        return PLATFORM_EA
+    return PLATFORM_SOLAR
 
 
 def platform_key(platform: str) -> str:
@@ -333,7 +364,8 @@ def create_or_get_connect_account(db, tenant) -> dict:
             # nothing there and would keep showing the wrong name on Stripe's
             # page. Once the Energy Agent key exists, abandon it and start
             # over on Energy Agent. A finished legacy account is left alone.
-            if (plat == PLATFORM_SOLAR and _ao_key() and not enabled and not details
+            if (plat == PLATFORM_SOLAR and _ao_key() and not _same_platform_account()
+                    and not enabled and not details
                     and (getattr(tenant, "stripe_connect_platform", None) or "") != PLATFORM_SOLAR):
                 logger.info("connect: abandoning unfinished %s account %s for %s; re-creating on %s",
                             plat, existing, tenant.id, PLATFORM_EA)

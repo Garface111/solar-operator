@@ -374,6 +374,7 @@ def test_pinned_methods_fall_back_to_automatic_when_the_account_rejects_them(mon
 # ─── platform account: Energy Agent for new connections, legacy stays put ───
 
 def test_platform_routing_and_keys(monkeypatch):
+    monkeypatch.setattr(pay, "_same_platform_account", lambda: False)
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_solar")
     monkeypatch.delenv("STRIPE_AO_SECRET_KEY", raising=False)
     fresh = SimpleNamespace(stripe_connect_account_id=None, stripe_connect_platform=None)
@@ -395,6 +396,7 @@ def test_platform_routing_and_keys(monkeypatch):
 
 
 def test_mint_uses_the_tenants_platform_key_and_stamps_the_row(monkeypatch):
+    monkeypatch.setattr(pay, "_same_platform_account", lambda: False)
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_solar")
     monkeypatch.setenv("STRIPE_AO_SECRET_KEY", "sk_test_agent")
     calls: list = []
@@ -423,6 +425,7 @@ def test_mint_uses_the_tenants_platform_key_and_stamps_the_row(monkeypatch):
 
 
 def test_connect_status_reports_fee_split_and_platform(client, monkeypatch):
+    monkeypatch.setattr(pay, "_same_platform_account", lambda: False)
     monkeypatch.setenv("STRIPE_AO_SECRET_KEY", "sk_test_agent")
     from api.account import mint_session_for_tenant
     t = _tenant(stripe_connect_account_id=None, stripe_connect_charges_enabled=False)
@@ -456,6 +459,7 @@ def test_webhook_verifier_tries_the_energy_agent_secrets(monkeypatch):
 
 
 def test_unfinished_solar_operator_onboarding_restarts_on_energy_agent(monkeypatch):
+    monkeypatch.setattr(pay, "_same_platform_account", lambda: False)
     monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_solar")
     monkeypatch.setenv("STRIPE_AO_SECRET_KEY", "sk_test_agent")
     t = _tenant(stripe_connect_account_id="acct_old", stripe_connect_charges_enabled=False,
@@ -486,3 +490,22 @@ def test_unfinished_solar_operator_onboarding_restarts_on_energy_agent(monkeypat
         with SessionLocal() as db:
             res2 = pay.create_or_get_connect_account(db, db.get(Tenant, t2.id))
     assert res2["account_id"] == "acct_done"
+
+
+def test_two_keys_to_one_stripe_account_are_one_platform(monkeypatch):
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_a")
+    monkeypatch.setenv("STRIPE_AO_SECRET_KEY", "sk_test_b")
+    pay._SAME_ACCOUNT.clear()
+    with patch("api.billing.payments.stripe.Account.retrieve", return_value={"id": "acct_same"}):
+        assert pay._same_platform_account() is True
+        fresh = SimpleNamespace(stripe_connect_account_id=None, stripe_connect_platform=None)
+        assert pay.platform_for(fresh) == "solar_operator"       # one platform, no split
+        # and an unfinished onboarding is NOT abandoned
+        t = _tenant(stripe_connect_account_id="acct_half", stripe_connect_charges_enabled=False,
+                    stripe_connect_platform=None)
+    with patch("api.billing.payments.stripe.Account.retrieve",
+               return_value={"id": "acct_half", "charges_enabled": False, "details_submitted": False}),             patch("api.billing.payments.stripe.Account.create", side_effect=AssertionError("must not create")):
+        with SessionLocal() as db:
+            res = pay.create_or_get_connect_account(db, db.get(Tenant, t.id))
+    assert res["account_id"] == "acct_half"
+    pay._SAME_ACCOUNT.clear()
