@@ -108,6 +108,31 @@ def plan_windows(
     return out
 
 
+def _locked_raw_window(db: Session, account: UtilityAccount, ws: date, we: date):
+    """Create-or-lock the window before preserving or replacing source bytes.
+
+    SELECT FOR UPDATE cannot lock a missing row. The unique-key insert serializes
+    simultaneous first captures as well, so each response can be versioned.
+    """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+    dialect = db.get_bind().dialect.name
+    factory = {"postgresql": pg_insert, "sqlite": sqlite_insert}.get(dialect)
+    if factory is None:
+        raise ValueError("raw windows require PostgreSQL or SQLite")
+    db.execute(factory(GmpUsageRaw).values(
+        tenant_id=account.tenant_id, account_id=account.id,
+        account_number=account.account_number, window_start=ws, window_end=we,
+    ).on_conflict_do_nothing(index_elements=["account_id", "window_start", "window_end"]))
+    return db.execute(select(GmpUsageRaw).where(
+        GmpUsageRaw.tenant_id == account.tenant_id,
+        GmpUsageRaw.account_id == account.id,
+        GmpUsageRaw.window_start == ws,
+        GmpUsageRaw.window_end == we,
+    ).with_for_update().execution_options(populate_existing=True)).scalar_one()
+
+
 def _persist_window(
     db: Session,
     account: UtilityAccount,
@@ -122,20 +147,13 @@ def _persist_window(
     Returns (daily_inserted, daily_updated)."""
     from ..source_artifacts import put_artifact, preserve_raw_version
 
+    # No response bytes are not a replacement source. Keep prior source and
+    # modeled readings readable; callers may retry the missing response.
+    if csv_text is None:
+        return 0, 0
+
     # ── 1. raw sponge (verbatim) — idempotent on (account, window) ──
-    raw = db.execute(
-        select(GmpUsageRaw).where(
-            GmpUsageRaw.account_id == account.id,
-            GmpUsageRaw.window_start == ws,
-            GmpUsageRaw.window_end == we,
-        ).with_for_update().execution_options(populate_existing=True)
-    ).scalar_one_or_none()
-    if raw is None:
-        raw = GmpUsageRaw(
-            tenant_id=account.tenant_id, account_id=account.id,
-            account_number=account.account_number, window_start=ws, window_end=we,
-        )
-        db.add(raw)
+    raw = _locked_raw_window(db, account, ws, we)
     if raw.raw_csv is not None:
         preserve_raw_version(db, raw)
     next_artifact = (put_artifact(db, account.tenant_id, csv_text.encode("utf-8"), "text/csv")
@@ -433,21 +451,10 @@ def _status_of(exc: Exception) -> int:
 
 def _record_404(db: Session, account: UtilityAccount, ws: date, we: date) -> None:
     """Store a 404 marker so the backfill won't re-probe below the floor."""
-    raw = db.execute(
-        select(GmpUsageRaw).where(
-            GmpUsageRaw.account_id == account.id,
-            GmpUsageRaw.window_start == ws, GmpUsageRaw.window_end == we,
-        ).with_for_update().execution_options(populate_existing=True)
-    ).scalar_one_or_none()
+    raw = _locked_raw_window(db, account, ws, we)
     # A transient missing response must never erase captured successful evidence.
     if raw is not None and (raw.raw_csv is not None or raw.artifact_id is not None):
         return
-    if raw is None:
-        raw = GmpUsageRaw(
-            tenant_id=account.tenant_id, account_id=account.id,
-            account_number=account.account_number, window_start=ws, window_end=we,
-        )
-        db.add(raw)
     raw.fmt = "csv"
     raw.http_status = 404
     raw.raw_csv = None
