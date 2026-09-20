@@ -13,8 +13,8 @@ Two layers, both stored on one OfftakerAuditRun row:
      with the model that produced them and never overwrite the deterministic
      ones.
 
-Nothing here mutates an invoice. Findings are advisory and point at the
-subscription / invoice they concern so the operator can open it.
+Only deterministic accepted-dispatch recovery may update local send bookkeeping.
+No audit sends email, changes payments or lets model output drive mutations.
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ import logging
 import os
 import threading
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
 from sqlalchemy import select
@@ -56,12 +56,12 @@ def _slim_outgoing(x: dict) -> dict:
     return {k: x.get(k) for k in keep}
 
 
-def gather(db, tenant) -> dict:
+def gather(db, tenant, *, include_reconcile=True) -> dict:
     """Everything the auditor looks at, from the same readers the mail room uses."""
     from . import mailroom
     ctx = mailroom.sub_context(db, tenant.id)
     sent, total = mailroom.sent_items(db, tenant.id, limit=1000, offset=0, ctx=ctx)
-    known = {(s["subscription_id"], str(s.get("period_end") or "")[:7]) for s in sent}
+    known = mailroom.known_frozen_periods(db, tenant.id)
     legacy = mailroom.legacy_items(db, tenant.id, ctx, known)
     outgoing = mailroom.outgoing_items(db, tenant.id, tenant, ctx=ctx)
 
@@ -72,7 +72,7 @@ def gather(db, tenant) -> dict:
     reconcile = None
     try:
         from .reconcile_bills import reconcile_tenant
-        rec = reconcile_tenant(db, tenant.id)
+        rec = reconcile_tenant(db, tenant.id) if include_reconcile else {}
         reconcile = {
             "status_counts": rec.get("status_counts"),
             "allocation_counts": rec.get("allocation_counts"),
@@ -115,6 +115,8 @@ def gather(db, tenant) -> dict:
         "outgoing": outgoing,
         "sent": sent + legacy,
         "sent_frozen_total": int(total),
+        "coverage": {"checked": len(sent) + len(legacy), "total": int(total) + len(legacy),
+                     "truncated": len(sent) < total, "reconcile_checked": include_reconcile},
         "reconcile": reconcile,
     }
 
@@ -131,7 +133,8 @@ def _dt(v) -> Optional[datetime]:
     if not v:
         return None
     try:
-        return datetime.fromisoformat(str(v).replace("Z", ""))
+        parsed = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None) if parsed.tzinfo else parsed
     except ValueError:
         return None
 
@@ -221,7 +224,7 @@ def deterministic_checks(payload: dict, now: Optional[datetime] = None) -> list[
         seen: dict[str, dict] = {}
         for x in rows:
             m = str(x.get("period_end") or x.get("period_key") or "")[:7]
-            if not m or x.get("kind") == "trueup":
+            if not m or x.get("kind") == "trueup" or x.get("status") != "accepted":
                 continue
             if m in seen:
                 out.append(_f("duplicate_period", "critical", "Same month invoiced twice",
@@ -456,11 +459,26 @@ def _bounded_json(payload: dict) -> str:
         "outgoing": [_slim_outgoing(x) for x in payload.get("outgoing") or []],
         "sent": sent,
         "sent_total": payload.get("sent_frozen_total"),
-        "reconcile": payload.get("reconcile"),
+        "reconcile": dict(payload.get("reconcile") or {}),
     }
     txt = json.dumps(slim, default=str)
     while len(txt) > MAX_PAYLOAD_CHARS and slim["sent"]:
         slim["sent"] = slim["sent"][: max(0, len(slim["sent"]) // 2)]
+        slim["truncated"] = True
+        txt = json.dumps(slim, default=str)
+    # The roster / queue can exceed the budget even after history is empty.
+    # Bound every list and explicitly tell the reviewer coverage is partial.
+    while len(txt) > MAX_PAYLOAD_CHARS:
+        candidates = [(slim, key) for key in ("subscriptions", "outgoing")
+                      if isinstance(slim.get(key), list) and slim[key]]
+        rec = slim.get("reconcile")
+        if isinstance(rec, dict) and isinstance(rec.get("subscriptions"), list) and rec["subscriptions"]:
+            candidates.append((rec, "subscriptions"))
+        if not candidates:
+            return json.dumps({"truncated": True, "sent_total": slim.get("sent_total"),
+                "note": "Evidence exceeded the model budget; deterministic findings remain authoritative."})
+        owner, key = max(candidates, key=lambda item: len(json.dumps(item[0][item[1]], default=str)))
+        owner[key] = owner[key][:len(owner[key]) // 2]
         slim["truncated"] = True
         txt = json.dumps(slim, default=str)
     return txt
@@ -662,17 +680,31 @@ def _verdict_from(findings: list[dict], model_verdict: Optional[str]) -> str:
     return rules
 
 
-def execute_run(run_id: int, *, tenant_id: str) -> None:
+def execute_run(run_id: int, *, tenant_id: str, rules_only=False) -> None:
     """Runs in its own thread with its own session (pool-leak rule)."""
     from ..db import SessionLocal
     from ..models import OfftakerAuditRun, Tenant
     t0 = time.time()
     try:
+        repair_accepted_dispatches(run_id, tenant_id)
         with SessionLocal() as db:
             tenant = db.get(Tenant, tenant_id)
-            payload = gather(db, tenant)
+            payload = gather(db, tenant, include_reconcile=not rules_only)
         rules = deterministic_checks(payload)
-        review = model_review(payload, rules)
+        with SessionLocal() as db:
+            current_run = db.get(OfftakerAuditRun, run_id)
+            for repair in ((current_run.stats or {}).get("repairs") or []) if current_run else []:
+                if repair.get("status") in ("blocked", "failed"):
+                    rules.append(_f("repair_requires_review", "high", "Send bookkeeping needs review",
+                        repair["reason"], invoice_id=repair.get("invoice_id"),
+                        action="Review the frozen invoice and accepted dispatch evidence.",
+                        evidence={"dispatch_id": repair.get("dispatch_id")}))
+        if (payload.get("coverage") or {}).get("truncated"):
+            rules.append(_f("partial_coverage", "medium", "Older invoice history was not checked",
+                "This bounded check reviewed the newest 1,000 frozen invoices. Older history remains available.",
+                evidence=payload["coverage"], action="Review older invoice history separately."))
+        review = ({"ok": False, "skipped": "Rules-only check; no model requested"}
+                  if rules_only else model_review(payload, rules))
         model_findings = []
         for f in (review.get("findings") or []):
             if isinstance(f, dict):
@@ -699,10 +731,13 @@ def execute_run(run_id: int, *, tenant_id: str) -> None:
         what_to_look_for = what_to_look_for[:10]
         stats = {
             "what_to_look_for": what_to_look_for,
+            "check_mode": "check" if rules_only else "deep",
+            "coverage": payload.get("coverage") or {},
             "subscriptions": len(payload.get("subscriptions") or []),
             "outgoing": len(payload.get("outgoing") or []),
             "sent": len(payload.get("sent") or []),
             "sent_frozen": payload.get("sent_frozen_total"),
+            "remaining_findings": len(findings),
             "rule_findings": len(rules),
             "model_findings": len(review.get("findings") or []),
             "by_severity": {s: sum(1 for f in findings if f.get("severity") == s) for s in SEVERITIES},
@@ -713,9 +748,15 @@ def execute_run(run_id: int, *, tenant_id: str) -> None:
             "seconds": round(time.time() - t0, 1),
         }
         with SessionLocal() as db:
-            run = db.get(OfftakerAuditRun, run_id)
-            if run is None:
+            from sqlalchemy import text
+            if db.bind.dialect.name == "sqlite":
+                db.execute(text("BEGIN IMMEDIATE"))
+            run = db.scalar(select(OfftakerAuditRun).where(OfftakerAuditRun.id == run_id).with_for_update())
+            if run is None or run.tenant_id != tenant_id or run.status != "running":
                 return
+            repairs = list((run.stats or {}).get("repairs") or [])
+            stats["repairs"] = repairs
+            stats["repaired_count"] = sum(r.get("status") == "repaired" for r in repairs)
             run.status = "done"
             run.finished_at = datetime.utcnow()
             run.model = review.get("model") if review.get("ok") else None
@@ -730,8 +771,11 @@ def execute_run(run_id: int, *, tenant_id: str) -> None:
         logger.exception("mailroom audit run %s failed", run_id)
         try:
             with SessionLocal() as db:
-                run = db.get(OfftakerAuditRun, run_id)
-                if run is not None:
+                from sqlalchemy import text
+                if db.bind.dialect.name == "sqlite":
+                    db.execute(text("BEGIN IMMEDIATE"))
+                run = db.scalar(select(OfftakerAuditRun).where(OfftakerAuditRun.id == run_id).with_for_update())
+                if run is not None and run.tenant_id == tenant_id and run.status == "running":
                     run.status = "failed"
                     run.finished_at = datetime.utcnow()
                     run.error = str(e)[:2000]
@@ -749,30 +793,86 @@ def _rules_summary(findings: list[dict], model_error: Optional[str]) -> str:
     return head + tail
 
 
-def start_run(db, tenant_id: str, *, triggered_by: str = "operator") -> dict:
-    """Create the run row and kick off the thread. One running audit per
-    tenant at a time; a second click returns the one in flight."""
-    from ..models import OfftakerAuditRun
-    active = db.execute(
-        select(OfftakerAuditRun).where(OfftakerAuditRun.tenant_id == tenant_id,
-                                       OfftakerAuditRun.status == "running")
-        .order_by(OfftakerAuditRun.id.desc())
-    ).scalars().first()
-    if active is not None:
-        # A run older than 15 minutes is a crashed thread, not a live one.
-        if active.started_at and (datetime.utcnow() - active.started_at) < timedelta(minutes=15):
-            return {"ok": True, "run_id": active.id, "already_running": True}
+def repair_accepted_dispatches(run_id, tenant_id):
+    """Bounded deterministic repair; never call a mailer, model or payment API."""
+    from sqlalchemy import String, cast, or_
+    from ..db import SessionLocal
+    from ..models import BillingEmailDispatch, OfftakerInvoice
+    from .issuance import repair_accepted_invoice
+    with SessionLocal() as db:
+        ids = db.scalars(select(OfftakerInvoice.id).join(BillingEmailDispatch,
+            (BillingEmailDispatch.tenant_id == OfftakerInvoice.tenant_id)
+            & (BillingEmailDispatch.key == "invoice:" + cast(OfftakerInvoice.id, String))
+        ).where(OfftakerInvoice.tenant_id == tenant_id,
+                BillingEmailDispatch.status == "accepted",
+                or_(OfftakerInvoice.status != "accepted", OfftakerInvoice.applied_at.is_(None)))
+            .order_by(OfftakerInvoice.period_end, OfftakerInvoice.id).limit(1000)).all()
+    for invoice_id in ids:
+        try:
+            repair_accepted_invoice(tenant_id=tenant_id, invoice_id=invoice_id, audit_run_id=run_id)
+        except Exception as exc:
+            logger.warning("Mail Room repair failed for invoice %s: %s", invoice_id, type(exc).__name__)
+            from sqlalchemy import text
+            from ..models import OfftakerAuditRun
+            with SessionLocal() as db:
+                if db.bind.dialect.name == "sqlite":
+                    db.execute(text("BEGIN IMMEDIATE"))
+                run = db.scalar(select(OfftakerAuditRun).where(
+                    OfftakerAuditRun.id == run_id, OfftakerAuditRun.tenant_id == tenant_id,
+                    OfftakerAuditRun.status == "running").with_for_update())
+                if run is not None:
+                    stats = dict(run.stats or {})
+                    stats["repairs"] = list(stats.get("repairs") or []) + [{
+                        "code": "accepted_dispatch_recovered", "invoice_id": invoice_id,
+                        "dispatch_id": None, "status": "failed",
+                        "reason": "Bookkeeping repair failed; invoice unchanged. Review manually.",
+                        "before": None, "after": None}]
+                    run.stats = stats
+                    db.commit()
+
+
+def start_run(db, tenant_id: str, *, triggered_by: str = "operator", rules_only=False,
+              force=False) -> dict:
+    """Tenant-row locking serializes claims across web processes."""
+    from sqlalchemy import text
+    from ..models import OfftakerAuditRun, Tenant
+    if db.bind.dialect.name == "sqlite":
+        db.execute(text("BEGIN IMMEDIATE"))
+    if db.scalar(select(Tenant.id).where(Tenant.id == tenant_id).with_for_update()) is None:
+        raise LookupError("Tenant not found")
+    now = datetime.utcnow()
+    active_rows = db.scalars(select(OfftakerAuditRun).where(
+        OfftakerAuditRun.tenant_id == tenant_id, OfftakerAuditRun.status == "running")
+        .order_by(OfftakerAuditRun.id.desc())).all()
+    for active in active_rows:
+        if active.started_at and now - active.started_at < timedelta(minutes=15):
+            db.commit()
+            return {"ok": True, "run_id": active.id, "already_running": True,
+                    "cached": False, "mode": (active.stats or {}).get("check_mode", "deep")}
         active.status = "failed"
-        active.error = "run did not finish (worker restarted?)"
-        active.finished_at = datetime.utcnow()
-        db.commit()
-    run = OfftakerAuditRun(tenant_id=tenant_id, status="running", triggered_by=triggered_by)
+        active.error = "Check interrupted or exceeded 15 minutes; start a fresh check."
+        active.finished_at = now
+    if rules_only and not force:
+        recent = db.scalar(select(OfftakerAuditRun).where(
+            OfftakerAuditRun.tenant_id == tenant_id, OfftakerAuditRun.status == "done",
+            OfftakerAuditRun.triggered_by == "mailroom_check",
+            OfftakerAuditRun.finished_at >= now - timedelta(minutes=15))
+            .order_by(OfftakerAuditRun.id.desc()).limit(1))
+        if recent is not None:
+            db.commit()
+            return {"ok": True, "run_id": recent.id, "already_running": False,
+                    "cached": True, "mode": "check"}
+    run = OfftakerAuditRun(tenant_id=tenant_id, status="running",
+        triggered_by="mailroom_check" if rules_only else triggered_by,
+        stats={"check_mode": "check" if rules_only else "deep", "repairs": [], "repaired_count": 0})
     db.add(run)
     db.commit()
     rid = run.id
-    threading.Thread(target=execute_run, args=(rid,), kwargs={"tenant_id": tenant_id},
-                     daemon=True, name=f"mailroom-audit-{rid}").start()
-    return {"ok": True, "run_id": rid, "already_running": False}
+    threading.Thread(target=execute_run, args=(rid,),
+        kwargs={"tenant_id": tenant_id, "rules_only": rules_only},
+        daemon=True, name=f"mailroom-audit-{rid}").start()
+    return {"ok": True, "run_id": rid, "already_running": False, "cached": False,
+            "mode": "check" if rules_only else "deep"}
 
 
 def run_json(run) -> dict:
@@ -782,5 +882,8 @@ def run_json(run) -> dict:
         "model": run.model, "provider": run.provider, "verdict": run.verdict,
         "summary": run.summary, "findings": run.findings or [], "stats": run.stats or {},
         "what_to_look_for": (run.stats or {}).get("what_to_look_for") or [],
+        "repairs": (run.stats or {}).get("repairs") or [],
+        "repaired_count": (run.stats or {}).get("repaired_count") or 0,
+        "coverage": (run.stats or {}).get("coverage") or {},
         "error": run.error,
     }

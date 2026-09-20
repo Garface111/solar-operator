@@ -6804,6 +6804,16 @@ def mailroom_invoice_email(invoice_id: int, authorization: Optional[str] = Heade
         "Cache-Control": "no-store", "X-Frame-Options": "SAMEORIGIN"})
 
 
+@router.post("/mailroom/check")
+def mailroom_check(force: bool = Query(default=False),
+                   authorization: Optional[str] = Header(default=None)):
+    """Run safe bookkeeping repairs and rules only; never transmit customer mail."""
+    from . import mailroom_audit as ma
+    t = tenant_from_session(authorization)
+    with SessionLocal() as db:
+        return ma.start_run(db, t.id, rules_only=True, force=force)
+
+
 @router.post("/mailroom/audit")
 def mailroom_audit_start(authorization: Optional[str] = Header(default=None)):
     """Start an independent audit of the mail room. Returns at once with the

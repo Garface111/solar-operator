@@ -103,13 +103,13 @@ def sub_context(db, tenant_id: str) -> dict[int, dict]:
                 pass
     uas = {}
     if ua_ids:
-        for ua in db.execute(select(UtilityAccount).where(UtilityAccount.id.in_(ua_ids))).scalars():
+        for ua in db.execute(select(UtilityAccount).where(UtilityAccount.tenant_id == tenant_id, UtilityAccount.id.in_(ua_ids))).scalars():
             uas[ua.id] = ua
             if ua.array_id:
                 arr_ids.add(ua.array_id)
     arrays = {}
     if arr_ids:
-        for a in db.execute(select(Array).where(Array.id.in_(arr_ids))).scalars():
+        for a in db.execute(select(Array).where(Array.tenant_id == tenant_id, Array.id.in_(arr_ids))).scalars():
             arrays[a.id] = a
 
     out: dict[int, dict] = {}
@@ -185,9 +185,12 @@ def _delivery_events(db, resend_ids: set[str]) -> dict[str, dict]:
     except Exception:  # noqa: BLE001
         return out
     try:
-        rows = db.execute(
-            select(EaEmailDelivery).where(EaEmailDelivery.resend_email_id.in_(resend_ids))
-        ).scalars().all()
+        # Missing legacy receipt tables must not poison a PostgreSQL transaction.
+        with db.begin_nested():
+            rows = db.execute(
+                select(EaEmailDelivery).where(EaEmailDelivery.resend_email_id.in_(resend_ids))
+                .order_by(EaEmailDelivery.created_at, EaEmailDelivery.id)
+            ).scalars().all()
     except Exception:  # noqa: BLE001
         return out
     for r in rows:
@@ -197,10 +200,10 @@ def _delivery_events(db, resend_ids: set[str]) -> dict[str, dict]:
             continue
         d = out.setdefault(rid, {"status": None, "delivered_at": None,
                                  "bounced_at": None, "reason": None})
-        if "deliver" in ev:
+        if ev in ("delivered", "email.delivered"):
             d["delivered_at"] = _iso(r.created_at)
             d["status"] = d["status"] or "delivered"
-        elif "bounce" in ev or "complain" in ev:
+        elif ev in ("bounced", "complained", "email.bounced", "email.complained"):
             d["bounced_at"] = _iso(r.created_at)
             d["reason"] = getattr(r, "reason", None)
             d["status"] = "bounced"
@@ -223,15 +226,35 @@ def sent_items(db, tenant_id: str, *, limit: int = 300, offset: int = 0,
             OfftakerInvoice.tenant_id == tenant_id,
             OfftakerInvoice.status.in_(SENT_STATUSES))
     ).scalar() or 0
+    # Fix the narrow ID page first: a concurrent accepted invoice must not
+    # shift OFFSET between batches and produce duplicate audit findings.
+    ids = db.scalars(select(OfftakerInvoice.id).where(
+        OfftakerInvoice.tenant_id == tenant_id, OfftakerInvoice.status.in_(SENT_STATUSES))
+        .order_by(OfftakerInvoice.sent_at.desc().nullslast(), OfftakerInvoice.id.desc())
+        .offset(max(0, offset)).limit(max(1, min(limit, 1000)))).all()
+    items = []
+    for batch_offset in range(0, len(ids), 50):
+        items.extend(_sent_items_page(db, tenant_id, ctx, ids[batch_offset:batch_offset + 50]))
+    return items, int(total)
+
+
+def _sent_items_page(db, tenant_id, ctx, invoice_ids):
+    """Keep heavyweight frozen HTML/PDF ORM objects inside one bounded scope.
+
+    Only small rendered summary dicts escape. SQLAlchemy's weak identity map
+    releases unmodified rows when this scope returns, without detaching objects
+    a caller may already own or discarding caller changes.
+    """
+    from ..models import (OfftakerInvoice, BillingEmailDispatch, OfftakerPayment,
+                          OfftakerSettlement)
+    from sqlalchemy import func
     rows = db.execute(
         select(OfftakerInvoice).where(
-            OfftakerInvoice.tenant_id == tenant_id,
-            OfftakerInvoice.status.in_(SENT_STATUSES))
+            OfftakerInvoice.tenant_id == tenant_id, OfftakerInvoice.id.in_(invoice_ids))
         .order_by(OfftakerInvoice.sent_at.desc().nullslast(), OfftakerInvoice.id.desc())
-        .offset(max(0, offset)).limit(max(1, min(limit, 1000)))
     ).scalars().all()
     if not rows:
-        return [], int(total)
+        return []
 
     ids = [r.id for r in rows]
     dispatches = {d.key: d for d in db.execute(
@@ -243,7 +266,7 @@ def sent_items(db, tenant_id: str, *, limit: int = 300, offset: int = 0,
     payments = {}
     if pay_ids:
         payments = {p.id: p for p in db.execute(
-            select(OfftakerPayment).where(OfftakerPayment.id.in_(pay_ids))).scalars()}
+            select(OfftakerPayment).where(OfftakerPayment.tenant_id == tenant_id, OfftakerPayment.id.in_(pay_ids))).scalars()}
     settled: dict[int, int] = {}
     for inv_id, cents in db.execute(
             select(OfftakerSettlement.invoice_id, func.sum(OfftakerSettlement.amount_cents))
@@ -259,7 +282,7 @@ def sent_items(db, tenant_id: str, *, limit: int = 300, offset: int = 0,
         items.append(_sent_item(r, dispatches.get(f"invoice:{r.id}"),
                                 payments.get(r.payment_id) if r.payment_id else None,
                                 settled.get(r.id, 0), events, ctx.get(r.subscription_id) or {}))
-    return items, int(total)
+    return items
 
 
 def _sent_item(inv, dispatch, payment, settled_cents: int, events: dict, c: dict) -> dict:
@@ -340,7 +363,7 @@ def _sent_item(inv, dispatch, payment, settled_cents: int, events: dict, c: dict
         "legacy": False,
         "kind": "trueup" if (ci.get("is_trueup") or str(inv.period_key).startswith("trueup:")) else "invoice",
         "subscription_id": inv.subscription_id,
-        "customer_name": c.get("customer_name") or (snap.get("customer") or {}).get("name"),
+        "customer_name": c.get("customer_name") or snap.get("customer_name") or (snap.get("customer") or {}).get("name"),
         "invoice_number": inv.invoice_number or ci.get("invoice_number"),
         "status": inv.status,
         "sent_at": _iso(inv.sent_at),
@@ -380,6 +403,14 @@ def _sent_item(inv, dispatch, payment, settled_cents: int, events: dict, c: dict
         "delivery_mode": c.get("delivery_mode"),
         "cadence": c.get("cadence"),
     }
+
+
+def known_frozen_periods(db, tenant_id):
+    """Suppress legacy duplicates against all history, independent of pagination."""
+    from ..models import OfftakerInvoice
+    return {(sid, str(end or key or "")[:7]) for sid, end, key in db.execute(
+        select(OfftakerInvoice.subscription_id, OfftakerInvoice.period_end, OfftakerInvoice.period_key)
+        .where(OfftakerInvoice.tenant_id == tenant_id, OfftakerInvoice.status.in_(SENT_STATUSES)))}
 
 
 def legacy_items(db, tenant_id: str, ctx: dict[int, dict], known_periods: set[tuple[int, str]]) -> list[dict]:
@@ -505,22 +536,27 @@ def outgoing_items(db, tenant_id: str, tenant, ctx: Optional[dict[int, dict]] = 
     ).scalars()} if keys else {}
     for r in open_rows:
         c = ctx.get(r.subscription_id) or {}
-        if not c.get("enabled", True):
-            continue
         covered.add(r.subscription_id)
         d = dispatches.get(f"invoice:{r.id}")
         ci = (r.snapshot or {}).get("computed_invoice") or {}
-        if r.status == "held":
+        if d is not None and d.status in ("sending", "uncertain") or r.status == "sending":
+            kind, status, when, label = "unconfirmed", "unconfirmed", None, "Delivery needs verification"
+        elif d is not None and d.status == "accepted":
+            kind, status, when, label = "prepared", "accepted_pending_record", None, "Accepted; local record needs recovery"
+        elif paused or not c.get("enabled", True):
+            kind, status, when = "held", "paused" if paused else "disabled", None
+            label = "Sending paused" if paused else "Off-taker disabled; no automatic retry"
+        elif d is not None and (d.attempts or 0) >= 8 and d.status == "failed":
+            kind, status, when, label = "held", "retry_exhausted", None, "Automatic retries exhausted"
+        elif r.status == "held":
             kind, status, when, label = "held", "held", None, "Held"
         elif r.status == "failed" or (d is not None and d.status == "failed"):
             kind, status = "retrying", "retrying"
             when = d.retry_at if d is not None else None
             label = f"Retry after {_day(when)} {when:%H:%M} UTC" if when else "Retry pending"
-        elif r.status in ("sending",) or (d is not None and d.status in ("sending", "uncertain")):
-            kind, status, when, label = "unconfirmed", "unconfirmed", None, "Sent? Mailer did not confirm"
-        else:  # prepared: frozen, waiting for the send step (pay link / mailer)
+        else:
             kind, status, when = "prepared", "prepared", None
-            label = "Frozen, sending next run"
+            label = "Frozen, waiting for the send step"
         items.append({
             "kind": kind, "draft_id": None, "invoice_id": r.id,
             "subscription_id": r.subscription_id,
@@ -582,7 +618,8 @@ def invoice_detail(db, tenant_id: str, invoice_id: int) -> Optional[dict]:
         select(BillingEmailDispatch).where(BillingEmailDispatch.tenant_id == tenant_id,
                                            BillingEmailDispatch.key == f"invoice:{inv.id}")
     ).scalars().first()
-    payment = db.get(OfftakerPayment, inv.payment_id) if inv.payment_id else None
+    payment = db.scalar(select(OfftakerPayment).where(OfftakerPayment.id == inv.payment_id,
+        OfftakerPayment.tenant_id == tenant_id)) if inv.payment_id else None
     settlements = db.execute(
         select(OfftakerSettlement).where(OfftakerSettlement.tenant_id == tenant_id,
                                          OfftakerSettlement.invoice_id == inv.id)
@@ -642,14 +679,57 @@ def attachment_bytes(db, tenant_id: str, invoice_id: int, filename: str) -> Opti
 
 # ── the whole board ────────────────────────────────────────────────────────
 
+def portfolio_counts(db, tenant_id):
+    """Global KPIs from narrow columns; never load archived HTML/PDF payloads."""
+    from sqlalchemy import func, String, cast
+    from ..models import OfftakerInvoice as I, OfftakerPayment as P, OfftakerSettlement as S, BillingEmailDispatch as D
+    offline = select(S.invoice_id, func.sum(S.amount_cents).label("paid")).where(
+        S.tenant_id == tenant_id).group_by(S.invoice_id).subquery()
+    rows = db.execute(select(I.status, I.amount_cents, P.id, P.status, P.amount_cents,
+        P.refunded_cents, offline.c.paid, D.status, D.resend_email_id)
+        .outerjoin(P, (P.id == I.payment_id) & (P.tenant_id == tenant_id))
+        .outerjoin(offline, offline.c.invoice_id == I.id)
+        .outerjoin(D, (D.tenant_id == tenant_id) & (D.key == "invoice:" + cast(I.id, String)))
+        .where(I.tenant_id == tenant_id, I.status.in_(SENT_STATUSES)))
+    out = {"paid": 0, "unpaid": 0, "unconfirmed": 0, "bounced": 0,
+           "billed_usd": 0.0, "collected_usd": 0.0}
+    receipts = set()
+    billed = collected = 0
+    for status, amount, payment_id, ps, pa, refund, off, dispatch_status, receipt in rows:
+        if receipt:
+            receipts.add(receipt)
+        if status == "uncertain" or dispatch_status in ("sending", "uncertain"):
+            out["unconfirmed"] += 1
+        gross = (int(pa or 0) if ps in ("paid", "refunded") else 0) + int(off or 0)
+        refunded = int(refund or 0) if ps in ("paid", "refunded") else 0
+        if status == "accepted":
+            billed += int(amount or 0)
+            collected += max(0, gross - refunded)
+        # Match _sent_item payment_summary exactly, including zero-dollar
+        # obligations with no payment identity and fully refunded payments.
+        if payment_id is None and not off:
+            continue  # not_tracked is neither paid nor unpaid
+        if refunded and refunded >= gross:
+            continue  # refunded
+        if amount is not None and gross >= amount:
+            out["paid"] += 1
+        else:
+            out["unpaid"] += 1  # unpaid or partial
+    ids = list(receipts)
+    for offset in range(0, len(ids), 500):
+        events = _delivery_events(db, set(ids[offset:offset + 500]))
+        out["bounced"] += sum(v.get("status") == "bounced" for v in events.values())
+    out["billed_usd"] = round(billed / 100, 2)
+    out["collected_usd"] = round(collected / 100, 2)
+    return out
+
+
 def board(db, tenant_id: str, tenant, *, limit: int = 300, offset: int = 0,
           include_legacy: bool = True) -> dict:
     ctx = sub_context(db, tenant_id)
     sent, total = sent_items(db, tenant_id, limit=limit, offset=offset, ctx=ctx)
-    legacy: list[dict] = []
-    if include_legacy and offset == 0:
-        known = {(s["subscription_id"], str(s.get("period_end") or "")[:7]) for s in sent}
-        legacy = legacy_items(db, tenant_id, ctx, known)
+    all_legacy = legacy_items(db, tenant_id, ctx, known_frozen_periods(db, tenant_id)) if include_legacy else []
+    legacy = all_legacy if offset == 0 else []
     outgoing = outgoing_items(db, tenant_id, tenant, ctx=ctx)
     sent_all = sent + legacy
     counts = {
@@ -657,9 +737,9 @@ def board(db, tenant_id: str, tenant, *, limit: int = 300, offset: int = 0,
         "drafts": sum(1 for x in outgoing if x["kind"] == "draft"),
         "held": sum(1 for x in outgoing if x["kind"] in ("held", "retrying", "unconfirmed", "prepared")),
         "scheduled": sum(1 for x in outgoing if x["kind"] == "scheduled"),
-        "sent_total": int(total) + len(legacy),
+        "sent_total": int(total) + len(all_legacy),
         "sent_frozen": int(total),
-        "sent_legacy": len(legacy),
+        "sent_legacy": len(all_legacy),
         "bounced": sum(1 for x in sent_all if (x.get("delivery") or {}).get("status") == "bounced"),
         "unconfirmed": sum(1 for x in sent_all if (x.get("delivery") or {}).get("status") == DELIVERY_UNCONFIRMED),
         "paid": sum(1 for x in sent_all if x.get("payment_summary") == "paid"),
@@ -673,7 +753,11 @@ def board(db, tenant_id: str, tenant, *, limit: int = 300, offset: int = 0,
         "paused": bool(getattr(tenant, "sending_paused", False)),
         "outgoing": outgoing,
         "sent": sent_all,
-        "counts": counts,
+        "counts": {**counts, **portfolio_counts(db, tenant_id)},
+        "page_counts": {**counts, "sent_total": len(sent_all), "sent_frozen": len(sent), "sent_legacy": len(legacy)},
+        "counts_scope": "portfolio_frozen_invoices",
+        "legacy_scope": "first_page_only",
+        "has_more": offset + len(sent) < total,
         "limit": limit, "offset": offset,
     }
 

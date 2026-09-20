@@ -104,41 +104,59 @@ def finish(invoice_id, result, *, payment_id=None):
         if db.bind.dialect.name == "sqlite":
             db.execute(text("BEGIN IMMEDIATE"))
         row = db.scalar(select(OfftakerInvoice).where(OfftakerInvoice.id == invoice_id).with_for_update())
-        row.payment_id = payment_id or row.payment_id
-        if row.status == "accepted" and row.applied_at:
-            return
-        row.status = "accepted" if result.get("ok") else ("uncertain" if result.get("uncertain") else "failed")
-        row.last_error = result.get("error")
-        if result.get("ok"):
-            sub = db.scalar(select(BillingReportSubscription).where(
-                BillingReportSubscription.id == row.subscription_id).with_for_update())
-            stamp = datetime.utcnow()
-            row.sent_at = stamp
-            ci = row.snapshot.get("computed_invoice") or {}
-            if not row.applied_at:
+        _finish_locked(db, row, result, payment_id=payment_id)
+        db.commit()
+
+
+
+def _finish_locked(db, row, result, *, payment_id=None):
+    row.payment_id = payment_id or row.payment_id
+    if row.status == "accepted" and row.applied_at:
+        return
+    row.status = "accepted" if result.get("ok") else ("uncertain" if result.get("uncertain") else "failed")
+    row.last_error = result.get("error")
+    if result.get("ok"):
+        sub = db.scalar(select(BillingReportSubscription).where(
+            BillingReportSubscription.id == row.subscription_id).with_for_update())
+        stamp = result.get("accepted_at") or datetime.utcnow()
+        row.sent_at = stamp
+        ci = row.snapshot.get("computed_invoice") or {}
+        if not row.applied_at:
+            # Recovery may complete an older accepted dispatch after a newer
+            # invoice. Never roll the subscription's latest-send state backward.
+            latest_period = str(sub.last_sent_period_end or "")[:10]
+            keep_latest = (
+                (sub.last_sent_at is not None and sub.last_sent_at > stamp)
+                or (latest_period and row.period_end.isoformat() < latest_period)
+            )
+            if not keep_latest:
                 sub.last_sent_at = stamp
                 sub.last_invoice_number = row.invoice_number
                 sub.last_sent_amount_usd = row.amount_cents / 100
                 sub.last_sent_customer_kwh = row.customer_kwh
-                if ci.get("is_trueup"):
+            if ci.get("is_trueup"):
+                if not keep_latest and (sub.last_trueup_window_end is None
+                                        or sub.last_trueup_window_end < row.period_end):
                     sub.last_trueup_window_end = row.period_end
-                    credit = ci.get("trueup_credit_usd", ci.get("credit_usd", 0))
-                    sub.pending_credit_usd = (cents(sub.pending_credit_usd) + cents(credit)) / 100
-                else:
-                    sub.last_sent_period_end = row.period_end.isoformat()
-                    from .delivery import next_send_at
-                    sub.next_send_at = next_send_at(sub.cadence, stamp)
-                if result.get("resend_email_id"):
-                    sub.last_resend_email_id = result["resend_email_id"]
-                override_id = (row.render_snapshot or {}).get("email_copy_override_id")
-                if override_id:
-                    from ..models import EmailCopyOverride
-                    from ..email_copy_overrides import record_send
-                    db.scalar(select(EmailCopyOverride).where(EmailCopyOverride.id == override_id).with_for_update())
-                    record_send(db, override_id)
-                row.applied_at = stamp
-        db.commit()
-
+                credit = ci.get("trueup_credit_usd", ci.get("credit_usd", 0))
+                sub.pending_credit_usd = (cents(sub.pending_credit_usd) + cents(credit)) / 100
+            elif not keep_latest:
+                sub.last_sent_period_end = row.period_end.isoformat()
+                from .delivery import next_send_at
+                sub.next_send_at = next_send_at(sub.cadence, stamp)
+            if not keep_latest and result.get("resend_email_id"):
+                sub.last_resend_email_id = result["resend_email_id"]
+            override_id = (row.render_snapshot or {}).get("email_copy_override_id")
+            if override_id:
+                from ..models import EmailCopyOverride
+                from ..email_copy_overrides import record_send
+                override = db.scalar(select(EmailCopyOverride).where(
+                    EmailCopyOverride.id == override_id,
+                    EmailCopyOverride.tenant_id == row.tenant_id).with_for_update())
+                if override is None:
+                    raise ValueError("Frozen email override is unavailable for this tenant")
+                record_send(db, override.id)
+            row.applied_at = stamp
 
 def reconcile(invoice_id):
     with SessionLocal() as db:
@@ -202,3 +220,55 @@ def rendered_evidence(invoice_id):
         if not row or not row.render_snapshot:
             raise ValueError("Original rendered invoice evidence is unavailable")
         return dict(row.render_snapshot)
+
+
+def repair_accepted_invoice(*, tenant_id, invoice_id, audit_run_id):
+    """Repair local acceptance bookkeeping only, atomically with its audit log."""
+    from ..models import OfftakerAuditRun
+    with SessionLocal() as db:
+        if db.bind.dialect.name == "sqlite":
+            db.execute(text("BEGIN IMMEDIATE"))
+        row = db.scalar(select(OfftakerInvoice).where(
+            OfftakerInvoice.id == invoice_id, OfftakerInvoice.tenant_id == tenant_id
+        ).with_for_update())
+        if row is None:
+            return None
+        dispatch = db.scalar(select(BillingEmailDispatch).where(
+            BillingEmailDispatch.tenant_id == tenant_id,
+            BillingEmailDispatch.key == f"invoice:{invoice_id}").with_for_update())
+        if dispatch is None or dispatch.status != "accepted":
+            return None
+        if row.status == "accepted" and row.applied_at:
+            return None
+        before = {"status": row.status, "applied_at": row.applied_at.isoformat() if row.applied_at else None}
+        ci = (row.snapshot or {}).get("computed_invoice") or {}
+        sub = db.scalar(select(BillingReportSubscription).where(
+            BillingReportSubscription.id == row.subscription_id,
+            BillingReportSubscription.tenant_id == tenant_id).with_for_update())
+        reason = None
+        if sub is None:
+            reason = "Subscription ownership is unavailable; review manually."
+        elif ci.get("is_trueup") or str(row.period_key).startswith("trueup:"):
+            reason = "True-up acceptance can adjust credits; review manually."
+        elif not row.snapshot or row.amount_cents is None or row.period_end is None:
+            reason = "Frozen invoice evidence is incomplete; review manually."
+        if reason is None:
+            _finish_locked(db, row, {"ok": True, "resend_email_id": dispatch.resend_email_id,
+                "accepted_at": row.sent_at or dispatch.updated_at or dispatch.created_at})
+        repair = {"code": "accepted_dispatch_recovered", "invoice_id": row.id,
+            "dispatch_id": dispatch.id, "status": "blocked" if reason else "repaired",
+            "reason": reason or "Recorded an already accepted send; no email was sent.",
+            "before": before, "after": {"status": row.status,
+                "applied_at": row.applied_at.isoformat() if row.applied_at else None}}
+        run = db.scalar(select(OfftakerAuditRun).where(
+            OfftakerAuditRun.id == audit_run_id, OfftakerAuditRun.tenant_id == tenant_id,
+            OfftakerAuditRun.status == "running").with_for_update())
+        if run is None:
+            db.rollback()
+            return None
+        stats = dict(run.stats or {})
+        stats["repairs"] = list(stats.get("repairs") or []) + [repair]
+        stats["repaired_count"] = sum(r["status"] == "repaired" for r in stats["repairs"])
+        run.stats = stats
+        db.commit()
+        return repair
