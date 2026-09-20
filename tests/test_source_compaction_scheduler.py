@@ -113,3 +113,13 @@ def test_cross_process_lock_prevents_duplicate_work(legacy_source):
         with SessionLocal() as db:
             assert db.get(GmpUsageRaw, identity).raw_csv is not None
     assert compaction.compact_legacy_raw(apply=True, tenant_id=tid)["processed"] == 1
+
+
+def test_compaction_interval_is_bounded(monkeypatch):
+    from api import scheduler
+    jobs = []
+    monkeypatch.setattr(scheduler.scheduler, "add_job", lambda *args, **kw: jobs.append(kw))
+    for value, expected in [("0", 1), ("99999", 60), ("bad", 5)]:
+        monkeypatch.setenv("GMP_SOURCE_COMPACTION_INTERVAL_MINUTES", value)
+        scheduler._register_source_compaction_job()
+        assert jobs[-1]["minutes"] == expected

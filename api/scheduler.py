@@ -1551,7 +1551,11 @@ def compact_gmp_sources_job() -> dict:
 
 
 def _register_source_compaction_job():
-    scheduler.add_job(compact_gmp_sources_job, "interval", minutes=5,
+    try:
+        minutes = max(1, min(60, int(os.environ.get("GMP_SOURCE_COMPACTION_INTERVAL_MINUTES", "5"))))
+    except (TypeError, ValueError):
+        minutes = 5
+    scheduler.add_job(compact_gmp_sources_job, "interval", minutes=minutes,
                       id="compact_gmp_sources", replace_existing=True,
                       max_instances=1, coalesce=True)
 
