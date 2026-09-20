@@ -2967,7 +2967,7 @@ def deliver_trueup_subscription(
         if not is_test:
             from .source_evidence import collect
             try:
-                source_capture = collect(sub)
+                source_capture = collect(sub, period_start=trueup_window(as_of)[0], period_end=window_end)
             except Exception as exc:
                 return {"ok": False, "held": True, "error": f"Source evidence unavailable: {exc}"}
         settlement = compute_annual_trueup(sub, as_of=as_of)
