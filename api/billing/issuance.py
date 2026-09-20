@@ -16,6 +16,7 @@ def cents(value):
 
 def restore(snapshot):
     d = dict(snapshot)
+    d.pop("_source_evidence", None)  # archive metadata is not a BillingMatch field
     def period(value):
         if not value:
             return None
@@ -80,11 +81,14 @@ def freeze(*, tenant_id, subscription_id, key, match, expected_amount=None, prep
         credit = cents(ci.get("credit_applied"))
         sub.pending_credit_usd = (cents(sub.pending_credit_usd) - credit) / 100
         rendered = prepare(match) if prepare is not None else None
+        from .source_evidence import archive
+        frozen_snapshot = match.to_dict()
+        frozen_snapshot["_source_evidence"] = archive(db, sub, match)
         values = dict(tenant_id=tenant_id, subscription_id=subscription_id,
             period_key=key, period_start=start, period_end=end,
             invoice_number=str(ci.get("invoice_number") or ""), amount_cents=amount,
             credit_applied_cents=credit, customer_kwh=ci.get("kwh"),
-            snapshot=match.to_dict(), render_snapshot=rendered, status="prepared")
+            snapshot=frozen_snapshot, render_snapshot=rendered, status="prepared")
         if row is None:
             row = OfftakerInvoice(**values)
             db.add(row)
