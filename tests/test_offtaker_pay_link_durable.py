@@ -453,3 +453,36 @@ def test_webhook_verifier_tries_the_energy_agent_secrets(monkeypatch):
         ev = wh._construct_signed_event(b"{}", "t=1,v1=abc")
     assert ev["id"] == "evt_1"
     assert seen == ["whsec_solar", "whsec_agent", "whsec_agent_connect"]
+
+
+def test_unfinished_solar_operator_onboarding_restarts_on_energy_agent(monkeypatch):
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_solar")
+    monkeypatch.setenv("STRIPE_AO_SECRET_KEY", "sk_test_agent")
+    t = _tenant(stripe_connect_account_id="acct_old", stripe_connect_charges_enabled=False,
+                stripe_connect_platform=None)
+    created = {}
+
+    def fake_retrieve(acct_id, **kw):
+        return {"id": acct_id, "charges_enabled": False, "details_submitted": False}
+
+    def fake_create(**kw):
+        created.update(kw)
+        return {"id": "acct_new"}
+
+    with patch("api.billing.payments.stripe.Account.retrieve", side_effect=fake_retrieve),             patch("api.billing.payments.stripe.Account.create", side_effect=fake_create):
+        with SessionLocal() as db:
+            res = pay.create_or_get_connect_account(db, db.get(Tenant, t.id))
+    assert res["ok"] and res["account_id"] == "acct_new"
+    assert created["api_key"] == "sk_test_agent"
+    with SessionLocal() as db:
+        row = db.get(Tenant, t.id)
+        assert row.stripe_connect_account_id == "acct_new"
+        assert row.stripe_connect_platform == "energy_agent"
+    # A FINISHED legacy account is left where it is.
+    t2 = _tenant(stripe_connect_account_id="acct_done", stripe_connect_charges_enabled=True,
+                 stripe_connect_platform=None)
+    with patch("api.billing.payments.stripe.Account.retrieve",
+               return_value={"id": "acct_done", "charges_enabled": True, "details_submitted": True}),             patch("api.billing.payments.stripe.Account.create", side_effect=AssertionError("must not create")):
+        with SessionLocal() as db:
+            res2 = pay.create_or_get_connect_account(db, db.get(Tenant, t2.id))
+    assert res2["account_id"] == "acct_done"

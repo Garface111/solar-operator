@@ -328,13 +328,29 @@ def create_or_get_connect_account(db, tenant) -> dict:
             if enabled != bool(tenant.stripe_connect_charges_enabled):
                 tenant.stripe_connect_charges_enabled = enabled
                 db.commit()
-            return {
-                "ok": True,
-                "account_id": existing,
-                "charges_enabled": enabled,
-                "details_submitted": details,
-                "created": False,
-            }
+            # An onboarding that was STARTED under the legacy Solar Operator
+            # platform but never finished (no details, no charges) is worth
+            # nothing there and would keep showing the wrong name on Stripe's
+            # page. Once the Energy Agent key exists, abandon it and start
+            # over on Energy Agent. A finished legacy account is left alone.
+            if (plat == PLATFORM_SOLAR and _ao_key() and not enabled and not details
+                    and (getattr(tenant, "stripe_connect_platform", None) or "") != PLATFORM_SOLAR):
+                logger.info("connect: abandoning unfinished %s account %s for %s; re-creating on %s",
+                            plat, existing, tenant.id, PLATFORM_EA)
+                tenant.stripe_connect_account_id = None
+                tenant.stripe_connect_platform = PLATFORM_EA
+                tenant.stripe_connect_charges_enabled = False
+                db.commit()
+                plat = PLATFORM_EA
+                existing = None
+            else:
+                return {
+                    "ok": True,
+                    "account_id": existing,
+                    "charges_enabled": enabled,
+                    "details_submitted": details,
+                    "created": False,
+                }
         except Exception as e:  # noqa: BLE001
             logger.warning("connect retrieve failed for %s: %s", tenant.id, e)
             return {"ok": True, "account_id": existing,
