@@ -33,9 +33,10 @@ def _mk_bill(db, tid, acct_id, excess, credit,
 def _cleanup(db, tid):
     """Remove this test's rows — some legacy tests assert on WHOLE tables, so
     leftover rows from this file would order-dependently break them."""
-    from api.models import ReportDraft, OfftakerInvoice, BillingEmailDispatch
+    from api.models import (ReportDraft, OfftakerInvoice, BillingEmailDispatch,
+                            SourceArtifact, SourceArtifactChunk)
     for model in (BillingEmailDispatch, OfftakerInvoice, ReportDraft, BillingReportSubscription, Bill,
-                  UtilityAccount, Array):
+                  UtilityAccount, Array, SourceArtifact, SourceArtifactChunk):
         db.query(model).filter(model.tenant_id == tid).delete(
             synchronize_session=False)
     t = db.get(Tenant, tid)
