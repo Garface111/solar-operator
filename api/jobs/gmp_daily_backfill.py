@@ -116,16 +116,19 @@ def _persist_window(
     csv_text: str | None,
     parsed: dict,
     http_status: int = 200,
+    *, captured_at=None,
 ) -> tuple[int, int]:
     """Upsert ONE window's raw payload (sponge) + derived per-day rows.
     Returns (daily_inserted, daily_updated)."""
+    from ..source_artifacts import put_artifact, preserve_raw_version
+
     # ── 1. raw sponge (verbatim) — idempotent on (account, window) ──
     raw = db.execute(
         select(GmpUsageRaw).where(
             GmpUsageRaw.account_id == account.id,
             GmpUsageRaw.window_start == ws,
             GmpUsageRaw.window_end == we,
-        )
+        ).with_for_update().execution_options(populate_existing=True)
     ).scalar_one_or_none()
     if raw is None:
         raw = GmpUsageRaw(
@@ -133,13 +136,23 @@ def _persist_window(
             account_number=account.account_number, window_start=ws, window_end=we,
         )
         db.add(raw)
+    if raw.raw_csv is not None:
+        preserve_raw_version(db, raw)
+    next_artifact = (put_artifact(db, account.tenant_id, csv_text.encode("utf-8"), "text/csv")
+                     if csv_text is not None else None)
+    changed = next_artifact != raw.artifact_id
+    if changed:
+        preserve_raw_version(db, raw)
     raw.fmt = "csv"
     raw.http_status = http_status
-    raw.raw_csv = csv_text
+    raw.artifact_id = next_artifact
+    raw.raw_csv = None
     raw.row_count = parsed["row_count"]
     raw.interval_min = parsed["interval_min"]
     raw.interval_max = parsed["interval_max"]
-    raw.fetched_at = now()
+    raw.fetched_at = captured_at if captured_at is not None else now()
+    if changed:
+        preserve_raw_version(db, raw)
 
     # ── 2. derived per-day rows — idempotent on (account, day) ──
     inserted = updated = 0
@@ -424,8 +437,11 @@ def _record_404(db: Session, account: UtilityAccount, ws: date, we: date) -> Non
         select(GmpUsageRaw).where(
             GmpUsageRaw.account_id == account.id,
             GmpUsageRaw.window_start == ws, GmpUsageRaw.window_end == we,
-        )
+        ).with_for_update().execution_options(populate_existing=True)
     ).scalar_one_or_none()
+    # A transient missing response must never erase captured successful evidence.
+    if raw is not None and (raw.raw_csv is not None or raw.artifact_id is not None):
+        return
     if raw is None:
         raw = GmpUsageRaw(
             tenant_id=account.tenant_id, account_id=account.id,
@@ -481,6 +497,7 @@ def backfill_tenant(
 def rederive_account(db: Optional[Session], account_id: int) -> dict[str, Any]:
     """Re-derive GmpDailyGeneration from already-stored GmpUsageRaw — NO re-pull.
     Use after a parser change to retroactively enrich stored history instantly."""
+    from ..source_artifacts import raw_payload_predicate, read_raw_csv
     _own = db is None
     if _own:
         db = SessionLocal()
@@ -491,19 +508,22 @@ def rederive_account(db: Optional[Session], account_id: int) -> dict[str, Any]:
         raws = db.execute(
             select(GmpUsageRaw).where(
                 GmpUsageRaw.account_id == account_id,
-                GmpUsageRaw.raw_csv.isnot(None),
+                raw_payload_predicate(GmpUsageRaw),
             )
-        ).scalars().all()
-        ins = upd = 0
+            .execution_options(yield_per=1)
+        ).scalars()
+        ins = upd = count = 0
         for raw in raws:
-            parsed = gmp_adapter.parse_usage_csv_to_daily(raw.raw_csv or "")
+            count += 1
+            csv_text = read_raw_csv(db, raw) or ""
+            parsed = gmp_adapter.parse_usage_csv_to_daily(csv_text)
             i, u = _persist_window(db, account, raw.window_start, raw.window_end,
-                                   raw.raw_csv, parsed, raw.http_status)
+                                   csv_text, parsed, raw.http_status, captured_at=raw.fetched_at)
             ins += i
             upd += u
         db.commit()
         return {"account_id": account_id, "status": "ok",
-                "windows_rederived": len(raws), "daily_inserted": ins, "daily_updated": upd}
+                "windows_rederived": count, "daily_inserted": ins, "daily_updated": upd}
     finally:
         if _own:
             db.close()

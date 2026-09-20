@@ -1238,6 +1238,8 @@ class GmpUsageRaw(Base):
         # window overwrites in place — idempotent, never duplicates the sponge.
         UniqueConstraint("account_id", "window_start", "window_end", name="uq_gmp_raw_window"),
         Index("ix_gmp_raw_acct_window", "account_id", "window_start"),
+        Index("ix_gmp_raw_inline_id", "id", postgresql_where=text("raw_csv IS NOT NULL"),
+              sqlite_where=text("raw_csv IS NOT NULL")),
     )
 
 

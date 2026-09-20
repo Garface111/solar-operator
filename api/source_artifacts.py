@@ -103,7 +103,12 @@ def get_artifact(db, tenant_id: str, artifact_id: int) -> bytes:
     if artifact is None:
         raise ValueError("Source artifact unavailable for tenant")
     manifest = artifact.manifest
-    if not isinstance(manifest, list) or sum(x["byte_length"] for x in manifest) != artifact.byte_length:
+    if not isinstance(manifest, list) or any(
+        not isinstance(entry, dict) or not isinstance(entry.get("id"), int)
+        or not isinstance(entry.get("sha256"), str) or len(entry["sha256"]) != 64
+        or not isinstance(entry.get("byte_length"), int) or not 0 < entry["byte_length"] <= MAX_CHUNK
+        for entry in manifest
+    ) or sum(entry["byte_length"] for entry in manifest) != artifact.byte_length:
         raise ValueError("Invalid source artifact manifest")
     # Batch reads; bound compressed chunk memory rather than loading every blob twice.
     output = bytearray()

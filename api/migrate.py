@@ -66,6 +66,8 @@ def main():
         added = []
         if not column_exists(conn, "gmp_usage_raw", "artifact_id"):
             conn.execute(text("ALTER TABLE gmp_usage_raw ADD COLUMN artifact_id INTEGER REFERENCES source_artifacts(id)"))
+        if table_exists(conn, "gmp_usage_raw") and not index_exists(conn, "gmp_usage_raw", "ix_gmp_raw_inline_id"):
+            conn.execute(text("CREATE INDEX ix_gmp_raw_inline_id ON gmp_usage_raw (id) WHERE raw_csv IS NOT NULL"))
         if not column_exists(conn, "offtaker_invoices", "render_snapshot"):
             conn.execute(text("ALTER TABLE offtaker_invoices ADD COLUMN render_snapshot JSON"))
         # Add columns to tenants
