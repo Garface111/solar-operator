@@ -59,10 +59,16 @@ def charge_model_for(tenant) -> str:
 def _stripe_kw(row) -> dict:
     """Request kwargs addressing the account a row's Session lives on: the
     operator's connected account for a direct charge, nothing (the platform)
-    for a legacy destination-charge row. Retrieve/expire/refund of a direct
-    charge's objects FAIL without it — they do not exist on the platform."""
+    for a legacy destination-charge row — and the KEY of the platform that
+    owns it. Retrieve/expire/refund of a direct charge's objects FAIL without
+    both — they do not exist on the other platform."""
     acct = getattr(row, "stripe_account_id", None)
-    return {"stripe_account": acct} if acct else {}
+    kw = {"stripe_account": acct} if acct else {}
+    plat = (getattr(row, "stripe_platform", None) or PLATFORM_SOLAR)
+    key = platform_key(plat)
+    if key:
+        kw["api_key"] = key
+    return kw
 
 
 def payment_method_types() -> Optional[list[str]]:
@@ -76,6 +82,89 @@ def payment_method_types() -> Optional[list[str]]:
         return None
     items = [p.strip() for p in raw.split(",") if p.strip()]
     return items or None
+
+# WHICH STRIPE PLATFORM ACCOUNT owns the Connect relationship (Ford, 2026-09-20).
+# The product's own Stripe account is "Energy Agent"; the legacy shared account
+# is "Solar Operator" (its name showed on Stripe's onboarding page — wrong brand
+# for an Array Operator customer). A tenant that already connected under Solar
+# Operator stays there (its account id does not exist on the other platform);
+# a fresh connection goes to Energy Agent as soon as STRIPE_AO_SECRET_KEY is
+# configured. Every Stripe call about a tenant or a payment row is made with
+# the key of the platform that owns it — never the process-wide default.
+PLATFORM_SOLAR = "solar_operator"
+PLATFORM_EA = "energy_agent"
+PLATFORM_LABELS = {PLATFORM_SOLAR: "Solar Operator", PLATFORM_EA: "Energy Agent"}
+
+# What Stripe itself deducts from each online payment, for the operator's eyes
+# (our 0.5% is separate). Published US rates; override if the account has
+# custom pricing.
+STRIPE_FEE_ACH = "0.8%, capped at $5"
+STRIPE_FEE_CARD = "2.9% + 30¢"
+
+
+def _so_key() -> str:
+    return (os.getenv("STRIPE_SECRET_KEY") or "").strip()
+
+
+def _ao_key() -> str:
+    return (os.getenv("STRIPE_AO_SECRET_KEY") or "").strip()
+
+
+def platform_for(tenant) -> str:
+    p = (getattr(tenant, "stripe_connect_platform", None) or "").strip()
+    if p in PLATFORM_LABELS:
+        return p
+    if getattr(tenant, "stripe_connect_account_id", None):
+        return PLATFORM_SOLAR          # connected before the split → legacy platform
+    return PLATFORM_EA if _ao_key() else PLATFORM_SOLAR
+
+
+def platform_key(platform: str) -> str:
+    if platform == PLATFORM_EA and _ao_key():
+        return _ao_key()
+    return _so_key() or _ao_key()
+
+
+def platform_label(platform: str) -> str:
+    return PLATFORM_LABELS.get(platform, "Stripe")
+
+
+def _api_kw(platform_or_tenant) -> dict:
+    plat = platform_or_tenant if isinstance(platform_or_tenant, str) else platform_for(platform_or_tenant)
+    key = platform_key(plat)
+    return {"api_key": key} if key else {}
+
+
+def stripe_fee_copy() -> dict:
+    return {"ach": (os.getenv("AO_STRIPE_FEE_ACH") or STRIPE_FEE_ACH).strip(),
+            "card": (os.getenv("AO_STRIPE_FEE_CARD") or STRIPE_FEE_CARD).strip()}
+
+
+def _retrieve_any(fn, *args, **kwargs):
+    """Call a Stripe retrieve with each configured platform key until one owns
+    the object. Returns (object, platform). Webhook handlers need this: an
+    event names an object, not the platform it lives on."""
+    tried = []
+    last = None
+    for plat in (PLATFORM_EA, PLATFORM_SOLAR):
+        key = _ao_key() if plat == PLATFORM_EA else _so_key()
+        if not key or key in tried:
+            continue
+        tried.append(key)
+        try:
+            return fn(*args, api_key=key, **kwargs), plat
+        except stripe.error.InvalidRequestError as exc:
+            if getattr(exc, "code", None) == "resource_missing":
+                last = exc
+                continue
+            raise
+        except stripe.error.AuthenticationError as exc:
+            last = exc
+            continue
+    if last is not None:
+        raise last
+    raise RuntimeError("Stripe not configured")
+
 
 # Platform fee: basis points of the invoice total (50 = 0.5%). "Scrape a tiny
 # bit" — env-driven so Ford can retune without a code push. Min floor optional.
@@ -135,10 +224,11 @@ def dollars_to_cents(amount: Any) -> int:
 
 
 def _stripe_ready() -> bool:
-    key = os.getenv("STRIPE_SECRET_KEY", "")
+    key = _so_key() or _ao_key()
     if not key:
         return False
-    stripe.api_key = key
+    # Process-wide default only; every Array Operator call passes api_key=.
+    stripe.api_key = _so_key() or key
     return True
 
 
@@ -160,6 +250,7 @@ def link_existing_connect_account(db, tenant) -> dict:
     if not _stripe_ready():
         return {"ok": False, "error": "Stripe not configured"}
     tid = str(getattr(tenant, "id", "") or "")
+    plat = platform_for(tenant)
     try:
         # Page through platform connected accounts (small platforms = fine).
         starting_after = None
@@ -168,7 +259,7 @@ def link_existing_connect_account(db, tenant) -> dict:
             kwargs = {"limit": 100}
             if starting_after:
                 kwargs["starting_after"] = starting_after
-            page = stripe.Account.list(**kwargs)
+            page = stripe.Account.list(**kwargs, **_api_kw(plat))
             data = page.get("data") if isinstance(page, dict) else list(page.data or [])
             if not data:
                 break
@@ -197,6 +288,7 @@ def link_existing_connect_account(db, tenant) -> dict:
             return {"ok": False, "error": "Connect account ownership conflict"}
         enabled = bool(matched.get("charges_enabled"))
         tenant.stripe_connect_account_id = acct_id
+        tenant.stripe_connect_platform = plat
         tenant.stripe_connect_charges_enabled = enabled
         db.commit()
         logger.info("linked existing Connect account %s → tenant %s (charges=%s)",
@@ -221,13 +313,14 @@ def create_or_get_connect_account(db, tenant) -> dict:
     """
     if not _stripe_ready():
         return {"ok": False, "error": "Stripe not configured"}
+    plat = platform_for(tenant)
 
     existing = getattr(tenant, "stripe_connect_account_id", None)
     if existing:
         # Refresh charges_enabled from Stripe so a completed KYC flips the flag
         # without waiting for account.updated.
         try:
-            acct = stripe.Account.retrieve(existing)
+            acct = stripe.Account.retrieve(existing, **_api_kw(plat))
             enabled = bool(getattr(acct, "charges_enabled", None)
                            or (acct.get("charges_enabled") if isinstance(acct, dict) else False))
             details = bool(getattr(acct, "details_submitted", None)
@@ -270,9 +363,10 @@ def create_or_get_connect_account(db, tenant) -> dict:
         # Pre-fill email so Stripe's form asks for less typing.
         if tenant.contact_email:
             create_kwargs["individual"] = {"email": tenant.contact_email}
-        acct = stripe.Account.create(**create_kwargs)
+        acct = stripe.Account.create(**create_kwargs, **_api_kw(plat))
         acct_id = acct["id"] if isinstance(acct, dict) else acct.id
         tenant.stripe_connect_account_id = acct_id
+        tenant.stripe_connect_platform = plat
         tenant.stripe_connect_charges_enabled = False
         db.commit()
         return {
@@ -340,6 +434,7 @@ def create_account_link(tenant, *, refresh_url: str, return_url: str) -> dict:
             refresh_url=refresh_url,
             return_url=return_url,
             type="account_onboarding",
+            **_api_kw(tenant),
         )
         url = link["url"] if isinstance(link, dict) else link.url
         return {"ok": True, "url": url, "account_id": acct_id}
@@ -443,6 +538,8 @@ def _mint_checkout_session(*, tenant, row, customer_email: Optional[str],
     pmt = payment_method_types()
     if pmt:
         extra["payment_method_types"] = pmt
+    plat = platform_for(tenant)
+    extra.update(_api_kw(plat))
     create_kwargs = dict(
         mode="payment",
         success_url=success_url + "&session_id={CHECKOUT_SESSION_ID}",
@@ -517,7 +614,7 @@ def _mint_checkout_session(*, tenant, row, customer_email: Optional[str],
     return {"id": sess_id, "url": url,
             "payment_intent": pi if isinstance(pi, str) else None,
             "expires_at": expires_at,
-            "charge_model": model,
+            "charge_model": model, "platform": plat,
             "account": acct if model == "direct" else None}
 
 
@@ -694,6 +791,7 @@ def create_offtaker_payment(db, *, tenant, sub, match,
         row.stripe_payment_intent_id = minted["payment_intent"]
         row.checkout_expires_at = datetime.utcfromtimestamp(minted["expires_at"])
         row.stripe_account_id = minted["account"]
+        row.stripe_platform = minted.get("platform")
         row.pay_url = durable_pay_url(tenant, row.pay_token)
         db.commit()
         # Keep the offtaker's default invoice ledger current (open row).
@@ -947,6 +1045,7 @@ def resolve_pay_link(db, token: str) -> dict:
     row.stripe_payment_intent_id = minted["payment_intent"]
     row.checkout_expires_at = datetime.utcfromtimestamp(minted["expires_at"])
     row.stripe_account_id = minted["account"]   # a re-mint may change charge model
+    row.stripe_platform = minted.get("platform")
     row.status = "open"
     row.error = None
     db.commit()
@@ -1015,7 +1114,8 @@ def _recover_payment_intent(db, pi, account):
     if not _stripe_ready():
         raise RuntimeError("Stripe unavailable for out-of-order refund reconciliation")
     scope = {"stripe_account": account} if account else {}
-    intent = stripe.PaymentIntent.retrieve(pi, **scope)
+    intent, plat = _retrieve_any(stripe.PaymentIntent.retrieve, pi, **scope)
+    scope = dict(scope, **_api_kw(plat))
     intent = intent.to_dict() if hasattr(intent, "to_dict") else dict(intent)
     meta = intent.get("metadata") or {}
     if meta.get("kind") != "offtaker_invoice":
@@ -1330,12 +1430,12 @@ def mark_application_fee_refunded(db, *, fee_dict: dict) -> dict:
     # on the platform. Only a proven missing resource permits that fallback.
     scope = account
     try:
-        charge = stripe.Charge.retrieve(charge_id, stripe_account=scope)
+        charge, _plat = _retrieve_any(stripe.Charge.retrieve, charge_id, stripe_account=scope)
     except stripe.error.InvalidRequestError as exc:
         if getattr(exc, "code", None) != "resource_missing":
             raise
         scope = None
-        charge = stripe.Charge.retrieve(charge_id)
+        charge, _plat = _retrieve_any(stripe.Charge.retrieve, charge_id)
     charge = charge.to_dict() if hasattr(charge, "to_dict") else dict(charge)
     attached_fee = charge.get("application_fee")
     if isinstance(attached_fee, dict):

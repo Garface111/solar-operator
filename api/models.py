@@ -196,6 +196,11 @@ class Tenant(Base):
         String(64), nullable=True, index=True)
     stripe_connect_charges_enabled: Mapped[bool] = mapped_column(
         Boolean, default=False, server_default="false", nullable=False)
+    # Which Stripe PLATFORM account the Connect account was created under:
+    # "energy_agent" (Array Operator's own account) or "solar_operator" (the
+    # legacy shared account). NULL + an account id = legacy. See
+    # billing.payments.platform_for.
+    stripe_connect_platform: Mapped[str | None] = mapped_column(String(24), nullable=True)
     # Offtaker pay-link CHARGE MODEL override (Sep 2026, Ford): "direct" — the
     # Checkout Session and charge live on this operator's connected account,
     # so the OPERATOR pays Stripe's processing fee (card 2.9%+30¢, ACH 0.8%
@@ -1998,6 +2003,9 @@ class OfftakerPayment(Base):
     # account for DIRECT charges; NULL = the platform (legacy destination
     # charges). Every later Stripe call about this row must address it.
     stripe_account_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # The platform account whose key addresses this row's objects
+    # ("energy_agent" | "solar_operator"; NULL = solar_operator, legacy).
+    stripe_platform: Mapped[str | None] = mapped_column(String(24), nullable=True)
     stripe_application_fee_id: Mapped[str | None] = mapped_column(String(100), nullable=True, unique=True)
     active_key: Mapped[str | None] = mapped_column(String(100), nullable=True, unique=True)
     refunded_cents: Mapped[int] = mapped_column(Integer, default=0, server_default="0")

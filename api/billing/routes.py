@@ -5934,6 +5934,11 @@ def payments_connect_status(authorization: Optional[str] = Header(default=None))
         "fee_bps": pay.fee_bps(),
         "fee_percent": pay.fee_bps() / 100.0,
         "fee_min_cents": pay.fee_min_cents(),
+        # What Stripe deducts on top of our fee, for honest copy in the UI.
+        "stripe_fees": pay.stripe_fee_copy(),
+        # The Stripe platform account the onboarding page will name.
+        "platform": pay.platform_for(tenant),
+        "platform_name": pay.platform_label(pay.platform_for(tenant)),
         "ready": charges,
     }
 

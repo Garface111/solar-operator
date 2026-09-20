@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import secrets
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from api.billing import payments as pay
@@ -317,7 +318,10 @@ def test_click_addresses_the_account_the_session_lives_on(client, monkeypatch):
     with patch("api.billing.payments.stripe.checkout.Session.retrieve", retrieve):
         r = client.get(_PAY + token, follow_redirects=False)
     assert r.status_code == 303
-    retrieve.assert_called_once_with("cs_test_1", stripe_account=t.stripe_connect_account_id)
+    retrieve.assert_called_once()
+    assert retrieve.call_args.args[0] == "cs_test_1"
+    assert retrieve.call_args.kwargs["stripe_account"] == t.stripe_connect_account_id
+    assert retrieve.call_args.kwargs.get("api_key")            # keyed to the owning platform
 
 
 def test_connect_account_requests_ach_and_webhook_accepts_connect_secret():
@@ -365,3 +369,87 @@ def test_pinned_methods_fall_back_to_automatic_when_the_account_rejects_them(mon
     assert len(calls) == 2
     assert calls[0]["payment_method_types"] == ["us_bank_account", "card"]
     assert "payment_method_types" not in calls[1]
+
+
+# ─── platform account: Energy Agent for new connections, legacy stays put ───
+
+def test_platform_routing_and_keys(monkeypatch):
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_solar")
+    monkeypatch.delenv("STRIPE_AO_SECRET_KEY", raising=False)
+    fresh = SimpleNamespace(stripe_connect_account_id=None, stripe_connect_platform=None)
+    legacy = SimpleNamespace(stripe_connect_account_id="acct_old", stripe_connect_platform=None)
+    assert pay.platform_for(fresh) == "solar_operator"            # no AO key yet → unchanged
+    monkeypatch.setenv("STRIPE_AO_SECRET_KEY", "sk_test_agent")
+    assert pay.platform_for(fresh) == "energy_agent"
+    assert pay.platform_for(legacy) == "solar_operator"           # connected before the split
+    tagged = SimpleNamespace(stripe_connect_account_id="acct_new", stripe_connect_platform="energy_agent")
+    assert pay.platform_for(tagged) == "energy_agent"
+    assert pay._api_kw(tagged) == {"api_key": "sk_test_agent"}
+    assert pay._api_kw(legacy) == {"api_key": "sk_test_solar"}
+    row_ea = SimpleNamespace(stripe_account_id="acct_new", stripe_platform="energy_agent")
+    row_old = SimpleNamespace(stripe_account_id="acct_old", stripe_platform=None)
+    assert pay._stripe_kw(row_ea) == {"stripe_account": "acct_new", "api_key": "sk_test_agent"}
+    assert pay._stripe_kw(row_old) == {"stripe_account": "acct_old", "api_key": "sk_test_solar"}
+    assert pay.platform_label("energy_agent") == "Energy Agent"
+    assert pay.stripe_fee_copy() == {"ach": "0.8%, capped at $5", "card": "2.9% + 30¢"}
+
+
+def test_mint_uses_the_tenants_platform_key_and_stamps_the_row(monkeypatch):
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_solar")
+    monkeypatch.setenv("STRIPE_AO_SECRET_KEY", "sk_test_agent")
+    calls: list = []
+    t = _tenant(stripe_connect_platform="energy_agent")
+    sid = _sub(t.id)
+    with patch("api.billing.payments.stripe.checkout.Session.create",
+               side_effect=_fake_create(calls)):
+        with SessionLocal() as db:
+            res = pay.create_offtaker_payment(
+                db, tenant=db.get(Tenant, t.id),
+                sub=db.get(BillingReportSubscription, sid), match=_FakeMatch(amount=100.0))
+    assert res["ok"]
+    assert calls[0]["api_key"] == "sk_test_agent"
+    with SessionLocal() as db:
+        assert db.get(OfftakerPayment, res["payment_id"]).stripe_platform == "energy_agent"
+    calls2: list = []
+    t2 = _tenant()   # account id set, platform NULL → legacy
+    sid2 = _sub(t2.id)
+    with patch("api.billing.payments.stripe.checkout.Session.create",
+               side_effect=_fake_create(calls2)):
+        with SessionLocal() as db:
+            pay.create_offtaker_payment(db, tenant=db.get(Tenant, t2.id),
+                                        sub=db.get(BillingReportSubscription, sid2),
+                                        match=_FakeMatch(amount=100.0))
+    assert calls2[0]["api_key"] == "sk_test_solar"
+
+
+def test_connect_status_reports_fee_split_and_platform(client, monkeypatch):
+    monkeypatch.setenv("STRIPE_AO_SECRET_KEY", "sk_test_agent")
+    from api.account import mint_session_for_tenant
+    t = _tenant(stripe_connect_account_id=None, stripe_connect_charges_enabled=False)
+    with patch("api.billing.payments.refresh_connect_status", return_value={"ok": True, "connected": False}):
+        r = client.get("/v1/array-operator/billing/payments/connect",
+                       headers={"Authorization": f"Bearer {mint_session_for_tenant(t.id)}"})
+    assert r.status_code == 200, r.text
+    b = r.json()
+    assert b["stripe_fees"]["ach"].startswith("0.8%") and "2.9%" in b["stripe_fees"]["card"]
+    assert b["platform"] == "energy_agent" and b["platform_name"] == "Energy Agent"
+
+
+def test_webhook_verifier_tries_the_energy_agent_secrets(monkeypatch):
+    from api import stripe_webhook as wh
+    monkeypatch.setattr(wh, "STRIPE_WEBHOOK_SECRET", "whsec_solar")
+    monkeypatch.setattr(wh, "STRIPE_CONNECT_WEBHOOK_SECRET", "")
+    monkeypatch.setattr(wh, "STRIPE_AO_WEBHOOK_SECRET", "whsec_agent")
+    monkeypatch.setattr(wh, "STRIPE_AO_CONNECT_WEBHOOK_SECRET", "whsec_agent_connect")
+    seen = []
+
+    def fake_construct(payload, sig, secret):
+        seen.append(secret)
+        if secret != "whsec_agent_connect":
+            raise wh.stripe.error.SignatureVerificationError("no", sig or "")
+        return {"id": "evt_1", "type": "x"}
+
+    with patch("api.stripe_webhook.stripe.Webhook.construct_event", side_effect=fake_construct):
+        ev = wh._construct_signed_event(b"{}", "t=1,v1=abc")
+    assert ev["id"] == "evt_1"
+    assert seen == ["whsec_solar", "whsec_agent", "whsec_agent_connect"]

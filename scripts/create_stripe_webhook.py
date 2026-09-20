@@ -10,8 +10,13 @@ To roll the signing secret (if secret is wrong/unknown):
 """
 import os, sys, stripe
 
-stripe.api_key = os.environ["STRIPE_SECRET_KEY"]
+# Which platform account: STRIPE_SECRET_KEY (Solar Operator, default) or
+# STRIPE_AO_SECRET_KEY (Energy Agent) — pick with STRIPE_KEY_ENV=STRIPE_AO_SECRET_KEY.
+KEY_ENV = os.getenv("STRIPE_KEY_ENV", "STRIPE_SECRET_KEY")
+stripe.api_key = os.environ[KEY_ENV]
+SECRET_PREFIX = "STRIPE_AO_" if KEY_ENV == "STRIPE_AO_SECRET_KEY" else "STRIPE_"
 mode = "live" if stripe.api_key.startswith("sk_live") else "test"
+print(f"platform key: {KEY_ENV} ({mode})")
 
 URL = "https://web-production-49c83.up.railway.app/v1/stripe/webhook"
 EVENTS = [
@@ -70,7 +75,7 @@ def create_or_update():
         print(f"created: {e.id}")
         print()
         print("Set on Railway:")
-        print(f"  STRIPE_WEBHOOK_SECRET={e.secret}")
+        print(f"  {SECRET_PREFIX}WEBHOOK_SECRET={e.secret}")
 
 
 # ── Connect endpoint (connected-account events) ────────────────────────────
@@ -104,7 +109,7 @@ def create_or_update_connect():
         print(f"connect endpoint created: {e.id}")
         print()
         print("Set on Railway:")
-        print(f"  STRIPE_CONNECT_WEBHOOK_SECRET={e.secret}")
+        print(f"  {SECRET_PREFIX}CONNECT_WEBHOOK_SECRET={e.secret}")
 
 
 if "--list" in sys.argv:

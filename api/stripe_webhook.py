@@ -48,13 +48,18 @@ STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 # only on a Connect endpoint ("listen to events on connected accounts"), which
 # has its OWN signing secret. Both endpoints point at this handler.
 STRIPE_CONNECT_WEBHOOK_SECRET = os.getenv("STRIPE_CONNECT_WEBHOOK_SECRET", "")
+# The Energy Agent platform account (Array Operator's own Stripe account) has
+# its own pair of endpoints and secrets; both platforms post to this handler.
+STRIPE_AO_WEBHOOK_SECRET = os.getenv("STRIPE_AO_WEBHOOK_SECRET", "")
+STRIPE_AO_CONNECT_WEBHOOK_SECRET = os.getenv("STRIPE_AO_CONNECT_WEBHOOK_SECRET", "")
 
 
 def _construct_signed_event(payload: bytes, sig: str | None):
     """Verify against the account endpoint's secret, then the Connect
     endpoint's. A connected-account event signed with the Connect secret used
     to be rejected as "Invalid signature" and silently lost."""
-    tried = [s for s in (STRIPE_WEBHOOK_SECRET, STRIPE_CONNECT_WEBHOOK_SECRET) if s]
+    tried = [s for s in (STRIPE_WEBHOOK_SECRET, STRIPE_CONNECT_WEBHOOK_SECRET,
+                         STRIPE_AO_WEBHOOK_SECRET, STRIPE_AO_CONNECT_WEBHOOK_SECRET) if s]
     last: Exception | None = None
     for secret in tried:
         try:

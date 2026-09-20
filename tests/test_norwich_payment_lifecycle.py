@@ -270,7 +270,8 @@ def test_application_fee_refund_requires_charge_ownership_and_is_monotonic(book)
         pay.mark_payment_paid(db, session_dict=event)
         with patch.object(pay.stripe.Charge, "retrieve", return_value=charge) as retrieve:
             assert pay.mark_application_fee_refunded(db, fee_dict=fee)["fee_refunded_cents"] == 20
-            retrieve.assert_called_with(fee["charge"], stripe_account=event["_stripe_account"])
+            assert retrieve.call_args.args[0] == fee["charge"]
+            assert retrieve.call_args.kwargs["stripe_account"] == event["_stripe_account"]
             assert pay.mark_application_fee_refunded(db, fee_dict=fee | {"amount_refunded":10})["fee_refunded_cents"] == 20
             assert "ignored" in pay.mark_application_fee_refunded(db, fee_dict=fee | {"id":"fee_wrong"})
             assert "ignored" in pay.mark_application_fee_refunded(db, fee_dict=fee | {"currency":"eur"})

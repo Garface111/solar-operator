@@ -1547,6 +1547,12 @@ def main():
             conn.execute(text(
                 "ALTER TABLE tenants ADD COLUMN offtaker_charge_model VARCHAR(16)"))
             print("  + tenants.offtaker_charge_model")
+        # 2026-09-20 Energy Agent platform account: which platform owns the
+        # Connect account (NULL + account id = legacy Solar Operator).
+        if not column_exists(conn, "tenants", "stripe_connect_platform"):
+            conn.execute(text(
+                "ALTER TABLE tenants ADD COLUMN stripe_connect_platform VARCHAR(24)"))
+            print("  + tenants.stripe_connect_platform")
         for idx_sql in [
             "CREATE INDEX IF NOT EXISTS ix_tenants_stripe_connect_account_id "
             "ON tenants (stripe_connect_account_id)",
@@ -1591,6 +1597,10 @@ def main():
             conn.execute(text(
                 "ALTER TABLE offtaker_payments ADD COLUMN stripe_account_id VARCHAR(64)"))
             print("  + offtaker_payments.stripe_account_id")
+        if not column_exists(conn, "offtaker_payments", "stripe_platform"):
+            conn.execute(text(
+                "ALTER TABLE offtaker_payments ADD COLUMN stripe_platform VARCHAR(24)"))
+            print("  + offtaker_payments.stripe_platform")
         try:
             conn.execute(text(
                 "CREATE UNIQUE INDEX IF NOT EXISTS ix_offtaker_payments_pay_token "
