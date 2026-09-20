@@ -64,6 +64,8 @@ def main():
 
     with engine.begin() as conn:
         added = []
+        if not column_exists(conn, "gmp_usage_raw", "artifact_id"):
+            conn.execute(text("ALTER TABLE gmp_usage_raw ADD COLUMN artifact_id INTEGER REFERENCES source_artifacts(id)"))
         if not column_exists(conn, "offtaker_invoices", "render_snapshot"):
             conn.execute(text("ALTER TABLE offtaker_invoices ADD COLUMN render_snapshot JSON"))
         # Add columns to tenants
