@@ -129,7 +129,9 @@ STALE_DAYS = 3
 # cache each connection's live result for 5 minutes. Keyed by a stable
 # (vendor, config) signature -> (fetched_at, live_dict|None).
 _CACHE_TTL = timedelta(minutes=5)
-_overview_cache: dict[str, tuple[datetime, Optional[dict]]] = {}
+from .runtime_cache import BoundedTimestampCache
+
+_overview_cache = BoundedTimestampCache(max_entries=512, retention=_CACHE_TTL)
 
 # Sentinel for "caller did not supply this optional arg" where None is a
 # meaningful value (a provider genuinely can be None).
@@ -137,7 +139,12 @@ _UNSET = object()
 
 
 def _cache_key(vendor: str, config: dict) -> str:
-    return vendor + ":" + json.dumps(config, sort_keys=True, default=str)
+    # The cache must not retain decrypted API keys/passwords in its keys.
+    import hashlib
+    fingerprint = hashlib.sha256(
+        json.dumps(config, sort_keys=True, default=str).encode()
+    ).hexdigest()
+    return vendor + ":" + fingerprint
 
 
 def _tenant_from_bearer(authorization: str | None) -> Tenant:
@@ -1614,7 +1621,7 @@ def array_owners_fleet_audit(
 # inverter), so cache the assembled tree per array for 10 minutes to respect the
 # 300 req/day SolarEdge budget. Keyed by (site_id) -> (fetched_at, inverters).
 _TREE_TTL = timedelta(minutes=10)
-_tree_cache: dict[str, tuple[datetime, list[dict]]] = {}
+_tree_cache = BoundedTimestampCache(max_entries=512, retention=_TREE_TTL)
 
 
 def _se_inverters_for(api_key: str, site_id: int) -> list[dict]:
