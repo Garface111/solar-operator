@@ -89,7 +89,7 @@ def put_artifact(db, tenant_id: str, payload: bytes, mime_type: str = "applicati
             if row.byte_length != chunks[row.sha256]["byte_length"]:
                 raise ValueError("chunk hash/length conflict")
             found[row.sha256] = row.id
-    manifest = [{"id": found[sha], "sha256": sha, "byte_length": size} for sha, size in ordered]
+    manifest = [{"id": found[sha], "byte_length": size} for sha, size in ordered]
     _insert_ignore(db, SourceArtifact, [{"tenant_id": tenant_id, "sha256": digest,
         "byte_length": len(payload), "mime_type": mime_type[:120], "manifest": manifest}], ["tenant_id", "sha256"])
     return db.execute(select(SourceArtifact.id).where(
@@ -105,7 +105,7 @@ def get_artifact(db, tenant_id: str, artifact_id: int) -> bytes:
     manifest = artifact.manifest
     if not isinstance(manifest, list) or any(
         not isinstance(entry, dict) or not isinstance(entry.get("id"), int)
-        or not isinstance(entry.get("sha256"), str) or len(entry["sha256"]) != 64
+        or ("sha256" in entry and (not isinstance(entry["sha256"], str) or len(entry["sha256"]) != 64))
         or not isinstance(entry.get("byte_length"), int) or not 0 < entry["byte_length"] <= MAX_CHUNK
         for entry in manifest
     ) or sum(entry["byte_length"] for entry in manifest) != artifact.byte_length:
@@ -120,7 +120,9 @@ def get_artifact(db, tenant_id: str, artifact_id: int) -> bytes:
         by_id = {r.id: r for r in rows}
         for entry in entries:
             row = by_id.get(entry["id"])
-            if row is None or row.sha256 != entry["sha256"] or row.byte_length != entry["byte_length"]:
+            if row is None or row.byte_length != entry["byte_length"] or (
+                "sha256" in entry and row.sha256 != entry["sha256"]
+            ):
                 raise ValueError("Missing or invalid source chunk")
             try:
                 if row.codec == "zlib":
@@ -134,7 +136,7 @@ def get_artifact(db, tenant_id: str, artifact_id: int) -> bytes:
                     raise ValueError("Unsupported source codec")
             except zlib.error as exc:
                 raise ValueError("Corrupt source chunk") from exc
-            if len(data) != entry["byte_length"] or hashlib.sha256(data).hexdigest() != entry["sha256"]:
+            if len(data) != entry["byte_length"] or hashlib.sha256(data).hexdigest() != row.sha256:
                 raise ValueError("Source chunk integrity check failed")
             output.extend(data)
     payload = bytes(output)

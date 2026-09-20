@@ -273,3 +273,41 @@ def test_worker_entrypoint_bounds_bytes_and_resumes_without_cursor(source_accoun
     assert second["processed"] == 1
     assert compact_legacy_raw(apply=True, tenant_id=tid)["processed"] == 0
     assert any(index["name"] == "ix_gmp_raw_inline_id" for index in inspect(engine).get_indexes("gmp_usage_raw"))
+
+
+@pytest.mark.parametrize("tamper", ["wrong_id", "reordered", "length"])
+def test_compact_manifest_detects_tampering(source_account, tamper):
+    tid, _, _ = source_account
+    payload = b"a" * 65536 + b"b" * 65536
+    with SessionLocal() as db:
+        identity = put_artifact(db, tid, payload)
+        other_id = put_artifact(db, tid, b"c" * 65536)
+        artifact = db.get(SourceArtifact, identity)
+        assert all(set(entry) == {"id", "byte_length"} for entry in artifact.manifest)
+        manifest = [dict(entry) for entry in artifact.manifest]
+        if tamper == "wrong_id":
+            manifest[0]["id"] = db.get(SourceArtifact, other_id).manifest[0]["id"]
+        elif tamper == "reordered":
+            manifest.reverse()
+        else:
+            manifest[0]["byte_length"] -= 1
+        artifact.manifest = manifest
+        db.flush()
+        with pytest.raises(ValueError):
+            get_artifact(db, tid, identity)
+
+
+def test_original_hash_bearing_manifest_remains_readable(source_account):
+    tid, _, _ = source_account
+    payload = b"original format compatibility"
+    with SessionLocal() as db:
+        identity = put_artifact(db, tid, payload)
+        artifact = db.get(SourceArtifact, identity)
+        artifact.manifest = [dict(entry, sha256=db.get(SourceArtifactChunk, entry["id"]).sha256)
+                             for entry in artifact.manifest]
+        db.flush()
+        assert get_artifact(db, tid, identity) == payload
+        artifact.manifest = [dict(entry, sha256="0" * 64) for entry in artifact.manifest]
+        db.flush()
+        with pytest.raises(ValueError, match="chunk"):
+            get_artifact(db, tid, identity)
