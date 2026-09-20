@@ -118,8 +118,10 @@ def test_daylight_for_uses_array_coords_and_falls_back(monkeypatch):
 def test_fleet_tree_emits_per_array_daylight(monkeypatch):
     """An array with far-away coords gets ITS OWN is_daylight, not Vermont's."""
     monkeypatch.setattr(
-        IF, "_is_daylight",
-        lambda lat=None, lon=None, when=None: lat is None)  # regional=True, coords=False
+        IF, "_solar_elevation_now",
+        # Stub the shared solar input, so both regional and per-site verdicts
+        # exercise the real threshold logic independent of the wall clock.
+        lambda lat=None, lon=None, when=None: 35.0 if lat is None else -20.0)
     with SessionLocal() as db:
         t = _mk_tenant(db)
         a_vt = Array(tenant_id=t.id, name="VT no coords", fuel_type="solar")
