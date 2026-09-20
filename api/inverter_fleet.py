@@ -329,7 +329,11 @@ def _solar_state_for(arr, default_elev: float | None, default_daylight: bool,
 # Per-site telemetry cache (inventory + N equipment calls is heavy; SolarEdge is
 # 300 req/day). Keyed by "vendor:site" -> (fetched_at, {serial: row}).
 _SITE_TTL = timedelta(minutes=10)
-_site_cache: dict[str, tuple] = {}
+from .runtime_cache import BoundedTimestampCache
+
+# Keep a bounded week of last-known data for existing vendor-outage fallback;
+# normal freshness remains ten minutes. Cold sites no longer live forever.
+_site_cache = BoundedTimestampCache(max_entries=512, retention=timedelta(days=7))
 
 # A capture-time instantaneous power stays shown for up to a day for
 # extension-captured vendors (Fronius/SMA), which only update on a manual
@@ -441,7 +445,7 @@ def _telemetry_for_site(vendor: str, config: dict, site_id, *, force: bool = Fal
             inv = _se.fetch_inventory(api_key, int(site_id))
         except _se.SolarEdgeError as exc:
             log.warning("fleet: inventory fetch failed for site %s: %s", site_id, exc)
-            return _site_cache.get(ck, (None, {}))[1] if ck in _site_cache else {}
+            return _site_cache.get(ck, (None, {}))[1]
 
         def _se_one(it: dict) -> tuple[str, dict] | None:
             sn = it.get("sn")
@@ -492,7 +496,7 @@ def _telemetry_for_site(vendor: str, config: dict, site_id, *, force: bool = Fal
             comps = _locus.list_inverter_components(creds, int(site_id))
         except _locus.LocusError as exc:
             log.warning("fleet: locus components fetch failed for site %s: %s", site_id, exc)
-            return _site_cache.get(ck, (None, {}))[1] if ck in _site_cache else {}
+            return _site_cache.get(ck, (None, {}))[1]
         end = now().date()
         start = end - timedelta(days=7)
 

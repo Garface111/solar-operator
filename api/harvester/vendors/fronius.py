@@ -11,6 +11,8 @@ endpoint) — a direct read, so a ~4-min cycle stays well under 5 minutes.
 """
 from __future__ import annotations
 
+from ..response import disposing_response
+
 import logging
 import re
 from datetime import datetime, timezone
@@ -64,10 +66,10 @@ class FroniusVendor:
             # the WSO2 login page, and following that redirect returns 200 — a false
             # "logged in" that makes us skip login entirely and scrape an empty
             # session ("no PV systems"). Not following it: 302 → not ok → re-login.
-            r = await page.context.request.get(
+            async with disposing_response(await page.context.request.get(
                 f"{BASE}/Messages/GetUnreadMessageCountForUser?_=0",
-                headers={"Accept": "application/json"}, max_redirects=0)
-            return r.ok
+                headers={"Accept": "application/json"}, max_redirects=0)) as r:
+                return r.ok
         except Exception:
             return False
 
@@ -75,13 +77,13 @@ class FroniusVendor:
         req = context.request
 
         async def get(path):
-            r = await req.get(f"{BASE}{path}", headers={"Accept": "application/json"})
-            if not r.ok:
-                return None
-            try:
-                return await r.json()
-            except Exception:
-                return None
+            async with disposing_response(await req.get(f"{BASE}{path}", headers={"Accept": "application/json"})) as r:
+                if not r.ok:
+                    return None
+                try:
+                    return await r.json()
+                except Exception:
+                    return None
 
         listing = await get("/PvSystems/GetPvSystemsForListView?_=0")
         systems = (listing or {}).get("data") or []

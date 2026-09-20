@@ -11,6 +11,8 @@ cycle keeps data under the 5-minute SLA.
 """
 from __future__ import annotations
 
+from ..response import disposing_response
+
 import base64
 import binascii
 import json
@@ -93,24 +95,24 @@ class SMAVendor:
         H = {"Authorization": f"Bearer {tok}", "Accept": "application/json"}
 
         async def get(path):
-            r = await req.get(f"{UIAPI}{path}", headers=H)
-            if r.status == 401:
-                raise RuntimeError("SMA uiapi 401 — token expired")
-            if not r.ok:
-                return None
-            try:
-                return await r.json()
-            except Exception:
-                return None
+            async with disposing_response(await req.get(f"{UIAPI}{path}", headers=H)) as r:
+                if r.status == 401:
+                    raise RuntimeError("SMA uiapi 401 — token expired")
+                if not r.ok:
+                    return None
+                try:
+                    return await r.json()
+                except Exception:
+                    return None
 
         async def post(path, body):
-            r = await req.post(f"{UIAPI}{path}", headers={**H, "Content-Type": "application/json"}, data=body)
-            if not r.ok:
-                return None
-            try:
-                return await r.json()
-            except Exception:
-                return None
+            async with disposing_response(await req.post(f"{UIAPI}{path}", headers={**H, "Content-Type": "application/json"}, data=body)) as r:
+                if not r.ok:
+                    return None
+                try:
+                    return await r.json()
+                except Exception:
+                    return None
 
         # Resolve ALL plants (never short-circuit on the URL's plant id).
         nav = await get("/api/v1/navigation") or []

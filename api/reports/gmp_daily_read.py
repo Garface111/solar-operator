@@ -38,6 +38,8 @@ from sqlalchemy.orm import Session
 
 from ..db import SessionLocal
 from ..models import GmpDailyGeneration, GmpUsageRaw, UtilityAccount, Array
+from sqlalchemy.orm import defer
+from ..source_artifacts import raw_payload_predicate, read_raw_csv
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -282,7 +284,7 @@ def get_hourly_series(
             q = select(GmpUsageRaw).where(
                 GmpUsageRaw.account_id == acct_id,
                 GmpUsageRaw.http_status == 200,
-                GmpUsageRaw.raw_csv.isnot(None),
+                raw_payload_predicate(GmpUsageRaw),
             )
             # Windows that could cover any day in [start, end].
             if start is not None:
@@ -291,8 +293,8 @@ def get_hourly_series(
                 q = q.where(GmpUsageRaw.window_start <= end)
             q = q.order_by(GmpUsageRaw.window_start, GmpUsageRaw.fetched_at)
             account_hours: dict[tuple[date, int], dict[str, float]] = {}
-            for raw in db.execute(q).scalars().all():
-                parsed = gmp_adapter.parse_usage_csv_to_hourly(raw.raw_csv or "")
+            for raw in db.execute(q.execution_options(yield_per=1)).scalars():
+                parsed = gmp_adapter.parse_usage_csv_to_hourly(read_raw_csv(db, raw) or "")
                 for (d, h), cell in (parsed.get("by_hour") or {}).items():
                     if start is not None and d < start:
                         continue
@@ -346,10 +348,10 @@ def get_raw_windows(
     if _own:
         db = SessionLocal()
     try:
-        rows = db.execute(
-            select(GmpUsageRaw).where(GmpUsageRaw.account_id == account_id)
-            .order_by(GmpUsageRaw.window_start)
-        ).scalars().all()
+        query = select(GmpUsageRaw).where(GmpUsageRaw.account_id == account_id).order_by(GmpUsageRaw.window_start)
+        if not include_payload:
+            query = query.options(defer(GmpUsageRaw.raw_csv))
+        rows = db.execute(query.execution_options(yield_per=1)).scalars()
         out = []
         for r in rows:
             d = {"window_start": r.window_start, "window_end": r.window_end,
@@ -357,7 +359,7 @@ def get_raw_windows(
                  "interval_min": r.interval_min, "interval_max": r.interval_max,
                  "fetched_at": r.fetched_at}
             if include_payload:
-                d["raw_csv"] = r.raw_csv
+                d["raw_csv"] = read_raw_csv(db, r)
             out.append(d)
         return out
     finally:

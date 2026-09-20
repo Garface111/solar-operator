@@ -725,22 +725,35 @@ def test_fleet_tree_renders_fronius_comb(client):
     assert lag["status"] == "underperforming"
 
 
-def test_fleet_tree_produced_today_falls_back_to_per_inverter_sum(client):
+@pytest.fixture
+def fleet_evening_day(monkeypatch):
+    """Keep capture/read clocks on the fleet day across the UTC midnight edge."""
+    from datetime import datetime
+    from api import inverter_fleet
+    from api.models import local_today
+    utc_evening = datetime(2026, 9, 20, 1, 30)
+    day = local_today(utc_evening)
+    assert day != utc_evening.date()
+    for module in (array_owners, inverter_fleet):
+        monkeypatch.setattr(module, "now", lambda: utc_evening)
+        monkeypatch.setattr(module, "local_today", lambda: day)
+    return day
+
+
+def test_fleet_tree_produced_today_falls_back_to_per_inverter_sum(client, fleet_evening_day):
     """When the array-level DailyGeneration row for TODAY is missing — the case for
     API-polled vendors like SolarEdge, which only write that row on the nightly pull
     — the array's produced_today_kwh falls back to summing each inverter's live daily
     series for today. So the daily total shows intraday like the extension vendors do.
     (Bruce: 'SolarEdge total kWh for the day not showing like the other vendors.')"""
-    from api.models import Inverter, InverterDaily, DailyGeneration, now
+    from api.models import Inverter, InverterDaily, DailyGeneration
     from datetime import timedelta
     tid, key = _make_tenant()
     client.post("/v1/array-owners/inverter-capture",
                 json=_fronius_payload_with_inverters(), headers=_auth(key))
-    # Use the app's clock (UTC now()), NOT local date.today(): the fleet-tree
-    # endpoint keys "today" off now().date(), so on a box whose local date differs
-    # from UTC (evening in a behind-UTC tz) date.today() writes the per-inverter
-    # rows under the WRONG day and the fallback sums nothing / a prior day.
-    today = now().date()
+    # Capture and fleet reads use the same fleet-local business day, even
+    # after UTC midnight. UTC-date rows would collide with captured yesterday.
+    today = fleet_evening_day
     with SessionLocal() as db:
         inv_by_sn = {i.serial: i.id for i in db.execute(
             select(Inverter).where(Inverter.tenant_id == tid)).scalars()}
@@ -1234,7 +1247,7 @@ def test_inverter_capture_rejects_implausible_per_inverter_kwh(client):
         assert all(v <= 7.6 * 24 for v in rows.values())
 
 
-def test_inverter_capture_readd_with_today_in_site_daily(client):
+def test_inverter_capture_readd_with_today_in_site_daily(client, fleet_evening_day):
     """REGRESSION (Jun 2026): re-adding an SMA array 500'd on uq_daily_array_day
     (Sentry PYTHON-FASTAPI-3, Key (array_id, day)=(…, today)). Root cause: the
     array-level write had TWO blocks — the today-row (from site.energy_today_kwh)
@@ -1243,12 +1256,11 @@ def test_inverter_capture_readd_with_today_in_site_daily(client):
     commit. This test reproduces it: site.energy_today_kwh set AND a site.daily
     entry for today, captured TWICE. Must 200 both times, one row for today,
     max-wins."""
-    from api.models import DailyGeneration, now as _now
+    from api.models import DailyGeneration
     tid, key = _make_tenant()
-    # Use the SAME clock the handler uses (now().date(), UTC) — not local
-    # date.today() — so this test is stable across the UTC/local midnight
-    # boundary (the handler stamps today's row by now().date()).
-    today_iso = _now().date().isoformat()
+    # The handler's today row and historical daily row must share its local
+    # business-day key, including the after-UTC-midnight case.
+    today_iso = fleet_evening_day.isoformat()
     payload = {
         "provider": "sma",
         "sites": [{
@@ -1271,7 +1283,7 @@ def test_inverter_capture_readd_with_today_in_site_daily(client):
         td = db.execute(
             select(DailyGeneration).where(
                 DailyGeneration.tenant_id == tid,
-                DailyGeneration.day == _now().date(),
+                DailyGeneration.day == fleet_evening_day,
             )
         ).scalars().all()
         assert len(td) == 1                    # exactly one row for today, no duplicate

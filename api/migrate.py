@@ -62,8 +62,23 @@ def main():
     init_db()
     print("✓ Base.metadata.create_all done (new tables created if missing)")
 
+    # Build the legacy-source work queue without blocking utility ingestion.
+    # Existing production tables are not altered by metadata.create_all.
+    if engine.dialect.name == "postgresql":
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            if table_exists(conn, "gmp_usage_raw"):
+                valid = conn.execute(text("SELECT indisvalid FROM pg_index WHERE indexrelid = to_regclass('ix_gmp_raw_inline_id')")).scalar_one_or_none()
+                if valid is False:
+                    conn.execute(text("DROP INDEX CONCURRENTLY IF EXISTS ix_gmp_raw_inline_id"))
+                if valid is not True:
+                    conn.execute(text("CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_gmp_raw_inline_id ON gmp_usage_raw (id) WHERE raw_csv IS NOT NULL"))
+
     with engine.begin() as conn:
         added = []
+        if not column_exists(conn, "gmp_usage_raw", "artifact_id"):
+            conn.execute(text("ALTER TABLE gmp_usage_raw ADD COLUMN artifact_id INTEGER REFERENCES source_artifacts(id)"))
+        if engine.dialect.name != "postgresql" and table_exists(conn, "gmp_usage_raw") and not index_exists(conn, "gmp_usage_raw", "ix_gmp_raw_inline_id"):
+            conn.execute(text("CREATE INDEX ix_gmp_raw_inline_id ON gmp_usage_raw (id) WHERE raw_csv IS NOT NULL"))
         if not column_exists(conn, "offtaker_invoices", "render_snapshot"):
             conn.execute(text("ALTER TABLE offtaker_invoices ADD COLUMN render_snapshot JSON"))
         # Add columns to tenants

@@ -288,6 +288,17 @@ class BrowserFarm:
             result = await vendor.scrape(page, context, creds)
             storage_state = await context.storage_state()
 
+            # Payloads are plain data; delivery no longer needs a browser.
+            # Retain the session snapshot for successful or failed delivery.
+            try:
+                await context.close()
+            except Exception as exc:
+                # Preserve capture/delivery if early cleanup fails; finally
+                # retries closing the context as it did before.
+                log.warning("early context close failed: %s", type(exc).__name__)
+            else:
+                context = page = None
+
             # Deliver through the existing capture endpoints (same as extension).
             rows = await deliver(tenant_id, result.requests)
 

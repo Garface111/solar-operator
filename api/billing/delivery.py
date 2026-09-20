@@ -2328,6 +2328,8 @@ def _prepare_invoice_evidence(match, sub, tenant, *, invoice_date=None, note=Non
     Render once before payment-provider failures. Both email variants and exact
     invoice/utility attachments remain unchanged on every subsequent retry.
     """
+    from .source_evidence import assert_unchanged
+    assert_unchanged(sub, match)
     to, cc, problems = resolve_recipients(sub, tenant)
     if not to:
         raise ValueError("; ".join(problems) or "No invoice recipient configured")
@@ -2357,6 +2359,7 @@ def _prepare_invoice_evidence(match, sub, tenant, *, invoice_date=None, note=Non
             reply_to=getattr(tenant, "contact_email", None), product=product)
     eco = _offtaker_email_fields(tenant.id, subscription_id=sub.id)
     import hashlib
+    assert_unchanged(sub, match)
     return {"variants": variants, "attachments": attachments,
         "artifact_sha256": {a["filename"]: hashlib.sha256(base64.b64decode(a["content"])).hexdigest() for a in attachments},
         "prepared_at": datetime.utcnow().isoformat() + "Z",
@@ -2415,7 +2418,12 @@ def deliver_subscription(db, sub, tenant, *, invoice_date: Optional[date] = None
             dates = re.findall(r"\d{4}-\d{2}-\d{2}", expected_period_label)
             if dates:
                 period_label = dates[-1][:7]
-        match = build_match(sub, period_label=period_label) if period_label else build_match(sub)
+        calculate = lambda: build_match(sub, period_label=period_label) if period_label else build_match(sub)
+        if is_test:
+            match = calculate()
+        else:
+            from .source_evidence import capture_calculation
+            match = capture_calculation(sub, calculate, period_label=period_label)
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": f"workbook unreadable: {e}"}
     if not match.matched or not match.latest_period:
@@ -2955,6 +2963,13 @@ def deliver_trueup_subscription(
         frozen_settlement = match.computed_invoice["trueup"]
         settlement = SimpleNamespace(window_end=window_end, to_dict=lambda: frozen_settlement)
     else:
+        source_capture = None
+        if not is_test:
+            from .source_evidence import collect
+            try:
+                source_capture = collect(sub, period_start=trueup_window(as_of)[0], period_end=window_end)
+            except Exception as exc:
+                return {"ok": False, "held": True, "error": f"Source evidence unavailable: {exc}"}
         settlement = compute_annual_trueup(sub, as_of=as_of)
         if not settlement.ok:
             # Already settled this window → benign skip; missing budget/months → skip.
@@ -2968,6 +2983,12 @@ def deliver_trueup_subscription(
             or "Array Operator"
         )
         match = build_trueup_match(sub, settlement, operator=operator)
+        if source_capture is not None:
+            from .source_evidence import finish_capture
+            try:
+                finish_capture(sub, match, source_capture)
+            except Exception as exc:
+                return {"ok": False, "held": True, "error": str(exc)}
     ci = match.computed_invoice or {}
     cur_period_key = f"trueup:{settlement.window_end.isoformat()}"
     # Exactly-once for the TRUE-UP lives on its own column. Writing the true-up

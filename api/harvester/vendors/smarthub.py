@@ -12,6 +12,8 @@ Emits:
 """
 from __future__ import annotations
 
+from ..response import disposing_response
+
 import base64
 import logging
 import re
@@ -175,12 +177,12 @@ class SmartHubVendor:
     @staticmethod
     async def _accounts(req, base: str, email: str) -> list[dict]:
         try:
-            r = await req.get(f"{base}/services/secured/accounts",
+            async with disposing_response(await req.get(f"{base}/services/secured/accounts",
                               params={"user": email},
-                              headers={"x-nisc-smarthub-username": email})
-            if r.ok:
-                data = await r.json()
-                return data if isinstance(data, list) else (data.get("accounts") or [])
+                              headers={"x-nisc-smarthub-username": email})) as r:
+                if r.ok:
+                    data = await r.json()
+                    return data if isinstance(data, list) else (data.get("accounts") or [])
         except Exception as exc:                     # noqa: BLE001
             log.warning("accounts discovery failed: %s", exc)
         return []
@@ -188,11 +190,11 @@ class SmartHubVendor:
     @staticmethod
     async def _overview(req, base: str, acct_no: str) -> list[dict]:
         try:
-            r = await req.get(f"{base}/services/secured/billing/history/overview",
-                              params={"acctNbr": acct_no})
-            if r.ok:
-                data = await r.json()
-                return data if isinstance(data, list) else (data.get("bills") or data.get("rows") or [])
+            async with disposing_response(await req.get(f"{base}/services/secured/billing/history/overview",
+                              params={"acctNbr": acct_no})) as r:
+                if r.ok:
+                    data = await r.json()
+                    return data if isinstance(data, list) else (data.get("bills") or data.get("rows") or [])
         except Exception as exc:                     # noqa: BLE001
             log.warning("overview failed: %s", type(exc).__name__)
         return []
@@ -211,14 +213,14 @@ class SmartHubVendor:
             d = "bill"
         url = f"{base}/services/secured/billPdfService/{d}_{acct}.pdf"
         try:
-            r = await req.get(url, params={"account": acct, "timestamp": ts,
-                                           "uuid": uuid, "systemOfRecord": sor})
-            if not r.ok:
-                return None
-            body = await r.body()
-            if not (PDF_MIN <= len(body) <= PDF_MAX):
-                return None
-            return base64.b64encode(body).decode("ascii")
+            async with disposing_response(await req.get(url, params={"account": acct, "timestamp": ts,
+                                           "uuid": uuid, "systemOfRecord": sor})) as r:
+                if not r.ok:
+                    return None
+                body = await r.body()
+                if not (PDF_MIN <= len(body) <= PDF_MAX):
+                    return None
+                return base64.b64encode(body).decode("ascii")
         except Exception as exc:                     # noqa: BLE001
             log.warning("pdf pull failed for %s: %s", uuid, exc)
             return None
@@ -238,12 +240,12 @@ class SmartHubVendor:
                 "endDateTime": int(end.timestamp() * 1000),
             }
             try:
-                r = await req.post(f"{base}/services/secured/utility-usage",
+                async with disposing_response(await req.post(f"{base}/services/secured/utility-usage",
                                    data=body,
                                    headers={"Content-Type": "application/json",
-                                            "x-nisc-smarthub-username": user_id})
-                if r.ok:
-                    self._reduce(await r.json(), gen_by_day)
+                                            "x-nisc-smarthub-username": user_id})) as r:
+                    if r.ok:
+                        self._reduce(await r.json(), gen_by_day)
             except Exception as exc:                 # noqa: BLE001
                 log.warning("utility-usage chunk failed: %s", exc)
             end = start

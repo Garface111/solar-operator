@@ -1229,7 +1229,8 @@ class GmpUsageRaw(Base):
     row_count: Mapped[int] = mapped_column(Integer, default=0)     # interval rows parsed from this blob
     interval_min: Mapped[date | None] = mapped_column(Date, nullable=True)  # earliest IntervalStart seen
     interval_max: Mapped[date | None] = mapped_column(Date, nullable=True)  # latest IntervalStart seen
-    raw_csv: Mapped[str | None] = mapped_column(Text, nullable=True)  # the VERBATIM payload (the sponge)
+    raw_csv: Mapped[str | None] = mapped_column(Text, nullable=True)  # legacy inline payload
+    artifact_id: Mapped[int | None] = mapped_column(ForeignKey("source_artifacts.id"), nullable=True)
     fetched_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
 
     __table_args__ = (
@@ -1237,6 +1238,8 @@ class GmpUsageRaw(Base):
         # window overwrites in place — idempotent, never duplicates the sponge.
         UniqueConstraint("account_id", "window_start", "window_end", name="uq_gmp_raw_window"),
         Index("ix_gmp_raw_acct_window", "account_id", "window_start"),
+        Index("ix_gmp_raw_inline_id", "id", postgresql_where=text("raw_csv IS NOT NULL"),
+              sqlite_where=text("raw_csv IS NOT NULL")),
     )
 
 
@@ -2906,3 +2909,40 @@ class OfftakerAuditRun(Base):
     __table_args__ = (
         Index("ix_offtaker_audit_runs_tenant_started", "tenant_id", "started_at"),
     )
+
+
+class SourceArtifactChunk(Base):
+    """Immutable compressed bytes; deduplication is confined to one tenant."""
+    __tablename__ = "source_artifact_chunks"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    byte_length: Mapped[int] = mapped_column(Integer, nullable=False)
+    codec: Mapped[str] = mapped_column(String(12), nullable=False)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    __table_args__ = (UniqueConstraint("tenant_id", "sha256", name="uq_source_chunk_tenant_hash"),)
+
+
+class SourceArtifact(Base):
+    """Immutable exact-byte manifest. Never delete while evidence references exist."""
+    __tablename__ = "source_artifacts"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    byte_length: Mapped[int] = mapped_column(Integer, nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    manifest: Mapped[list] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now, nullable=False)
+    __table_args__ = (UniqueConstraint("tenant_id", "sha256", name="uq_source_artifact_tenant_hash"),)
+
+
+class GmpUsageRawVersion(Base):
+    """Original window metadata + immutable payload for each retained source version."""
+    __tablename__ = "gmp_usage_raw_versions"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tenant_id: Mapped[str] = mapped_column(String(32), ForeignKey("tenants.id"), nullable=False)
+    raw_id: Mapped[int] = mapped_column(ForeignKey("gmp_usage_raw.id"), nullable=False, index=True)
+    artifact_id: Mapped[int] = mapped_column(ForeignKey("source_artifacts.id"), nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    source_metadata: Mapped[dict] = mapped_column(JSON, nullable=False)
+    __table_args__ = (UniqueConstraint("raw_id", "artifact_id", "captured_at", name="uq_gmp_raw_version"),)

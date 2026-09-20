@@ -6838,3 +6838,36 @@ def mailroom_audit_get(run_id: int, authorization: Optional[str] = Header(defaul
         if r is None or r.tenant_id != t.id:
             raise HTTPException(404, "audit run not found")
         return {"ok": True, "run": ma.run_json(r)}
+
+
+@router.get("/invoices/{invoice_id}/source-evidence")
+def invoice_source_evidence(invoice_id: int, authorization: Optional[str] = Header(default=None)):
+    """Permanent source manifest; legacy invoices are never retro-certified."""
+    tenant = tenant_from_session(authorization)
+    from ..models import OfftakerInvoice
+    from .source_evidence import manifest
+    with SessionLocal() as db:
+        invoice = db.get(OfftakerInvoice, invoice_id)
+        if invoice is None or invoice.tenant_id != tenant.id:
+            raise HTTPException(404, "Invoice not found")
+        return manifest(invoice)
+
+
+@router.get("/invoices/{invoice_id}/source-evidence/{artifact_id}")
+def download_invoice_source_evidence(invoice_id: int, artifact_id: int,
+                                     authorization: Optional[str] = Header(default=None)):
+    tenant = tenant_from_session(authorization)
+    from ..models import OfftakerInvoice
+    from ..source_artifacts import get_artifact
+    from .source_evidence import manifest
+    with SessionLocal() as db:
+        invoice = db.get(OfftakerInvoice, invoice_id)
+        if invoice is None or invoice.tenant_id != tenant.id:
+            raise HTTPException(404, "Invoice not found")
+        evidence = next((a for a in manifest(invoice)["artifacts"] if a["artifact_id"] == artifact_id), None)
+        if evidence is None:
+            raise HTTPException(404, "Evidence not linked to this invoice")
+        payload = get_artifact(db, tenant.id, artifact_id)
+        return Response(payload, media_type=evidence["mime_type"], headers={
+            "Content-Disposition": f'attachment; filename="invoice-{invoice_id}-source-{artifact_id}"',
+            "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})

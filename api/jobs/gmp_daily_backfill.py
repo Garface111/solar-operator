@@ -108,6 +108,31 @@ def plan_windows(
     return out
 
 
+def _locked_raw_window(db: Session, account: UtilityAccount, ws: date, we: date):
+    """Create-or-lock the window before preserving or replacing source bytes.
+
+    SELECT FOR UPDATE cannot lock a missing row. The unique-key insert serializes
+    simultaneous first captures as well, so each response can be versioned.
+    """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+    from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+
+    dialect = db.get_bind().dialect.name
+    factory = {"postgresql": pg_insert, "sqlite": sqlite_insert}.get(dialect)
+    if factory is None:
+        raise ValueError("raw windows require PostgreSQL or SQLite")
+    db.execute(factory(GmpUsageRaw).values(
+        tenant_id=account.tenant_id, account_id=account.id,
+        account_number=account.account_number, window_start=ws, window_end=we,
+    ).on_conflict_do_nothing(index_elements=["account_id", "window_start", "window_end"]))
+    return db.execute(select(GmpUsageRaw).where(
+        GmpUsageRaw.tenant_id == account.tenant_id,
+        GmpUsageRaw.account_id == account.id,
+        GmpUsageRaw.window_start == ws,
+        GmpUsageRaw.window_end == we,
+    ).with_for_update().execution_options(populate_existing=True)).scalar_one()
+
+
 def _persist_window(
     db: Session,
     account: UtilityAccount,
@@ -116,30 +141,36 @@ def _persist_window(
     csv_text: str | None,
     parsed: dict,
     http_status: int = 200,
+    *, captured_at=None,
 ) -> tuple[int, int]:
     """Upsert ONE window's raw payload (sponge) + derived per-day rows.
     Returns (daily_inserted, daily_updated)."""
+    from ..source_artifacts import put_artifact, preserve_raw_version
+
+    # No response bytes are not a replacement source. Keep prior source and
+    # modeled readings readable; callers may retry the missing response.
+    if csv_text is None:
+        return 0, 0
+
     # ── 1. raw sponge (verbatim) — idempotent on (account, window) ──
-    raw = db.execute(
-        select(GmpUsageRaw).where(
-            GmpUsageRaw.account_id == account.id,
-            GmpUsageRaw.window_start == ws,
-            GmpUsageRaw.window_end == we,
-        )
-    ).scalar_one_or_none()
-    if raw is None:
-        raw = GmpUsageRaw(
-            tenant_id=account.tenant_id, account_id=account.id,
-            account_number=account.account_number, window_start=ws, window_end=we,
-        )
-        db.add(raw)
+    raw = _locked_raw_window(db, account, ws, we)
+    if raw.raw_csv is not None:
+        preserve_raw_version(db, raw)
+    next_artifact = (put_artifact(db, account.tenant_id, csv_text.encode("utf-8"), "text/csv")
+                     if csv_text is not None else None)
+    changed = next_artifact != raw.artifact_id
+    if changed:
+        preserve_raw_version(db, raw)
     raw.fmt = "csv"
     raw.http_status = http_status
-    raw.raw_csv = csv_text
+    raw.artifact_id = next_artifact
+    raw.raw_csv = None
     raw.row_count = parsed["row_count"]
     raw.interval_min = parsed["interval_min"]
     raw.interval_max = parsed["interval_max"]
-    raw.fetched_at = now()
+    raw.fetched_at = captured_at if captured_at is not None else now()
+    if changed:
+        preserve_raw_version(db, raw)
 
     # ── 2. derived per-day rows — idempotent on (account, day) ──
     inserted = updated = 0
@@ -420,18 +451,10 @@ def _status_of(exc: Exception) -> int:
 
 def _record_404(db: Session, account: UtilityAccount, ws: date, we: date) -> None:
     """Store a 404 marker so the backfill won't re-probe below the floor."""
-    raw = db.execute(
-        select(GmpUsageRaw).where(
-            GmpUsageRaw.account_id == account.id,
-            GmpUsageRaw.window_start == ws, GmpUsageRaw.window_end == we,
-        )
-    ).scalar_one_or_none()
-    if raw is None:
-        raw = GmpUsageRaw(
-            tenant_id=account.tenant_id, account_id=account.id,
-            account_number=account.account_number, window_start=ws, window_end=we,
-        )
-        db.add(raw)
+    raw = _locked_raw_window(db, account, ws, we)
+    # A transient missing response must never erase captured successful evidence.
+    if raw is not None and (raw.raw_csv is not None or raw.artifact_id is not None):
+        return
     raw.fmt = "csv"
     raw.http_status = 404
     raw.raw_csv = None
@@ -481,6 +504,7 @@ def backfill_tenant(
 def rederive_account(db: Optional[Session], account_id: int) -> dict[str, Any]:
     """Re-derive GmpDailyGeneration from already-stored GmpUsageRaw — NO re-pull.
     Use after a parser change to retroactively enrich stored history instantly."""
+    from ..source_artifacts import raw_payload_predicate, read_raw_csv
     _own = db is None
     if _own:
         db = SessionLocal()
@@ -491,19 +515,22 @@ def rederive_account(db: Optional[Session], account_id: int) -> dict[str, Any]:
         raws = db.execute(
             select(GmpUsageRaw).where(
                 GmpUsageRaw.account_id == account_id,
-                GmpUsageRaw.raw_csv.isnot(None),
+                raw_payload_predicate(GmpUsageRaw),
             )
-        ).scalars().all()
-        ins = upd = 0
+            .execution_options(yield_per=1)
+        ).scalars()
+        ins = upd = count = 0
         for raw in raws:
-            parsed = gmp_adapter.parse_usage_csv_to_daily(raw.raw_csv or "")
+            count += 1
+            csv_text = read_raw_csv(db, raw) or ""
+            parsed = gmp_adapter.parse_usage_csv_to_daily(csv_text)
             i, u = _persist_window(db, account, raw.window_start, raw.window_end,
-                                   raw.raw_csv, parsed, raw.http_status)
+                                   csv_text, parsed, raw.http_status, captured_at=raw.fetched_at)
             ins += i
             upd += u
         db.commit()
         return {"account_id": account_id, "status": "ok",
-                "windows_rederived": len(raws), "daily_inserted": ins, "daily_updated": upd}
+                "windows_rederived": count, "daily_inserted": ins, "daily_updated": upd}
     finally:
         if _own:
             db.close()
