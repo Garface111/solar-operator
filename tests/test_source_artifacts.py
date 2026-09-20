@@ -103,8 +103,8 @@ def test_failed_roundtrip_keeps_inline_and_rolls_back(source_account, monkeypatc
     with SessionLocal() as db:
         identity = add_raw(db, tid, aid, "original").id
         db.commit()
-    monkeypatch.setattr("scripts.compact_gmp_sources.get_artifact", lambda *a: b"wrong")
-    with pytest.raises(ValueError, match="Roundtrip"):
+    monkeypatch.setattr("api.source_artifacts.get_artifact", lambda *a: b"wrong")
+    with pytest.raises(ValueError, match="roundtrip"):
         compact_batch(apply=True, tenant_id=tid)
     with SessionLocal() as db:
         row = db.get(GmpUsageRaw, identity)
@@ -207,7 +207,7 @@ def test_cross_tenant_chunks_are_never_shared_or_read(source_account):
 
 
 def test_interrupted_migration_resumes_without_losing_inline(source_account, monkeypatch):
-    import scripts.compact_gmp_sources as migration
+    import api.source_artifacts as migration
     tid, aid, _ = source_account
     with SessionLocal() as db:
         first = add_raw(db, tid, aid, "first", start=date(2026, 1, 1)).id
@@ -311,3 +311,16 @@ def test_original_hash_bearing_manifest_remains_readable(source_account):
         db.flush()
         with pytest.raises(ValueError, match="chunk"):
             get_artifact(db, tid, identity)
+
+
+def test_shared_chunks_are_not_recompressed(source_account, monkeypatch):
+    from api import source_artifacts
+    tid, _, _ = source_account
+    first = b"a" * 65536 + b"b" * 65536
+    second = b"b" * 65536 + b"a" * 65536
+    with SessionLocal() as db:
+        identity = put_artifact(db, tid, first)
+        monkeypatch.setattr(source_artifacts.zlib, "compress", lambda *a, **kw: pytest.fail("shared chunks recompressed"))
+        assert put_artifact(db, tid, first) == identity
+        second_id = put_artifact(db, tid, second)
+        assert get_artifact(db, tid, second_id) == second

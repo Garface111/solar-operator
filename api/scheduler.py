@@ -1533,6 +1533,29 @@ def prune_runtime_diagnostics_job() -> dict:
         return {"deleted": 0, "error": "exception"}
 
 
+
+def compact_gmp_sources_job() -> dict:
+    """Opt-in bounded source migration. Never sends email."""
+    from .source_compaction import compact_legacy_raw, scheduled_config
+    config = scheduled_config()
+    if not config.pop("enabled"):
+        return {"processed": 0, "skipped": "disabled"}
+    try:
+        result = compact_legacy_raw(apply=True, **config)
+        if result.get("processed") or result.get("blocked_id"):
+            logger.info("GMP source compaction: %s", result)
+        return result
+    except Exception:
+        logger.exception("GMP source compaction failed; current source rolled back; earlier sources may have committed")
+        return {"error": "exception", "current_source_rolled_back": True}
+
+
+def _register_source_compaction_job():
+    scheduler.add_job(compact_gmp_sources_job, "interval", minutes=5,
+                      id="compact_gmp_sources", replace_existing=True,
+                      max_instances=1, coalesce=True)
+
+
 def _prewarm_reconcile() -> None:
     """Keep the bill-audit reconcile sweep cache HOT so the offtaker-invoicing
     "Doesn't match GMP" KPI + Bill-audit view load INSTANTLY instead of waiting
@@ -1782,6 +1805,7 @@ def start():
         id="prune_runtime_diagnostics", replace_existing=True,
         max_instances=1, coalesce=True,
     )
+    _register_source_compaction_job()
     # Every 30 min: precompute the fleet forecast per tenant so the Analysis tab
     # serves an instant snapshot instead of computing (geocode + Open-Meteo) on the
     # request path. coalesce + single instance so a slow tick never stacks up.

@@ -60,22 +60,22 @@ def put_artifact(db, tenant_id: str, payload: bytes, mime_type: str = "applicati
     if not tenant_id or not isinstance(payload, bytes):
         raise ValueError("tenant_id and bytes payload are required")
     digest = hashlib.sha256(payload).hexdigest()
-    existing = db.execute(select(SourceArtifact).where(
-        SourceArtifact.tenant_id == tenant_id, SourceArtifact.sha256 == digest)).scalar_one_or_none()
+    existing = db.execute(select(SourceArtifact.id, SourceArtifact.byte_length).where(
+        SourceArtifact.tenant_id == tenant_id, SourceArtifact.sha256 == digest)).one_or_none()
     if existing is not None:
         if existing.byte_length != len(payload):
             raise ValueError("artifact hash/length conflict")
         return existing.id
     ordered = []
     chunks = {}
+    offset_in_payload = 0
     for data in content_chunks(payload, mime_type):
         sha = hashlib.sha256(data).hexdigest()
         ordered.append((sha, len(data)))
         if sha not in chunks:
-            compressed = zlib.compress(data, 6)
             chunks[sha] = {"tenant_id": tenant_id, "sha256": sha, "byte_length": len(data),
-                           "codec": "zlib" if len(compressed) < len(data) else "raw",
-                           "data": compressed if len(compressed) < len(data) else data}
+                           "offset": offset_in_payload}
+        offset_in_payload += len(data)
     found = {}
     hashes = list(chunks)
     for offset in range(0, len(hashes), 100):
@@ -83,9 +83,22 @@ def put_artifact(db, tenant_id: str, payload: bytes, mime_type: str = "applicati
         rows = db.execute(select(SourceArtifactChunk.id, SourceArtifactChunk.sha256, SourceArtifactChunk.byte_length).where(
             SourceArtifactChunk.tenant_id == tenant_id, SourceArtifactChunk.sha256.in_(batch))).all()
         known = {r.sha256 for r in rows}
-        _insert_ignore(db, SourceArtifactChunk, [chunks[h] for h in batch if h not in known], ["tenant_id", "sha256"])
-        for row in db.execute(select(SourceArtifactChunk.id, SourceArtifactChunk.sha256, SourceArtifactChunk.byte_length).where(
-            SourceArtifactChunk.tenant_id == tenant_id, SourceArtifactChunk.sha256.in_(batch))).all():
+        missing = []
+        for sha in batch:
+            if sha not in known:
+                value = dict(chunks[sha])
+                position = value.pop("offset")
+                value["data"] = payload[position:position + value["byte_length"]]
+                compressed = zlib.compress(value["data"], 6)
+                value["codec"] = "zlib" if len(compressed) < len(value["data"]) else "raw"
+                if value["codec"] == "zlib":
+                    value["data"] = compressed
+                missing.append(value)
+        if missing:
+            _insert_ignore(db, SourceArtifactChunk, missing, ["tenant_id", "sha256"])
+            rows = db.execute(select(SourceArtifactChunk.id, SourceArtifactChunk.sha256, SourceArtifactChunk.byte_length).where(
+                SourceArtifactChunk.tenant_id == tenant_id, SourceArtifactChunk.sha256.in_(batch))).all()
+        for row in rows:
             if row.byte_length != chunks[row.sha256]["byte_length"]:
                 raise ValueError("chunk hash/length conflict")
             found[row.sha256] = row.id
