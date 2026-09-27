@@ -540,6 +540,16 @@ def send_reminder_email(tenant: Tenant, *, note: str, detail: str = "") -> bool:
     )
 
 
+# Plain statement of what the data shows, per fail type. "Down" is only true for
+# a unit producing nothing; an underperforming unit is not down.
+_ESCALATION_STATE = {
+    "dead": "has produced nothing",
+    "fault": "has reported a fault",
+    "comm_gap": "has stopped reporting",
+    "underperforming": "has been underperforming its peers",
+}
+
+
 def send_repair_escalation_email(
     tenant: Tenant,
     *,
@@ -551,6 +561,7 @@ def send_repair_escalation_email(
     days_down: int,
     loss_usd_month: float | None = None,
     contact_name: str | None = None,
+    also: list[dict] | None = None,
 ) -> bool:
     """Week-long-down escalation TO THE OWNER, from the owner-agent mailbox so
     the reply routes back to Energy Agent. Carries [AO-TICKET-N] so the reply
@@ -579,9 +590,19 @@ def send_repair_escalation_email(
             "I'll reach out to them, start the conversation, and coordinate the fix, keeping you "
             "posted here and in the app the whole way."
         )
+    state = _ESCALATION_STATE.get(fail_type, "has needed attention")
+    others = [a for a in (also or []) if a.get("inverter")]
+    more = ""
+    if others:
+        lines = "\n".join(
+            f"  • {a['inverter']} {_ESCALATION_STATE.get(a.get('fail_type') or '', 'needs attention')}"
+            for a in others
+        )
+        more = f"Also at {site}:\n{lines}\n\n"
     body = (
-        f"{unit} has been down for {days_down} days now{money}.\n\n"
+        f"{unit} {state} for {days_down} days{money}.\n\n"
         f"What I'm seeing: {what}.\n\n"
+        f"{more}"
         f"{ask}\n\n"
         f"Reference: {ref}"
     )
@@ -591,15 +612,20 @@ def send_repair_escalation_email(
     if off_url:
         footer += f' · <a href="{off_url}">Fewer emails</a>'
     html = render_email_skin(
-        preheader=f"{unit} — down {days_down} days, want me to get it fixed?",
-        headline="A site's been down a while",
+        preheader=f"{unit} {state} for {days_down} days",
+        headline=("Inverters need attention" if others else "An inverter needs attention"),
         intro_line="From Energy Agent, your fleet's operator",
         body_html=f"<p style='white-space:pre-line'>{esc}</p>",
         footer_line=footer,
         product="array_operator",
     )
     text = body + ("\n\nFewer emails: " + off_url if off_url else "")
-    subject = f"{site} has been down {days_down} days — want me to get it fixed?"
+    # Name the unit, not the site: "Tinker Hall Site has been down" was false when
+    # 15 of its 16 inverters were producing. No first-person offer in the subject.
+    if others:
+        subject = f"{site}: {1 + len(others)} inverters need attention ({days_down}+ days)"
+    else:
+        subject = f"{site}: {inverter} {state} for {days_down} days"
     return bool(
         _send_via_resend(
             to=to, subject=subject, html=html, text=text,

@@ -3294,6 +3294,11 @@ def _ticket_loss_usd_month(ticket: RepairTicket) -> float | None:
         return None
 
 
+# Which ticket leads a per-site owner email: a unit producing nothing outranks
+# one that is merely underperforming or quiet.
+_SEVERITY_RANK = {"dead": 0, "fault": 1, "comm_gap": 2, "underperforming": 3}
+
+
 def escalate_stale_repairs(db, tenant: Tenant) -> int:
     """Email the OWNER about any fault that's been down consistently for a week
     and hasn't been escalated yet — asking if they want action and (when we have
@@ -3323,6 +3328,13 @@ def escalate_stale_repairs(db, tenant: Tenant) -> int:
     ).scalars().all()
 
     sent = 0
+    # ONE email per site per sweep. Before 2026-09-26 this sent one email per
+    # stale ticket, each under a SITE-level subject — on 07-24 Tinker Hall's
+    # owners got three "Tinker Hall Site has been down 7 days" emails in the same
+    # second (one per inverter 13/14/15) when one unit was dead and two were
+    # underperforming. Now the worst ticket at each site leads the email, the
+    # rest are listed in it, and all of them are marked escalated together.
+    live: list = []
     for ticket in stale:
         # CHOKEPOINT: never email the owner about a device that is no longer a
         # live inverter. reconcile cancels these, but it returns early when the
@@ -3340,6 +3352,17 @@ def escalate_stale_repairs(db, tenant: Tenant) -> int:
             )
             db.commit()
             continue
+        live.append(ticket)
+
+    by_site: dict = {}
+    for ticket in live:
+        key = ticket.array_id if ticket.array_id is not None else (ticket.site_name or f"t{ticket.id}")
+        by_site.setdefault(key, []).append(ticket)
+
+    for group in by_site.values():
+        # Lead with the most severe, then the longest-running case.
+        group.sort(key=lambda t: (_SEVERITY_RANK.get(t.fail_type or "", 9), t.opened_at or now()))
+        ticket, others = group[0], group[1:]
         contact = get_contact(db, tenant.id, ticket.contact_id) if ticket.contact_id else None
         days_down = max(ESCALATE_DAYS, (now() - ticket.opened_at).days) if ticket.opened_at else int(ESCALATE_DAYS)
         ev = ticket.evidence or {}
@@ -3356,12 +3379,20 @@ def escalate_stale_repairs(db, tenant: Tenant) -> int:
                 days_down=int(days_down),
                 loss_usd_month=_ticket_loss_usd_month(ticket),
                 contact_name=(contact.name if contact else None),
+                also=[
+                    {"inverter": o.inv_name or o.serial or "an inverter", "fail_type": o.fail_type or "down"}
+                    for o in others
+                ],
             )
         except Exception as exc:  # noqa: BLE001
             log.warning("owner escalation email failed ticket=%s: %s", ticket.id, exc)
             ok = False
         if ok:
             ticket.owner_escalated_at = now()
+            for o in others:
+                o.owner_escalated_at = ticket.owner_escalated_at
+                note_o = f"[auto] owner emailed together with #{ticket.id} (one email per site)"
+                o.tech_note = (o.tech_note + "\n" + note_o) if o.tech_note else note_o
             sent += 1
             site = ticket.site_name or "a site"
             inv = ticket.inv_name or "the inverter"
