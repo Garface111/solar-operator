@@ -43,6 +43,12 @@ DEAD_DAYS = 2                   # zero output this many days (peers alive) => de
 COMM_GAP_HOURS = 24             # no telemetry within => comm_gap
 WINDOW_DAYS = 14                # analysis window (informational; caller windows the data)
 MIN_PEER_DAYS = 3               # stable mode: need >= this many reporting days to peer-judge
+# A day above this many kWh per nameplate kW is physically impossible (a clear
+# Vermont June day is ~6-7 kWh/kW). It is a counter catching up after a reporting
+# gap: Tinker Hall Inverter 15 (36 kW) sent 0 for 28 days, then 6,102 kWh on
+# 2026-08-06 -- about its whole missed share. Only judged when nameplate is KNOWN
+# (an inferred nameplate is derived from the peak, so it can't catch this).
+BURST_KWH_PER_KW = 9.0
 
 
 def _parse_ts(value: str | None) -> Optional[datetime]:
@@ -136,6 +142,32 @@ def analyze_cohort(
                 if d.get("date") and str(d["date"]) < today_local
             ]
 
+    # CATCH-UP BURSTS: a run of zero days followed by one impossible day is a unit
+    # that kept producing but couldn't report, then sent the backlog at once. The
+    # zeros were never real zeros and the burst is not one day's output, so both
+    # leave the series: neither may call the unit dead nor skew its peer_index.
+    for u in out_units:
+        npk = u.get("nameplate_kw")
+        series = list(u.get("daily") or [])
+        if not npk or not series:
+            continue
+        limit = float(npk) * BURST_KWH_PER_KW
+        drop: set[int] = set()
+        for i, d in enumerate(series):
+            if (d.get("kwh") or 0) > limit:
+                j = i - 1
+                while j >= 0 and (series[j].get("kwh") or 0) == 0:
+                    drop.add(j)
+                    j -= 1
+                drop.add(i)
+                u["catchup_burst"] = {
+                    "date": d.get("date"),
+                    "kwh": round(float(d["kwh"]), 1),
+                    "zero_days_before": i - 1 - j,
+                }
+        if drop:
+            u["daily"] = [d for k, d in enumerate(series) if k not in drop]
+
     for u in out_units:
         u["nameplate_kw"] = _infer_nameplate(u)
 
@@ -174,7 +206,9 @@ def analyze_cohort(
     # genuine deficit is still caught.
     day_energy: dict[str, float] = {}
     day_nameplate: dict[str, float] = {}
-    if complete_days_only:
+    # Also needed in live mode for any unit whose catch-up burst was removed: its
+    # series now has holes, and a raw window total would call it underperforming.
+    if complete_days_only or any(u.get("catchup_burst") for u in out_units):
         for u in out_units:
             npk = u["nameplate_kw"] or 0.0
             for d in u.get("daily", []):
@@ -188,7 +222,7 @@ def analyze_cohort(
         share_e = e / cohort_energy
         share_np = (u["nameplate_kw"] or 0.0) / total_nameplate
         # Peer index is only meaningful with >= 2 units in the cohort.
-        if complete_days_only:
+        if complete_days_only or u.get("catchup_burst"):
             # Mean of this unit's per-active-day (output-per-kW vs the cohort's
             # output-per-kW that same day). Missing/zero days are skipped, so a
             # sparse-but-healthy capture reads ~1.0; a real every-day deficit < 0.85.
@@ -250,6 +284,18 @@ def analyze_cohort(
             u["diagnosis"] = (
                 f"Vendor fault {u['error_code']} — reports mode "
                 f"{u.get('mode') or '?'}. Dispatch-worthy."
+            )
+        elif (zero_streak >= DEAD_DAYS or gap_dead_days >= DEAD_DAYS) and u.get("catchup_burst"):
+            # Zeros again, from a unit that has already shown it reports zeros while
+            # producing (it caught up with a backlog inside this window). Treat it
+            # as a reporting gap until it proves otherwise: a paid visit to an
+            # inverter that is making power is the expensive mistake.
+            _b = u["catchup_burst"]
+            u["status"] = "comm_gap"
+            u["diagnosis"] = (
+                f"Reporting 0 again. On {_b['date']} this unit sent {_b['kwh']:,.0f} kWh at "
+                f"once after {_b['zero_days_before']} days of zeros, so it was producing but "
+                "not reporting. Likely the same reporting gap, not a dead inverter."
             )
         elif zero_streak >= DEAD_DAYS or gap_dead_days >= DEAD_DAYS:
             _days = max(zero_streak, gap_dead_days)
