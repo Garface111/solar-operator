@@ -50,6 +50,17 @@ MIN_PEER_DAYS = 3               # stable mode: need >= this many reporting days 
 # (an inferred nameplate is derived from the peak, so it can't catch this).
 BURST_KWH_PER_KW = 9.0
 
+# CHRONIC-LOW: Tannery Brook #1 has made a steady 80-82% of its neighbours every
+# day since July. The 0.85 floor flagged it, it cleared, it flagged again: 7
+# tickets in 2 months and the owner learned to ignore us. If a unit's longer
+# history (the stored days BEFORE the analysis window) shows it consistently at
+# the same reduced share, and it's holding that share now, it's structural.
+# A drop below its own level still flags, like an owner-set expected-low.
+CHRONIC_MIN_DAYS = 20        # history days (unit and >= 2 peers producing) needed
+CHRONIC_BAND = 0.10          # a "consistent" day is within +-10% of the unit's own median
+CHRONIC_CONSISTENT = 0.80    # ... on at least 80% of history days
+CHRONIC_HOLD = 0.90          # now must be >= 90% of its own historical level
+
 
 def _parse_ts(value: str | None) -> Optional[datetime]:
     """Parse an ISO timestamp into an aware UTC datetime, or None."""
@@ -62,6 +73,55 @@ def _parse_ts(value: str | None) -> Optional[datetime]:
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
     return ts
+
+
+def _median(xs: list[float]) -> float:
+    xs = sorted(xs)
+    m = len(xs) // 2
+    return xs[m] if len(xs) % 2 else (xs[m - 1] + xs[m]) / 2
+
+
+def _daily_peer_ratios(unit: dict, units: list[dict], key: str) -> list[float]:
+    """Each day's kWh/kW for `unit` over the median kWh/kW of its producing peers.
+    Days the unit made 0 are skipped: a dead spell is not its baseline."""
+    npk = unit.get("nameplate_kw")
+    if not npk:
+        return []
+    peers_by_date: dict[str, list[float]] = {}
+    for p in units:
+        if p is unit or not p.get("nameplate_kw"):
+            continue
+        for d in p.get(key) or []:
+            k = d.get("kwh") or 0
+            if k > 0:
+                peers_by_date.setdefault(str(d.get("date"))[:10], []).append(k / p["nameplate_kw"])
+    out = []
+    for d in unit.get(key) or []:
+        k = d.get("kwh") or 0
+        peers = peers_by_date.get(str(d.get("date"))[:10])
+        if k > 0 and peers and len(peers) >= 2:
+            med = _median(peers)
+            if med > 0:
+                out.append(k / npk / med)
+    return out
+
+
+def _chronic_low(unit: dict, units: list[dict]) -> bool:
+    """True when the unit is low now only because it has always been this low.
+    Records the evidence in unit["chronic_low"]."""
+    hist = _daily_peer_ratios(unit, units, "history_daily")
+    if len(hist) < CHRONIC_MIN_DAYS:
+        return False
+    base = _median(hist)
+    consistent = sum(1 for r in hist if abs(r - base) <= CHRONIC_BAND * base) / len(hist)
+    cur = _daily_peer_ratios(unit, units, "daily")
+    if not cur:
+        return False
+    now_level = _median(cur)
+    unit["chronic_low"] = {"baseline": round(base, 2), "now": round(now_level, 2),
+                           "history_days": len(hist), "consistent_share": round(consistent, 2)}
+    return (base < UNDERPERFORM_THRESHOLD and consistent >= CHRONIC_CONSISTENT
+            and now_level >= CHRONIC_HOLD * base)
 
 
 def _infer_nameplate(unit: dict) -> Optional[float]:
@@ -351,6 +411,16 @@ def analyze_cohort(
                     f"{u.get('expected_low_reason') or 'known shading/obstruction'}). "
                     "Marked expected-low, so this is normal for this unit, not a fault."
                 )
+        elif (u["peer_index"] is not None and u["peer_index"] < UNDERPERFORM_THRESHOLD
+              and u.get("daily") and _chronic_low(u, out_units)):
+            _c = u["chronic_low"]
+            u["status"] = "ok"
+            u["diagnosis"] = (
+                f"Runs at about {round(_c['baseline'] * 100)}% of its neighbours, and has on "
+                f"{round(_c['consistent_share'] * 100)}% of the last {_c['history_days']} days. "
+                "That steady level is how this unit is built or sited (fewer panels, shade), "
+                "not a new fault. We'll flag it if it drops below its own usual level."
+            )
         elif (u["peer_index"] is not None and u["peer_index"] < UNDERPERFORM_THRESHOLD
               and u.get("daily")):
             # Real underperformance requires real history to compare against. An

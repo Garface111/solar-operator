@@ -1529,6 +1529,8 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
     # Match _stored_inverter_daily: last 14 ROWS per inverter (not a calendar
     # window) — a 20-day API outage must not blank the graph.
     _daily_by_iv: dict[int, list[dict]] = defaultdict(list)
+    _history_by_iv: dict[int, list[dict]] = defaultdict(list)
+    _HISTORY_ROWS = 76   # ~90 stored days in all
     _iv_ids = [iv.id for iv in inverters if getattr(iv, "id", None) is not None]
     if _iv_ids:
         try:
@@ -1540,14 +1542,16 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
             _tmp: dict[int, list] = defaultdict(list)
             for r in _drows:
                 bucket = _tmp[r.inverter_id]
-                if len(bucket) >= 14:
+                if len(bucket) >= 14 + _HISTORY_ROWS:
                     continue
                 bucket.append(r)
             for iid, rows in _tmp.items():
-                _daily_by_iv[iid] = [
-                    {"date": r.day.isoformat(), "kwh": r.kwh}
-                    for r in sorted(rows, key=lambda x: x.day)
-                ]
+                _pts = [{"date": r.day.isoformat(), "kwh": r.kwh}
+                        for r in sorted(rows, key=lambda x: x.day)]
+                _daily_by_iv[iid] = _pts[-14:]
+                # Older stored days, before the window: the unit's own track record,
+                # so a steady structural shortfall isn't re-flagged every fortnight.
+                _history_by_iv[iid] = _pts[:-14]
         except Exception:
             log.warning("fleet: batched InverterDaily load failed", exc_info=True)
 
@@ -1725,6 +1729,7 @@ def build_fleet_tree(db, tenant: Tenant, *, force_refresh: bool = False,
                 "expected_low": bool(getattr(iv, "expected_low", False)),
                 "expected_low_baseline": getattr(iv, "expected_low_baseline", None),
                 "expected_low_reason": getattr(iv, "expected_low_reason", None),
+                "history_daily": _history_by_iv.get(iv.id, []),
             })
 
         analyzed = peer_analysis.analyze_cohort(
