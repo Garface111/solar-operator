@@ -94,12 +94,78 @@ def account_key(provider: str, username_lc: str) -> tuple[str, str]:
     return ((provider or "").strip().lower(), (username_lc or "").strip().lower())
 
 
-def _is_due(c, _now, account_fails: int | None = None) -> bool:
+# A capture that keeps failing the SAME way after we are past the login form
+# (Chint "retrieve returned no sites", SMA "sso-resumed, not authenticated") is no
+# lockout risk, so the guard above rightly ignores it — but retrying it on the
+# 3-minute inverter loop forever kept a Chromium busy ~10 h/day for runs that
+# delivered nothing (prod 2026-10-01, last 24h: 651 Chint + 313 SMA failures vs 69
+# successes — the single biggest line on the Railway bill). So the streak backs off:
+# the first failure retries on the normal cadence, each further one doubles it, up
+# to FAILURE_BACKOFF_CAP. Never a stop: a capped credential still retries every
+# cap, the first ok resets the streak, and `lockout_alert.run_capture_stall_watchdog`
+# keeps a stalled capture loud. Utilities (12 h cadence) are already slower than
+# the cap, so this only ever touches the inverter loop.
+FAILURE_BACKOFF_CAP = timedelta(
+    minutes=int(os.environ.get("CLOUD_CAPTURE_FAILURE_BACKOFF_CAP_MIN") or 30))
+FAILURE_STREAK_LOOKBACK = 8
+
+
+def failure_backoff(provider: str, streak: int) -> timedelta:
+    """Wait after a run of ``streak`` consecutive non-ok harvests (0/1 = cadence)."""
+    base = _due_after(provider)
+    if streak <= 1:
+        return base
+    return min(base * (2 ** min(streak - 1, 16)), max(base, FAILURE_BACKOFF_CAP))
+
+
+def failure_streaks(db, rows, since=None) -> dict[tuple[str, str, str], int]:
+    """Consecutive non-ok runs (newest first) per (tenant, provider, username_lc).
+
+    One windowed query over the recent HarvestRun audit rows for the tenants in
+    ``rows``; bounded by FAILURE_STREAK_LOOKBACK, which already reaches the cap.
+    """
+    from sqlalchemy import func
+
+    tenants = {c.tenant_id for c in rows}
+    if not tenants:
+        return {}
+    rn = func.row_number().over(
+        partition_by=(HarvestRun.tenant_id, HarvestRun.provider, HarvestRun.username_lc),
+        order_by=(HarvestRun.started_at.desc(), HarvestRun.id.desc()),
+    ).label("rn")
+    recent = (
+        select(HarvestRun.tenant_id, HarvestRun.provider, HarvestRun.username_lc,
+               HarvestRun.status, rn)
+        .where(HarvestRun.tenant_id.in_(tenants),
+               HarvestRun.started_at >= (since or now() - timedelta(days=1)))
+        .subquery()
+    )
+    ordered = db.execute(
+        select(recent.c.tenant_id, recent.c.provider, recent.c.username_lc, recent.c.status)
+        .where(recent.c.rn <= FAILURE_STREAK_LOOKBACK)
+        .order_by(recent.c.tenant_id, recent.c.provider, recent.c.username_lc, recent.c.rn)
+    ).all()
+    out: dict[tuple[str, str, str], int] = {}
+    broken: set[tuple[str, str, str]] = set()
+    for tid, provider, ulc, status in ordered:
+        key = (tid, provider, ulc)
+        if key in broken:
+            continue
+        if status == "ok":
+            broken.add(key)
+            out.setdefault(key, 0)
+        else:
+            out[key] = out.get(key, 0) + 1
+    return out
+
+
+def _is_due(c, _now, account_fails: int | None = None, fail_streak: int = 0) -> bool:
     """Whether a credential should be harvested now — with the lockout guard.
 
     ``account_fails`` is the worst consecutive-fresh-login-failure count across
     EVERY credential row sharing this portal account (see `account_key`). Callers
-    that don't pass it fall back to this row's own counter.
+    that don't pass it fall back to this row's own counter. ``fail_streak`` is this
+    row's run of consecutive non-ok harvests (see `failure_streaks`).
     """
     fails = c.harvest_fails or 0
     if account_fails is not None:
@@ -118,9 +184,9 @@ def _is_due(c, _now, account_fails: int | None = None) -> bool:
         # being throttled to 30-min by an old login failure it already recovered
         # from — the counter stays set (honest), the data path stays fast.
         return last <= _now - FAIL_BACKOFF * fails
-    # Healthy, or a post-login scrape failure (not a lockout risk) → retry on the
-    # normal family cadence, not the login backoff.
-    return last <= _now - _due_after(c.provider)
+    # Healthy, or a post-login scrape failure (not a lockout risk) → the normal
+    # family cadence, stretched only while the same capture keeps failing.
+    return last <= _now - failure_backoff(c.provider, fail_streak)
 
 
 def accounts_with_recent_fresh_login(db, window: timedelta | None = None) -> set[tuple[str, str]]:
@@ -212,10 +278,12 @@ def due_credentials() -> list[tuple[str, str, str]]:
         # Lockout state is per PORTAL ACCOUNT, not per tenant row (see account_key).
         acct_fails = coordinate_account_fails(
             rows, accounts_with_recent_fresh_login(db))
+        streaks = failure_streaks(db, rows)
         # Cache allow decisions per tenant_id (demo/allowlist still need Tenant).
         allowed_cache: dict[str, bool] = {}
         for c in rows:
-            if not _is_due(c, _now, acct_fails.get(account_key(c.provider, c.username_lc))):
+            if not _is_due(c, _now, acct_fails.get(account_key(c.provider, c.username_lc)),
+                           streaks.get((c.tenant_id, c.provider, c.username_lc), 0)):
                 continue
             tid = c.tenant_id
             if tid not in allowed_cache:
@@ -226,9 +294,10 @@ def due_credentials() -> list[tuple[str, str, str]]:
     return out
 
 
-async def run_tick(farm) -> list:
+async def run_tick(farm, jobs: list[tuple[str, str, str]] | None = None) -> list:
     """Harvest all due credentials concurrently (bounded by the farm semaphore)."""
-    jobs = due_credentials()
+    if jobs is None:
+        jobs = due_credentials()
     if not jobs:
         log.info("tick: nothing due")
         return []
@@ -262,18 +331,61 @@ def run_health_watchdogs() -> None:
         log.exception("cloud capture watchdogs failed: %s", exc)
 
 
-async def run_forever():
-    """Long-running loop: build one BrowserFarm and tick on the configured cadence."""
-    from .engine import BrowserFarm
+# The browser is up only while there is work. Chromium + the Playwright node driver
+# were ~1.2 GB resident around the clock and grew for as long as the process lived
+# (Railway bills RAM by the minute). Sessions survive a browser restart — each job
+# opens a fresh context from its persisted storage_state — so closing the farm on
+# an idle tick costs one ~2 s launch on the next busy one, nothing else. A busy
+# farm is also recycled after FARM_MAX_JOBS harvests so it can't grow unbounded.
+FARM_MAX_JOBS = int(os.environ.get("CLOUD_CAPTURE_FARM_MAX_JOBS") or 40)
+
+
+async def _open_farm(factory):
+    farm = factory()
+    try:
+        await farm.__aenter__()
+    except BaseException:
+        await _close_farm(farm)
+        raise
+    return farm
+
+
+async def _close_farm(farm) -> None:
+    try:
+        await farm.__aexit__(None, None, None)
+    except Exception as exc:                          # noqa: BLE001
+        log.warning("browser farm close failed: %s", type(exc).__name__)
+
+
+async def run_forever(farm_factory=None, sleep=asyncio.sleep, max_ticks: int | None = None):
+    """Long-running loop: tick on the configured cadence, browser only while busy."""
+    if farm_factory is None:
+        from .engine import BrowserFarm as farm_factory
     interval = config.tick_seconds()
     next_watchdog = now()
-    async with BrowserFarm() as farm:
-        while True:
+    farm, jobs_on_farm, ticks = None, 0, 0
+    try:
+        while max_ticks is None or ticks < max_ticks:
+            ticks += 1
+            jobs: list = []
             try:
-                await run_tick(farm)
+                jobs = due_credentials()
+                if jobs:
+                    if farm is None:
+                        farm = await _open_farm(farm_factory)
+                    await run_tick(farm, jobs)
+                    jobs_on_farm += len(jobs)
+                else:
+                    log.info("tick: nothing due")
             except Exception as exc:                  # noqa: BLE001 — never die on a tick
                 log.exception("tick error: %s", exc)
+            if farm is not None and (not jobs or jobs_on_farm >= FARM_MAX_JOBS):
+                await _close_farm(farm)
+                farm, jobs_on_farm = None, 0
             if now() >= next_watchdog:
                 next_watchdog = now() + WATCHDOG_EVERY
                 await asyncio.to_thread(run_health_watchdogs)
-            await asyncio.sleep(interval)
+            await sleep(interval)
+    finally:
+        if farm is not None:
+            await _close_farm(farm)
