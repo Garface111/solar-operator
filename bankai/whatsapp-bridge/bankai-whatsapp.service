@@ -1,0 +1,19 @@
+# BankAI WhatsApp bridge — install to /etc/systemd/system/, then:
+#   systemctl daemon-reload && systemctl enable --now bankai-whatsapp
+[Unit]
+Description=BankAI WhatsApp bridge (Baileys sidecar)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/bankai/whatsapp-bridge
+Environment=WHATSAPP_DATA_DIR=/root/bankai-data/whatsapp
+EnvironmentFile=-/opt/bankai/.env
+ExecStart=/usr/local/bin/node /opt/bankai/whatsapp-bridge/bridge.js
+Restart=always
+RestartSec=5
+StandardOutput=append:/root/bankai-data/whatsapp-bridge.log
+StandardError=append:/root/bankai-data/whatsapp-bridge.log
+
+[Install]
+WantedBy=multi-user.target

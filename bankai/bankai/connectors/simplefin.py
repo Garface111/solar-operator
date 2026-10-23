@@ -1,0 +1,221 @@
+"""SimpleFIN Bridge connector — read-only by protocol.
+
+Flow: the user connects banks at beta-bridge.simplefin.org, generates a one-time
+setup token, and we claim it once for a permanent read-only access URL. That URL is
+the only credential this app ever holds; it cannot move money.
+
+CLI: python -m bankai.connectors.simplefin claim <SETUP_TOKEN>
+"""
+from __future__ import annotations
+
+import base64
+import re
+import sys
+from datetime import date, datetime, timedelta, timezone
+
+import httpx
+
+from .. import config
+from ..db import session_scope
+from ..ingest import TxnIn, ingest_transactions, upsert_account
+from ..models import SyncLog
+
+
+def _redact(text: str) -> str:
+    """Scrub the SimpleFIN access URL — the household's only bank credential,
+    carried as basic-auth userinfo (https://user:pass@bridge...) — from any
+    string before it can reach a log, the SyncLog table, or an API response.
+
+    httpx does NOT mask the password when it formats a request URL into an
+    HTTPStatusError, so a single 4xx/5xx from the bridge would otherwise write a
+    working, replayable-from-anywhere bank credential into the at-rest DB."""
+    text = re.sub(r"(https?://)[^/\s@]+@", r"\1<redacted>@", text)
+    for url in config.SIMPLEFIN_ACCESS_URLS:
+        if url:
+            text = text.replace(url, "<simplefin-url>")
+    return text
+
+_KIND_HINTS = [
+    ("credit", "credit"),
+    ("card", "credit"),
+    ("visa", "credit"),
+    ("amex", "credit"),
+    ("savings", "savings"),
+    ("invest", "investment"),
+    ("brokerage", "investment"),
+    ("401", "investment"),
+    ("ira", "investment"),
+]
+
+# Consulted only when the account name itself gives no hint — e.g. Fidelity
+# names its brokerage accounts just "Individual (1234)".
+_INSTITUTION_HINTS = [
+    ("fidelity", "investment"),
+    ("schwab", "investment"),
+    ("vanguard", "investment"),
+    ("invest", "investment"),
+    ("brokerage", "investment"),
+]
+
+
+def claim_setup_token(setup_token: str) -> str:
+    """Exchange a one-time SimpleFIN setup token for the permanent access URL."""
+    claim_url = base64.b64decode(setup_token.strip()).decode()
+    resp = httpx.post(claim_url, timeout=30)
+    resp.raise_for_status()
+    return resp.text.strip()
+
+
+def _guess_kind(name: str, institution: str = "") -> str:
+    lower = name.lower()
+    for hint, kind in _KIND_HINTS:
+        if hint in lower:
+            return kind
+    lower_inst = institution.lower()
+    for hint, kind in _INSTITUTION_HINTS:
+        if hint in lower_inst:
+            return kind
+    return "checking"
+
+
+def fetch(access_url: str, lookback_days: int = 90) -> dict:
+    start = int((datetime.now(timezone.utc) - timedelta(days=lookback_days)).timestamp())
+    resp = httpx.get(f"{access_url}/accounts", params={"start-date": start}, timeout=60)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def sync(lookback_days: int = 90) -> dict:
+    """Pull every configured SimpleFIN bridge into the local model.
+
+    Each household member can hold their own bridge, so one spouse's failure
+    (an expired connection, a bank outage) must not stop the other's from
+    syncing — each is pulled independently and reported on its own.
+    """
+    urls = config.SIMPLEFIN_ACCESS_URLS
+    if not urls:
+        return {"status": "skipped", "detail": "no SimpleFIN access URL configured"}
+    if len(urls) == 1:
+        return _sync_one(urls[0], lookback_days)
+
+    results = [_sync_one(url, lookback_days) for url in urls]
+    failed = [r for r in results if r.get("status") != "ok"]
+    return {
+        "status": "ok" if not failed else ("partial" if len(failed) < len(results) else "error"),
+        "bridges": len(results),
+        "accounts": sum(r.get("accounts", 0) for r in results),
+        "added": sum(r.get("added", 0) for r in results),
+        "skipped": sum(r.get("skipped", 0) for r in results),
+        "pending_matched": sum(r.get("pending_matched", 0) for r in results),
+        "stale_feeds": [s for r in results for s in r.get("stale_feeds", [])],
+        "provider_errors": [e for r in results for e in r.get("provider_errors", [])],
+        "failures": [r.get("detail") for r in failed],
+    }
+
+
+def _sync_one(access_url: str, lookback_days: int = 90) -> dict:
+    added = skipped = accounts_seen = 0
+    added_ids: list[str] = []
+    stale_feeds: list[dict] = []
+    try:
+        data = fetch(access_url, lookback_days)
+        # SimpleFIN reports upstream connection trouble in `errors` — dropping
+        # it is how a dead bank login stays invisible for days.
+        provider_errors = [str(e) for e in (data.get("errors") or [])]
+        now_ts = datetime.now(timezone.utc).timestamp()
+        with session_scope() as session:
+            for acct in data.get("accounts", []):
+                accounts_seen += 1
+                balance_date = acct.get("balance-date")
+                # The provider's own timestamp is the freshness truth: if THEY
+                # are serving a days-old snapshot, the upstream bank connection
+                # has stopped, however healthy this fetch looks.
+                if balance_date:
+                    days_stale = (now_ts - float(balance_date)) / 86400.0
+                    if days_stale > config.STALE_FEED_DAYS:
+                        stale_feeds.append({
+                            "account": acct.get("name") or "Unnamed account",
+                            "institution": (acct.get("org") or {}).get("name", ""),
+                            "days_stale": round(days_stale, 1),
+                        })
+                account = upsert_account(
+                    session,
+                    source="simplefin",
+                    external_id=acct.get("id"),
+                    name=acct.get("name") or "Unnamed account",
+                    institution=(acct.get("org") or {}).get("name", ""),
+                    kind=_guess_kind(
+                        acct.get("name") or "", (acct.get("org") or {}).get("name") or ""
+                    ),
+                    currency=acct.get("currency") or "USD",
+                    balance=float(acct.get("balance") or 0),
+                    balance_date=(
+                        datetime.fromtimestamp(balance_date, tz=timezone.utc).replace(tzinfo=None)
+                        if balance_date
+                        else None
+                    ),
+                )
+                txns = [
+                    TxnIn(
+                        posted=date.fromtimestamp(t.get("posted") or t.get("transacted_at") or 0),
+                        amount=float(t.get("amount") or 0),
+                        description=t.get("description") or "",
+                        external_id=t.get("id"),
+                        pending=bool(t.get("pending")),
+                    )
+                    for t in acct.get("transactions", [])
+                    if t.get("posted") or t.get("transacted_at")
+                ]
+                result = ingest_transactions(session, account, txns)
+                added += result.added
+                skipped += result.skipped
+                added_ids.extend(result.ids)
+            # Fresh feed data is ground truth: match any chat-mentioned spend
+            # that has now actually posted on a bank card, so it stops being
+            # provisional. Runs on the ids just added, so nothing is matched twice.
+            matched = 0
+            if added_ids:
+                from .. import pending
+                matched = len(pending.reconcile(session, added_ids))
+            # Feed balances just moved. Re-stamp today's snapshot for the WHOLE
+            # account set (including manual accounts this sync never touched), so the
+            # day's net-worth history row stays in agreement with get_accounts instead
+            # of dropping every un-synced manual account out of the total.
+            from ..intelligence.insights import snapshot_net_worth
+            snapshot_net_worth(session)
+            stale_note = (
+                " STALE:" + ",".join(s["account"] for s in stale_feeds)
+            ) if stale_feeds else ""
+            err_note = (" provider_errors=" + "; ".join(provider_errors)[:200]) if provider_errors else ""
+            session.add(
+                SyncLog(
+                    source="simplefin",
+                    status="ok",
+                    detail=(
+                        f"accounts={accounts_seen} added={added} skipped={skipped} "
+                        f"pending_matched={matched}{stale_note}{err_note}"
+                    ),
+                )
+            )
+        return {"status": "ok", "accounts": accounts_seen, "added": added,
+                "skipped": skipped, "pending_matched": matched,
+                "stale_feeds": stale_feeds, "provider_errors": provider_errors}
+    except Exception as exc:  # log the failure, never crash the scheduler
+        detail = _redact(str(exc))[:2000]
+        with session_scope() as session:
+            session.add(SyncLog(source="simplefin", status="error", detail=detail))
+        return {"status": "error", "detail": detail}
+
+
+if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "claim":
+        url = claim_setup_token(sys.argv[2])
+        print("Access URL (put this in .env as SIMPLEFIN_ACCESS_URL):")
+        print(url)
+    elif len(sys.argv) == 2 and sys.argv[1] == "sync":
+        from ..db import init_db
+
+        init_db()
+        print(sync())
+    else:
+        print("usage: python -m bankai.connectors.simplefin claim <SETUP_TOKEN> | sync")

@@ -1,0 +1,105 @@
+# The Sentinel Charter
+
+BankAI holds a family's whole financial and legal life — balances, statements,
+deeds, trusts, tax returns, identity documents, a home address. This document is
+the doctrine for defending it. It is written for the humans who own the system;
+a short disposition version is woven into the copilot's own mind (its system
+prompt), but **this file, and the code that enforces it, is the real boundary.**
+
+## The one principle everything else follows from
+
+**The copilot lives inside the sandbox. It never holds the keys to its own cage.**
+
+You cannot make an AI safe by making it *want* to be safe. A prompt is a
+disposition, not a wall — a model that is prompt-injected by a malicious
+document, or that drifts as it grows more capable, will ignore its own good
+intentions. So the controls that keep BankAI safe run in code the model does not
+edit, write to a ledger the model cannot rewrite, and hand every consequential
+decision to a human.
+
+Concretely, the model cannot, by design:
+
+- move money or reach a bank (bank access is read-only, always);
+- email or message anyone outside the household without a human clicking Approve;
+- change its own security settings, permissions, or code;
+- delete or edit the audit ledger.
+
+If a future change would break any of these, that change is the thing to stop.
+
+## Sentinel's job: watch and sound the alarm — never fight back
+
+Sentinel is BankAI's self-defense subsystem. Its power is to **see and warn**,
+loudly and honestly. It deliberately does **not**:
+
+- take autonomous action against a third party (a bank, a lender, an attacker) —
+  a defense that can "retaliate" is just a new weapon pointed at the family;
+- silently change security controls to "fix" what it finds — it reports the exact
+  remediation and a human decides;
+- act on instructions it finds *inside* data (an email, a document, a memo). Data
+  is never a command.
+
+What it does, on a schedule and in code the copilot can't switch off:
+
+1. **Tamper-evident audit.** Every security-relevant event is appended to a
+   hash-chained ledger. Editing or deleting history breaks the chain and is
+   detected (`verify_chain`). This is how "did it do something without
+   permission?" stays answerable.
+
+2. **Posture self-audit.** The things that *drift* and open holes get checked
+   every cycle: file permissions (BankAI was briefly world-writable once —
+   never again unnoticed), the localhost-only binding, secrets accidentally
+   written to logs, whether the session secret is set, backup freshness. Drift is
+   reported, never silently auto-changed.
+
+3. **Threat watch.** Failed-login bursts and prompt-injection markers in inbound
+   email and documents are flagged and alarmed.
+
+When Sentinel finds something new and real, it emails the household and drops a
+note in the shared thread so the copilot sees it — framed as *report this to the
+family*, never *act on it*.
+
+## The one sanctioned auto-action: permission self-heal
+
+There is exactly one thing Sentinel is allowed to change on its own, and it is
+worth being precise about why it is the safe exception rather than a crack in the
+doctrine.
+
+Deploys keep copying the code in from a `/mnt/c` (Windows/DrvFs) worktree, where
+every file is mode 0777, so the runtime tree keeps reverting to world-writable.
+A root systemd timer (`bankai-harden`, script at `/root/bankai-harden.sh`, plus
+an `ExecStartPre` on the service) re-locks `/opt/bankai` to owner(root)-only on a
+schedule and on every restart.
+
+This is safe as an autonomous action for reasons that do NOT generalize to
+anything else:
+
+- it only ever REMOVES access — it strips group/other bits, never grants any;
+- it restores a fixed, known-good baseline of the system's OWN files — it makes
+  no judgement and touches nothing outside the sandbox, no third party;
+- it runs OUTSIDE the copilot, as root, so the model cannot trigger it, disable
+  it, or change what it does; and
+- every heal is written to the tamper-evident ledger (`perms_relocked`), so the
+  self-healing is itself auditable.
+
+That is the whole exception. Anything that would GRANT access, reach outside the
+box, make a judgement call, or be reachable by the model stays detect-and-alarm.
+
+## The three classes of "rogue element", and how each is met
+
+- **Rogue AI (including this one, prompt-injected).** Injection-marker detection
+  on all untrusted input; the instruction-vs-data rule in the copilot's mind; and
+  the hard code gates above, which hold even if the model is fully subverted.
+- **Institutions acting against the family.** The copilot is disposed to check
+  the household's statements against their interest — overcharges, errors,
+  predatory terms, silent fee or rate changes — and to raise them. It advises;
+  it does not fight the institution on its own.
+- **Fraud / scams / "loan" attackers.** Watch inbound documents and messages for
+  scam, phishing, predatory-lending, and identity-theft signals, and warn the
+  family before they act.
+
+## Extending Sentinel safely
+
+Add detections freely. Before adding any *action* — anything that changes state,
+reaches outside the box, or alters a control — ask: could a prompt-injected
+copilot trigger this to the family's harm? If yes, it must be human-gated. Detection
+scales without limit; autonomy does not.

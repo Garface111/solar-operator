@@ -1,0 +1,15 @@
+{
+  "name": "bankai-whatsapp-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "BankAI copilot's WhatsApp seat: Baileys sidecar spooling group messages to/from the filesystem",
+  "main": "bridge.js",
+  "scripts": {
+    "start": "node bridge.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "pino": "^9.5.0",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
