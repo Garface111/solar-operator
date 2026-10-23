@@ -265,12 +265,21 @@ def status(authorization: Optional[str] = Header(default=None)):
             .order_by(HarvestRun.started_at.desc())
             .limit(200)
         ).all()
+        # login_failed: the vendor's OWN words for the rejection, when its module
+        # captured them (login_failure_detail, e.g. "Chint rejected the sign-in:
+        # <Chint's msg>"). The engine appends them after " - " to its own
+        # "login outcome=…, not authenticated" text; only that vendor part goes
+        # to the owner, so they can tell "the saved password is the old one"
+        # from a generic failure.
+        last_error: dict[tuple[str, str], str] = {}
         for provider, username_lc, run_status, run_detail in recent_runs:
             key = (provider, username_lc)
             if key not in last_status:
                 last_status[key] = run_status
                 if run_status == "login_blocked" and run_detail:
                     last_block[key] = run_detail[:400]
+                elif run_status == "login_failed" and run_detail and " rejected the sign-in" in run_detail:
+                    last_error[key] = run_detail.split(" - ", 1)[-1][:300]
 
         # T2-1: customer-visible harvest activity (trust + tripwire). Counts only
         # — never detail text, never secrets. Month = UTC calendar month.
@@ -326,6 +335,7 @@ def status(authorization: Optional[str] = Header(default=None)):
                 "last_harvest_ok": c.last_harvest_ok,
                 "last_harvest_status": last_status.get((c.provider, c.username_lc)),
                 "login_block": last_block.get((c.provider, c.username_lc)),
+                "login_error": last_error.get((c.provider, c.username_lc)),
                 "harvest_fails": c.harvest_fails or 0,
                 "has_session": bool(c.has_session),
                 **act,
