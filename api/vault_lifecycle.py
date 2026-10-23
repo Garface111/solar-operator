@@ -48,8 +48,14 @@ def teardown_cloud_capture_for_tenant(db, tenant_id: str, *, reason: str = "") -
             db.delete(r)
         counts["harvest_run"] = len(n_hr)
 
+        # Deferred vault columns: wiping a secret never needs to read it, and a
+        # full-entity fetch decrypts them, which the web process refuses.
+        from sqlalchemy.orm import defer
         n_pc = db.execute(
-            select(PortalCredential).where(PortalCredential.tenant_id == tid)
+            select(PortalCredential)
+            .options(defer(PortalCredential.secret_enc),
+                     defer(PortalCredential.session_state_enc))
+            .where(PortalCredential.tenant_id == tid)
         ).scalars().all()
         for r in n_pc:
             # Clear sensitive fields before delete in case of deferred flush / session expire
@@ -92,8 +98,12 @@ def disable_cloud_capture_for_tenant(db, tenant_id: str) -> int:
     """Flip cloud_capture_enabled=False without deleting (pre-teardown belt)."""
     from .models import PortalCredential
 
+    from sqlalchemy.orm import defer
     rows = db.execute(
-        select(PortalCredential).where(PortalCredential.tenant_id == tenant_id)
+        select(PortalCredential)
+        .options(defer(PortalCredential.secret_enc),
+                 defer(PortalCredential.session_state_enc))
+        .where(PortalCredential.tenant_id == tenant_id)
     ).scalars().all()
     for r in rows:
         r.cloud_capture_enabled = False

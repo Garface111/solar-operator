@@ -20,6 +20,17 @@ from . import config
 
 log = logging.getLogger("harvester.credentials")
 
+def _no_vault():
+    """Load options that keep the encrypted vault columns OUT of a fetch.
+
+    EncryptedVaultStr/JSON decrypt at row-fetch time, and the public web process
+    refuses vault decrypt (SO_VAULT_DECRYPT=0). Anything web can reach that loads
+    a PortalCredential row must defer them; writing a new secret does not need
+    the old one."""
+    from sqlalchemy.orm import defer
+    return (defer(PortalCredential.secret_enc), defer(PortalCredential.session_state_enc))
+
+
 # Auto-login pauses after this many consecutive failures (mirrors the extension's
 # AUTOLOGIN_MAX_VENDOR_FAILS and portal_access._PAUSE_FAILS).
 PAUSE_FAILS = 3
@@ -120,8 +131,12 @@ def upsert_credential(
         )
     username_lc = (username or "").strip().lower()[:200]
     provider = (provider or "").strip().lower()[:40]
+    # Deferred vault columns: re-saving an EXISTING login runs on the public web
+    # process, which may not decrypt (SO_VAULT_DECRYPT=0). Loading the full row
+    # decrypted the old password just to overwrite it, and 500'd every password
+    # change since the split-key hardening (Bruce's Chint re-save, 2026-10-23).
     row = db.execute(
-        select(PortalCredential).where(
+        select(PortalCredential).options(*_no_vault()).where(
             PortalCredential.tenant_id == tenant_id,
             PortalCredential.provider == provider,
             PortalCredential.username_lc == username_lc,
@@ -244,7 +259,7 @@ def rearm(
     Used by portal sign-off + credential unlock. Never returns secrets.
     """
     provider = (provider or "").strip().lower()
-    q = select(PortalCredential).where(
+    q = select(PortalCredential).options(*_no_vault()).where(
         PortalCredential.tenant_id == tenant_id,
         PortalCredential.provider == provider,
     )
@@ -285,7 +300,8 @@ def rearm_all(db, *, tenant_id: str | None = None, only_enabled: bool = False) -
         raise ValueError(
             "rearm_all requires tenant_id — fleet-wide rearm is disabled"
         )
-    q = select(PortalCredential).where(PortalCredential.tenant_id == tenant_id)
+    q = select(PortalCredential).options(*_no_vault()).where(
+        PortalCredential.tenant_id == tenant_id)
     if only_enabled:
         q = q.where(PortalCredential.cloud_capture_enabled.is_(True))
     rows = db.execute(q).scalars().all()

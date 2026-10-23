@@ -430,3 +430,56 @@ def test_sentry_scrubs_contexts():
     crumb_msg = out["breadcrumbs"]["values"][0]["message"]
     assert "abcdef" not in crumb_msg or "redacted" in crumb_msg.lower()
     assert out["breadcrumbs"]["values"][0]["data"]["password"] == "[redacted]"
+
+
+def test_resaving_an_existing_login_on_web_does_not_unwrap_the_vault(Session, monkeypatch):
+    """Re-saving the password of a login that ALREADY exists must work on the
+    public web process (SO_VAULT_DECRYPT=0).
+
+    Live 2026-10-23: Bruce typed his new Chint password into the Chint box and
+    Save answered http_500. `upsert_credential` loaded the full PortalCredential
+    entity, so fetching the existing row ran the EncryptedVaultStr/JSON
+    decryptors, which web refuses. A NEW login never hit it (no row to load), so
+    every first save worked and every password CHANGE failed.
+    """
+    from api import cloud_capture
+    from api.harvester import config as hconfig
+
+    os.environ[crypto.ENV_KEY] = KEY
+    os.environ["SO_VAULT_DECRYPT"] = "1"   # harvester-side: store an encrypted row
+    crypto._cache.clear()
+    with Session() as db:
+        t = _tenant(db)
+        db.add(PortalCredential(
+            tenant_id=t.id, provider="chint", username="owner@example.com",
+            username_lc="owner@example.com", secret_enc="old-password",
+            cloud_capture_enabled=True, harvest_fails=5,
+            session_state_enc={"cookies": ["c"]},
+        ))
+        db.commit()
+
+    os.environ["SO_VAULT_DECRYPT"] = "0"   # public web
+    crypto._cache.clear()
+
+    class _T:
+        id = "ten_a"
+
+    monkeypatch.setattr(cloud_capture, "SessionLocal", Session)
+    monkeypatch.setattr(cloud_capture, "tenant_from_session", lambda a: _T())
+    monkeypatch.setattr(cloud_capture.ratelimit, "enforce", lambda *a, **k: None)
+    monkeypatch.setattr(hconfig, "collection_enabled", lambda: True)
+    monkeypatch.setattr(cloud_capture, "ensure_client_for_login", lambda *a, **k: None)
+
+    out = cloud_capture.save_credential(
+        cloud_capture.CredentialIn(provider="chint", username="owner@example.com",
+                                   password="new-password", enable=True, consent=True),
+        request=MagicMock(), authorization="Bearer x")       # must not raise
+    assert out["ok"] is True
+
+    os.environ["SO_VAULT_DECRYPT"] = "1"   # harvester again: the new secret landed
+    crypto._cache.clear()
+    with Session() as db:
+        row = db.execute(select(PortalCredential).where(
+            PortalCredential.username_lc == "owner@example.com")).scalar_one()
+        assert row.secret_enc == "new-password"
+        assert row.harvest_fails == 0 and row.last_harvest_at is None   # re-armed
