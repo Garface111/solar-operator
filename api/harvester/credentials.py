@@ -353,6 +353,13 @@ def record_health(
     # not-ok but don't bump the fail counter, so it retries on the normal cadence
     # instead of the 30-min login backoff.
     login_failure = (status == "login_failed")
+    # login_blocked = the portal ACCEPTED the password and then parked the session
+    # on a human-only wall (EULA / terms / account picker / texted code). An
+    # accepted password ends the wrong-password streak at the portal, so it ends
+    # ours too: clear the counter and the pause. Without this a correct password
+    # behind a one-time EULA read as "Paused, re-enter your password" (Chint,
+    # Bruce, 2026-10).
+    password_accepted = (status == "login_blocked")
     cred.last_harvest_at = now()
     cred.last_harvest_ok = ok
     # `harvest_fails` counts CONSECUTIVE FRESH-LOGIN failures — nothing else may
@@ -371,7 +378,7 @@ def record_health(
     # data down to a 6-hour heartbeat for a risk that does not exist. They are
     # still recorded as failed runs, and `lockout_alert.run_capture_stall_watchdog`
     # is what makes that class loud — this branch is about lockout, not silence.
-    if ok and fresh_login:
+    if (ok or password_accepted) and fresh_login:
         cred.harvest_fails = 0
     elif login_failure and fresh_login:
         cred.harvest_fails = min((cred.harvest_fails or 0) + 1, 999)
@@ -398,6 +405,9 @@ def record_health(
         if fresh_login:
             row.fails = 0
             row.paused = False
+    elif password_accepted and fresh_login:
+        row.fails = 0
+        row.paused = False
     elif login_failure and fresh_login:
         row.fails = min((row.fails or 0) + 1, 999)
         if row.fails >= PAUSE_FAILS:

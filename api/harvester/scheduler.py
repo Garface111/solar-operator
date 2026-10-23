@@ -80,6 +80,14 @@ FAIL_BACKOFF = timedelta(minutes=int(os.environ.get("CLOUD_CAPTURE_FAIL_BACKOFF_
 # could care (a handful of attempts a day), short enough that a password the owner
 # fixed at the portal — or a vendor-side outage that ended — heals itself.
 PAUSED_RETRY = timedelta(hours=int(os.environ.get("CLOUD_CAPTURE_PAUSED_RETRY_HOURS") or 6))
+# A login parked on a HUMAN-ONLY wall (status login_blocked: the portal accepted
+# the password, then asked the owner to accept a EULA / terms, pick an account or
+# type a texted code). Retrying can't clear it — only the owner can — so the only
+# job of a retry is to notice promptly that they did. Every 30 min resumes capture
+# within half an hour of their click, without a real password sign-in every 3 min
+# (480/day), which is exactly the pattern a vendor's bot detection flags. Retries
+# forever; the vault shows the owner the exact fix the whole time.
+BLOCKED_RETRY = timedelta(minutes=int(os.environ.get("CLOUD_CAPTURE_BLOCKED_RETRY_MIN") or 30))
 
 
 def account_key(provider: str, username_lc: str) -> tuple[str, str]:
@@ -94,12 +102,13 @@ def account_key(provider: str, username_lc: str) -> tuple[str, str]:
     return ((provider or "").strip().lower(), (username_lc or "").strip().lower())
 
 
-def _is_due(c, _now, account_fails: int | None = None) -> bool:
+def _is_due(c, _now, account_fails: int | None = None, blocked: bool = False) -> bool:
     """Whether a credential should be harvested now — with the lockout guard.
 
     ``account_fails`` is the worst consecutive-fresh-login-failure count across
     EVERY credential row sharing this portal account (see `account_key`). Callers
     that don't pass it fall back to this row's own counter.
+    ``blocked``: this row's latest run was login_blocked (see BLOCKED_RETRY).
     """
     fails = c.harvest_fails or 0
     if account_fails is not None:
@@ -107,6 +116,8 @@ def _is_due(c, _now, account_fails: int | None = None) -> bool:
     last = c.last_harvest_at
     if last is None:
         return True                                   # never harvested
+    if blocked:
+        return last <= _now - BLOCKED_RETRY
     if fails >= MAX_LOGIN_FAILS:
         # PAUSED — slow heartbeat, never a permanent stop. Loudly alerted by
         # `lockout_alert.run_login_lockout_watchdog` for as long as it persists.
@@ -137,12 +148,41 @@ def accounts_with_recent_fresh_login(db, window: timedelta | None = None) -> set
     cutoff = now() - (window or PAUSED_RETRY)
     rows = db.execute(
         select(HarvestRun.provider, HarvestRun.username_lc)
-        .where(HarvestRun.status == "ok",
+        # login_blocked counts: the portal ACCEPTED the password (a human-only
+        # wall came after it), which resets its failure counter just as well.
+        .where(HarvestRun.status.in_(("ok", "login_blocked")),
                HarvestRun.logged_in_fresh.is_(True),
                HarvestRun.started_at >= cutoff)
         .distinct()
     ).all()
     return {account_key(p, u) for (p, u) in rows}
+
+
+def blocked_credentials(db, window: timedelta | None = None) -> set[tuple[str, str, str]]:
+    """(tenant_id, provider, username_lc) whose MOST RECENT harvest run was
+    login_blocked — parked on a human-only wall, waiting for the owner.
+
+    Two small indexed reads instead of a latest-row-per-credential scan: the keys
+    that hit a wall inside `window`, then the newest run of just those keys.
+    """
+    cutoff = now() - (window or timedelta(days=2))
+    keys = db.execute(
+        select(HarvestRun.tenant_id, HarvestRun.provider, HarvestRun.username_lc)
+        .where(HarvestRun.status == "login_blocked", HarvestRun.started_at >= cutoff)
+        .distinct()
+    ).all()
+    out: set[tuple[str, str, str]] = set()
+    for tid, prov, ulc in keys:
+        latest = db.execute(
+            select(HarvestRun.status)
+            .where(HarvestRun.tenant_id == tid, HarvestRun.provider == prov,
+                   HarvestRun.username_lc == ulc)
+            .order_by(HarvestRun.started_at.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+        if latest == "login_blocked":
+            out.add((tid, prov, ulc))
+    return out
 
 
 def coordinate_account_fails(rows, vouched: set[tuple[str, str]] | None = None
@@ -212,10 +252,12 @@ def due_credentials() -> list[tuple[str, str, str]]:
         # Lockout state is per PORTAL ACCOUNT, not per tenant row (see account_key).
         acct_fails = coordinate_account_fails(
             rows, accounts_with_recent_fresh_login(db))
+        blocked = blocked_credentials(db)
         # Cache allow decisions per tenant_id (demo/allowlist still need Tenant).
         allowed_cache: dict[str, bool] = {}
         for c in rows:
-            if not _is_due(c, _now, acct_fails.get(account_key(c.provider, c.username_lc))):
+            if not _is_due(c, _now, acct_fails.get(account_key(c.provider, c.username_lc)),
+                           blocked=(c.tenant_id, c.provider, c.username_lc) in blocked):
                 continue
             tid = c.tenant_id
             if tid not in allowed_cache:

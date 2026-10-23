@@ -217,6 +217,14 @@ class BrowserFarm:
                 await page.bring_to_front()
             except Exception:
                 pass
+            # Optional vendor hook, before the first navigation: e.g. Chint listens
+            # for its doLogin answer so a failed sign-in can say WHY.
+            prep = getattr(vendor, "prepare_page", None)
+            if prep is not None:
+                try:
+                    await prep(page)
+                except Exception as exc:  # noqa: BLE001 — diagnostics only
+                    log.warning("prepare_page failed for %s: %s", provider, type(exc).__name__)
 
             url = await vendor.login_url(creds)
             await page.goto(url, wait_until="domcontentloaded")
@@ -263,7 +271,8 @@ class BrowserFarm:
                     await asyncio.sleep(2)
                 if not _logged:
                     # Ask the vendor whether a HUMAN-ONLY interstitial is in the
-                    # way (Fronius ToS wall, 2026-08) — the password may be fine.
+                    # way (Fronius ToS wall 2026-08, Chint EULA / account picker /
+                    # texted code 2026-10) — the password itself was accepted.
                     block = None
                     try:
                         hook = getattr(vendor, "login_block_reason", None)
@@ -273,16 +282,38 @@ class BrowserFarm:
                         block = None
                     shot = await self._screenshot(page, tenant_id, provider, "login")
                     storage_state = await context.storage_state()
+                    if block:
+                        # NOT a credential failure: the portal accepted the
+                        # password and is waiting on the OWNER (we never click
+                        # through legal terms for them). Recorded as login_blocked:
+                        # it does not count toward the lockout pause, the vault
+                        # shows the owner the exact one-step fix, and the scheduler
+                        # re-checks on a gentle cadence (BLOCKED_RETRY) so capture
+                        # resumes soon after they clear it.
+                        self._persist(tenant_id, provider, username_lc,
+                                      storage_state=storage_state, ok=False,
+                                      status="login_blocked", started_at=started,
+                                      fresh=fresh, rows=0, error=block,
+                                      shot=shot, login_failed_fresh=False)
+                        return HarvestOutcome(provider, username_lc, "login_blocked",
+                                              fresh=fresh, detail=block)
+                    why = None
+                    try:
+                        fhook = getattr(vendor, "login_failure_detail", None)
+                        if fhook is not None:
+                            why = await fhook(page)
+                    except Exception:
+                        why = None
                     self._persist(tenant_id, provider, username_lc,
                                   storage_state=storage_state, ok=False,
                                   status="login_failed", started_at=started,
                                   fresh=fresh, rows=0,
                                   error=(f"login outcome={outcome}, not authenticated"
-                                         + (f" - {block}" if block else "")),
+                                         + (f" - {why}" if why else "")),
                                   shot=shot, login_failed_fresh=fresh)
                     return HarvestOutcome(provider, username_lc, "login_failed",
                                           fresh=fresh,
-                                          detail=(f"{outcome} - {block}" if block
+                                          detail=(f"{outcome} - {why}" if why
                                                   else outcome))
 
             result = await vendor.scrape(page, context, creds)

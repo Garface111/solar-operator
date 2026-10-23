@@ -253,16 +253,24 @@ def status(authorization: Optional[str] = Header(default=None)):
         # their password (Ford 2026-07-12, Chint). One query, newest-first, indexed
         # on (tenant_id, provider, started_at) — take the first row per credential.
         last_status: dict[tuple[str, str], str] = {}
+        # login_blocked carries the owner-facing one-step fix the vendor module
+        # wrote (e.g. Chint's "accept the user agreement once"): the panel shows it
+        # verbatim instead of a generic "check the password". Only that status's
+        # detail is ever returned — failure details stay internal.
+        last_block: dict[tuple[str, str], str] = {}
         recent_runs = db.execute(
-            select(HarvestRun.provider, HarvestRun.username_lc, HarvestRun.status)
+            select(HarvestRun.provider, HarvestRun.username_lc, HarvestRun.status,
+                   HarvestRun.detail)
             .where(HarvestRun.tenant_id == t.id)
             .order_by(HarvestRun.started_at.desc())
             .limit(200)
         ).all()
-        for provider, username_lc, run_status in recent_runs:
+        for provider, username_lc, run_status, run_detail in recent_runs:
             key = (provider, username_lc)
             if key not in last_status:
                 last_status[key] = run_status
+                if run_status == "login_blocked" and run_detail:
+                    last_block[key] = run_detail[:400]
 
         # T2-1: customer-visible harvest activity (trust + tripwire). Counts only
         # — never detail text, never secrets. Month = UTC calendar month.
@@ -317,6 +325,7 @@ def status(authorization: Optional[str] = Header(default=None)):
                 "last_harvest_at": c.last_harvest_at.isoformat() if c.last_harvest_at else None,
                 "last_harvest_ok": c.last_harvest_ok,
                 "last_harvest_status": last_status.get((c.provider, c.username_lc)),
+                "login_block": last_block.get((c.provider, c.username_lc)),
                 "harvest_fails": c.harvest_fails or 0,
                 "has_session": bool(c.has_session),
                 **act,

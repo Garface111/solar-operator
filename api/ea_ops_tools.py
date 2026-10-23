@@ -359,6 +359,13 @@ def _explain_capture_failure(
     if st == "login_failed":
         reasons.append("portal login failed — password changed, MFA wall, or account lockout")
         severity = "critical"
+    elif st == "login_blocked":
+        # The portal accepted the password; a one-time human step (EULA / terms /
+        # account picker / texted code) stands in the way. `detail` is the
+        # owner-facing instruction the vendor module wrote.
+        reasons.append("password accepted, but the portal is waiting on the owner: "
+                       + ((detail or "").strip() or "a one-time step at the portal"))
+        severity = "critical"
     elif st == "scrape_failed":
         reasons.append("login succeeded but data scrape failed — not a password problem; will retry")
         severity = "warning"
