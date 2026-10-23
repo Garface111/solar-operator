@@ -1735,8 +1735,18 @@ def delete_account(
         # Anonymize contact so the email can re-signup; keep id for FK orphans.
         old_email = tenant.contact_email
         tenant.contact_email = f"deleted+{tenant.id[:12]}@invalid.local"
-        tenant.gmp_email = None
-        tenant.gmp_username = None
+        # GMP identifiers live on the tenant's Client rows — Tenant has no
+        # gmp_email/gmp_username column, so assigning them here set a plain
+        # instance attribute and wiped nothing. This is not cosmetic: /v1/sync
+        # auto-populates arrays onto a client by matching a capture against
+        # clients.gmp_email / gmp_username, so a surviving identifier can
+        # attach fresh utility data to an account that asked to be deleted.
+        for _c in db.execute(
+            select(Client).where(Client.tenant_id == tenant.id)
+        ).scalars().all():
+            _c.gmp_email = None
+            _c.gmp_username = None
+            _c.gmp_autopopulate = False
         if hasattr(tenant, "password_hash"):
             try:
                 tenant.password_hash = None
