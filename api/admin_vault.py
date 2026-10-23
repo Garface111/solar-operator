@@ -2,6 +2,8 @@
 
 GET /admin/vault-stats   — fleet counts (no secrets, no usernames)
 GET /admin/vault-health  — encryption + split-key posture + residual churn check
+GET /admin/harvest-runs  — one portal login's stored copies, lockout roster and
+                           newest harvest runs (no secrets; ops debugging)
 
 Auth: X-Admin-Key header ONLY (query ?key= rejected — lands in access logs).
 """
@@ -134,4 +136,80 @@ def vault_health(
         "ok": len(issues) == 0,
         "issues": issues,
         "stats": s,
+    })
+
+
+@router.get("/admin/harvest-runs")
+def harvest_runs(
+    provider: str = Query(..., min_length=2, max_length=40),
+    username: str | None = Query(default=None, max_length=200),
+    tenant_id: str | None = Query(default=None, max_length=32),
+    limit: int = Query(default=40, ge=1, le=200),
+    x_admin_key: str | None = Header(default=None),
+    key: str | None = Query(default=None),
+):
+    """One portal login's Cloud Capture story, for ops debugging without a
+    database shell: every stored copy of the login (one per tenant), its lockout
+    roster row, and the newest harvest runs with their sanitized detail.
+
+    Read-only. Never selects ciphertext (secret_enc / session_state_enc are only
+    tested for NULL in SQL), so the web process never decrypts the vault.
+    Narrow by `username` (the portal login, case-insensitive) and/or `tenant_id`.
+    """
+    _check(x_admin_key, key)
+    prov = provider.strip().lower()
+    ulc = (username or "").strip().lower() or None
+    where = ["pc.provider = :prov"]
+    params: dict = {"prov": prov, "lim": int(limit)}
+    if ulc:
+        where.append("pc.username_lc = :ulc")
+        params["ulc"] = ulc
+    if tenant_id:
+        where.append("pc.tenant_id = :tid")
+        params["tid"] = tenant_id.strip()
+    with SessionLocal() as db:
+        creds = db.execute(text(f"""
+            SELECT pc.id, pc.tenant_id, t.contact_email, t.product, t.active,
+                   pc.username_lc, pc.cloud_capture_enabled,
+                   (pc.secret_enc IS NOT NULL) AS has_secret,
+                   (pc.session_state_enc IS NOT NULL) AS has_session,
+                   pc.session_state_at, pc.last_harvest_at, pc.last_harvest_ok,
+                   pc.harvest_fails, pc.created_at, pc.updated_at,
+                   pls.fails AS roster_fails, pls.paused AS roster_paused,
+                   pls.last_ok_at AS roster_last_ok_at
+            FROM portal_credential pc
+            JOIN tenants t ON t.id = pc.tenant_id
+            LEFT JOIN portal_login_status pls
+              ON pls.tenant_id = pc.tenant_id AND pls.provider = pc.provider
+             AND pls.username_lc = pc.username_lc
+            WHERE {' AND '.join(where)}
+            ORDER BY pc.updated_at DESC
+        """), params).mappings().all()
+        run_where = ["provider = :prov"]
+        if ulc:
+            run_where.append("username_lc = :ulc")
+        if tenant_id:
+            run_where.append("tenant_id = :tid")
+        runs = db.execute(text(f"""
+            SELECT started_at, ended_at, tenant_id, username_lc, status,
+                   logged_in_fresh, rows_written, detail
+            FROM harvest_run
+            WHERE {' AND '.join(run_where)}
+            ORDER BY started_at DESC
+            LIMIT :lim
+        """), params).mappings().all()
+
+    def _row(m) -> dict:
+        out = {}
+        for k, v in dict(m).items():
+            out[k] = v.isoformat() if isinstance(v, datetime) else v
+        return out
+
+    return JSONResponse({
+        "as_of": datetime.utcnow().isoformat() + "Z",
+        "provider": prov,
+        "username": ulc,
+        "tenant_id": tenant_id,
+        "credentials": [_row(c) for c in creds],
+        "runs": [_row(r) for r in runs],
     })
