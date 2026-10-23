@@ -730,3 +730,207 @@ def test_stale_banner_html_reflects_cloud_only_fleet():
     stale = _col_with_source("Behind", [9, 8, 7], "solaredge")
     html = digest.build_digest_html(_tenant(), {"columns": [fresh, stale]})
     assert "capture extension" not in html
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HONESTY: never tell a Cloud Capture fleet to "re-connect" a utility login
+#
+# Regression suite for the 2026-07-30 customer report (Paul Bozuwa, forwarded by
+# Ford: "still complaining about Vt electric coop"). Every morning his digest
+# opened with "Your Vermont Electric Cooperative sign-in expired twelve days
+# ago … reconnect VEC and I'll backfill everything we missed" — on a fleet that
+# is on Cloud Capture, in the same email that reported 100% fleet health.
+#
+# Two root causes, one per test group below:
+#
+#   1. THE GHOST TOKEN. UtilitySession.expires_at is not a login lifetime. For
+#      SmartHub co-ops (VEC included) it is written from the adapter's
+#      _SESSION_TIMEOUT_SECONDS — a FIVE MINUTE re-auth hint — so the row reads
+#      "expired" five minutes after the last extension capture and stays that
+#      way forever. The reported outage grew by one day every morning.
+#   2. THE WRONG INSTRUCTION. Under Cloud Capture the password lives on our
+#      server and the harvester signs in itself; there is no re-connect the
+#      owner can perform. scheduler.py already gates the standalone reauth
+#      emails on exactly this — the digest was the surface that never got it.
+# ─────────────────────────────────────────────────────────────────────────────
+
+from api.models import HarvestRun, PortalCredential, UtilitySession
+
+
+def _cloud_credential(tid: str, provider: str = "vec") -> None:
+    """Put this tenant on Cloud Capture for a provider: a real, enabled,
+    password-bearing credential — what has_active_credential actually checks."""
+    with SessionLocal() as db:
+        db.add(PortalCredential(
+            tenant_id=tid, provider=provider,
+            username="paul@example.test", username_lc="paul@example.test",
+            secret_enc="not-a-real-password", cloud_capture_enabled=True))
+        db.commit()
+
+
+def _harvest_run(tid: str, provider: str, hours_ago: float, status: str = "ok") -> None:
+    with SessionLocal() as db:
+        db.add(HarvestRun(
+            tenant_id=tid, provider=provider, username_lc="paul@example.test",
+            started_at=digest.datetime.utcnow() - timedelta(hours=hours_ago),
+            status=status))
+        db.commit()
+
+
+def _expired_session(tid: str, provider: str = "vec", minutes_ago: int = 5) -> None:
+    """The SmartHub session row exactly as the capture path writes it: an
+    expires_at five minutes past its capture, which never gets refreshed again
+    once the fleet moves to Cloud Capture."""
+    with SessionLocal() as db:
+        db.add(UtilitySession(
+            tenant_id=tid, provider=provider, api_token="tok",
+            expires_at=digest.datetime.utcnow() - timedelta(minutes=minutes_ago),
+            captured_at=digest.datetime.utcnow() - timedelta(days=12)))
+        db.commit()
+
+
+def _vec_array(tid: str, name: str, last_gen_days_ago: int | None) -> int:
+    aid = _db_array(tid, name)
+    with SessionLocal() as db:
+        db.add(UtilityAccount(tenant_id=tid, array_id=aid, provider="vec",
+                              account_number=f"acct-{aid}", enabled=True))
+        db.commit()
+    if last_gen_days_ago is not None:
+        _gen(tid, aid, {n: 400.0 for n in range(last_gen_days_ago + 3,
+                                                last_gen_days_ago - 1, -1)},
+             source="utility_meter")
+    return aid
+
+
+def _health(tid: str) -> dict:
+    with SessionLocal() as db:
+        return digest.build_connection_health(db, db.get(Tenant, tid))
+
+
+def test_expired_token_alone_is_never_reported_as_a_dead_login():
+    """Paul's ghost: a five-minute SmartHub token that expired long ago while the
+    meter data kept arriving daily. A token row is not evidence — nothing it
+    feeds has stopped, so there is nothing to tell the owner."""
+    tid = _db_tenant()
+    _vec_array(tid, "52 COUNTY RD, GLOVER, VT", last_gen_days_ago=1)
+    _expired_session(tid)
+
+    health = _health(tid)
+    assert health["ok"] is True, health["problems"]
+    assert health["problems"] == []
+
+
+def test_cloud_capture_fleet_is_never_told_to_reconnect_a_healthy_login():
+    """Cloud Capture is signing in server-side and captured an hour ago. The
+    expired legacy token row is a ghost — no problem, and above all no
+    'reconnect VEC' the owner has no way to perform."""
+    tid = _db_tenant()
+    _vec_array(tid, "52 COUNTY RD, GLOVER, VT", last_gen_days_ago=1)
+    _expired_session(tid)
+    _cloud_credential(tid)
+    _harvest_run(tid, "vec", hours_ago=1)
+
+    health = _health(tid)
+    assert health["problems"] == []
+    blurb = " ".join(i["title"] + " " + i["detail"]
+                     for i in digest._connection_items({"columns": [],
+                                                        "connection_health": health}))
+    assert "re-connect" not in blurb.lower()
+    assert "reconnect" not in blurb.lower()
+
+
+def test_cloud_capture_login_failure_asks_for_a_password_update_not_a_reconnect():
+    """When Cloud Capture genuinely cannot sign in, the owner still hears about
+    it — but the ask matches reality: update the saved password. The credential
+    is on our side, so 're-connect' names a mechanism they do not have."""
+    tid = _db_tenant()
+    _vec_array(tid, "52 COUNTY RD, GLOVER, VT", last_gen_days_ago=9)
+    _cloud_credential(tid)
+    _harvest_run(tid, "vec", hours_ago=2, status="login_failed")
+    with SessionLocal() as db:
+        db.add(InverterAlertState(
+            tenant_id=tid, incident_key=f"coop_session_dead:{tid}:vec",
+            first_flagged_at=digest.datetime.utcnow() - timedelta(days=3)))
+        db.commit()
+
+    health = _health(tid)
+    assert health["ok"] is False                     # a real failure is never muted
+    prob = health["problems"][0]
+    assert prob["kind"] == "cloud_login_failing"
+    assert prob["capture_mode"] == "cloud"
+    assert "password" in prob["fix"].lower()
+    assert "re-connect" not in (prob["detail"] + prob["fix"]).lower()
+    # The duration comes from the starved DATA, never from the frozen token row
+    # — that row is what made the reported outage grow by a day every morning.
+    assert prob["since"] == _iso_days_ago(9)
+    assert prob["days_down"] == 9
+
+    items = digest._connection_items({"columns": [], "connection_health": health})
+    assert "52 COUNTY RD, GLOVER, VT" in items[0]["detail"]      # still names the site
+    assert "re-connect" not in (items[0]["title"] + items[0]["detail"]).lower()
+
+
+def test_cloud_capture_working_but_readings_missing_is_still_reported():
+    """The no-self-sabotage half: Cloud Capture logs in fine, yet a site it feeds
+    has gone quiet. That is real and must be said — these are often zero-inverter
+    utility arrays the vendor body excludes, so dropping the item would make the
+    site vanish from the email entirely."""
+    tid = _db_tenant()
+    _vec_array(tid, "52 COUNTY RD, GLOVER, VT", last_gen_days_ago=9)
+    _cloud_credential(tid)
+    _harvest_run(tid, "vec", hours_ago=1)
+    with SessionLocal() as db:
+        db.add(InverterAlertState(
+            tenant_id=tid, incident_key=f"coop_session_dead:{tid}:vec",
+            first_flagged_at=digest.datetime.utcnow() - timedelta(days=3)))
+        db.commit()
+
+    health = _health(tid)
+    assert health["ok"] is False
+    prob = health["problems"][0]
+    assert prob["kind"] == "cloud_feed_gap"
+    assert "52 COUNTY RD, GLOVER, VT" in " ".join(
+        a["array"] for a in prob["arrays_affected"])
+    assert "re-connect" not in (prob["detail"] + prob["fix"]).lower()
+
+
+def test_device_mode_fleet_still_gets_the_reconnect_instruction():
+    """Extension mode is the one world where 'go log in' is the true fix — the
+    owner's browser session IS the capture. Nothing above may take that away."""
+    tid = _db_tenant()
+    _vec_array(tid, "52 COUNTY RD, GLOVER, VT", last_gen_days_ago=9)
+    with SessionLocal() as db:
+        db.get(Tenant, tid).capture_mode = "device"
+        db.add(InverterAlertState(
+            tenant_id=tid, incident_key=f"coop_session_dead:{tid}:vec",
+            first_flagged_at=digest.datetime.utcnow() - timedelta(days=3)))
+        db.commit()
+
+    health = _health(tid)
+    prob = health["problems"][0]
+    assert prob["kind"] == "login_expired"
+    assert "re-connect" in prob["fix"].lower()
+
+
+def test_capture_path_reads_cloud_state_from_credentials_and_harvest_runs():
+    tid = _db_tenant()
+    with SessionLocal() as db:
+        t = db.get(Tenant, tid)
+        assert digest._capture_path(db, t, "vec")["mode"] == "unmanaged"
+
+    _cloud_credential(tid)
+    with SessionLocal() as db:
+        t = db.get(Tenant, tid)
+        path = digest._capture_path(db, t, "vec")
+        assert path["mode"] == "cloud"
+        assert path["harvesting"] is False            # no successful run yet
+
+    _harvest_run(tid, "vec", hours_ago=digest._CLOUD_CAPTURE_STALL_HOURS + 6)
+    with SessionLocal() as db:
+        t = db.get(Tenant, tid)
+        assert digest._capture_path(db, t, "vec")["harvesting"] is False
+
+    _harvest_run(tid, "vec", hours_ago=2)
+    with SessionLocal() as db:
+        t = db.get(Tenant, tid)
+        assert digest._capture_path(db, t, "vec")["harvesting"] is True
