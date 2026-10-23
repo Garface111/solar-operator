@@ -593,6 +593,16 @@ def _startup():
             os.environ.get("THREADPOOL_TOKENS", "64"))
     except Exception:
         pass  # non-fatal — fall back to the default limiter
+    # Restart this worker at its boot footprint before its heap grows into the
+    # Railway bill. Armed by start.sh only under uvicorn --workers>1, whose
+    # supervisor brings the worker straight back (see api/rss_recycle.py).
+    if "pytest" not in _sys.modules:
+        try:
+            from .rss_recycle import start_web_worker_recycler
+            start_web_worker_recycler()
+        except Exception:
+            logging.getLogger("uvicorn.error").warning(
+                "could not arm web worker recycler", exc_info=True)
 
 
 

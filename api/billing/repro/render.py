@@ -29,6 +29,7 @@ import pathlib
 import shutil
 import subprocess
 import tempfile
+import time
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ SOFFICE_BIN = (os.getenv("SOFFICE_BIN")
                or shutil.which("soffice")
                or shutil.which("libreoffice"))
 RENDER_TIMEOUT_S = int(os.getenv("REPRO_RENDER_TIMEOUT_S", "120"))
+GOTENBERG_WAKE_WAIT_S = float(os.getenv("GOTENBERG_WAKE_WAIT_S", "6"))
 
 
 class RenderUnavailable(RuntimeError):
@@ -93,11 +95,23 @@ def _render_gotenberg(file_bytes: bytes, filename: str = "invoice.xlsx") -> byte
     import httpx
     url = f"{GOTENBERG_URL}/forms/libreoffice/convert"
     files = {"files": (filename, file_bytes, "application/octet-stream")}
-    try:
-        r = httpx.post(url, files=files, timeout=RENDER_TIMEOUT_S)
-        r.raise_for_status()
-    except Exception as e:  # noqa: BLE001
-        raise RenderError(f"gotenberg convert failed: {e}") from e
+    # The Gotenberg service sleeps when idle (Railway App Sleeping, to stop paying
+    # for an always-on renderer); the request that wakes it can get a 502/503 or a
+    # refused connection. One short retry absorbs the cold start.
+    for attempt in (1, 2):
+        try:
+            r = httpx.post(url, files=files, timeout=RENDER_TIMEOUT_S)
+            if attempt == 1 and r.status_code in (502, 503, 504):
+                raise httpx.TransportError(f"cold start {r.status_code}")
+            r.raise_for_status()
+            break
+        except httpx.TransportError as e:
+            if attempt == 2:
+                raise RenderError(f"gotenberg convert failed: {e}") from e
+            log.info("gotenberg not ready (%s); retrying once", e)
+            time.sleep(GOTENBERG_WAKE_WAIT_S)
+        except Exception as e:  # noqa: BLE001
+            raise RenderError(f"gotenberg convert failed: {e}") from e
     if r.content[:4] != b"%PDF":
         raise RenderError("gotenberg returned non-PDF content")
     return r.content

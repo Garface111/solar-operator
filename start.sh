@@ -75,7 +75,22 @@ if [ "$PROCESS_ROLE" = "worker" ] || [ "$SO_PROCESS" = "worker" ]; then
   echo "start.sh: launching background worker (scheduler + /health)"
   # Migrations stay on the web service; worker just needs tables to exist.
   export RUN_SCHEDULER="${RUN_SCHEDULER:-1}"
-  exec python -m api.background_main
+  # Restart loop for the RSS recycler (api/rss_recycle.py): exit 75 = "I grew
+  # past WORKER_RECYCLE_MB and drained at a quiet moment, start me fresh". Any
+  # other exit propagates to Railway exactly as the old `exec` did. The trap
+  # forwards Railway's SIGTERM so redeploys still shut the scheduler down cleanly.
+  export SO_SUPERVISED=1
+  export WORKER_RECYCLE_MB="${WORKER_RECYCLE_MB:-700}"
+  while :; do
+    python -m api.background_main &
+    child=$!
+    trap 'kill -TERM "$child" 2>/dev/null; wait "$child"; exit 143' TERM INT
+    wait "$child"
+    code=$?
+    trap - TERM INT
+    if [ "$code" != 75 ]; then exit "$code"; fi
+    echo "start.sh: scheduler worker recycled (rss over ${WORKER_RECYCLE_MB}MB) — restarting"
+  done
 fi
 
 # Multi-worker web: a single blocked event loop was taking the whole public
@@ -89,5 +104,15 @@ case "$WORKERS" in
 esac
 if [ "$WORKERS" -lt 1 ]; then WORKERS=1; fi
 if [ "$WORKERS" -gt 4 ]; then WORKERS=4; fi
-echo "start.sh: launching web API (uvicorn workers=$WORKERS)"
-python -m api.migrate && exec uvicorn api.app:app --host 0.0.0.0 --port "${PORT:-8000}" --workers "$WORKERS"
+# RSS recycler (api/rss_recycle.py): with >1 worker the uvicorn supervisor
+# restarts any worker that exits, so an over-limit worker can retire itself
+# gracefully while its sibling serves. Never armed for a single worker — nothing
+# would bring it back. The graceful-shutdown cap bounds a retiring worker (and a
+# redeploy) held open by a long stream.
+if [ "$WORKERS" -gt 1 ]; then
+  export WEB_WORKER_RECYCLE_MB="${WEB_WORKER_RECYCLE_MB:-500}"
+else
+  unset WEB_WORKER_RECYCLE_MB
+fi
+echo "start.sh: launching web API (uvicorn workers=$WORKERS, recycle at ${WEB_WORKER_RECYCLE_MB:-off}MB)"
+python -m api.migrate && exec uvicorn api.app:app --host 0.0.0.0 --port "${PORT:-8000}" --workers "$WORKERS" --timeout-graceful-shutdown 30

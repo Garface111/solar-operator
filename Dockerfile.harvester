@@ -20,6 +20,10 @@ RUN pip install --no-cache-dir -r requirements-harvester.txt
 COPY . .
 
 ENV PYTHONUNBUFFERED=1
+# Same glibc tuning the web service runs with: the container sees 48 host CPUs,
+# so unbounded malloc arenas let the Python side hoard freed memory (RAM is
+# billed by the minute). Railway service vars still override these.
+ENV MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=131072 MALLOC_MMAP_THRESHOLD_=131072
 # Name the process. This is the ONE role allowed to unwrap portal passwords
 # (api/crypto.vault_decrypt_enabled). Leaving it unset reported role=unknown on
 # every capture, which api/crypto._note_decrypt filed as a CRITICAL "vault

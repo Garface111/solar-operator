@@ -30,6 +30,11 @@ GOTENBERG = "https://gotenberg.internal:3000"
 FAKE_PDF = b"%PDF-1.7\n%mock gotenberg output\n%%EOF"
 
 
+@pytest.fixture(autouse=True)
+def _no_wake_wait(monkeypatch):
+    monkeypatch.setattr(R, "GOTENBERG_WAKE_WAIT_S", 0)
+
+
 def _xlsx() -> bytes:
     wb = Workbook()
     ws = wb.active
@@ -117,6 +122,23 @@ def test_gotenberg_http_error_fails_closed_without_fallback(monkeypatch):
     _install_capture(monkeypatch, content=b"", status=502)
     with pytest.raises(R.RenderError):
         R.render_xlsx_to_pdf(_xlsx())
+
+
+def test_gotenberg_cold_start_is_retried_once(monkeypatch):
+    # The service sleeps when idle; the request that wakes it may 502. One retry
+    # gets the real render instead of degrading to the fallback.
+    monkeypatch.setattr(R, "GOTENBERG_URL", GOTENBERG)
+    monkeypatch.setattr(R, "SOFFICE_BIN", None)
+    replies = iter([_FakeResponse(b"", 502), _FakeResponse(FAKE_PDF, 200)])
+    calls = []
+
+    def fake_post(url, files=None, timeout=None, **kw):
+        calls.append(url)
+        return next(replies)
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    assert R.render_xlsx_to_pdf(_xlsx()) == FAKE_PDF
+    assert len(calls) == 2
 
 
 def test_gotenberg_failure_falls_back_to_soffice(monkeypatch):

@@ -35,6 +35,14 @@ def _startup() -> None:
         os.environ["RUN_SCHEDULER"] = "1"
     log.info("background worker: starting APScheduler (RUN_SCHEDULER=%r)", os.environ.get("RUN_SCHEDULER"))
     start_scheduler()
+    # Restart at a quiet moment once the heap outgrows WORKER_RECYCLE_MB; armed
+    # only under start.sh's restart loop (SO_SUPERVISED=1). See api/rss_recycle.py.
+    try:
+        from api.rss_recycle import start_scheduler_recycler
+        from api.scheduler import scheduler as aps
+        start_scheduler_recycler(aps)
+    except Exception:
+        log.warning("could not arm scheduler worker recycler", exc_info=True)
 
 
 @app.get("/health")
