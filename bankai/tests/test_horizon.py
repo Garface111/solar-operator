@@ -89,6 +89,81 @@ def test_baseline_excludes_transfers_and_partial_month(session):
     assert all(m["month"] < today.strftime("%Y-%m") for m in base["months"])
 
 
+def seed_brokerage_activity(session, account, *, months):
+    """What a brokerage feed reports that is NOT the household earning or spending:
+    sales, purchases, core-account sweeps, journals, dividends.
+
+    Deliberately lopsided — a sale lands in one month and the sweep that parks
+    the cash in the next — so the rows cannot quietly cancel inside a month.
+    """
+    today = date.today()
+    txns = []
+    for back in range(1, months + 1):
+        start = _months_back(today, back)
+        sign = 1.0 if back % 2 else -1.0
+        txns += [
+            TxnIn(posted=start.replace(day=3), amount=450.0,
+                  description="DIVIDEND RECEIVED INITECH CORP"),
+            TxnIn(posted=start.replace(day=12), amount=sign * (38_000.0 + back),
+                  description="YOU SOLD HOOLI INC CLASS A" if sign > 0
+                  else "YOU BOUGHT VANDELAY INDUSTRIES"),
+            TxnIn(posted=start.replace(day=14), amount=sign * (9_500.0 + back),
+                  description="REDEMPTION FROM CORE ACCOUNT" if sign > 0
+                  else "PURCHASE INTO CORE ACCOUNT"),
+            TxnIn(posted=start.replace(day=25), amount=sign * 2_000.0,
+                  description="JOURNALED JNL VS A/C TYPES"),
+        ]
+    ingest_transactions(session, account, txns)
+
+
+@pytest.mark.parametrize("kind", ["investment", "retirement", "brokerage"])
+def test_baseline_ignores_activity_inside_investment_accounts(session, kind):
+    checking = upsert_account(
+        session, source="csv", name="Everyday Checking", kind="checking", balance=60_000.0
+    )
+    portfolio = upsert_account(
+        session, source="csv", name="Index Portfolio", kind=kind, balance=200_000.0
+    )
+    seed_months(session, checking, months=8)
+    # The portfolio has a longer record than the checking account: a month with
+    # nothing but trades in it is not a month of household history.
+    seed_brokerage_activity(session, portfolio, months=12)
+
+    base = derive_baseline(session)
+
+    assert base["months_observed"] == 8
+    assert base["monthly_income"] == 5000.0  # the paycheck, not the sales
+    assert base["monthly_spend"] == 3500.0  # the groceries, not the purchases
+    assert base["monthly_savings"] == 1500.0
+    assert base["savings_rate_pct"] == 30.0
+    for month in base["months"]:
+        assert (month["income"], month["spend"], month["net"]) == (5000.0, -3500.0, 1500.0)
+    # The balance still counts in full — only the churn inside it is ignored.
+    assert base["balances"]["investments"] == 200_000.0
+    assert base["balances"]["net_worth"] == 260_000.0
+    # A dividend is not a paycheck.
+    streams = base["income"]["streams"]
+    assert len(streams) == 1
+    assert "dividend" not in streams[0]["merchant"].lower()
+    assert base["income"]["implied_monthly_income"] == pytest.approx(5000.0, abs=1.0)
+    assert any("investment account" in a.lower() for a in base["assumptions"])
+
+
+def test_projection_is_unmoved_by_trades_inside_the_portfolio(session):
+    checking = household(session, months=8)
+    quiet = project_wealth(session, 20, seed=21, simulations=80)
+
+    portfolio = upsert_account(
+        session, source="csv", name="Index Brokerage", kind="investment", balance=200_000.0
+    )
+    seed_brokerage_activity(session, portfolio, months=8)
+    busy = project_wealth(session, 20, seed=21, simulations=80)
+
+    assert checking is not None
+    assert busy["monthly_savings_used"] == 1500.0
+    assert busy == quiet
+
+
 def test_baseline_is_honest_about_thin_data(session):
     checking = upsert_account(
         session, source="csv", name="Checking", kind="checking", balance=5_000.0

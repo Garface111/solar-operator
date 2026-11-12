@@ -10,6 +10,9 @@ The model is deliberately small enough to explain out loud:
   * A **baseline** is derived from the observed record: the median *complete*
     calendar month's net (income minus spend, transfers excluded), plus the
     current liquid / investment / property / debt split of the accounts.
+    Activity *inside* an investment account — sales, purchases, core-account
+    sweeps, dividends — is not income or spend: the account's balance already
+    carries it, so it is left out of the monthly picture entirely.
   * A **projection** walks that baseline forward one year at a time. Investments
     compound at a sampled annual return; liquid grows only by savings (cash earns
     nothing here — an explicit, conservative choice); property tracks inflation
@@ -125,18 +128,37 @@ def account_buckets(session: Session) -> dict[str, float]:
     return buckets
 
 
+def _investment_account_ids(session: Session) -> set[str]:
+    """Accounts whose own transactions are NOT household income or spend.
+
+    A brokerage feed reports every sale, purchase, core-account sweep, journal
+    and dividend as a signed cash row. None of it is the household earning or
+    spending: it is money changing shape inside a balance ``account_buckets``
+    already counts in full. Read as income, a year of ordinary portfolio churn
+    looks like a six-figure salary.
+    """
+    return {
+        account.id
+        for account in session.execute(select(Account)).scalars()
+        if (account.kind or "other").lower() in INVESTMENT_KINDS
+    }
+
+
 def _monthly_nets(
     session: Session, *, today: date, lookback_months: int
 ) -> tuple[list[dict], bool]:
-    """Per-calendar-month income/spend/net, transfers and pendings excluded.
+    """Per-calendar-month income/spend/net of the household's own accounts.
+
+    Transfers, pendings and everything on an investment account are excluded.
 
     Returns ``(months, used_partial_month)``. The in-progress month is dropped —
     a half-finished month understates spend and would bias the median low. If
     dropping it leaves nothing, it is kept and the flag comes back True.
     """
     since = _months_back(today, lookback_months)
+    investment_ids = _investment_account_ids(session)
     rows = session.execute(
-        select(Transaction.posted, Transaction.amount).where(
+        select(Transaction.posted, Transaction.amount, Transaction.account_id).where(
             Transaction.posted >= since,
             Transaction.pending.is_(False),
             Transaction.category != "transfer",
@@ -145,7 +167,9 @@ def _monthly_nets(
 
     income: dict[str, float] = {}
     spend: dict[str, float] = {}
-    for posted, amount in rows:
+    for posted, amount, account_id in rows:
+        if account_id in investment_ids:
+            continue
         key = _month_key(posted)
         if amount >= 0:
             income[key] = income.get(key, 0.0) + amount
@@ -173,11 +197,19 @@ def _monthly_nets(
 
 
 def _income_cadence(session: Session) -> dict:
-    """Detected recurring inflows, summarized into a cadence + implied monthly income."""
+    """Detected recurring inflows, summarized into a cadence + implied monthly income.
+
+    Inflows on investment accounts are skipped for the same reason
+    ``_monthly_nets`` skips them: a quarterly dividend or a monthly redemption
+    from the core position is the portfolio moving, not a paycheck.
+    """
+    investment_ids = _investment_account_ids(session)
     series = [
         s
         for s in detect_recurring(session)
-        if not s.is_bill and s.avg_amount >= INCOME_SERIES_MIN
+        if not s.is_bill
+        and s.avg_amount >= INCOME_SERIES_MIN
+        and s.account_id not in investment_ids
     ]
     streams = [
         {
@@ -293,6 +325,13 @@ def derive_baseline(session: Session, *, lookback_months: int = BASELINE_LOOKBAC
             "the in-progress month is excluded.",
             "Transactions categorized 'transfer' are excluded so moving money between "
             "own accounts is not counted as income or spend.",
+            "Transactions on an investment account (kinds: "
+            + ", ".join(INVESTMENT_KINDS)
+            + ") are excluded: sales, purchases, core-account sweeps and dividends "
+            "move money inside a balance that is already counted, so a sale is not "
+            "income and a purchase is not spending. Money drawn out of such an "
+            "account counts as income only if its deposit is not categorized "
+            "'transfer'.",
             "Pending transactions are excluded.",
             f"Lookback window is {lookback_months} months.",
             "Balances are whatever each account last reported — a stale feed or a "

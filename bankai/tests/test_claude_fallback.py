@@ -73,6 +73,85 @@ def test_not_logged_in_never_tries_other_models(session, monkeypatch):
     assert tried == ["claude-fable-5"]  # login is dead for every model
 
 
+def _expired_login_json() -> str:
+    """The shape a logged-out CLI really prints: exit 1, a "success" subtype, and
+    the reason buried ~900 characters in, after the counters."""
+    return json.dumps({
+        "duration_api_ms": 0, "stop_reason": "stop_sequence",
+        "session_id": "00000000-0000-0000-0000-000000000000", "total_cost_usd": 0,
+        "usage": {"input_tokens": 0, "output_tokens": 0,
+                  "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0,
+                  "server_tool_use": {"web_search_requests": 0, "web_fetch_requests": 0},
+                  "service_tier": "standard", "iterations": [], "speed": "standard"},
+        "modelUsage": {}, "permission_denials": [], "terminal_reason": "api_error",
+        "padding": "x" * 700,
+        "is_error": True, "num_turns": 1, "subtype": "success", "api_error_status": None,
+        "result": "Failed to authenticate: OAuth session expired and could not be refreshed",
+        "type": "result",
+    })
+
+
+def test_an_expired_login_is_named_not_buried_in_json(session, monkeypatch):
+    """The reason sits past the old 500-char cut. It must still be recognised as
+    a dead login — and say which command brings the brain back."""
+    tried = []
+
+    def fake_run(cmd, **kw):
+        tried.append(_model_of(cmd))
+        return FakeProc(stdout=_expired_login_json(), returncode=1)
+
+    monkeypatch.setattr(claude_cli.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError) as err:
+        claude_cli.run(session, "s", [{"role": "user", "content": "x"}], model="claude-fable-5")
+    message = str(err.value)
+    assert "not logged in" in message
+    assert "OAuth session expired" in message  # what the CLI actually said
+    assert "auth login" in message  # what to do about it
+    assert tried == ["claude-fable-5"]  # no other model can fix a dead login
+
+
+def test_a_401_status_alone_reads_as_a_dead_login(session, monkeypatch):
+    def fake_run(cmd, **kw):
+        return FakeProc(returncode=1, stdout=json.dumps(
+            {"is_error": True, "api_error_status": 401, "result": "API Error"}))
+
+    monkeypatch.setattr(claude_cli.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="not logged in"):
+        claude_cli.run(session, "s", [{"role": "user", "content": "x"}], model="claude-fable-5")
+
+
+def test_a_json_failure_reports_its_reason_not_its_counters(session, monkeypatch):
+    blob = json.loads(_expired_login_json())
+    blob["result"] = "the MCP server crashed on startup"
+
+    def fake_run(cmd, **kw):
+        return FakeProc(stdout=json.dumps(blob), returncode=1)
+
+    monkeypatch.setattr(claude_cli.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="claude CLI failed") as err:
+        claude_cli.run(session, "s", [{"role": "user", "content": "x"}], model="claude-fable-5")
+    assert "the MCP server crashed on startup" in str(err.value)
+    assert "input_tokens" not in str(err.value)
+
+
+def test_a_json_usage_limit_still_falls_to_the_next_model(session, monkeypatch):
+    tried = []
+    blob = json.loads(_expired_login_json())
+    blob["result"] = "Claude usage limit reached. Your limit will reset at 3am."
+
+    def fake_run(cmd, **kw):
+        m = _model_of(cmd)
+        tried.append(m)
+        if m == "claude-fable-5":
+            return FakeProc(stdout=json.dumps(blob), returncode=1)
+        return FakeProc(stdout=json.dumps({"result": f"answered on {m}"}))
+
+    monkeypatch.setattr(claude_cli.subprocess, "run", fake_run)
+    out = claude_cli.run(session, "s", [{"role": "user", "content": "x"}], model="claude-fable-5")
+    assert out == "answered on claude-opus-5"
+    assert tried == ["claude-fable-5", "claude-opus-5"]
+
+
 def test_all_claude_models_out_raises_for_the_outer_chain(session, monkeypatch):
     tried = []
 
