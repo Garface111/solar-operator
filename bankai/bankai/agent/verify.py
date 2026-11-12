@@ -197,14 +197,25 @@ def looks_like_refusal(text: str) -> bool:
 # repeated it without calling anything. Two scheduled turns did exactly that
 # within twenty minutes, one of them in a check-in email to the household.
 #
-# Deliberately narrow. "Gaurav's bank connection has been unavailable since
-# August" and "I have no tool that moves money" are true, useful sentences and
-# must pass: this matches the plumbing vocabulary, not the idea of a limit.
+# Deliberately narrow. "The bank connection has been unavailable since August",
+# "I have no tool that moves money", "tax-deferred tools", "the order couldn't
+# be filled in this session" and an insurer's "Managed Care Plan (MCP)" are all
+# ordinary sentences and must pass: this matches the copilot talking about its
+# own plumbing, in the first person or by tool name, not the idea of a limit.
+_INABILITY = (
+    r"(?:cannot|can['’]t|can not|unable to|couldn['’]t|could not|"
+    r"(?:don['’]t|do not) have access|have no access)"
+)
+_PLUMBING = r"(?:tools?|servers?|connection|session|callable)"
 _TOOL_OUTAGE_RE = re.compile(
-    r"\bMCP\b"
-    r"|\b(?:cannot|can't|can not|unable to|couldn't|could not)\b[^.\n]{0,80}"
-    r"\bin this session\b"
-    r"|\bdeferred tools?\b",
+    # a raw tool id, e.g. "mcp__bankai__get_accounts"
+    r"(?<![a-z])mcp__\w+"
+    # "the MCP tools ...", "MCP connection ...", "tools ... over MCP"
+    rf"|(?<![a-z])mcp(?![a-z_])[^.\n]{{0,60}}\b{_PLUMBING}\b"
+    rf"|\b{_PLUMBING}\b[^.\n]{{0,60}}(?<![a-z])mcp(?![a-z_])"
+    # "I cannot reach the accounts in this session", either way round
+    rf"|\bI\b[^.\n]{{0,40}}\b{_INABILITY}\b[^.\n]{{0,80}}\bin this session\b"
+    rf"|\bin this session\b[^.\n]{{0,20}}\bI\b[^.\n]{{0,40}}\b{_INABILITY}\b",
     re.IGNORECASE,
 )
 

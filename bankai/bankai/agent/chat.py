@@ -631,6 +631,10 @@ def run_turn(
                     raise RuntimeError(
                         "backend twice claimed its own tools were unavailable"
                     )
+                if verify.looks_like_refusal(reply):
+                    raise RuntimeError(
+                        "backend answered a correction with a refusal template"
+                    )
             # A decision to stay out of a conversation has nothing to verify,
             # and handing it to a critic invites it to be argued into speaking.
             if is_silence(reply):
@@ -652,7 +656,17 @@ def run_turn(
             # subscription was exhausted and a fallback brain was answering — so
             # a guard that depends on the tier, or on a model checking itself,
             # is exactly the guard that was not there.
-            return _grounded(session, reply, list(messages), _run)
+            final = _grounded(session, reply, list(messages), _run)
+            # The verifier and the grounding gate can each rewrite the reply,
+            # and every rewrite is one more chance to produce the tool-outage
+            # text. So it is checked once more, last, on exactly what is about
+            # to be sent. (The grounding gate's own canned refusal is a
+            # legitimate answer and is not matched by this.)
+            if verify.looks_like_tool_outage(final):
+                raise RuntimeError(
+                    "the finished reply claimed its own tools were unavailable"
+                )
+            return final
         except Exception as exc:
             errors.append(f"{name}: {exc}")
             logging.getLogger("bankai.chat").warning(

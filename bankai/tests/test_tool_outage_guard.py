@@ -22,8 +22,24 @@ SEEN_LIVE = [
     "current accounts, spending anomalies and cash flow are not callable.",
 ]
 
+# Paraphrases a model reaches for when it copies the above.
+PARAPHRASED = [
+    "The mcp__bankai__get_accounts tool is not callable.",
+    "I can’t reach the accounts in this session.",
+    "I don't have access to the household's financial data in this session.",
+    "In this session I cannot reach the accounts.",
+    "I am unable to retrieve balances in this session.",
+    "The tools I need are not reachable over MCP right now.",
+]
+
 # True, useful sentences about real limits. None of them may be caught.
 LEGITIMATE = [
+    "A traditional IRA and an HSA are your two best tax-deferred tools for this.",
+    "The limit order couldn't be filled in this session.",
+    "The insurer lists the clinic under its Managed Care Plan (MCP), so the claim "
+    "goes to the plan first.",
+    "I couldn't verify part of that answer against your records, so I'm not "
+    "sending it.",
     "The Riverside Credit Union connection has been unavailable since August 30, "
     "so the checking balance is 74 days old.",
     "I can't see charges on the store card after the last export — it has no feed.",
@@ -43,8 +59,8 @@ def _fixed_chain(monkeypatch):
     monkeypatch.setattr(verify, "VERIFY_REPLIES", False)
 
 
-@pytest.mark.parametrize("text", SEEN_LIVE)
-def test_the_live_shapes_are_recognised(text):
+@pytest.mark.parametrize("text", SEEN_LIVE + PARAPHRASED)
+def test_the_live_shapes_and_their_paraphrases_are_recognised(text):
     assert verify.looks_like_tool_outage(text)
     assert verify.is_error_template(text)
 
@@ -52,7 +68,12 @@ def test_the_live_shapes_are_recognised(text):
 @pytest.mark.parametrize("text", LEGITIMATE)
 def test_real_limits_are_not_mistaken_for_an_outage(text):
     assert not verify.looks_like_tool_outage(text)
-    assert not verify.is_error_template(text)
+
+
+def test_the_grounding_gates_own_refusal_is_not_an_outage():
+    from bankai import grounding
+
+    assert not verify.looks_like_tool_outage(grounding.refusal_message([]))
 
 
 def test_a_draft_that_blames_its_tools_gets_one_correction(session, monkeypatch):
@@ -91,7 +112,26 @@ def test_a_backend_that_insists_fails_the_turn_instead_of_shipping_it(session, m
         agent_chat.run_turn(session, [{"role": "user", "content": "balance?"}])
 
 
+def test_a_correction_answered_with_a_refusal_template_also_fails(session, monkeypatch):
+    replies = iter([SEEN_LIVE[0], "I need to stop myself here — I cannot find it in your data."])
+    monkeypatch.setattr(claude_cli, "run", lambda s, system, messages, **k: next(replies))
+    with pytest.raises(RuntimeError, match="refusal template"):
+        agent_chat.run_turn(session, [{"role": "user", "content": "balance?"}])
+
+
+def test_an_outage_written_by_a_later_rewrite_is_caught_before_sending(session, monkeypatch):
+    """The verifier and the grounding gate both rewrite replies. Whatever they
+    hand back is checked once more, last."""
+    monkeypatch.setattr(claude_cli, "run", lambda s, system, messages, **k: "Checking holds $1,250.00.")
+    monkeypatch.setattr(agent_chat, "_grounded", lambda s, reply, messages, run: SEEN_LIVE[2])
+    with pytest.raises(RuntimeError, match="finished reply"):
+        agent_chat.run_turn(session, [{"role": "user", "content": "balance?"}])
+
+
 def test_stored_error_replies_are_withheld_from_history_not_deleted(session):
+    from datetime import datetime, timedelta
+
+    start = datetime(2031, 3, 4, 9, 0, 0)
     rows = [
         ("user", "Avery", "what do we owe on the card?"),
         ("assistant", "copilot", SEEN_LIVE[0]),
@@ -100,8 +140,11 @@ def test_stored_error_replies_are_withheld_from_history_not_deleted(session):
         ("user", "Avery", "and checking?"),
         ("assistant", "copilot", "I need to stop myself here — I cannot find it in your data."),
     ]
-    for role, speaker, content in rows:
-        session.add(ChatMessage(channel="web", role=role, speaker=speaker, content=content))
+    for n, (role, speaker, content) in enumerate(rows):
+        # explicit, strictly increasing timestamps: ids are random, so two rows
+        # in the same clock tick would otherwise have no defined order
+        session.add(ChatMessage(channel="web", role=role, speaker=speaker, content=content,
+                                created_at=start + timedelta(minutes=n)))
         session.flush()
 
     history = thread.build_history(session)
