@@ -32,7 +32,7 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from statistics import median
 
 from sqlalchemy import select
@@ -62,6 +62,12 @@ THIN_DATA_MONTHS = 6
 MIN_CONFIDENT_MONTHS = 3
 # A recurring inflow smaller than this is treated as noise, not household income.
 INCOME_SERIES_MIN = 200.0
+# A household-account row with the same amount (to the cent) and the opposite
+# sign as a row on an investment account, within this many days, is probably the
+# bank's side of a draw or a contribution.
+MIRROR_WINDOW_DAYS = 5
+# Below this an amount match is coincidence more often than it is a transfer.
+MIRROR_MIN_AMOUNT = 100.0
 # A sampled annual return below this is clipped: -100% would zero the portfolio.
 MIN_ANNUAL_RETURN = -0.95
 
@@ -196,6 +202,63 @@ def _monthly_nets(
     return months, used_partial
 
 
+def _possible_untagged_transfers(
+    session: Session, *, since: date, months: set[str], investment_ids: set[str]
+) -> dict:
+    """Household rows that look like the bank's side of a move to or from an
+    investment account but are NOT categorized 'transfer'.
+
+    With the investment side left out of the monthly picture, such a row is
+    one-sided: an untagged draw reads as income, an untagged contribution as
+    spending. This only DETECTS them — nothing is removed from the figures. An
+    amount match is strong evidence, not proof (draw $5,000, then pay a $5,000
+    bill, and the bill matches too), so the call belongs to whoever reads the
+    caveat, and the remedy is to recategorize the row, not to guess here.
+    """
+    found: list[tuple[date, float, str]] = []
+    if investment_ids and months:
+        rows = session.execute(
+            select(
+                Transaction.posted,
+                Transaction.amount,
+                Transaction.account_id,
+                Transaction.category,
+                Transaction.description,
+            ).where(
+                Transaction.posted >= since - timedelta(days=MIRROR_WINDOW_DAYS),
+                Transaction.pending.is_(False),
+            )
+        ).all()
+        legs: dict[int, list[tuple[date, float]]] = {}
+        for posted, amount, account_id, _category, _description in rows:
+            if account_id in investment_ids and abs(amount) >= MIRROR_MIN_AMOUNT:
+                legs.setdefault(round(abs(amount) * 100), []).append((posted, amount))
+        for posted, amount, account_id, category, description in rows:
+            if (
+                account_id in investment_ids
+                or category == "transfer"
+                or abs(amount) < MIRROR_MIN_AMOUNT
+                or _month_key(posted) not in months
+            ):
+                continue
+            for leg_posted, leg_amount in legs.get(round(abs(amount) * 100), ()):
+                if (leg_amount > 0) != (amount > 0) and abs(
+                    (leg_posted - posted).days
+                ) <= MIRROR_WINDOW_DAYS:
+                    found.append((posted, amount, description or ""))
+                    break
+    found.sort()
+    return {
+        "count": len(found),
+        "inflow_total": _r(sum(amount for _, amount, _ in found if amount > 0)),
+        "outflow_total": _r(sum(amount for _, amount, _ in found if amount < 0)),
+        "examples": [
+            {"posted": posted.isoformat(), "amount": _r(amount), "description": text[:60]}
+            for posted, amount, text in found[-5:]
+        ],
+    }
+
+
 def _income_cadence(session: Session) -> dict:
     """Detected recurring inflows, summarized into a cadence + implied monthly income.
 
@@ -298,6 +361,23 @@ def derive_baseline(session: Session, *, lookback_months: int = BASELINE_LOOKBAC
             "No investment account is linked, so the projection compounds nothing "
             "and will read pessimistically."
         )
+    untagged = _possible_untagged_transfers(
+        session,
+        since=_months_back(today, lookback_months),
+        months={m["month"] for m in months},
+        investment_ids=_investment_account_ids(session),
+    )
+    if untagged["count"]:
+        caveats.append(
+            f"{untagged['count']} transaction(s) on household accounts "
+            f"(${untagged['inflow_total']:,.2f} in, ${abs(untagged['outflow_total']):,.2f} "
+            "out) match a same-amount move on an investment account within "
+            f"{MIRROR_WINDOW_DAYS} days but are not categorized 'transfer'. If they "
+            "are draws from, or contributions to, that account they are being "
+            "counted here as income or spending and the savings rate is off by "
+            "that much — recategorize them as 'transfer' if so "
+            "(see possible_untagged_transfers)."
+        )
 
     return {
         "as_of": today.isoformat(),
@@ -318,6 +398,7 @@ def derive_baseline(session: Session, *, lookback_months: int = BASELINE_LOOKBAC
             "net_worth": _r(sum(buckets.values())),
         },
         "income": _income_cadence(session),
+        "possible_untagged_transfers": untagged,
         "months": months,
         "caveats": caveats,
         "assumptions": [
@@ -329,9 +410,10 @@ def derive_baseline(session: Session, *, lookback_months: int = BASELINE_LOOKBAC
             + ", ".join(INVESTMENT_KINDS)
             + ") are excluded: sales, purchases, core-account sweeps and dividends "
             "move money inside a balance that is already counted, so a sale is not "
-            "income and a purchase is not spending. Money drawn out of such an "
-            "account counts as income only if its deposit is not categorized "
-            "'transfer'.",
+            "income and a purchase is not spending. The bank's side of a draw or "
+            "a contribution is left out only when it is categorized 'transfer'; "
+            "untagged look-alikes are still counted and are listed under "
+            "possible_untagged_transfers.",
             "Pending transactions are excluded.",
             f"Lookback window is {lookback_months} months.",
             "Balances are whatever each account last reported — a stale feed or a "
@@ -587,7 +669,8 @@ def project_wealth(
             simulations=simulations,
         )
         + [
-            "Savings rate is the observed median monthly net"
+            "Savings rate is the observed median monthly net of the household's own "
+            "accounts — transfers and everything inside investment accounts left out"
             + (
                 f" adjusted by ${monthly_savings_delta:,.2f}/month."
                 if monthly_savings_delta

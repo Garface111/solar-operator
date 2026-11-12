@@ -33,13 +33,16 @@ TIMEOUT_SECONDS = config.CLAUDE_CLI_TIMEOUT_SECONDS
 _USAGE_ERROR = re.compile(
     r"usage limit|rate.?limit|out of credit|credits?|quota|exceeded|"
     r"too many requests|\b429\b|limit reached|upgrade your plan|overloaded|"
-    r"at capacity|insufficient",
+    r"at capacity|insufficient|hit (your|the|a) [a-z ]{0,20}limit",
     re.IGNORECASE,
 )
 
+# API statuses that mean "this model is throttled or full", whatever the text says.
+_USAGE_STATUSES = {"429", "529"}
 
-def _is_usage_error(detail: str) -> bool:
-    return bool(_USAGE_ERROR.search(detail or ""))
+
+def _is_usage_error(detail: str, api_status: object = None) -> bool:
+    return str(api_status) in _USAGE_STATUSES or bool(_USAGE_ERROR.search(detail or ""))
 
 
 # The CLI's login is dead — no other Claude model would fix it, only a human
@@ -49,6 +52,7 @@ def _is_usage_error(detail: str) -> bool:
 # expired"), so match the family rather than one sentence.
 _LOGIN_ERROR = re.compile(
     r"not logged in|/login|failed to authenticate|oauth (session|access token)|"
+    r"oauth\b.{0,40}\b(expired|revoked)|token has expired|"
     r"re-?authenticate|invalid api key|authentication_error",
     re.IGNORECASE,
 )
@@ -75,17 +79,26 @@ def _failure_reason(proc) -> tuple[str, object]:
     ~900 characters in, behind the token counters. Truncating the raw blob, as
     this path used to, cut the reason off and logged "exit 1" plus a wall of
     zeroes: a logged-out CLI read as an empty reply, and stayed misdiagnosed.
-    Fall back to the raw output for anything that is not that JSON shape.
+
+    The JSON is the last line of stdout that parses (a warning may precede it).
+    Anything that is not that shape, or carries no reason, falls back to the raw
+    stderr + stdout exactly as before. The status rides along separately because
+    it is the one counter that matters: 401 is a dead login, 429/529 a throttle.
     """
     raw = (proc.stderr or "") + (proc.stdout or "")
-    out = (proc.stdout or "").strip()
-    if out.startswith("{"):
+    for line in reversed((proc.stdout or "").splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
         try:
-            data = json.loads(out)
+            data = json.loads(line)
         except ValueError:
-            return raw, None
-        if isinstance(data, dict) and data.get("result"):
-            return str(data["result"]).strip(), data.get("api_error_status")
+            continue
+        if not isinstance(data, dict):
+            continue
+        reason = data.get("result")
+        reason = reason.strip() if isinstance(reason, str) else ""
+        return (reason or raw), data.get("api_error_status")
     return raw, None
 
 
@@ -236,7 +249,7 @@ def run(
                 raise _logged_out(detail)
             # Out of credits on THIS model? Fall to the next Claude model; when
             # even the last one is credit-limited, break to the outer chain.
-            if _is_usage_error(detail):
+            if _is_usage_error(detail, api_status):
                 usage_errors.append(f"{use_model or 'default'}: {detail[:160]}")
                 if i < len(chain) - 1:
                     log.warning(
@@ -245,6 +258,9 @@ def run(
                     )
                     continue
                 break  # every Claude model exhausted
+            stderr = (proc.stderr or "").strip()
+            if stderr and stderr not in detail:  # the reason first, never instead of stderr
+                detail = f"{detail} | stderr: {stderr[:200]}"
             raise RuntimeError(f"claude CLI failed (exit {proc.returncode}): {detail[:500]}")
         data = json.loads(proc.stdout)
         reply = (data.get("result") or "").strip()

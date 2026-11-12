@@ -152,6 +152,52 @@ def test_a_json_usage_limit_still_falls_to_the_next_model(session, monkeypatch):
     assert tried == ["claude-fable-5", "claude-opus-5"]
 
 
+def test_a_429_status_falls_to_the_next_model_whatever_the_wording(session, monkeypatch):
+    """The status used to be found by searching the whole blob for 429. Now that
+    only the reason is read, the status has to be honoured on its own."""
+    tried = []
+    blob = json.loads(_expired_login_json())
+    blob["result"] = "You've hit your limit · resets 3am"
+    blob["api_error_status"] = 429
+
+    def fake_run(cmd, **kw):
+        m = _model_of(cmd)
+        tried.append(m)
+        if m == "claude-fable-5":
+            return FakeProc(stdout=json.dumps(blob), returncode=1)
+        return FakeProc(stdout=json.dumps({"result": f"answered on {m}"}))
+
+    monkeypatch.setattr(claude_cli.subprocess, "run", fake_run)
+    out = claude_cli.run(session, "s", [{"role": "user", "content": "x"}], model="claude-fable-5")
+    assert out == "answered on claude-opus-5"
+    assert tried == ["claude-fable-5", "claude-opus-5"]
+    assert claude_cli._is_usage_error("You've hit your limit · resets 3am")
+    assert claude_cli._is_usage_error("", 529)
+
+
+def test_the_reason_survives_a_warning_line_and_keeps_stderr(session, monkeypatch):
+    blob = json.loads(_expired_login_json())
+    blob["result"] = "the MCP server crashed on startup"
+
+    def fake_run(cmd, **kw):
+        return FakeProc(stdout="Warning: something unrelated\n" + json.dumps(blob) + "\n",
+                        stderr="node: out of memory", returncode=1)
+
+    monkeypatch.setattr(claude_cli.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="claude CLI failed") as err:
+        claude_cli.run(session, "s", [{"role": "user", "content": "x"}], model="claude-fable-5")
+    assert "the MCP server crashed on startup" in str(err.value)
+    assert "node: out of memory" in str(err.value)  # stderr is added, never dropped
+    assert "input_tokens" not in str(err.value)
+
+
+def test_failure_reason_falls_back_to_the_raw_output():
+    for stdout in ("", "plain text error", "[1, 2]", '{"result": "   "}', '{"result": {"a": 1}}'):
+        reason, status = claude_cli._failure_reason(FakeProc(stdout=stdout, stderr="E!"))
+        assert reason == "E!" + stdout
+        assert status is None
+
+
 def test_all_claude_models_out_raises_for_the_outer_chain(session, monkeypatch):
     tried = []
 

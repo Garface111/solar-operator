@@ -161,7 +161,59 @@ def test_projection_is_unmoved_by_trades_inside_the_portfolio(session):
 
     assert checking is not None
     assert busy["monthly_savings_used"] == 1500.0
-    assert busy == quiet
+    # everything but the as_of stamp, which could straddle midnight between calls
+    for key in ("summary", "bands", "deterministic", "starting", "caveats", "months_observed"):
+        assert busy[key] == quiet[key]
+
+
+def _draw_from_portfolio(session, *, bank_description):
+    """A $7,000 draw: it leaves the portfolio on the 8th and lands in checking on
+    the 9th of the month before last. Only the bank's wording varies."""
+    checking = upsert_account(
+        session, source="csv", name="Everyday Checking", kind="checking", balance=60_000.0
+    )
+    portfolio = upsert_account(
+        session, source="csv", name="Index Portfolio", kind="investment", balance=200_000.0
+    )
+    seed_months(session, checking, months=6)
+    month = _months_back(date.today(), 2)
+    ingest_transactions(session, portfolio, [
+        TxnIn(posted=month.replace(day=8), amount=-7_000.0, description="CASH DISBURSEMENT PAID"),
+        TxnIn(posted=month.replace(day=8), amount=7_000.0, description="REDEMPTION FROM CORE ACCOUNT"),
+        # same sign as the paycheck, same amount: must not be mistaken for a mirror
+        TxnIn(posted=month.replace(day=10), amount=5_000.0, description="YOU SOLD HOOLI INC CLASS A"),
+    ])
+    ingest_transactions(session, checking, [
+        TxnIn(posted=month.replace(day=9), amount=7_000.0, description=bank_description),
+    ])
+    return month.strftime("%Y-%m")
+
+
+def test_an_untagged_draw_is_counted_but_called_out(session):
+    drawn_in = _draw_from_portfolio(session, bank_description="INITECH BKG SVC MONEYLINE")
+    base = derive_baseline(session)
+
+    flagged = base["possible_untagged_transfers"]
+    assert flagged["count"] == 1
+    assert flagged["inflow_total"] == 7000.0 and flagged["outflow_total"] == 0.0
+    assert flagged["examples"][0]["description"] == "INITECH BKG SVC MONEYLINE"
+    # detection only: the row is still in that month's income, nothing is guessed away
+    month = next(m for m in base["months"] if m["month"] == drawn_in)
+    assert month["income"] == 12_000.0
+    assert any("not categorized 'transfer'" in c for c in base["caveats"])
+    # and the projection, which is what the household actually reads, carries it
+    result = project_wealth(session, 10, seed=4, simulations=40)
+    assert any("not categorized 'transfer'" in c for c in result["caveats"])
+
+
+def test_a_draw_tagged_transfer_raises_no_flag(session):
+    drawn_in = _draw_from_portfolio(session, bank_description="TRANSFER FROM INDEX PORTFOLIO")
+    base = derive_baseline(session)
+
+    assert base["possible_untagged_transfers"]["count"] == 0
+    assert not any("not categorized 'transfer'" in c for c in base["caveats"])
+    month = next(m for m in base["months"] if m["month"] == drawn_in)
+    assert month["income"] == 5000.0  # the draw is a transfer, not a second paycheck
 
 
 def test_baseline_is_honest_about_thin_data(session):
