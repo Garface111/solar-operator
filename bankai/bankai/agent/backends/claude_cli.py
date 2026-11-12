@@ -122,6 +122,25 @@ def _allowed_tools() -> str:
     return _BASE_TOOLS + ",WebSearch,WebFetch"
 
 
+def _builtin_tools() -> str:
+    """The only built-in tools the session is STARTED with (``--tools``).
+
+    ``--allowedTools`` pre-approves tools; it removes nothing. On its own the
+    headless session still carries the whole interactive toolbox of whoever is
+    logged in on this machine — Bash, Write, Task and the rest — plus, without
+    ``--strict-mcp-config``, every plugin server and claude.ai connector on that
+    account (mail, calendar, documents). They are denied when called, but they
+    are in the room, and they do real damage just by being there: with ~150
+    tools loaded the CLI defers the finance tools behind a tool search, and a
+    small model at low effort does not reliably find them. Measured on the live
+    box (2026-11-12): the same question took 10 steps with four denied
+    Bash/Write attempts, or came back "I cannot access the household's
+    financial data" with an EMPTY account list; with the session cut down to
+    this list it took 4 steps and answered from the ledger.
+    """
+    return "Read,WebSearch,WebFetch" if config.WEB_ACCESS else "Read"
+
+
 def _log_web_access() -> None:
     """Record that a turn ran with live web egress.
 
@@ -199,6 +218,11 @@ def run(
         system,
         "--mcp-config",
         _mcp_config(),
+        # Only the finance server above — never the plugins and connectors of
+        # the account the CLI happens to be logged into (see _builtin_tools).
+        "--strict-mcp-config",
+        "--tools",
+        _builtin_tools(),
         "--allowedTools",
         # Read lets it open vault images (pasted screenshots) at the path
         # read_document hands back — an MCP tool can only return text.

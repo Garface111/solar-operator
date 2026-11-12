@@ -198,6 +198,38 @@ def test_failure_reason_falls_back_to_the_raw_output():
         assert status is None
 
 
+def _command_for_one_turn(session, monkeypatch):
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = cmd
+        return FakeProc(stdout=json.dumps({"result": "ok"}))
+
+    monkeypatch.setattr(claude_cli.subprocess, "run", fake_run)
+    claude_cli.run(session, "s", [{"role": "user", "content": "x"}], model="claude-fable-5")
+    return seen["cmd"]
+
+
+def test_the_session_starts_with_only_the_finance_tools(session, monkeypatch):
+    """--allowedTools approves, it does not remove. The session must be STARTED
+    without the logged-in account's toolbox, plugins and connectors."""
+    cmd = _command_for_one_turn(session, monkeypatch)
+    assert "--strict-mcp-config" in cmd
+    assert cmd[cmd.index("--tools") + 1] == "Read"
+    assert list(json.loads(cmd[cmd.index("--mcp-config") + 1])["mcpServers"]) == ["bankai"]
+    # the list-taking options are each followed by another option, so none of
+    # them can swallow the next argument
+    for option in ("--tools", "--allowedTools", "--mcp-config"):
+        assert cmd[cmd.index(option) + 2].startswith("--")
+
+
+def test_web_access_adds_the_web_tools_and_nothing_else(session, monkeypatch):
+    monkeypatch.setattr(config, "WEB_ACCESS", True)
+    cmd = _command_for_one_turn(session, monkeypatch)
+    assert cmd[cmd.index("--tools") + 1].split(",") == ["Read", "WebSearch", "WebFetch"]
+    assert "--strict-mcp-config" in cmd
+
+
 def test_all_claude_models_out_raises_for_the_outer_chain(session, monkeypatch):
     tried = []
 
