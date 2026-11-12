@@ -188,6 +188,39 @@ def looks_like_refusal(text: str) -> bool:
     return bool(_REFUSAL_RE.search(text or ""))
 
 
+# A reply that says its own plumbing is missing: "the MCP tools are not
+# callable", "I cannot access the household's data in this session". The
+# household-facing copilot has no reason ever to say "MCP" or to speak of its
+# "session" — those words appear only when a turn really ran without its tools
+# (2026-11-12: the CLI had deferred them behind a tool search) or, far more
+# often afterwards, when a later turn READ such a reply in the thread and
+# repeated it without calling anything. Two scheduled turns did exactly that
+# within twenty minutes, one of them in a check-in email to the household.
+#
+# Deliberately narrow. "Gaurav's bank connection has been unavailable since
+# August" and "I have no tool that moves money" are true, useful sentences and
+# must pass: this matches the plumbing vocabulary, not the idea of a limit.
+_TOOL_OUTAGE_RE = re.compile(
+    r"\bMCP\b"
+    r"|\b(?:cannot|can't|can not|unable to|couldn't|could not)\b[^.\n]{0,80}"
+    r"\bin this session\b"
+    r"|\bdeferred tools?\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_tool_outage(text: str) -> bool:
+    """A draft (or a stored reply) claiming the copilot's own tools are missing.
+    Like the figure-refusal above it is an artifact, never an answer: checked on
+    drafts so it is not sent, and on history so it cannot be imitated."""
+    return bool(_TOOL_OUTAGE_RE.search(text or ""))
+
+
+def is_error_template(text: str) -> bool:
+    """Any reply shape that must never be fed back to the model as history."""
+    return looks_like_refusal(text) or looks_like_tool_outage(text)
+
+
 def revision_is_refusal(original: str, revised: str) -> bool:
     """True when the revision abandoned the answer instead of fixing it.
 

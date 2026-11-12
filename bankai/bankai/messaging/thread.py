@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..agent import chat as agent_chat
+from ..agent import verify as agent_verify
 from ..models import ChatMessage
 from . import sms
 
@@ -52,6 +53,13 @@ def build_history(session: Session, limit: int = HISTORY_LIMIT) -> list[dict]:
     for m in reversed(rows):
         if m.role == "user":
             messages.append({"role": "user", "content": f"[{m.speaker}] {m.content}"})
+        elif agent_verify.is_error_template(m.content):
+            # An error the copilot once said out loud ("I need to stop myself",
+            # "the MCP tools are not callable") stays in the stored thread for
+            # the household to see, but is never handed back to the model: read
+            # as history it becomes a template and gets repeated on healthy
+            # turns. Withheld here rather than deleted there.
+            continue
         else:
             messages.append({"role": "assistant", "content": m.content})
     # History must start with a user turn for the API.

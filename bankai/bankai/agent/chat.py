@@ -606,6 +606,31 @@ def run_turn(
                     raise RuntimeError(
                         "backend produced only refusal-template output twice"
                     )
+            # Same disease, second strain: a draft that says its own tools are
+            # missing ("the MCP tools are not callable in this session"). It is
+            # almost always a copy of an earlier bad reply, written without one
+            # tool call. One corrective retry; if it insists, the turn FAILS —
+            # a logged error and the next backend are better than a check-in
+            # email telling the household the copilot cannot see their accounts.
+            if verify.looks_like_tool_outage(reply):
+                logging.getLogger("bankai.chat").warning(
+                    "draft claims its own tools are missing — retrying with correction"
+                )
+                reply = _run(session, system, list(messages) + [{
+                    "role": "user",
+                    "content": (
+                        "(correction: that draft said your tools or the accounts "
+                        "were unavailable. They are available right now. Any "
+                        "earlier reply that said otherwise was an error — do not "
+                        "repeat it. Call your tools and answer from what they "
+                        "return. Never mention MCP, sessions or tool availability "
+                        "to the household.)"
+                    ),
+                }])
+                if verify.looks_like_tool_outage(reply):
+                    raise RuntimeError(
+                        "backend twice claimed its own tools were unavailable"
+                    )
             # A decision to stay out of a conversation has nothing to verify,
             # and handing it to a critic invites it to be argued into speaking.
             if is_silence(reply):
