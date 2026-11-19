@@ -55,7 +55,7 @@ COMPLEX_LENGTH_CHARS = 320
 
 @dataclass
 class RouteDecision:
-    tier: str      # quick | fast | complex | default
+    tier: str      # quick | fast | complex | review | default
     model: str
     effort: str
     verify: bool
@@ -95,6 +95,16 @@ def for_tier(tier: str) -> RouteDecision:
     if tier == "fast":
         return RouteDecision("fast", config.ROUTER_FAST_MODEL,
                              config.ROUTER_FAST_EFFORT, verify=False, reason="forced fast")
+    if tier == "review":
+        # The scheduled monthly review has its own pin, so the one turn that has
+        # to add a month up can run on a stronger model without moving the
+        # everyday tiers. Unpinned, it is the complex tier.
+        return RouteDecision(
+            "review",
+            config.ROUTER_REVIEW_MODEL or config.ROUTER_COMPLEX_MODEL,
+            config.ROUTER_REVIEW_EFFORT or config.ROUTER_COMPLEX_EFFORT,
+            verify=True, reason="scheduled review",
+        )
     return _complex("forced complex")
 
 

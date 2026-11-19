@@ -6,7 +6,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, datetime
+import re
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import select
 
@@ -14,8 +15,9 @@ from . import config, realestate
 from .connectors import email_harvest, simplefin
 from .db import session_scope
 from .agent import chat as agent_chat
+from .agent import verify as agent_verify
 from .messaging import thread as chat_thread
-from .models import ChatMessage, MemoryNote, Property
+from .models import ChatMessage, MemoryNote, Property, _utcnow
 from .rules.engine import evaluate_rules
 from .rules.notify import deliver_firings
 from .security import sentinel
@@ -400,8 +402,139 @@ def _set_review_marker(session, today: date) -> None:
         session.add(MemoryNote(title=REVIEW_MARKER_TITLE, content=month))
 
 
+REVIEW_SPEAKER = "monthly review (scheduled)"
+REVIEW_ATTEMPTS_TITLE = "Monthly review attempts"
+CHECKIN_ATTEMPTS_TITLE = "Check-in attempts"
+
+#: A monthly review states at least one dollar figure: the prompt asks it to
+#: "lead with the one number that matters most".
+_DOLLAR_FIGURE = re.compile(r"\$\s?\d")
+
+#: A reply about writing the review, in place of the review: "I cannot write an
+#: accurate monthly review with the data currently on file. May I proceed?"
+#: (2026-11-19). Nobody is there to answer a scheduled turn, so that is a
+#: give-up, not a question.
+_NOT_WRITTEN = re.compile(
+    r"\b(?:can['’]?t|cannot|can not|couldn['’]t|could not|unable to|not able to)\s+"
+    r"(?:write|produce|complete|prepare|put together)"
+    r"(?:\s+[\w-]+){0,5}?\s+(?:review|check-?in)\b",
+    re.IGNORECASE,
+)
+#: A reply with this many figures in it did the work, whatever it says about its
+#: own limits ("I can't write a complete review while one feed is stale; what I
+#: can stand behind is …"). A real limit, stated with its figures, is an answer.
+_FIGURES_OF_A_REAL_ANSWER = 3
+
+
+def _gave_up(text: str) -> bool:
+    return bool(_NOT_WRITTEN.search(text)) and (
+        len(_DOLLAR_FIGURE.findall(text)) < _FIGURES_OF_A_REAL_ANSWER
+    )
+
+
+def _failed_attempts(session, title: str, cycle: str) -> int:
+    """How many times this cycle's scheduled turn has come back unusable.
+
+    Kept as "<cycle>:<count>" under its own note, so a new cycle (the next
+    month, the next check-in date) starts from zero without anything having to
+    remember to reset it."""
+    note = session.execute(
+        select(MemoryNote).where(MemoryNote.title == title)
+    ).scalar_one_or_none()
+    if note is None:
+        return 0
+    seen, _, count = (note.content or "").strip().rpartition(":")
+    return int(count) if seen == cycle and count.isascii() and count.isdigit() else 0
+
+
+def _record_failed_attempt(session, title: str, cycle: str) -> int:
+    count = _failed_attempts(session, title, cycle) + 1
+    note = session.execute(
+        select(MemoryNote).where(MemoryNote.title == title)
+    ).scalar_one_or_none()
+    if note:
+        note.content = f"{cycle}:{count}"
+    else:
+        session.add(MemoryNote(title=title, content=f"{cycle}:{count}"))
+    return count
+
+
+def _scheduled_turn(session, history: list[dict], tier: str) -> tuple[str, str | None]:
+    """One scheduled turn: (reply, problem).
+
+    `problem` is set when the model answered and the turn's own guards threw
+    every draft away. That is a spent try, like any other unusable reply. A
+    backend that is down still raises from here: it cost nothing, it uses up no
+    try, and the loop asks again on its next tick."""
+    try:
+        return agent_chat.run_turn(session, history, channel="web", force_tier=tier), None
+    except agent_chat.UnusableReply as exc:
+        return "", f"the turn's guards threw every draft away ({str(exc)[:120]})"
+
+
+def _came_to_nothing(title: str, cycle: str, what: str, problem: str, close_cycle) -> dict:
+    """Count one unusable scheduled turn and say what happens next.
+
+    Under the limit nothing else changes, so the next tick asks again. At the
+    limit `close_cycle(session)` marks the cycle done: every further try is a
+    paid model turn that has already failed the same way, so stop asking and
+    say so where it is seen, the log, at ERROR."""
+    limit = config.SCHEDULED_TURN_MAX_ATTEMPTS
+    with session_scope() as session:
+        failed = _record_failed_attempt(session, title, cycle)
+        if failed >= limit:
+            close_cycle(session)
+    if failed >= limit:
+        log.error(
+            "%s ABANDONED for cycle %s: %d tries, none usable (last: %s)",
+            what, cycle or "?", failed, problem,
+        )
+        return {"status": "abandoned", "why": problem, "attempts": failed}
+    log.warning(
+        "%s not usable (%s): try %d of %d, the next tick runs again",
+        what, problem, failed, limit,
+    )
+    return {"status": "withheld", "why": problem, "attempt": failed}
+
+
+def review_problem(reply: str) -> str | None:
+    """Why `reply` is not a monthly review, or None when it is one.
+
+    Mechanical on purpose. On 2026-11-19 the review came back twice as
+    something else: once as the grounding gate's stand-in ("I couldn't verify
+    part of that answer…") and once as a request for permission to start. Both
+    were stored in the thread and both marked November as reviewed."""
+    text = (reply or "").strip()
+    if not text or agent_chat.is_silence(text):
+        return "it said nothing"
+    if agent_verify.is_error_template(text):
+        return "a guard withheld it"
+    if not _DOLLAR_FIGURE.search(text):
+        return "it states no figure"
+    if _gave_up(text):
+        return "it is about writing the review, not the review"
+    return None
+
+
+def checkin_problem(reply: str) -> str | None:
+    """Why `reply` must not be the check-in email, or None when it may be.
+
+    Looser than the review: a quiet check-in can honestly have no figure in
+    it, and a deliberate silence ([[no reply]]) is the caller's to handle. An
+    empty reply is neither: it would go out as an empty email."""
+    text = (reply or "").strip()
+    if not text:
+        return "it said nothing"
+    if agent_verify.is_error_template(text):
+        return "a guard withheld it"
+    if _gave_up(text):
+        return "it is about writing the check-in, not the check-in"
+    return None
+
+
 def run_monthly_review_once() -> dict:
     today = date.today()
+    month = today.strftime("%Y-%m")
     with session_scope() as session:
         action = monthly_review_action(session, today)
         if action == "init":
@@ -409,11 +542,42 @@ def run_monthly_review_once() -> dict:
             return {"status": "initialized"}
         if action == "skip":
             return {"status": "skip"}
-    # The review is a real agent turn into the shared thread; the marker is set
-    # only after it succeeds, so a downed backend retries on the next tick.
+
+    # A real agent turn, on the review tier. Nothing is stored until the reply
+    # is known to be a review: a stand-in or an empty-handed reply in the thread
+    # is read back by every later turn, and a stored prompt with no answer under
+    # it is how one bad night left five copies of the prompt behind. A downed
+    # backend raises here, stores nothing, uses up no try, and the next tick
+    # runs again.
     with session_scope() as session:
-        chat_thread.handle_web(session, "monthly review (scheduled)", MONTHLY_REVIEW_PROMPT)
+        history = chat_thread.build_history(session)
+    history.append(
+        {"role": "user", "content": f"[{REVIEW_SPEAKER}] {MONTHLY_REVIEW_PROMPT}"}
+    )
+    asked = _utcnow()  # before the turn, which can run for many minutes
     with session_scope() as session:
+        reply, thrown_away = _scheduled_turn(session, history, "review")
+
+    problem = thrown_away or review_problem(reply)
+    if problem:
+        return _came_to_nothing(
+            REVIEW_ATTEMPTS_TITLE, month, "monthly review", problem,
+            lambda s: _set_review_marker(s, today),
+        )
+
+    with session_scope() as session:
+        # The same two rows, at the same two times, as when the prompt was
+        # stored first and the reply after the turn: asked when it was asked,
+        # answered when it was answered. Both times are explicit because both
+        # rows are written together and the thread sorts on created_at.
+        session.add(ChatMessage(
+            channel="web", role="user", speaker=REVIEW_SPEAKER,
+            content=MONTHLY_REVIEW_PROMPT, created_at=asked,
+        ))
+        session.add(ChatMessage(
+            channel="web", role="assistant", speaker="copilot", content=reply,
+            created_at=max(_utcnow(), asked + timedelta(microseconds=1)),
+        ))
         _set_review_marker(session, today)
     return {"status": "ran"}
 
@@ -492,7 +656,24 @@ def run_checkin_once() -> dict:
     history.append({"role": "user", "content": CHECKIN_PROMPT})
     with session_scope() as session:
         # A check-in is a deliberate analytical note to the household — Fable-max.
-        reply = agent_chat.run_turn(session, history, channel="web", force_tier="complex")
+        reply, thrown_away = _scheduled_turn(session, history, "complex")
+
+    problem = thrown_away or checkin_problem(reply)
+    if problem:
+        # Not a check-in: a guard's stand-in ("I couldn't verify part of that
+        # answer…"), or the model asking leave to start. It must never be the
+        # email. The marker stays behind so the next tick tries again; after
+        # SCHEDULED_TURN_MAX_ATTEMPTS the cycle is skipped, loudly, rather than
+        # asked for every six hours for ever.
+        with session_scope() as session:
+            marker = session.execute(
+                select(MemoryNote).where(MemoryNote.title == CHECKIN_MARKER_TITLE)
+            ).scalar_one_or_none()
+            cycle = (marker.content or "").strip() if marker else ""
+        return _came_to_nothing(
+            CHECKIN_ATTEMPTS_TITLE, cycle, "household check-in", problem,
+            lambda s: _set_checkin_marker(s, today),
+        )
 
     if agent_chat.is_silence(reply):
         # The prompt forbids silence, but never put words in the copilot's mouth:

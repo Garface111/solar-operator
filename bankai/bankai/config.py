@@ -127,6 +127,19 @@ ROUTER_FAST_MODEL = _env("ROUTER_FAST_MODEL", "claude-opus-5")
 ROUTER_FAST_EFFORT = _env("ROUTER_FAST_EFFORT", "low")
 ROUTER_QUICK_MODEL = _env("ROUTER_QUICK_MODEL", "claude-sonnet-5")
 ROUTER_QUICK_EFFORT = _env("ROUTER_QUICK_EFFORT", "low")
+# The monthly review is the one scheduled turn that has to add a month up and
+# still reconcile with the ledger. On the cost-guard tier (haiku, low effort) it
+# could not: on 2026-11-19 it was tried twice and the grounding gate stopped
+# both. So it has its own pin, for one turn a month. Empty = the complex tier's.
+ROUTER_REVIEW_MODEL = _env("ROUTER_REVIEW_MODEL")
+ROUTER_REVIEW_EFFORT = _env("ROUTER_REVIEW_EFFORT")
+# How many unusable replies (withheld by a guard, or with no review in them) a
+# scheduled review or check-in gets per cycle before it stops asking. Never
+# below one, and a typo here must not stop the service from starting.
+try:
+    SCHEDULED_TURN_MAX_ATTEMPTS = max(1, int(_env("SCHEDULED_TURN_MAX_ATTEMPTS", "3") or 3))
+except ValueError:
+    SCHEDULED_TURN_MAX_ATTEMPTS = 3
 
 # --- Reply verification: a second model pass critiques consequential replies
 # (dollar figures, percentages, recommendations, deadlines) before they are

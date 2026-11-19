@@ -150,3 +150,24 @@ def test_run_turn_verifies_on_complex(session, monkeypatch):
         session, msg("[Ford] should we refinance? analyze it."), channel="web"
     )
     assert verified["n"] == 1 and out == "checked reply"
+
+
+# --- the scheduled monthly review has its own pin ---
+
+def test_the_review_tier_has_its_own_pin(monkeypatch):
+    monkeypatch.setattr(config, "ROUTER_REVIEW_MODEL", "claude-sonnet-5")
+    monkeypatch.setattr(config, "ROUTER_REVIEW_EFFORT", "medium")
+    d = router.for_tier("review")
+    assert (d.tier, d.model, d.effort, d.verify) == (
+        "review", "claude-sonnet-5", "medium", True,
+    )
+    # pinning the review moves nothing else
+    assert router.for_tier("complex").model == "claude-fable-5"
+    assert router.for_tier("complex").effort == "max"
+
+
+def test_an_unpinned_review_is_the_complex_tier(monkeypatch):
+    monkeypatch.setattr(config, "ROUTER_REVIEW_MODEL", "")
+    monkeypatch.setattr(config, "ROUTER_REVIEW_EFFORT", "")
+    d = router.for_tier("review")
+    assert (d.model, d.effort, d.verify) == ("claude-fable-5", "max", True)

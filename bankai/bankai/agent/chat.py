@@ -35,6 +35,15 @@ def is_silence(reply: str) -> bool:
     return SILENCE in (reply or "")
 
 
+class UnusableReply(RuntimeError):
+    """The model answered, and a guard threw every answer away.
+
+    Still a RuntimeError, so nothing that catches a failed turn changes. It has
+    its own type because the two failures cost differently: a backend that is
+    down costs nothing to ask again, while this was a paid turn that came to
+    nothing, and a turn that runs on a schedule has to be able to count those."""
+
+
 GROUP_DYNAMICS = """
 
 You are a participant in a group conversation between Ford and Gaurav, not a bot that
@@ -568,6 +577,7 @@ def run_turn(
         decision.tier, decision.model, decision.effort, decision.verify, decision.reason,
     )
     errors: list[str] = []
+    answered = False  # did a backend answer, only for a guard to throw it away?
     for name in [b.strip() for b in config.LLM_BACKEND.split(",") if b.strip()]:
         try:
             impl = _backend(name)
@@ -603,7 +613,7 @@ def run_turn(
                     ),
                 }])
                 if verify.looks_like_refusal(reply):
-                    raise RuntimeError(
+                    raise UnusableReply(
                         "backend produced only refusal-template output twice"
                     )
             # Same disease, second strain: a draft that says its own tools are
@@ -628,11 +638,11 @@ def run_turn(
                     ),
                 }])
                 if verify.looks_like_tool_outage(reply):
-                    raise RuntimeError(
+                    raise UnusableReply(
                         "backend twice claimed its own tools were unavailable"
                     )
                 if verify.looks_like_refusal(reply):
-                    raise RuntimeError(
+                    raise UnusableReply(
                         "backend answered a correction with a refusal template"
                     )
             # A decision to stay out of a conversation has nothing to verify,
@@ -663,15 +673,20 @@ def run_turn(
             # to be sent. (The grounding gate's own canned refusal is a
             # legitimate answer and is not matched by this.)
             if verify.looks_like_tool_outage(final):
-                raise RuntimeError(
+                raise UnusableReply(
                     "the finished reply claimed its own tools were unavailable"
                 )
             return final
         except Exception as exc:
+            answered = answered or isinstance(exc, UnusableReply)
             errors.append(f"{name}: {exc}")
             logging.getLogger("bankai.chat").warning(
                 "backend %s failed, trying next: %s", name, exc
             )
-    raise RuntimeError(" | ".join(errors) or "no LLM backend configured")
+    # The same message either way; the type says whether a model was paid to
+    # answer on the way to this failure.
+    raise (UnusableReply if answered else RuntimeError)(
+        " | ".join(errors) or "no LLM backend configured"
+    )
 
 

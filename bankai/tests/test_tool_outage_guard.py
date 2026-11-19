@@ -156,3 +156,33 @@ def test_stored_error_replies_are_withheld_from_history_not_deleted(session):
         "[Avery] what do we owe on the card?", "[Avery] try again", "[Avery] and checking?",
     ]
     assert session.query(ChatMessage).count() == len(rows)
+
+
+# --- paid for and thrown away is not the same failure as a backend that is down ---
+
+def test_a_turn_the_guards_threw_away_says_so_by_its_type(session, monkeypatch):
+    """A scheduled turn has to tell the two apart: one costs nothing to ask
+    again, the other is a spent try."""
+    question = [{"role": "user", "content": "balance?"}]
+
+    def down(s, system, messages, **k):
+        raise RuntimeError("all Claude models are out of credits/usage")
+
+    # the model answered, twice, and both answers were thrown away
+    monkeypatch.setattr(config, "LLM_BACKEND", "claude-cli")
+    monkeypatch.setattr(claude_cli, "run", lambda s, system, messages, **k: SEEN_LIVE[1])
+    with pytest.raises(agent_chat.UnusableReply, match="tools were unavailable"):
+        agent_chat.run_turn(session, question)
+
+    # ...and it stays that kind of failure when the next backend is simply down
+    monkeypatch.setattr(config, "LLM_BACKEND", "claude-cli,grok")
+    monkeypatch.setattr(grok_backend, "run", down)
+    with pytest.raises(agent_chat.UnusableReply):
+        agent_chat.run_turn(session, question)
+
+    # nobody answered at all: a plain failed turn, as it always was
+    monkeypatch.setattr(claude_cli, "run", down)
+    with pytest.raises(RuntimeError) as err:
+        agent_chat.run_turn(session, question)
+    assert not isinstance(err.value, agent_chat.UnusableReply)
+    assert issubclass(agent_chat.UnusableReply, RuntimeError)
