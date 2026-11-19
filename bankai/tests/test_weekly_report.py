@@ -263,3 +263,51 @@ def test_print_document_prints_pdf_original_and_falls_back_to_text(
     r3 = execute_tool(session, "print_document", {"document_id": "doc_nope"})
     r3 = json.loads(r3) if isinstance(r3, str) else r3
     assert "no document" in r3["error"]
+
+
+@pytest.mark.parametrize("bad", ["the gate's stand-in", "", "thrown away"])
+def test_a_narrative_that_is_not_one_is_never_printed_or_emailed(
+    monkeypatch, tmp_path, bad,
+):
+    """2026-11-19: a scheduled turn can come back as the grounding gate's
+    stand-in ("I couldn't verify part of that answer…"). Under the week's
+    numbers, on paper and in the email, that reads as the copilot's verdict on
+    the week. The page goes out with its numbers and no narrative."""
+    from bankai import grounding
+    from bankai.messaging import email_thread
+
+    stand_in = grounding.refusal_message([])
+    with session_scope() as s:
+        for note in s.query(MemoryNote).filter_by(title="Last weekly report").all():
+            s.delete(note)
+
+    def turn(s, history, channel="web", force_tier=None):
+        if bad == "thrown away":
+            raise agent_chat.UnusableReply("claude-cli: refusal-template output twice")
+        return stand_in if bad == "the gate's stand-in" else bad
+
+    monkeypatch.setattr(scheduler.agent_chat, "run_turn", turn)
+    monkeypatch.setattr(reports, "REPORTS_DIR", tmp_path)
+    printed = {}
+    real_render = reports.render_pdf
+
+    def render(data, narrative, path):
+        printed["narrative"] = narrative
+        return real_render(data, narrative, path)
+
+    monkeypatch.setattr(reports, "render_pdf", render)
+    monkeypatch.setattr(reports, "print_pdf", lambda path, title="": "job-1")
+    sent = []
+    monkeypatch.setattr(email_thread, "configured", lambda: True)
+    monkeypatch.setattr(
+        email_thread, "start_thread",
+        lambda s, subject, body: sent.append(body) or {"sent": True},
+    )
+
+    result = scheduler.run_weekly_report_once(datetime(2026, 8, 15, 9, 0))
+    assert result["status"] == "ran" and result["printed"] is True
+    assert printed["narrative"] == ""
+    assert len(sent) == 1
+    assert sent[0].startswith("Weekly report for 2026-08-15")
+    assert "verify" not in sent[0] and "not sending" not in sent[0]
+    assert (tmp_path / "weekly-2026-08-15.pdf").exists()

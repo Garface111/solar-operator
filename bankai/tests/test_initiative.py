@@ -350,17 +350,21 @@ def test_the_stand_in_under_test_is_the_one_the_gate_writes():
 def loop_db():
     """The scheduler loops write through session_scope to one throwaway database
     that lives for the whole test run. Start, and leave, with an empty thread,
-    no tries on the books and no cycle markers."""
+    no tries on the books, no cycle markers and no flags planted."""
     from bankai.db import session_scope
     from bankai.models import MemoryNote
+    from bankai.watchpoints import Watchpoint
 
     def wipe():
         with session_scope() as s:
             s.query(ChatMessage).delete()
+            s.query(Watchpoint).delete()
             s.query(MemoryNote).filter(MemoryNote.title.in_([
-                "Monthly review attempts", "Check-in attempts",
-                "Last monthly review", "Last household check-in",
+                "Monthly review attempts", "Check-in attempts", "Life review attempts",
+                "Last monthly review", "Last household check-in", "Last life review",
             ])).delete(synchronize_session=False)
+        scheduler._unusable_wakes.clear()
+        scheduler._unanswered_prompts.clear()
 
     wipe()
     yield
@@ -682,3 +686,336 @@ def test_a_new_checkin_cycle_starts_with_a_full_set_of_tries(loop_db, monkeypatc
     _age_checkin_marker(config.CHECKIN_INTERVAL_DAYS + 1)
     assert scheduler.run_checkin_once()["status"] == "withheld"
     assert seen["calls"] == 3
+
+
+# --- the other scheduled turns hold the same line ---
+#
+# The monthly review and the check-in stopped storing a guard's stand-in on
+# 2026-11-19. The watchpoint wake, the sync wake, tending and the life review
+# still took whatever came back: it went into the thread and the turn counted
+# as done.
+
+A_WAKE_NOTE = "The Initech card is at $912.40 against its $1,500.00 limit. Pay it this week."
+GUARDS_THREW_IT_AWAY = agent_chat.UnusableReply(
+    "claude-cli: backend produced only refusal-template output twice"
+)
+NOT_AN_ANSWER = [GATE_STAND_IN, "", "  \n ", GUARDS_THREW_IT_AWAY]
+
+
+def _plant_due_flag(title: str = "Initech card payoff") -> str:
+    """A date watchpoint whose date has passed. Returns its id."""
+    from bankai import watchpoints
+    from bankai.db import session_scope
+
+    with session_scope() as s:
+        flag = watchpoints.create_watchpoint(
+            s, title=title, kind="on_date", note="check the Initech balance",
+            params={"date": "2026-01-05"},
+        )
+        return flag.id
+
+
+def _flag_status(flag_id: str) -> str:
+    from bankai.db import session_scope
+    from bankai.watchpoints import Watchpoint
+
+    with session_scope() as s:
+        return s.get(Watchpoint, flag_id).status
+
+
+@pytest.mark.parametrize("reply, kept", [
+    ("Your Initech minimum is due in 2 days and nothing is scheduled.", True),
+    (agent_chat.SILENCE, True),      # a deliberate silence is the caller's to handle
+    (GATE_STAND_IN, False),
+    ("", False),
+    ("  \n ", False),
+])
+def test_what_may_be_kept_from_a_scheduled_turn(reply, kept):
+    assert (scheduler.reply_problem(reply) is None) is kept
+
+
+def test_a_named_document_can_be_given_up_on_and_nothing_else():
+    gave_up = "I cannot complete the life review with the data on file. May I proceed?"
+    assert scheduler.reply_problem(gave_up, "life review") is not None
+    # with nothing named, a sentence about a review is just a sentence
+    assert scheduler.reply_problem(gave_up) is None
+    # and a real finding that mentions its own limits, with its figures, is kept
+    finding = (
+        "I couldn't complete the review of March while the Hooli feed is stale, "
+        "but the Initech card moved from $612.40 to $912.40 and $300.00 of that "
+        "is one charge."
+    )
+    assert scheduler.reply_problem(finding, "life review") is None
+
+
+def test_the_line_under_an_unanswered_flag_never_reaches_the_model():
+    from bankai.agent import verify
+
+    assert verify.is_error_template(scheduler.WAKE_UNANSWERED)
+    assert "$" not in scheduler.WAKE_UNANSWERED
+
+
+def test_a_wake_that_answers_lands_under_its_prompt(loop_db, monkeypatch):
+    flag = _plant_due_flag()
+    seen = _replies(monkeypatch, A_WAKE_NOTE)
+    result = scheduler.run_watchpoints_once()
+    assert result == {"fired": 1, "woken": 1, "withheld": 0, "deferred": 0}
+    asked, answered = _thread()
+    assert asked[:2] == ("user", "watchpoint (scheduled)")
+    assert asked[2].startswith("[watchpoint fired] 'Initech card payoff'")
+    assert answered == ("assistant", "copilot", A_WAKE_NOTE)
+    # the model was asked exactly what the thread now shows, and nobody forced a tier
+    assert seen["history"][-1] == {
+        "role": "user", "content": f"[watchpoint (scheduled)] {asked[2]}",
+    }
+    assert seen["tier"] is None
+    assert _flag_status(flag) == "fired"
+    # a flag fires once
+    assert scheduler.run_watchpoints_once()["fired"] == 0
+    assert seen["calls"] == 1
+
+
+ONE_FLAG_ON_SHOW = [("user", "watchpoint (scheduled)")]
+
+
+def _flags_and_replies() -> list[tuple[str, str]]:
+    return [row[:2] for row in _thread()]
+
+
+def _wake_books() -> tuple[dict, dict]:
+    return scheduler._unusable_wakes, scheduler._unanswered_prompts
+
+
+@pytest.mark.parametrize("bad", NOT_AN_ANSWER)
+def test_a_wake_that_is_not_an_answer_files_no_reply_and_the_flag_fires_again(
+    loop_db, monkeypatch, bad,
+):
+    flag = _plant_due_flag()
+    seen = _replies(monkeypatch, bad, A_WAKE_NOTE)
+    result = scheduler.run_watchpoints_once()
+    assert (result["fired"], result["woken"], result["withheld"]) == (1, 0, 1)
+    # the flag and its reading stay on show; nothing a guard wrote goes under them
+    assert _flags_and_replies() == ONE_FLAG_ON_SHOW
+    assert _flag_status(flag) == "armed"   # not counted as done
+    # the next tick asks again in place of the unanswered prompt, and the note lands
+    assert scheduler.run_watchpoints_once()["woken"] == 1
+    assert seen["calls"] == 2
+    assert [row[0] for row in _thread()] == ["user", "assistant"]
+    assert _thread()[1][2] == A_WAKE_NOTE
+    assert _flag_status(flag) == "fired"
+    assert _wake_books() == ({}, {})
+
+
+@pytest.mark.parametrize("bad", [GATE_STAND_IN, GUARDS_THREW_IT_AWAY])
+def test_a_wake_that_never_comes_good_stops_and_the_thread_says_so(
+    loop_db, monkeypatch, bad,
+):
+    from bankai.db import session_scope
+    from bankai.messaging import thread as chat_thread
+
+    flag = _plant_due_flag()
+    monkeypatch.setattr(config, "SCHEDULED_TURN_MAX_ATTEMPTS", 3)
+    seen = _replies(monkeypatch, bad)
+    results = []
+    for _ in range(5):
+        results.append(scheduler.run_watchpoints_once())
+        # one question in the thread, however many times it was asked
+        assert [row[0] for row in _thread()].count("user") == 1
+    assert [r["fired"] for r in results] == [1, 1, 1, 0, 0]
+    assert all(r["woken"] == 0 for r in results)
+    assert seen["calls"] == 3              # three paid turns, then it stops asking
+    assert _flag_status(flag) == "fired"
+    # the household is told the flag tripped, in words no guard wrote for a figure
+    asked, answered = _thread()
+    assert asked[2].startswith("[watchpoint fired] 'Initech card payoff'")
+    assert answered == ("assistant", "copilot", scheduler.WAKE_UNANSWERED)
+    # and the model reads the flag back, never the line under it
+    with session_scope() as s:
+        history = chat_thread.build_history(s)
+    assert [m["role"] for m in history] == ["user"]
+    assert _wake_books() == ({}, {})
+
+
+def test_a_downed_backend_leaves_one_prompt_however_long_it_is_down(loop_db, monkeypatch):
+    flag = _plant_due_flag()
+    _replies(monkeypatch, RuntimeError("all Claude models are out of credits/usage"))
+    for _ in range(5):
+        result = scheduler.run_watchpoints_once()
+        assert (result["fired"], result["woken"], result["withheld"]) == (1, 0, 0)
+        # the flag shows, once: it used to leave one more prompt every tick
+        assert _flags_and_replies() == ONE_FLAG_ON_SHOW
+        assert _flag_status(flag) == "armed"
+    assert scheduler._unusable_wakes == {}   # an outage uses up no try
+    # the backend comes back: the flag still has all its tries and its note lands
+    _replies(monkeypatch, A_WAKE_NOTE)
+    assert scheduler.run_watchpoints_once()["woken"] == 1
+    assert [row[0] for row in _thread()] == ["user", "assistant"]
+    assert _thread()[1][2] == A_WAKE_NOTE
+
+
+def _move_flag_date(flag_id: str, day: str) -> None:
+    from bankai.db import session_scope
+    from bankai.watchpoints import Watchpoint
+
+    with session_scope() as s:
+        s.get(Watchpoint, flag_id).params = {"date": day}
+
+
+@pytest.mark.parametrize("bad", [GATE_STAND_IN, RuntimeError("backend down")])
+def test_a_flag_that_tripped_stays_on_show_when_it_stops_firing(loop_db, monkeypatch, bad):
+    """Its reading moves back before the next try, so no wake is coming. The
+    trip must not vanish with it, and a later trip starts from nothing."""
+    flag = _plant_due_flag()
+    monkeypatch.setattr(config, "SCHEDULED_TURN_MAX_ATTEMPTS", 3)
+    seen = _replies(monkeypatch, bad)
+    scheduler.run_watchpoints_once()
+    assert _flag_status(flag) == "armed"
+    _move_flag_date(flag, "2099-01-01")             # the condition no longer holds
+    assert scheduler.run_watchpoints_once()["fired"] == 0
+    assert seen["calls"] == 1
+    assert _flags_and_replies() == ONE_FLAG_ON_SHOW  # the record that it tripped
+    assert _thread()[0][2].startswith("[watchpoint fired] 'Initech card payoff'")
+    assert _wake_books() == ({}, {})
+    # it trips again much later: that is a new event, with all its tries
+    _move_flag_date(flag, "2026-01-05")
+    seen = _replies(monkeypatch, GATE_STAND_IN)
+    for _ in range(5):
+        scheduler.run_watchpoints_once()
+    assert seen["calls"] == 3
+    assert [row[0] for row in _thread()] == ["user", "user", "assistant"]
+    assert _thread()[2][2] == scheduler.WAKE_UNANSWERED
+
+
+def test_a_cancelled_flag_keeps_the_record_that_it_tripped(loop_db, monkeypatch):
+    from bankai import watchpoints
+    from bankai.db import session_scope
+
+    flag = _plant_due_flag()
+    seen = _replies(monkeypatch, GATE_STAND_IN)
+    scheduler.run_watchpoints_once()
+    with session_scope() as s:
+        watchpoints.cancel_watchpoint(s, flag)
+    assert scheduler.run_watchpoints_once()["fired"] == 0
+    assert seen["calls"] == 1
+    assert _flags_and_replies() == ONE_FLAG_ON_SHOW
+    assert _wake_books() == ({}, {})
+
+
+def test_a_wake_answered_with_silence_files_no_marker(loop_db, monkeypatch):
+    flag = _plant_due_flag()
+    seen = _replies(monkeypatch, agent_chat.SILENCE)
+    result = scheduler.run_watchpoints_once()
+    assert (result["woken"], result["withheld"]) == (1, 0)
+    assert _flags_and_replies() == ONE_FLAG_ON_SHOW  # the flag, and no "[[no reply]]" row
+    assert _flag_status(flag) == "fired"
+    assert scheduler.run_watchpoints_once()["fired"] == 0
+    assert seen["calls"] == 1
+
+
+def test_one_bad_wake_does_not_cost_the_flag_beside_it(loop_db, monkeypatch):
+    first = _plant_due_flag("Initech card payoff")
+    second = _plant_due_flag("Hooli renewal")
+    _replies(monkeypatch, GATE_STAND_IN, A_WAKE_NOTE)   # the first wake is withheld
+    result = scheduler.run_watchpoints_once()
+    assert (result["fired"], result["woken"], result["withheld"]) == (2, 1, 1)
+    assert {_flag_status(first), _flag_status(second)} == {"armed", "fired"}
+    # both flags show; only the second has a note under it
+    assert [row[0] for row in _thread()] == ["user", "user", "assistant"]
+    assert GATE_STAND_IN not in [row[2] for row in _thread()]
+
+
+def test_a_flag_waiting_its_turn_keeps_its_count(loop_db, monkeypatch):
+    """More flags trip than one tick may wake, so the overflow waits. A flag
+    that already failed a try and then has to wait is still owed its wake,
+    with the same count: waiting must not hand it a fresh set of tries."""
+    monkeypatch.setattr(config, "SCHEDULED_TURN_MAX_ATTEMPTS", 2)
+    pair = {_plant_due_flag("Initech card payoff"), _plant_due_flag("Hooli renewal")}
+    seen = _replies(monkeypatch, GATE_STAND_IN)
+    scheduler.run_watchpoints_once()                    # both fail their first try
+    assert scheduler._unusable_wakes == dict.fromkeys(pair, 1)
+    monkeypatch.setattr(scheduler, "MAX_WAKES_PER_TICK", 1)
+    result = scheduler.run_watchpoints_once()           # one is abandoned, one waits
+    assert (result["fired"], result["deferred"]) == (1, 1)
+    (waiting,) = scheduler._unusable_wakes
+    assert scheduler._unusable_wakes == {waiting: 1} and waiting in pair
+    assert waiting in scheduler._unanswered_prompts
+    scheduler.run_watchpoints_once()                    # its second try is its last
+    assert _wake_books() == ({}, {})
+    assert scheduler.run_watchpoints_once()["fired"] == 0
+    assert seen["calls"] == 4
+    assert [row[0] for row in _thread()].count("user") == 2
+
+
+@pytest.mark.parametrize("bad", NOT_AN_ANSWER)
+def test_tending_never_files_a_reply_that_is_not_one(loop_db, monkeypatch, bad):
+    seen = _replies(monkeypatch, bad)
+    result = scheduler.run_tending_once()
+    assert result["status"] == "withheld" and result["why"]
+    assert _thread() == []
+    assert seen["calls"] == 1 and seen["tier"] is None
+
+
+@pytest.mark.parametrize("bad", NOT_AN_ANSWER)
+def test_the_sync_wake_never_files_a_reply_that_is_not_one(loop_db, monkeypatch, bad):
+    monkeypatch.setattr(config, "SYNC_WAKE", True)
+    _replies(monkeypatch, bad)
+    result = scheduler.run_sync_wake_once({"added": 2})
+    assert (result["status"], result["added"]) == ("withheld", 2)
+    assert _thread() == []
+    # the next sync with new data wakes it again, and real news still lands
+    _replies(monkeypatch, "The Hooli refund of $64.20 posted this morning.")
+    assert scheduler.run_sync_wake_once({"added": 1})["status"] == "spoke"
+    assert [row[2] for row in _thread()] == ["The Hooli refund of $64.20 posted this morning."]
+
+
+@pytest.mark.parametrize("bad", NOT_AN_ANSWER)
+def test_a_life_review_that_is_not_one_stores_nothing_and_the_next_tick_tries_again(
+    loop_db, monkeypatch, bad,
+):
+    from datetime import date
+
+    monkeypatch.setattr(config, "LIFE_REVIEW_DAYS", 7)
+    seen = _replies(monkeypatch, bad, agent_chat.SILENCE)
+    result = scheduler.run_life_review_once()
+    assert (result["status"], result["attempt"]) == ("withheld", 1)
+    assert _thread() == []
+    assert _note("Last life review") is None      # the week is not marked done
+    # the next tick runs again; a quiet review is a finished one
+    assert scheduler.run_life_review_once()["status"] == "quiet"
+    assert seen["calls"] == 2
+    assert _note("Last life review") == date.today().isoformat()
+    assert scheduler.run_life_review_once()["status"] == "not_due"
+
+
+def test_a_life_review_withheld_every_time_skips_the_cycle(loop_db, monkeypatch):
+    from datetime import date
+
+    monkeypatch.setattr(config, "LIFE_REVIEW_DAYS", 7)
+    monkeypatch.setattr(config, "SCHEDULED_TURN_MAX_ATTEMPTS", 2)
+    seen = _replies(monkeypatch, GATE_STAND_IN)
+    statuses = [scheduler.run_life_review_once()["status"] for _ in range(3)]
+    assert statuses == ["withheld", "abandoned", "not_due"]
+    assert seen["calls"] == 2
+    assert _thread() == []
+    assert _note("Last life review") == date.today().isoformat()
+
+
+def test_a_life_review_with_something_to_say_still_says_it(loop_db, monkeypatch):
+    from datetime import date
+
+    monkeypatch.setattr(config, "LIFE_REVIEW_DAYS", 7)
+    said = "Hooli billed twice this month: $14.99 on the 3rd and $14.99 on the 17th."
+    _replies(monkeypatch, said)
+    assert scheduler.run_life_review_once()["status"] == "spoke"
+    assert _thread() == [("assistant", "copilot", said)]
+    assert _note("Last life review") == date.today().isoformat()
+
+
+def test_a_downed_backend_uses_up_no_life_review_try(loop_db, monkeypatch):
+    monkeypatch.setattr(config, "LIFE_REVIEW_DAYS", 7)
+    _replies(monkeypatch, RuntimeError("all Claude models are out of credits/usage"))
+    for _ in range(4):
+        with pytest.raises(RuntimeError):
+            scheduler.run_life_review_once()
+    assert _note("Life review attempts") is None
+    assert _note("Last life review") is None

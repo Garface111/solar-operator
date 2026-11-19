@@ -10,10 +10,10 @@ as a real agent turn, so it reasons about the trigger with full current context
 Each watchpoint fires AT MOST ONCE: `status` is the guard (armed -> fired), so
 `evaluate_watchpoints` is safe to call on every scheduler tick.
 
-The wake mechanism itself lives in the scheduler (see INTEGRATION-watchpoints.md):
-`build_wake_prompt()` produces the nudge text, which is posted into the shared
-conversation exactly the way the monthly review is —
-`bankai.messaging.thread.handle_web(session, speaker, prompt)`.
+The wake mechanism itself lives in the scheduler (`run_watchpoints_once`):
+`build_wake_prompt()` produces the nudge text, which is filed in the shared
+conversation as a scheduled turn. The reply goes under it only once it is known
+to be an answer; a guard's stand-in re-arms the flag instead.
 """
 from __future__ import annotations
 

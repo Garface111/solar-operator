@@ -67,13 +67,124 @@ def _rearm(watchpoint_id: str) -> None:
             row.fired_at = None
 
 
+#: What the thread says under a flag whose wake never came good. It names no
+#: figure, and it ends in the grounding gate's own "not sending it", so
+#: build_history withholds it from the model like any other guard stand-in:
+#: the household reads it, the copilot never learns to write it.
+WAKE_UNANSWERED = (
+    "This flag tripped. I couldn't get a note about it past my own checks, so "
+    "I'm not sending it. Ask me about it here and I'll look it up directly and "
+    "show my source."
+)
+
+#: Wakes that came back unusable, per watchpoint, since this process started.
+#: Kept in memory, not in the database: the count only has to stop one flag
+#: from buying a model turn every tick for ever. A restart hands a flag a
+#: fresh set of tries, which is usually what the restart was for.
+_unusable_wakes: dict[str, int] = {}
+
+#: The prompt a failed wake left in the thread, per watchpoint (message id).
+#: It stays there as the record that the flag tripped. When the flag fires
+#: again its newer prompt replaces it, so the thread holds one question per
+#: flag however many ticks the answer takes. Also per process: after a restart
+#: an unanswered prompt simply stays where it is.
+_unanswered_prompts: dict[str, str] = {}
+
+
+def _forget_wakes_no_longer_owed(fired_ids: set[str]) -> None:
+    """Close the books on flags that failed a wake and did not fire again.
+
+    A flag whose wake failed is re-armed, and fires again on the next tick
+    while its condition holds. When it does not (the balance moved back, or
+    the household cancelled the flag) no wake is coming. The prompt already in
+    the thread is the record that it tripped, and a later trip starts with a
+    full set of tries."""
+    for watchpoint_id in (set(_unusable_wakes) | set(_unanswered_prompts)) - fired_ids:
+        _unusable_wakes.pop(watchpoint_id, None)
+        if _unanswered_prompts.pop(watchpoint_id, None):
+            log.warning(
+                "watchpoint %s tripped, its wake got no usable answer, and it is "
+                "no longer firing: its prompt stays in the thread as the record",
+                watchpoint_id,
+            )
+
+
+def _wake(watchpoint_id: str, prompt: str) -> bool:
+    """One wake turn for a fired watchpoint. True when the wake is done.
+
+    Whatever came back used to be stored under the prompt, so a guard's
+    stand-in ("I couldn't verify part of that answer…") counted as the wake.
+    And a turn that failed left its prompt behind and re-armed the flag, every
+    tick, with nothing to stop it: a night of failures stacked the thread with
+    copies of one question.
+
+    The prompt is filed first and never taken back. A flag that tripped always
+    shows in the thread with its reading (code measured it, not a model),
+    whether the turn dies, the process dies, or the reading moves back before
+    the next try. What changed is what goes under it: only a reply that is
+    one. An unusable reply re-arms the flag, so the next tick asks again, and
+    that newer prompt replaces the unanswered one, up to
+    SCHEDULED_TURN_MAX_ATTEMPTS times; after the last the flag stays fired and
+    the thread says plainly that no note came of it. A downed backend raises
+    from here, uses up no try, and the caller re-arms."""
+    stale_id = _unanswered_prompts.pop(watchpoint_id, None)
+    with session_scope() as session:
+        stale = session.get(ChatMessage, stale_id) if stale_id else None
+        if stale is not None:
+            session.delete(stale)  # the same flag, asked again: one question, not two
+        asked = ChatMessage(
+            channel="web", role="user", speaker=WATCHPOINT_SPEAKER, content=prompt
+        )
+        session.add(asked)
+        session.flush()
+        asked_id = asked.id
+        history = chat_thread.build_history(session)
+    # Committed: the write lock is released before the turn (see pass 1 below).
+    try:
+        with session_scope() as session:
+            reply, thrown_away = _scheduled_turn(session, history)
+    except Exception:
+        _unanswered_prompts[watchpoint_id] = asked_id
+        raise
+
+    problem = thrown_away or reply_problem(reply)
+    if problem:
+        failed = _unusable_wakes.get(watchpoint_id, 0) + 1
+        limit = config.SCHEDULED_TURN_MAX_ATTEMPTS
+        if failed < limit:
+            _unusable_wakes[watchpoint_id] = failed
+            _unanswered_prompts[watchpoint_id] = asked_id
+            log.warning(
+                "watchpoint %s wake not usable (%s): try %d of %d, re-arming",
+                watchpoint_id, problem, failed, limit,
+            )
+            _rearm(watchpoint_id)
+            return False
+        log.error(
+            "watchpoint %s wake ABANDONED: %d tries, none usable (last: %s); "
+            "the flag stays fired and the thread says so",
+            watchpoint_id, failed, problem,
+        )
+        reply = WAKE_UNANSWERED
+    _unusable_wakes.pop(watchpoint_id, None)
+    if agent_chat.is_silence(reply):
+        # Nothing to add is an answer. Its marker is not something to file.
+        log.info("watchpoint %s wake: the copilot had nothing to add", watchpoint_id)
+        return True
+    with session_scope() as session:
+        session.add(
+            ChatMessage(channel="web", role="assistant", speaker="copilot", content=reply)
+        )
+    return not problem
+
+
 def run_watchpoints_once() -> dict:
     """Fire due watchpoints and wake the copilot in the shared thread for each."""
     # Pass 1: flip statuses and capture the prompts. session_scope commits on exit,
     # so the armed->fired transition is durable BEFORE any agent turn starts — that
     # is what guarantees one wake per flag, and it also releases the SQLite write
     # lock (the agent turn writes to the same DB from the claude-cli MCP process;
-    # holding an uncommitted `fired` row across handle_web would deadlock).
+    # holding an uncommitted `fired` row across the wake turn would deadlock).
     deferred = 0
     with session_scope() as session:
         fired = evaluate_watchpoints(session)
@@ -84,19 +195,25 @@ def run_watchpoints_once() -> dict:
             overflow.fired_at = None
             deferred += 1
         pending = [(w.id, build_wake_prompt(w)) for w in fired[:MAX_WAKES_PER_TICK]]
+        fired_ids = {w.id for w in fired}  # the deferred ones too: they are still owed
+    _forget_wakes_no_longer_owed(fired_ids)
 
-    woken = 0
+    woken = withheld = 0
     for watchpoint_id, prompt in pending:
         try:
-            with session_scope() as session:
-                chat_thread.handle_web(session, WATCHPOINT_SPEAKER, prompt)
-            woken += 1
+            if _wake(watchpoint_id, prompt):
+                woken += 1
+            else:
+                withheld += 1
         except Exception:
             # The turn failed (backend down). Re-arm so the next tick retries,
             # mirroring the monthly review's "marker only after success" rule.
             log.exception("watchpoint %s wake failed; re-arming", watchpoint_id)
             _rearm(watchpoint_id)
-    return {"fired": len(pending), "woken": woken, "deferred": deferred}
+    return {
+        "fired": len(pending), "woken": woken, "withheld": withheld,
+        "deferred": deferred,
+    }
 
 
 SYNC_WAKE_PROMPT = (
@@ -121,7 +238,14 @@ def run_sync_wake_once(sync_result: dict) -> dict:
         history = chat_thread.build_history(session)
     history.append({"role": "user", "content": SYNC_WAKE_PROMPT.format(added=added)})
     with session_scope() as session:
-        reply = agent_chat.run_turn(session, history, channel="tending")
+        reply, thrown_away = _scheduled_turn(session, history, channel="tending")
+    problem = thrown_away or reply_problem(reply)
+    if problem:
+        # A guard's stand-in is not news about the new data, and nothing the
+        # copilot said. Nothing is stored; the next sync that brings
+        # transactions wakes it again.
+        log.warning("sync wake not usable (%s): nothing stored", problem)
+        return {"status": "withheld", "added": added, "why": problem}
     if agent_chat.is_silence(reply):
         return {"status": "quiet", "added": added}
     with session_scope() as session:
@@ -353,8 +477,14 @@ def run_tending_once() -> dict:
     history.append({"role": "user", "content": TENDING_PROMPT})
 
     with session_scope() as session:
-        reply = agent_chat.run_turn(session, history, channel="tending")
+        reply, thrown_away = _scheduled_turn(session, history, channel="tending")
 
+    problem = thrown_away or reply_problem(reply)
+    if problem:
+        # Only a reply worth hearing is kept, and a guard's stand-in for one it
+        # withheld is not that. The next pass looks at the same picture again.
+        log.warning("tending reply not usable (%s): nothing stored", problem)
+        return {"status": "withheld", "why": problem}
     if agent_chat.is_silence(reply):
         return {"status": "quiet"}
     with session_scope() as session:
@@ -459,15 +589,20 @@ def _record_failed_attempt(session, title: str, cycle: str) -> int:
     return count
 
 
-def _scheduled_turn(session, history: list[dict], tier: str) -> tuple[str, str | None]:
+def _scheduled_turn(
+    session, history: list[dict], tier: str | None = None, channel: str = "web",
+) -> tuple[str, str | None]:
     """One scheduled turn: (reply, problem).
 
     `problem` is set when the model answered and the turn's own guards threw
     every draft away. That is a spent try, like any other unusable reply. A
     backend that is down still raises from here: it cost nothing, it uses up no
-    try, and the loop asks again on its next tick."""
+    try, and the loop asks again on its next tick.
+
+    With no `tier` the router picks one, as it does for a turn nobody forced."""
+    routed = {"force_tier": tier} if tier else {}
     try:
-        return agent_chat.run_turn(session, history, channel="web", force_tier=tier), None
+        return agent_chat.run_turn(session, history, channel=channel, **routed), None
     except agent_chat.UnusableReply as exc:
         return "", f"the turn's guards threw every draft away ({str(exc)[:120]})"
 
@@ -516,20 +651,35 @@ def review_problem(reply: str) -> str | None:
     return None
 
 
-def checkin_problem(reply: str) -> str | None:
-    """Why `reply` must not be the check-in email, or None when it may be.
+def reply_problem(reply: str, what: str = "") -> str | None:
+    """Why a scheduled turn's `reply` must not be stored, printed or sent, or
+    None when it may be.
 
-    Looser than the review: a quiet check-in can honestly have no figure in
-    it, and a deliberate silence ([[no reply]]) is the caller's to handle. An
-    empty reply is neither: it would go out as an empty email."""
+    The check every scheduled turn shares. Nothing came back, or what came back
+    is a guard's stand-in for an answer it withheld ("I couldn't verify part of
+    that answer…"): neither is something the copilot said, so neither may land
+    in the thread, on the printed page or in an email, or count as the turn
+    having been done. Name what the turn was asked to write (`what`: "check-in",
+    "life review") and a reply about writing it, in place of it, is a problem
+    too. A deliberate silence ([[no reply]]) is not one: it is the caller's to
+    handle."""
     text = (reply or "").strip()
     if not text:
         return "it said nothing"
     if agent_verify.is_error_template(text):
         return "a guard withheld it"
-    if _gave_up(text):
-        return "it is about writing the check-in, not the check-in"
+    if what and _gave_up(text):
+        return f"it is about writing the {what}, not the {what}"
     return None
+
+
+def checkin_problem(reply: str) -> str | None:
+    """Why `reply` must not be the check-in email, or None when it may be.
+
+    Looser than the review: a quiet check-in can honestly have no figure in
+    it, and a deliberate silence is the quiet path's to handle. An empty reply
+    is neither: it would go out as an empty email."""
+    return reply_problem(reply, "check-in")
 
 
 def run_monthly_review_once() -> dict:
@@ -725,6 +875,19 @@ LIFE_REVIEW_PROMPT = (
 )
 
 
+LIFE_REVIEW_ATTEMPTS_TITLE = "Life review attempts"
+
+
+def _set_life_review_marker(session, today: date) -> None:
+    note = session.execute(
+        select(MemoryNote).where(MemoryNote.title == LIFE_REVIEW_MARKER_TITLE)
+    ).scalar_one_or_none()
+    if note:
+        note.content = today.isoformat()
+    else:
+        session.add(MemoryNote(title=LIFE_REVIEW_MARKER_TITLE, content=today.isoformat()))
+
+
 def run_life_review_once(now: datetime | None = None) -> dict:
     """A periodic re-read of the household's data as a life, marker-gated like
     the check-in: the marker only advances on success, so a failed review is
@@ -743,20 +906,26 @@ def run_life_review_once(now: datetime | None = None) -> dict:
                     return {"status": "not_due"}
             except ValueError:
                 pass
+        cycle = (note.content or "").strip() if note is not None else ""
         history = chat_thread.build_history(session)
     history.append({"role": "user", "content": LIFE_REVIEW_PROMPT})
     with session_scope() as session:
-        reply = agent_chat.run_turn(session, history, channel="tending")
+        reply, thrown_away = _scheduled_turn(session, history, channel="tending")
+
+    problem = thrown_away or reply_problem(reply, "life review")
+    if problem:
+        # Not something to tell the household and not a finished review: a
+        # guard's stand-in, or nothing at all. It used to be stored in the
+        # thread and the week marked done. The marker stays behind so the next
+        # tick tries again; after SCHEDULED_TURN_MAX_ATTEMPTS the cycle is
+        # skipped, loudly, like a check-in that never comes good.
+        return _came_to_nothing(
+            LIFE_REVIEW_ATTEMPTS_TITLE, cycle, "life review", problem,
+            lambda s: _set_life_review_marker(s, now.date()),
+        )
+
     with session_scope() as session:
-        note = session.execute(
-            select(MemoryNote).where(MemoryNote.title == LIFE_REVIEW_MARKER_TITLE)
-        ).scalar_one_or_none()
-        if note:
-            note.content = now.date().isoformat()
-        else:
-            session.add(MemoryNote(
-                title=LIFE_REVIEW_MARKER_TITLE, content=now.date().isoformat()
-            ))
+        _set_life_review_marker(session, now.date())
         if not agent_chat.is_silence(reply):
             session.add(ChatMessage(
                 channel="web", role="assistant", speaker="copilot", content=reply
@@ -881,10 +1050,17 @@ def run_weekly_report_once(now: datetime | None = None) -> dict:
             })
             # The Saturday report is a complex synthesis — always Fable at max,
             # never downshifted by the router (Ford's ask 2026-08-11).
-            narrative = agent_chat.run_turn(
-                session, history, channel="web", force_tier="complex"
+            narrative, thrown_away = _scheduled_turn(session, history, "complex")
+        withheld = thrown_away or reply_problem(narrative)
+        if withheld:
+            # A guard's stand-in ("I couldn't verify part of that answer…") is
+            # not a narrative. It must not be printed under the week's numbers
+            # or sent with them: the page goes out without one.
+            log.warning(
+                "weekly report: narrative not usable (%s); printing numbers only",
+                withheld,
             )
-        if agent_chat.is_silence(narrative):
+        if withheld or agent_chat.is_silence(narrative):
             narrative = ""
     except Exception:
         log.exception("weekly report: narrative turn failed; printing numbers only")

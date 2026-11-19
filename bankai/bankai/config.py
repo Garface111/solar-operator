@@ -134,8 +134,9 @@ ROUTER_QUICK_EFFORT = _env("ROUTER_QUICK_EFFORT", "low")
 ROUTER_REVIEW_MODEL = _env("ROUTER_REVIEW_MODEL")
 ROUTER_REVIEW_EFFORT = _env("ROUTER_REVIEW_EFFORT")
 # How many unusable replies (withheld by a guard, or with no review in them) a
-# scheduled review or check-in gets per cycle before it stops asking. Never
-# below one, and a typo here must not stop the service from starting.
+# scheduled turn gets before it stops asking: per cycle for the monthly review,
+# the check-in and the life review, per flag for a watchpoint wake. Never below
+# one, and a typo here must not stop the service from starting.
 try:
     SCHEDULED_TURN_MAX_ATTEMPTS = max(1, int(_env("SCHEDULED_TURN_MAX_ATTEMPTS", "3") or 3))
 except ValueError:
