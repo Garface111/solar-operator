@@ -1,0 +1,10 @@
+[Unit]
+Description=Run BankAI permission self-heal periodically
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

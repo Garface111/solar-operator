@@ -1,0 +1,7 @@
+[Unit]
+Description=BankAI permission self-heal (re-lock /opt/bankai to owner-only)
+After=bankai.service
+
+[Service]
+Type=oneshot
+ExecStart=/root/bankai-harden.sh
